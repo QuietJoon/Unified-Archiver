@@ -1,0 +1,14 @@
+# Configuration for unified-archive testing
+# This file is ONLY used by tests - the library itself uses std::env::temp_dir()
+
+# Temporary directory for test files
+# The library uses system temp directories automatically:
+# - macOS: $TMPDIR (usually /var/folders/.../T/ - respects sandboxing)
+# - Windows: %TEMP% (usually C:\Users\...\AppData\Local\Temp)
+# - Linux: $TMPDIR or /tmp
+#
+# For tests, you can override with:
+# 1. UNIFIED_ARCHIVE_TEMP_DIR environment variable (highest priority)
+# 2. This config file (for development convenience)
+# 3. System default (fallback)
+temp_dir = "/Volumes/Temp/claude"

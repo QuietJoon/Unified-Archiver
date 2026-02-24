@@ -1,0 +1,52 @@
+[package]
+name = "unified-archive"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["7zip-RBinding Contributors"]
+license = "Apache-2.0 OR MIT"
+description = "Unified, format-agnostic Rust bindings for 7zip archive operations across ZIP, 7z, RAR, TAR, and more"
+repository = "https://github.com/yourusername/7zip-rbinding"
+keywords = ["archive", "7zip", "compression", "extraction", "unified"]
+categories = ["compression", "filesystem"]
+
+[dependencies]
+once_cell = "1.20"
+rayon = "1.8"
+goblin = "0.9"
+crc32fast = "1.4"
+secstr = "0.5"
+walkdir = "2.4"
+piz = "0.5"  # Native Rust ZIP backend with parallel extraction and CRC32 metadata
+sevenz-rust2 = "0.19"  # Native Rust 7z backend with CRC32 metadata access (maintained fork)
+memmap2 = "0.9"  # Memory mapping for piz (requires &[u8])
+zip = { version = "2.2", default-features = false, features = ["deflate"] }  # Native Rust ZIP creation
+
+[dev-dependencies]
+criterion = "0.5"
+tempfile = "3.0"
+proptest = "1.4"
+
+[build-dependencies]
+pkg-config = "0.3"
+
+[features]
+default = ["rar-support"]
+rar-support = []  # RAR/RAR5 support (requires UnRAR license compliance)
+external-rar-create = []  # RAR creation via external WinRAR CLI (Windows only)
+
+[[example]]
+name = "inspect_archive"
+path = "examples/inspect_archive.rs"
+
+[[example]]
+name = "extract_archive"
+path = "examples/extract_archive.rs"
+
+[[example]]
+name = "create_archive"
+path = "examples/create_archive.rs"
+
+[[example]]
+name = "modify_archive"
+path = "examples/modify_archive.rs"

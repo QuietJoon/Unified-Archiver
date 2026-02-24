@@ -1,0 +1,54 @@
+# Rust
+target/
+debug/
+release/
+*.rs.bk
+*.rlib
+*.prof*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Environment
+.env*
+
+# OS
+.DS_Store
+Thumbs.db
+*.tmp
+
+# Build artifacts
+Cargo.lock
+
+# Compiled object files (UnRAR SDK build artifacts)
+src/ffi/native/unrar/*.o
+src/ffi/native/unrar/*.a
+src/ffi/native/unrar/*.so
+src/ffi/native/unrar/*.dylib
+
+# Agent/AI config
+.claude/
+.codex/
+.gemini/
+.specify/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.fpp-stop
+
+# Scratch / temporary files
+extracted/
+test_file.txt
+architecture_investigation.md
+codebase_investigation.md
+Refactor.md
+issues/
+reviews/
+unrar-src.tar.gz
