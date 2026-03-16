@@ -64,6 +64,12 @@ unsafe extern "C" {
 
     pub fn archive_read_data_skip(archive: *mut Archive) -> c_int;
 
+    pub fn archive_read_data(
+        archive: *mut Archive,
+        buffer: *mut c_void,
+        size: usize,
+    ) -> c_longlong;
+
     // Entry metadata
     pub fn archive_entry_pathname(entry: *mut LibarchiveEntry) -> *const c_char;
     pub fn archive_entry_size(entry: *mut LibarchiveEntry) -> c_longlong;

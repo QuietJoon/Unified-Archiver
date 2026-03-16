@@ -29,15 +29,6 @@ impl ZipArchive {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
 
-        // Verify file exists and is readable
-        if !path_buf.exists() {
-            return Err(ArchiveError::io(
-                "open",
-                path_buf.clone(),
-                std::io::Error::new(std::io::ErrorKind::NotFound, "File not found"),
-            ));
-        }
-
         Ok(Self {
             path: path_buf,
             password: None,
@@ -161,7 +152,6 @@ impl ZipArchive {
         entry.compressed_size = compressed_size;
         entry.modified = modified;
         entry.is_encrypted = zip_file.encrypted();
-        entry.compute_compression_ratio();
 
         Ok(entry)
     }
@@ -303,6 +293,10 @@ impl ZipArchive {
     }
 
     /// Extract a single file to a stream
+    ///
+    /// Note: Currently loads the entire file into memory before wrapping in a cursor.
+    /// True streaming would require holding a borrow on the ZipArchive reader,
+    /// which conflicts with the ownership model.
     pub fn extract_to_stream(
         &self,
         file_path: &str,
@@ -325,14 +319,11 @@ impl ZipArchive {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn fixtures_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
-    }
+    use crate::test_utils::fixture;
 
     #[test]
     fn test_zip_wrapper_open_valid() {
-        let path = fixtures_dir().join("test.zip");
+        let path = fixture("test.zip");
         let archive = ZipArchive::open(&path);
         assert!(archive.is_ok());
         assert_eq!(archive.unwrap().path(), path);
@@ -346,7 +337,7 @@ mod tests {
 
     #[test]
     fn test_zip_wrapper_open_with_password() {
-        let path = fixtures_dir().join("test.zip");
+        let path = fixture("test.zip");
         let archive = ZipArchive::open_with_password(&path, "secret");
         assert!(archive.is_ok());
         // Password should be stored
@@ -356,7 +347,7 @@ mod tests {
 
     #[test]
     fn test_zip_wrapper_list_files() {
-        let path = fixtures_dir().join("test.zip");
+        let path = fixture("test.zip");
         let archive = ZipArchive::open(&path).unwrap();
         let entries = archive.list_files();
         assert!(entries.is_ok());
@@ -378,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_zip_wrapper_extract_to_memory() {
-        let path = fixtures_dir().join("test.zip");
+        let path = fixture("test.zip");
         let archive = ZipArchive::open(&path).unwrap();
         let data = archive.extract_to_memory("test_file.txt");
         assert!(data.is_ok());
@@ -387,7 +378,7 @@ mod tests {
 
     #[test]
     fn test_zip_wrapper_extract_to_memory_nonexistent() {
-        let path = fixtures_dir().join("test.zip");
+        let path = fixture("test.zip");
         let archive = ZipArchive::open(&path).unwrap();
         let result = archive.extract_to_memory("does_not_exist.txt");
         assert!(result.is_err());
@@ -396,7 +387,7 @@ mod tests {
     #[test]
     fn test_zip_wrapper_extract_to_stream() {
         use std::io::Read;
-        let path = fixtures_dir().join("test.zip");
+        let path = fixture("test.zip");
         let archive = ZipArchive::open(&path).unwrap();
         let mut stream = archive.extract_to_stream("test_file.txt").unwrap();
         let mut buf = Vec::new();
@@ -407,7 +398,7 @@ mod tests {
     #[test]
     fn test_zip_wrapper_memory_and_stream_same_data() {
         use std::io::Read;
-        let path = fixtures_dir().join("test.zip");
+        let path = fixture("test.zip");
 
         let archive1 = ZipArchive::open(&path).unwrap();
         let mem_data = archive1.extract_to_memory("test_file.txt").unwrap();

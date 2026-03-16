@@ -1,6 +1,5 @@
 //! Safe wrapper for libarchive operations
 
-use super::common::TempDirGuard;
 use super::libarchive::*;
 use crate::entry::{ArchiveEntry, EntryType};
 use crate::error::{ArchiveError, Result};
@@ -19,6 +18,43 @@ pub struct LibarchiveArchive {
 }
 
 impl LibarchiveArchive {
+    /// Open a libarchive read handle with all formats/filters enabled
+    ///
+    /// Encapsulates: archive_read_new, null check, support_format_all,
+    /// support_filter_all, open_filename, error check with archive_read_free on failure.
+    unsafe fn open_read_handle(c_path: &std::ffi::CStr) -> Result<*mut Archive> {
+        let archive = unsafe { archive_read_new() };
+        if archive.is_null() {
+            return Err(ArchiveError::format(
+                None,
+                "Failed to create libarchive instance",
+            ));
+        }
+
+        unsafe { archive_read_support_format_all(archive) };
+        unsafe { archive_read_support_filter_all(archive) };
+
+        let result = unsafe { archive_read_open_filename(archive, c_path.as_ptr(), 10240) };
+        if result != ARCHIVE_OK {
+            let error_msg = if !archive.is_null() {
+                let err_str = unsafe { archive_error_string(archive) };
+                if !err_str.is_null() {
+                    unsafe { std::ffi::CStr::from_ptr(err_str) }
+                        .to_string_lossy()
+                        .to_string()
+                } else {
+                    format!("libarchive error code: {}", result)
+                }
+            } else {
+                format!("libarchive error code: {}", result)
+            };
+            unsafe { archive_read_free(archive) };
+            return Err(ArchiveError::format(None, error_msg));
+        }
+
+        Ok(archive)
+    }
+
     /// Open an archive with libarchive
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path_str = path.as_ref().to_string_lossy().to_string();
@@ -28,36 +64,7 @@ impl LibarchiveArchive {
             .map_err(|_| ArchiveError::invalid_path(&path_str, "Contains null byte"))?;
 
         unsafe {
-            let archive = archive_read_new();
-            if archive.is_null() {
-                return Err(ArchiveError::format(
-                    None,
-                    "Failed to create libarchive instance",
-                ));
-            }
-
-            // Enable all formats and filters
-            archive_read_support_format_all(archive);
-            archive_read_support_filter_all(archive);
-
-            // Try to open the file
-            let result = archive_read_open_filename(archive, c_path.as_ptr(), 10240);
-
-            if result != ARCHIVE_OK {
-                let error_msg = if !archive.is_null() {
-                    let err_ptr = archive_error_string(archive);
-                    if !err_ptr.is_null() {
-                        CStr::from_ptr(err_ptr).to_string_lossy().into_owned()
-                    } else {
-                        "Unknown error".to_string()
-                    }
-                } else {
-                    "Failed to open archive".to_string()
-                };
-
-                archive_read_free(archive);
-                return Err(ArchiveError::format(None, error_msg));
-            }
+            let archive = Self::open_read_handle(&c_path)?;
 
             // Close immediately - we'll reopen for each operation
             archive_read_free(archive);
@@ -90,23 +97,7 @@ impl LibarchiveArchive {
             .map_err(|_| ArchiveError::invalid_path(&self.path, "Contains null byte"))?;
 
         unsafe {
-            let archive = archive_read_new();
-            if archive.is_null() {
-                return Err(ArchiveError::format(
-                    None,
-                    "Failed to create libarchive instance",
-                ));
-            }
-
-            archive_read_support_format_all(archive);
-            archive_read_support_filter_all(archive);
-
-            let result = archive_read_open_filename(archive, c_path.as_ptr(), 10240);
-            if result != ARCHIVE_OK {
-                let error_msg = get_archive_error(archive);
-                archive_read_free(archive);
-                return Err(ArchiveError::format(None, error_msg));
-            }
+            let archive = Self::open_read_handle(&c_path)?;
 
             let mut entries = Vec::new();
             let mut entry_ptr: *mut LibarchiveEntry = std::ptr::null_mut();
@@ -205,7 +196,7 @@ impl LibarchiveArchive {
     ) -> Result<()> {
         // Calculate total size for progress tracking
         let (total_bytes, _entries) = if progress.is_some() {
-            let entries = self.list_files()?;
+            let entries = self.list_files_metadata_only()?;
             let total: u64 = entries.iter().filter_map(|e| e.size).sum();
             (total, entries)
         } else {
@@ -216,23 +207,7 @@ impl LibarchiveArchive {
             .map_err(|_| ArchiveError::invalid_path(&self.path, "Contains null byte"))?;
 
         unsafe {
-            let archive = archive_read_new();
-            if archive.is_null() {
-                return Err(ArchiveError::format(
-                    None,
-                    "Failed to create libarchive instance",
-                ));
-            }
-
-            archive_read_support_format_all(archive);
-            archive_read_support_filter_all(archive);
-
-            let result = archive_read_open_filename(archive, c_path.as_ptr(), 10240);
-            if result != ARCHIVE_OK {
-                let error_msg = get_archive_error(archive);
-                archive_read_free(archive);
-                return Err(ArchiveError::format(None, error_msg));
-            }
+            let archive = Self::open_read_handle(&c_path)?;
 
             // Create disk writer
             let ext = archive_write_disk_new();
@@ -384,23 +359,7 @@ impl LibarchiveArchive {
             .map_err(|_| ArchiveError::invalid_path(&self.path, "Contains null byte"))?;
 
         unsafe {
-            let archive = archive_read_new();
-            if archive.is_null() {
-                return Err(ArchiveError::format(
-                    None,
-                    "Failed to create libarchive instance",
-                ));
-            }
-
-            archive_read_support_format_all(archive);
-            archive_read_support_filter_all(archive);
-
-            let result = archive_read_open_filename(archive, c_path.as_ptr(), 10240);
-            if result != ARCHIVE_OK {
-                let error_msg = get_archive_error(archive);
-                archive_read_free(archive);
-                return Err(ArchiveError::format(None, error_msg));
-            }
+            let archive = Self::open_read_handle(&c_path)?;
 
             let mut entry_ptr: *mut LibarchiveEntry = std::ptr::null_mut();
             let mut found = false;
@@ -504,67 +463,79 @@ impl LibarchiveArchive {
         }
     }
 
-    /// Extract to memory
+    /// Extract to memory using direct in-memory extraction (no temp files)
     pub fn extract_to_memory(&self, file_path: &str) -> Result<Vec<u8>> {
-        use std::io::Read;
-        use std::time::{SystemTime, UNIX_EPOCH};
+        let c_path = CString::new(self.path.clone())
+            .map_err(|_| ArchiveError::invalid_path(&self.path, "Contains null byte"))?;
 
-        // Use system temp directory (respects TMPDIR/TEMP environment variables)
-        // Include timestamp to avoid conflicts between parallel tests
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| std::time::Duration::from_secs(0))
-            .as_nanos();
-        let temp_base = std::env::temp_dir();
-        let temp_dir = temp_base.join(format!(
-            "libarchive_mem_{}_{}",
-            std::process::id(),
-            timestamp
-        ));
+        unsafe {
+            let archive = Self::open_read_handle(&c_path)?;
 
-        // Ensure temp directory exists
-        std::fs::create_dir_all(&temp_dir)
-            .map_err(|e| ArchiveError::io("create_temp_dir", temp_dir.clone(), e))?;
+            let mut entry: *mut LibarchiveEntry = std::ptr::null_mut();
 
-        // RAII guard ensures cleanup on all exit paths (success or error)
-        let _guard = TempDirGuard::new(temp_dir.clone());
+            // Iterate entries to find the target file
+            loop {
+                let r = archive_read_next_header(archive, &mut entry);
+                if r == ARCHIVE_EOF {
+                    break;
+                }
+                if r != ARCHIVE_OK && r != ARCHIVE_WARN {
+                    let error_msg = get_archive_error(archive);
+                    archive_read_free(archive);
+                    return Err(ArchiveError::format(None, error_msg));
+                }
 
-        // Extract to temp
-        self.extract_file(file_path, &temp_dir)?;
+                let pathname = archive_entry_pathname(entry);
+                if pathname.is_null() {
+                    archive_read_data_skip(archive);
+                    continue;
+                }
 
-        // Read into memory (use sanitized path to locate extracted file)
-        let extracted_path = sanitize_entry_path(file_path, &temp_dir)?;
-        let mut file = std::fs::File::open(&extracted_path)
-            .map_err(|e| ArchiveError::io("open_extracted", extracted_path.clone(), e))?;
+                let entry_name = CStr::from_ptr(pathname).to_string_lossy();
+                if entry_name.as_ref() == file_path {
+                    // Read data blocks directly into memory
+                    let size_hint = archive_entry_size(entry);
+                    let mut buffer = if size_hint > 0 {
+                        Vec::with_capacity(size_hint as usize)
+                    } else {
+                        Vec::new()
+                    };
 
-        let metadata = file
-            .metadata()
-            .map_err(|e| ArchiveError::io("stat_extracted", extracted_path.clone(), e))?;
-        let len = metadata.len();
+                    let mut buff: *const c_void = std::ptr::null();
+                    let mut size: usize = 0;
+                    let mut offset: c_longlong = 0;
 
-        if len > usize::MAX as u64 {
-            return Err(ArchiveError::UnsupportedOperation {
-                operation: "extract_to_memory".to_string(),
-                reason: format!(
-                    "File '{}' is too large to buffer in memory: {} bytes",
-                    file_path, len
-                ),
-            });
+                    loop {
+                        let r = archive_read_data_block(archive, &mut buff, &mut size, &mut offset);
+                        if r == ARCHIVE_EOF {
+                            break;
+                        }
+                        if r != ARCHIVE_OK {
+                            let error_msg = get_archive_error(archive);
+                            archive_read_free(archive);
+                            return Err(ArchiveError::format(None, error_msg));
+                        }
+
+                        if size > 0 && !buff.is_null() {
+                            let slice = std::slice::from_raw_parts(buff as *const u8, size);
+                            buffer.extend_from_slice(slice);
+                        }
+                    }
+
+                    archive_read_free(archive);
+                    return Ok(buffer);
+                }
+
+                archive_read_data_skip(archive);
+            }
+
+            archive_read_free(archive);
+
+            Err(ArchiveError::format(
+                None,
+                format!("File '{}' not found in archive", file_path),
+            ))
         }
-
-        let mut buffer = Vec::new();
-        buffer
-            .try_reserve(len as usize)
-            .map_err(|_| ArchiveError::UnsupportedOperation {
-                operation: "extract_to_memory".to_string(),
-                reason: format!("Unable to allocate {} bytes for file '{}'", len, file_path),
-            })?;
-
-        file.read_to_end(&mut buffer)
-            .map_err(|e| ArchiveError::io("read_extracted", extracted_path.clone(), e))?;
-
-        // Guard handles cleanup on drop
-        Ok(buffer)
     }
 
     /// Get archive path
@@ -1107,9 +1078,6 @@ unsafe fn parse_entry(entry: *mut LibarchiveEntry) -> Option<ArchiveEntry> {
     arch_entry.is_encrypted = is_encrypted;
     arch_entry.comment = None; // Not available in libarchive generic API
     arch_entry.attributes = None; // No platform-specific attributes available
-
-    // Compute compression ratio if sizes available
-    arch_entry.compute_compression_ratio();
 
     Some(arch_entry)
 }

@@ -60,9 +60,6 @@ pub struct ArchiveEntry {
     /// Last access time (UTC)
     pub accessed: Option<SystemTime>,
 
-    /// Compression ratio (compressed_size / size), computed lazily
-    pub compression_ratio: Option<f64>,
-
     /// Whether entry is encrypted/password-protected
     pub is_encrypted: bool,
 
@@ -94,7 +91,6 @@ impl ArchiveEntry {
             // Phase 1: Enhanced metadata
             created: None,
             accessed: None,
-            compression_ratio: None,
             is_encrypted: false,
             comment: None,
             attributes: None,
@@ -102,12 +98,11 @@ impl ArchiveEntry {
         }
     }
 
-    /// Compute and cache compression ratio if both sizes are available
-    pub fn compute_compression_ratio(&mut self) {
-        if let (Some(compressed), Some(original)) = (self.compressed_size, self.size) {
-            if original > 0 {
-                self.compression_ratio = Some(compressed as f64 / original as f64);
-            }
+    /// Compute compression ratio from sizes (compressed_size / size)
+    pub fn compression_ratio(&self) -> Option<f64> {
+        match (self.size, self.compressed_size) {
+            (Some(s), Some(cs)) if s > 0 => Some(cs as f64 / s as f64),
+            _ => None,
         }
     }
 
@@ -151,7 +146,7 @@ mod tests {
         assert!(entry.permissions.is_none());
         assert!(entry.created.is_none());
         assert!(entry.accessed.is_none());
-        assert!(entry.compression_ratio.is_none());
+        assert!(entry.compression_ratio().is_none());
         assert!(!entry.is_encrypted);
         assert!(entry.comment.is_none());
         assert!(entry.attributes.is_none());
@@ -220,68 +215,61 @@ mod tests {
     // ── Compression ratio ──
 
     #[test]
-    fn test_compute_compression_ratio_normal() {
+    fn test_compression_ratio_normal() {
         let mut entry = ArchiveEntry::new("data.bin".into(), 0);
         entry.size = Some(1000);
         entry.compressed_size = Some(400);
-        entry.compute_compression_ratio();
-        let ratio = entry.compression_ratio.unwrap();
+        let ratio = entry.compression_ratio().unwrap();
         assert!((ratio - 0.4).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_compute_compression_ratio_store() {
+    fn test_compression_ratio_store() {
         let mut entry = ArchiveEntry::new("data.bin".into(), 0);
         entry.size = Some(500);
         entry.compressed_size = Some(500);
-        entry.compute_compression_ratio();
-        let ratio = entry.compression_ratio.unwrap();
+        let ratio = entry.compression_ratio().unwrap();
         assert!((ratio - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_compute_compression_ratio_zero_original() {
+    fn test_compression_ratio_zero_original() {
         let mut entry = ArchiveEntry::new("empty.txt".into(), 0);
         entry.size = Some(0);
         entry.compressed_size = Some(0);
-        entry.compute_compression_ratio();
         // Division by zero protection: should remain None
-        assert!(entry.compression_ratio.is_none());
+        assert!(entry.compression_ratio().is_none());
     }
 
     #[test]
-    fn test_compute_compression_ratio_missing_compressed() {
+    fn test_compression_ratio_missing_compressed() {
         let mut entry = ArchiveEntry::new("data.bin".into(), 0);
         entry.size = Some(1000);
         // compressed_size is None
-        entry.compute_compression_ratio();
-        assert!(entry.compression_ratio.is_none());
+        assert!(entry.compression_ratio().is_none());
     }
 
     #[test]
-    fn test_compute_compression_ratio_missing_original() {
+    fn test_compression_ratio_missing_original() {
         let mut entry = ArchiveEntry::new("data.bin".into(), 0);
         // size is None
         entry.compressed_size = Some(400);
-        entry.compute_compression_ratio();
-        assert!(entry.compression_ratio.is_none());
+        assert!(entry.compression_ratio().is_none());
     }
 
     #[test]
-    fn test_compute_compression_ratio_both_missing() {
-        let mut entry = ArchiveEntry::new("data.bin".into(), 0);
-        entry.compute_compression_ratio();
-        assert!(entry.compression_ratio.is_none());
+    fn test_compression_ratio_both_missing() {
+        let entry = ArchiveEntry::new("data.bin".into(), 0);
+        assert!(entry.compression_ratio().is_none());
     }
 
     #[test]
-    fn test_compute_compression_ratio_larger_compressed() {
+    fn test_compression_ratio_larger_compressed() {
         // Incompressible data can have ratio > 1.0
         let mut entry = ArchiveEntry::new("random.bin".into(), 0);
         entry.size = Some(100);
         entry.compressed_size = Some(120);
-        entry.compute_compression_ratio();
-        let ratio = entry.compression_ratio.unwrap();
+        let ratio = entry.compression_ratio().unwrap();
         assert!((ratio - 1.2).abs() < f64::EPSILON);
     }
 
@@ -391,9 +379,8 @@ mod tests {
         let mut entry = ArchiveEntry::new("huge.bin".into(), 0);
         entry.size = Some(u64::MAX);
         entry.compressed_size = Some(u64::MAX);
-        entry.compute_compression_ratio();
         // u64::MAX / u64::MAX = 1.0
-        let ratio = entry.compression_ratio.unwrap();
+        let ratio = entry.compression_ratio().unwrap();
         assert!((ratio - 1.0).abs() < f64::EPSILON);
     }
 }

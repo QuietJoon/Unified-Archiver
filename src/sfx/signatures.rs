@@ -2,6 +2,8 @@
 //
 // Defines magic byte patterns for detecting embedded archives in SFX files
 
+use std::sync::OnceLock;
+
 use crate::format::ArchiveFormat;
 
 /// Archive format signature definition
@@ -73,6 +75,21 @@ pub const SIGNATURES: &[Signature] = &[
     },
 ];
 
+/// Pre-computed first-byte dispatch table for variable-offset signatures.
+/// Built once on first use, shared across all calls.
+fn variable_sig_table() -> &'static [Vec<usize>; 256] {
+    static TABLE: OnceLock<[Vec<usize>; 256]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table: [Vec<usize>; 256] = std::array::from_fn(|_| Vec::new());
+        for (i, sig) in SIGNATURES.iter().enumerate() {
+            if sig.fixed_offset.is_none() {
+                table[sig.bytes[0] as usize].push(i);
+            }
+        }
+        table
+    })
+}
+
 /// Scan buffer for archive signatures
 ///
 /// # Arguments
@@ -84,26 +101,29 @@ pub const SIGNATURES: &[Signature] = &[
 pub fn scan_for_signatures(buffer: &[u8], _chunk_size: usize) -> Vec<(usize, ArchiveFormat)> {
     let mut found = Vec::new();
 
+    // First handle fixed-offset signatures (like TAR at offset 257)
     for sig in SIGNATURES {
         if let Some(fixed_offset) = sig.fixed_offset {
-            // Check at fixed offset only
             if fixed_offset + sig.bytes.len() <= buffer.len()
                 && &buffer[fixed_offset..fixed_offset + sig.bytes.len()] == sig.bytes
             {
                 found.push((fixed_offset, sig.format));
             }
-        } else {
-            // Search through buffer byte-by-byte for accuracy
-            // Note: chunk_size parameter is for future optimization (SIMD, etc.)
-            let mut offset = 0;
-            while offset + sig.bytes.len() <= buffer.len() {
-                if &buffer[offset..offset + sig.bytes.len()] == sig.bytes {
-                    found.push((offset, sig.format));
-                    // Skip past this match to avoid overlapping detections
-                    offset += sig.bytes.len();
-                } else {
-                    offset += 1;
-                }
+        }
+    }
+
+    // Use pre-computed dispatch table for variable-offset signatures
+    let table = variable_sig_table();
+
+    // Single pass through buffer
+    for offset in 0..buffer.len() {
+        let first_byte = buffer[offset] as usize;
+        for &sig_idx in &table[first_byte] {
+            let sig = &SIGNATURES[sig_idx];
+            if offset + sig.bytes.len() <= buffer.len()
+                && &buffer[offset..offset + sig.bytes.len()] == sig.bytes
+            {
+                found.push((offset, sig.format));
             }
         }
     }

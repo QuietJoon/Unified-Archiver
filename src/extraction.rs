@@ -6,9 +6,10 @@
 use crate::archive::{Archive, ArchiveBackend};
 use crate::entry::ArchiveEntry;
 use crate::error::{ArchiveError, Result};
+use crate::error::ops;
 use crate::options::ExtractionOptions;
-use crate::security::check_extraction_safe;
-use std::path::{Component, Path, PathBuf};
+use crate::security::{check_extraction_safe, validate_entry_path};
+use std::path::Path;
 
 /// Ensure destination directory exists
 ///
@@ -16,25 +17,6 @@ use std::path::{Component, Path, PathBuf};
 /// Succeeds silently if the directory already exists.
 fn ensure_destination(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path).map_err(|e| ArchiveError::io("create_dir", path, e))
-}
-
-fn normalized_entry_path(entry_path: &str, destination: &Path) -> Result<PathBuf> {
-    let normalized = Path::new(entry_path)
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(name) => Some(name),
-            _ => None,
-        })
-        .collect::<PathBuf>();
-
-    if normalized.as_os_str().is_empty() {
-        return Err(ArchiveError::invalid_path(
-            entry_path,
-            "Path contains only traversal components",
-        ));
-    }
-
-    Ok(destination.join(normalized))
 }
 
 fn check_overwrite_conflicts(
@@ -48,7 +30,7 @@ fn check_overwrite_conflicts(
     }
 
     for entry in entries.iter().filter(|entry| entry.is_file()) {
-        let output_path = normalized_entry_path(&entry.path, destination)?;
+        let output_path = validate_entry_path(&entry.path, destination)?;
         if output_path.exists() {
             return Err(ArchiveError::UnsupportedOperation {
                 operation: operation.to_string(),
@@ -73,6 +55,41 @@ fn open_archive_for_extraction(path: &Path, password: Option<&str>) -> Result<Ar
         }
     } else {
         Archive::open(path)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn extract_single_entry(
+    archive_path: &std::path::Path,
+    password: Option<&str>,
+    entry_path: &str,
+    dest: &std::path::Path,
+    overwrite: bool,
+    verify_crc32: bool,
+    preserve_permissions: bool,
+    preserve_times: bool,
+) -> Result<()> {
+    let extract_archive = open_archive_for_extraction(archive_path, password)?;
+    match &extract_archive.backend {
+        ArchiveBackend::Unrar(unrar) => {
+            unrar.extract_file_with_options(entry_path, dest, overwrite)
+        }
+        ArchiveBackend::Piz(piz) => {
+            piz.extract_file_with_options(entry_path, dest, overwrite, verify_crc32)
+        }
+        ArchiveBackend::SevenZ(sevenz) => {
+            sevenz.extract_file_with_options(entry_path, dest, overwrite, verify_crc32)
+        }
+        ArchiveBackend::ZipWriter(_) => {
+            Err(ArchiveError::write_mode_only(ops::EXTRACT_FILTERED))
+        }
+        ArchiveBackend::Libarchive(libarchive) => libarchive.extract_file_with_options(
+            entry_path,
+            dest,
+            overwrite,
+            preserve_permissions,
+            preserve_times,
+        ),
     }
 }
 
@@ -148,7 +165,7 @@ impl Archive {
             &entries,
             &options.destination,
             options.overwrite,
-            "extract_all",
+            ops::EXTRACT_ALL,
         )?;
 
         // Multi-part note: libarchive and UnRAR backends automatically handle
@@ -172,7 +189,7 @@ impl Archive {
                 options.overwrite,
                 options.verify_crc32,
             ),
-            ArchiveBackend::ZipWriter(_) => Err(ArchiveError::write_mode_only("extract_all")),
+            ArchiveBackend::ZipWriter(_) => Err(ArchiveError::write_mode_only(ops::EXTRACT_ALL)),
             ArchiveBackend::Libarchive(libarchive) => libarchive.extract_all_with_options(
                 &options.destination,
                 options.progress.as_mut(),
@@ -211,7 +228,7 @@ impl Archive {
             &to_extract,
             &options.destination,
             options.overwrite,
-            "extract_file",
+            ops::EXTRACT_FILE,
         )?;
 
         // Use the current archive handle for extraction
@@ -231,7 +248,7 @@ impl Archive {
                 options.overwrite,
                 options.verify_crc32,
             ),
-            ArchiveBackend::ZipWriter(_) => Err(ArchiveError::write_mode_only("extract_file")),
+            ArchiveBackend::ZipWriter(_) => Err(ArchiveError::write_mode_only(ops::EXTRACT_FILE)),
             ArchiveBackend::Libarchive(libarchive) => libarchive.extract_file_with_options(
                 file_path,
                 &options.destination,
@@ -250,7 +267,7 @@ impl Archive {
             ArchiveBackend::Unrar(unrar) => unrar.extract_to_memory(file_path),
             ArchiveBackend::Piz(piz) => piz.extract_to_memory(file_path),
             ArchiveBackend::SevenZ(sevenz) => sevenz.extract_to_memory(file_path),
-            ArchiveBackend::ZipWriter(_) => Err(ArchiveError::write_mode_only("extract_to_memory")),
+            ArchiveBackend::ZipWriter(_) => Err(ArchiveError::write_mode_only(ops::EXTRACT_TO_MEMORY)),
             ArchiveBackend::Libarchive(libarchive) => libarchive.extract_to_memory(file_path),
         }
     }
@@ -284,7 +301,7 @@ impl Archive {
             ArchiveBackend::Unrar(unrar) => unrar.extract_to_stream(file_path),
             ArchiveBackend::Piz(piz) => piz.extract_to_stream(file_path),
             ArchiveBackend::SevenZ(sevenz) => sevenz.extract_to_stream(file_path),
-            ArchiveBackend::ZipWriter(_) => Err(ArchiveError::write_mode_only("extract_to_stream")),
+            ArchiveBackend::ZipWriter(_) => Err(ArchiveError::write_mode_only(ops::EXTRACT_TO_STREAM)),
             ArchiveBackend::Libarchive(libarchive) => libarchive.extract_to_stream(file_path),
         }
     }
@@ -323,7 +340,7 @@ impl Archive {
             &to_extract_entries,
             &options.destination,
             options.overwrite,
-            "extract_filtered",
+            ops::EXTRACT_FILTERED,
         )?;
 
         // Phase 2.7: Parallel extraction for multiple files
@@ -337,40 +354,17 @@ impl Archive {
         let preserve_permissions = options.preserve_permissions;
         let preserve_times = options.preserve_times;
 
-        // Extract common extraction logic to avoid duplication
         let extract_one = |entry: &&ArchiveEntry| -> Result<()> {
-            let extract_archive = open_archive_for_extraction(&archive_path, password.as_deref())?;
-            match &extract_archive.backend {
-                ArchiveBackend::Unrar(unrar) => {
-                    unrar.extract_file_with_options(&entry.path, &extraction_dest, overwrite)
-                }
-                ArchiveBackend::Piz(piz) => piz.extract_file_with_options(
-                    &entry.path,
-                    &extraction_dest,
-                    overwrite,
-                    verify_crc32,
-                ),
-                ArchiveBackend::SevenZ(sevenz) => sevenz.extract_file_with_options(
-                    &entry.path,
-                    &extraction_dest,
-                    overwrite,
-                    verify_crc32,
-                ),
-                ArchiveBackend::ZipWriter(_) => {
-                    Err(ArchiveError::write_mode_only("extract_filtered"))
-                }
-                ArchiveBackend::Libarchive(libarchive) => libarchive.extract_file_with_options(
-                    &entry.path,
-                    &extraction_dest,
-                    overwrite,
-                    preserve_permissions,
-                    preserve_times,
-                ),
-            }
+            extract_single_entry(
+                &archive_path, password.as_deref(), &entry.path, &extraction_dest,
+                overwrite, verify_crc32, preserve_permissions, preserve_times,
+            )
         };
 
-        // Use parallel extraction for 4+ files, sequential for fewer
-        if to_extract.len() >= 4 {
+        // Disable parallel extraction for solid archives (sequential decompression required)
+        let use_parallel = to_extract.len() >= 4 && !self.is_solid().unwrap_or(false);
+
+        if use_parallel {
             // Parallel extraction with early error return
             to_extract
                 .par_iter()
@@ -445,7 +439,7 @@ impl Archive {
             &to_extract_entries,
             &options.destination,
             options.overwrite,
-            "extract_files",
+            ops::EXTRACT_FILES,
         )?;
 
         // Use parallel extraction for 4+ files, sequential for fewer
@@ -460,32 +454,16 @@ impl Archive {
         let preserve_times = options.preserve_times;
 
         let extract_one = |path: &&str| -> Result<()> {
-            let extract_archive = open_archive_for_extraction(&archive_path, password.as_deref())?;
-            match &extract_archive.backend {
-                ArchiveBackend::Unrar(unrar) => {
-                    unrar.extract_file_with_options(path, &extraction_dest, overwrite)
-                }
-                ArchiveBackend::Piz(piz) => {
-                    piz.extract_file_with_options(path, &extraction_dest, overwrite, verify_crc32)
-                }
-                ArchiveBackend::SevenZ(sevenz) => sevenz.extract_file_with_options(
-                    path,
-                    &extraction_dest,
-                    overwrite,
-                    verify_crc32,
-                ),
-                ArchiveBackend::ZipWriter(_) => Err(ArchiveError::write_mode_only("extract_files")),
-                ArchiveBackend::Libarchive(libarchive) => libarchive.extract_file_with_options(
-                    path,
-                    &extraction_dest,
-                    overwrite,
-                    preserve_permissions,
-                    preserve_times,
-                ),
-            }
+            extract_single_entry(
+                &archive_path, password.as_deref(), path, &extraction_dest,
+                overwrite, verify_crc32, preserve_permissions, preserve_times,
+            )
         };
 
-        if paths.len() >= 4 {
+        // Disable parallel extraction for solid archives (sequential decompression required)
+        let use_parallel = paths.len() >= 4 && !self.is_solid().unwrap_or(false);
+
+        if use_parallel {
             // Parallel extraction with early error return
             paths
                 .par_iter()
@@ -561,7 +539,7 @@ impl Archive {
             let entry = entries
                 .get(id)
                 .ok_or_else(|| ArchiveError::UnsupportedOperation {
-                    operation: "extract_by_ids".to_string(),
+                    operation: ops::EXTRACT_BY_IDS.to_string(),
                     reason: format!(
                         "Invalid ID {}: archive has {} entries (valid IDs: 0-{})",
                         id,
@@ -578,7 +556,7 @@ impl Archive {
             &to_extract_entries,
             &options.destination,
             options.overwrite,
-            "extract_by_ids",
+            ops::EXTRACT_BY_IDS,
         )?;
 
         // Use parallel extraction for 4+ files, sequential for fewer
@@ -593,34 +571,16 @@ impl Archive {
         let preserve_times = options.preserve_times;
 
         let extract_one = |path: &&str| -> Result<()> {
-            let extract_archive = open_archive_for_extraction(&archive_path, password.as_deref())?;
-            match &extract_archive.backend {
-                ArchiveBackend::Unrar(unrar) => {
-                    unrar.extract_file_with_options(path, &extraction_dest, overwrite)
-                }
-                ArchiveBackend::Piz(piz) => {
-                    piz.extract_file_with_options(path, &extraction_dest, overwrite, verify_crc32)
-                }
-                ArchiveBackend::SevenZ(sevenz) => sevenz.extract_file_with_options(
-                    path,
-                    &extraction_dest,
-                    overwrite,
-                    verify_crc32,
-                ),
-                ArchiveBackend::ZipWriter(_) => {
-                    Err(ArchiveError::write_mode_only("extract_by_ids"))
-                }
-                ArchiveBackend::Libarchive(libarchive) => libarchive.extract_file_with_options(
-                    path,
-                    &extraction_dest,
-                    overwrite,
-                    preserve_permissions,
-                    preserve_times,
-                ),
-            }
+            extract_single_entry(
+                &archive_path, password.as_deref(), path, &extraction_dest,
+                overwrite, verify_crc32, preserve_permissions, preserve_times,
+            )
         };
 
-        if paths.len() >= 4 {
+        // Disable parallel extraction for solid archives (sequential decompression required)
+        let use_parallel = paths.len() >= 4 && !self.is_solid().unwrap_or(false);
+
+        if use_parallel {
             // Parallel extraction with early error return
             paths
                 .par_iter()
@@ -640,14 +600,8 @@ impl Archive {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::fixture;
     use std::path::PathBuf;
-
-    fn fixture(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("fixtures")
-            .join(name)
-    }
 
     // ── ensure_destination tests ──
 
@@ -675,41 +629,41 @@ mod tests {
         ensure_destination(temp.path()).unwrap();
     }
 
-    // ── normalized_entry_path tests ──
+    // ── validate_entry_path tests ──
 
     #[test]
-    fn test_normalized_entry_path_simple() {
+    fn test_validate_entry_path_simple() {
         let dest = Path::new("/output");
-        let result = normalized_entry_path("file.txt", dest).unwrap();
+        let result = validate_entry_path("file.txt", dest).unwrap();
         assert_eq!(result, PathBuf::from("/output/file.txt"));
     }
 
     #[test]
-    fn test_normalized_entry_path_with_subdir() {
+    fn test_validate_entry_path_with_subdir() {
         let dest = Path::new("/output");
-        let result = normalized_entry_path("subdir/file.txt", dest).unwrap();
+        let result = validate_entry_path("subdir/file.txt", dest).unwrap();
         assert_eq!(result, PathBuf::from("/output/subdir/file.txt"));
     }
 
     #[test]
-    fn test_normalized_entry_path_strips_traversal() {
+    fn test_validate_entry_path_strips_traversal() {
         let dest = Path::new("/output");
-        let result = normalized_entry_path("../../../etc/passwd", dest).unwrap();
+        let result = validate_entry_path("../../../etc/passwd", dest).unwrap();
         // Path traversal components should be stripped
         assert_eq!(result, PathBuf::from("/output/etc/passwd"));
     }
 
     #[test]
-    fn test_normalized_entry_path_strips_absolute() {
+    fn test_validate_entry_path_strips_absolute() {
         let dest = Path::new("/output");
-        let result = normalized_entry_path("/absolute/path.txt", dest).unwrap();
+        let result = validate_entry_path("/absolute/path.txt", dest).unwrap();
         assert_eq!(result, PathBuf::from("/output/absolute/path.txt"));
     }
 
     #[test]
-    fn test_normalized_entry_path_only_traversal() {
+    fn test_validate_entry_path_only_traversal() {
         let dest = Path::new("/output");
-        let result = normalized_entry_path("../../..", dest);
+        let result = validate_entry_path("../../..", dest);
         assert!(
             result.is_err(),
             "Path with only traversal components should fail"
@@ -732,7 +686,6 @@ mod tests {
             is_encrypted: false,
             entry_type,
             permissions: None,
-            compression_ratio: None,
             comment: None,
             attributes: None,
         }

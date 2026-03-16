@@ -88,9 +88,21 @@ pub struct Archive {
 }
 
 // SAFETY: Archive can be moved between threads (Send) but not shared (&Archive from multiple threads).
-// - UnrarArchive contains a raw FFI handle that is safe to move but not share (thread-local state)
-// - LibarchiveArchive only contains owned String (Send+Sync)
-// - PathBuf, ArchiveFormat, ArchiveMode, OnceCell<Vec<T>> are all Send
+//
+// Per-variant justification:
+// - Unrar(UnrarArchive): Contains a raw FFI handle (RARHandle). The UnRAR SDK uses global state
+//   protected by internal mutexes for file I/O, but individual handles are not reentrant.
+//   Moving the handle between threads is safe; sharing via &Archive is not (hence !Sync).
+//   Single-threaded access is already enforced by !Sync + the fact that extraction creates
+//   fresh handles via fresh_handle().
+// - Piz(PizArchive): Contains only PathBuf (Send+Sync). All operations re-open/mmap the file.
+// - SevenZ(SevenZArchive): Contains PathBuf + Option<String> (Send+Sync).
+// - ZipWriter(ZipWriter): Contains owned zip::ZipWriter<File> which is Send.
+// - Libarchive(LibarchiveArchive): Contains owned String + Option<*mut Archive>.
+//   The raw pointer is only used in Write mode and is accessed exclusively by the owning thread.
+//
+// Shared fields: PathBuf, ArchiveFormat, ArchiveMode, OnceCell<Vec<T>>, Option<ModificationTracker>
+// are all Send.
 //
 // This satisfies FR-020/FR-021: concurrent operations on **different** Archive instances
 // from different threads, but not concurrent operations on the **same** Archive instance.
@@ -100,6 +112,18 @@ unsafe impl Send for Archive {}
 // because the underlying FFI operations are not reentrant.
 
 impl Archive {
+    /// Private constructor for read-mode archives
+    fn new_read(backend: ArchiveBackend, path_buf: PathBuf, format: ArchiveFormat) -> Self {
+        Self {
+            backend,
+            path: path_buf,
+            mode: ArchiveMode::Read,
+            format,
+            entry_cache: OnceCell::new(),
+            modifications: None,
+        }
+    }
+
     /// Open an existing archive for reading
     ///
     /// Format is automatically detected from file content.
@@ -136,14 +160,7 @@ impl Archive {
             }
         };
 
-        Ok(Self {
-            backend,
-            path: path_buf,
-            mode: ArchiveMode::Read,
-            format,
-            entry_cache: OnceCell::new(),
-            modifications: None,
-        })
+        Ok(Self::new_read(backend, path_buf, format))
     }
 
     /// Open an encrypted archive with password
@@ -177,14 +194,7 @@ impl Archive {
             }
         };
 
-        Ok(Self {
-            backend,
-            path: path_buf,
-            mode: ArchiveMode::Read,
-            format,
-            entry_cache: OnceCell::new(),
-            modifications: None,
-        })
+        Ok(Self::new_read(backend, path_buf, format))
     }
 
     /// Detect if a file is a self-extracting archive (SFX)
@@ -527,15 +537,7 @@ impl Drop for Archive {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    // Helper to get fixture path
-    fn fixture(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("fixtures")
-            .join(name)
-    }
+    use crate::test_utils::fixture;
 
     // ── ArchiveMode tests ──
 

@@ -406,12 +406,11 @@ impl UnrarArchive {
         overwrite: bool,
     ) -> Result<()> {
         // Calculate total size for progress tracking (uses cached entries)
-        let (total_bytes, _entries) = if progress.is_some() {
+        let total_bytes = if progress.is_some() {
             let entries = self.list_files()?;
-            let total: u64 = entries.iter().filter_map(|e| e.size).sum();
-            (total, entries)
+            entries.iter().filter_map(|e| e.size).sum()
         } else {
-            (0, Vec::new())
+            0
         };
 
         // Create fresh handle for extraction (list_files() exhausted the original handle)
@@ -589,6 +588,10 @@ impl UnrarArchive {
     }
 
     /// Extract a single file to memory
+    ///
+    /// Note: The UnRAR API requires extraction to disk first, so this method
+    /// extracts to a temporary directory and reads the result into memory.
+    /// This is a fundamental limitation of the UnRAR SDK.
     pub fn extract_to_memory(&self, file_path: &str) -> Result<Vec<u8>> {
         use std::io::Read;
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -656,8 +659,9 @@ impl UnrarArchive {
 
     /// Extract a single file to a stream (Phase 2.4)
     ///
-    /// Returns a StreamingExtractor that reads the extracted file.
-    /// Note: UnRAR API requires extraction to disk first, so this uses a temporary file.
+    /// Note: Currently loads the entire file into memory before wrapping in a cursor.
+    /// The UnRAR API requires extraction to disk first, so true streaming is not possible
+    /// without a fundamental change to the extraction pipeline.
     pub fn extract_to_stream(
         &self,
         file_path: &str,
@@ -828,30 +832,11 @@ fn parse_header(header: &RARHeaderDataEx) -> Result<ArchiveEntry> {
         None
     };
 
-    // Compression ratio
-    entry.compute_compression_ratio();
-
     // Encryption status
     entry.is_encrypted = (header.flags & RHDF_ENCRYPTED) != 0;
 
-    // Comment (if available) - with bounds checking
-    entry.comment = if !header.cmt_buf.is_null() && header.cmt_size > 0 {
-        // Security: Limit comment size to prevent excessive memory allocation
-        const MAX_COMMENT_SIZE: u32 = 64 * 1024; // 64 KB
-        if header.cmt_size > MAX_COMMENT_SIZE {
-            None
-        } else {
-            unsafe {
-                let slice = std::slice::from_raw_parts(
-                    header.cmt_buf as *const u8,
-                    header.cmt_size as usize,
-                );
-                String::from_utf8_lossy(slice).to_string().into()
-            }
-        }
-    } else {
-        None
-    };
+    // Comment is not available via RARHeaderDataEx (cmt_buf/cmt_size are not populated by UnRAR)
+    entry.comment = None;
 
     // Platform-specific attributes
     use crate::entry::FileAttributes;

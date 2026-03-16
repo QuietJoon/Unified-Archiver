@@ -5,7 +5,9 @@
 
 use crate::archive::{Archive, ArchiveBackend, ArchiveMode};
 use crate::error::{ArchiveError, Result};
+use crate::error::ops;
 use crate::format::ArchiveFormat;
+use std::collections::HashSet;
 use std::path::Path;
 
 /// Configuration options for archive modification operations (stub)
@@ -55,7 +57,7 @@ impl Default for ModificationOptions {
 #[derive(Default)]
 pub(crate) struct ModificationTracker {
     /// Files to remove from archive
-    pub(crate) removed: Vec<String>,
+    pub(crate) removed: HashSet<String>,
     /// Files to add to archive (path, data)
     pub(crate) added: Vec<(String, Vec<u8>)>,
 }
@@ -85,7 +87,7 @@ impl Archive {
         // Check if format supports modification
         if !format.can_modify() {
             return Err(ArchiveError::UnsupportedOperation {
-                operation: "modify".to_string(),
+                operation: ops::MODIFY.to_string(),
                 reason: format!("{:?} archives do not support modification", format),
             });
         }
@@ -94,7 +96,7 @@ impl Archive {
         let backend = match format {
             ArchiveFormat::Rar | ArchiveFormat::Rar5 => {
                 return Err(ArchiveError::UnsupportedOperation {
-                    operation: "modify".to_string(),
+                    operation: ops::MODIFY.to_string(),
                     reason: "RAR archives are read-only".to_string(),
                 });
             }
@@ -122,7 +124,7 @@ impl Archive {
     pub fn add_entry(&mut self, path: &str, data: &[u8]) -> Result<()> {
         if self.mode != ArchiveMode::Modify {
             return Err(ArchiveError::UnsupportedOperation {
-                operation: "add_entry".to_string(),
+                operation: ops::ADD_ENTRY.to_string(),
                 reason: "Only available in Modify mode. Use add_file_from_data() for Write mode"
                     .to_string(),
             });
@@ -132,7 +134,7 @@ impl Archive {
             self.modifications
                 .as_mut()
                 .ok_or_else(|| ArchiveError::UnsupportedOperation {
-                    operation: "add_entry".to_string(),
+                    operation: ops::ADD_ENTRY.to_string(),
                     reason: "Archive not in Modify mode".to_string(),
                 })?;
 
@@ -143,7 +145,7 @@ impl Archive {
     /// Add a directory entry to archive (stub - not yet implemented)
     pub fn add_directory_entry(&mut self, _path: &str) -> Result<()> {
         Err(ArchiveError::UnsupportedOperation {
-            operation: "add_directory_entry".to_string(),
+            operation: ops::ADD_DIRECTORY_ENTRY.to_string(),
             reason: "Archive modification not yet implemented".to_string(),
         })
     }
@@ -154,7 +156,7 @@ impl Archive {
     pub fn remove_entry(&mut self, path: &str) -> Result<()> {
         if self.mode != ArchiveMode::Modify {
             return Err(ArchiveError::UnsupportedOperation {
-                operation: "remove_entry".to_string(),
+                operation: ops::REMOVE_ENTRY.to_string(),
                 reason: "Only available in Modify mode".to_string(),
             });
         }
@@ -163,11 +165,11 @@ impl Archive {
             self.modifications
                 .as_mut()
                 .ok_or_else(|| ArchiveError::UnsupportedOperation {
-                    operation: "remove_entry".to_string(),
+                    operation: ops::REMOVE_ENTRY.to_string(),
                     reason: "Archive not in Modify mode".to_string(),
                 })?;
 
-        modifications.removed.push(path.to_string());
+        modifications.removed.insert(path.to_string());
         Ok(())
     }
 
@@ -188,14 +190,20 @@ impl Archive {
             .unwrap_or(0)
     }
 
-    /// Clear pending operations (stub)
+    /// Clear pending operations
     pub fn clear_operations(&mut self) {
-        // Stub: no-op
+        if let Some(modifications) = self.modifications.as_mut() {
+            modifications.added.clear();
+            modifications.removed.clear();
+        }
     }
 
-    /// Clear all entries in archive being created (stub)
-    pub fn clear_entries(&mut self) {
-        // Stub: no-op
+    /// Clear all entries in archive being created
+    pub fn clear_entries(&mut self) -> Result<()> {
+        Err(ArchiveError::UnsupportedOperation {
+            operation: ops::CLEAR_ENTRIES.to_string(),
+            reason: "Cannot clear already-written entries from an archive".to_string(),
+        })
     }
 
     /// Commit changes to archive (for Modify mode)
@@ -214,7 +222,7 @@ impl Archive {
     pub fn commit_changes(mut self) -> Result<()> {
         if self.mode != ArchiveMode::Modify {
             return Err(ArchiveError::UnsupportedOperation {
-                operation: "commit_changes".to_string(),
+                operation: ops::COMMIT_CHANGES.to_string(),
                 reason: "Only available in Modify mode".to_string(),
             });
         }
@@ -223,7 +231,7 @@ impl Archive {
             self.modifications
                 .take()
                 .ok_or_else(|| ArchiveError::UnsupportedOperation {
-                    operation: "commit_changes".to_string(),
+                    operation: ops::COMMIT_CHANGES.to_string(),
                     reason: "No modification tracker".to_string(),
                 })?;
 
@@ -260,7 +268,10 @@ impl Archive {
         new_archive.finish()?;
 
         // Replace original file with new one
-        rename_with_overwrite(&temp_path, &self.path)?;
+        if let Err(e) = rename_with_overwrite(&temp_path, &self.path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e);
+        }
 
         Ok(())
     }
@@ -296,7 +307,7 @@ fn rename_with_overwrite(from: &std::path::Path, to: &std::path::Path) -> Result
 
     // Link to kernel32.dll MoveFileExW
     #[link(name = "kernel32")]
-    extern "system" {
+    unsafe extern "system" {
         fn MoveFileExW(
             lpExistingFileName: *const u16,
             lpNewFileName: *const u16,
@@ -329,14 +340,7 @@ fn rename_with_overwrite(from: &std::path::Path, to: &std::path::Path) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    fn fixture(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("fixtures")
-            .join(name)
-    }
+    use crate::test_utils::fixture;
 
     // ── ModificationOptions tests ──
 
@@ -426,9 +430,9 @@ mod tests {
     #[test]
     fn test_modification_tracker_remove_entries() {
         let mut tracker = ModificationTracker::default();
-        tracker.removed.push("old.txt".to_string());
+        tracker.removed.insert("old.txt".to_string());
         assert_eq!(tracker.removed.len(), 1);
-        assert_eq!(tracker.removed[0], "old.txt");
+        assert!(tracker.removed.contains("old.txt"));
     }
 
     // ── Archive::modify() tests ──
@@ -587,22 +591,23 @@ mod tests {
         assert_eq!(archive.pending_operations(), 0);
     }
 
-    // ── clear_operations() / clear_entries() stubs ──
+    // ── clear_operations() / clear_entries() ──
 
     #[test]
-    fn test_clear_operations_is_noop() {
+    fn test_clear_operations_clears_pending() {
         let mut archive = Archive::modify(fixture("test.zip")).unwrap();
         archive.add_entry("file.txt", b"data").unwrap();
-        // clear_operations is a stub (no-op), pending_operations unchanged
+        archive.remove_entry("old.txt").unwrap();
+        assert_eq!(archive.pending_operations(), 2);
         archive.clear_operations();
-        assert_eq!(archive.pending_operations(), 1);
+        assert_eq!(archive.pending_operations(), 0);
     }
 
     #[test]
-    fn test_clear_entries_is_noop() {
+    fn test_clear_entries_returns_error() {
         let mut archive = Archive::modify(fixture("test.zip")).unwrap();
-        // clear_entries is a stub, should not panic
-        archive.clear_entries();
+        let result = archive.clear_entries();
+        assert!(result.is_err());
     }
 
     // ── commit_changes() tests ──

@@ -305,7 +305,7 @@ proptest! {
             .map_err(|e| TestCaseError::fail(format!("list_files failed: {}", e)))?;
 
         for entry in entries {
-            if let Some(ratio) = entry.compression_ratio {
+            if let Some(ratio) = entry.compression_ratio() {
                 prop_assert!(
                     ratio >= 0.0,
                     "Compression ratio for '{}' should be non-negative, got {} in {}",

@@ -103,18 +103,6 @@ pub fn detect_sfx<P: AsRef<Path>>(path: P) -> Result<SfxDetectionResult> {
 /// # Returns
 /// * `Ok(())` if archive is valid
 /// * `Err(ArchiveError)` if validation fails
-#[allow(dead_code)]
-pub fn validate_archive_at_offset(offset: usize, buffer: &[u8]) -> Result<()> {
-    // Check if there's at least 100 bytes of data after the signature
-    // This is a basic sanity check - full validation happens during extraction
-    if offset + 100 > buffer.len() {
-        return Err(ArchiveError::corruption(
-            "embedded_archive",
-            "Insufficient data after archive signature",
-        ));
-    }
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
@@ -151,26 +139,6 @@ mod tests {
         assert_eq!(result.archive_format, Some(ArchiveFormat::Zip));
     }
 
-    #[test]
-    fn test_validate_archive_at_offset_valid() {
-        let buffer = vec![0u8; 500];
-        // Offset 100, buffer has 500 bytes, so 400 bytes after offset
-        assert!(validate_archive_at_offset(100, &buffer).is_ok());
-    }
-
-    #[test]
-    fn test_validate_archive_at_offset_too_close() {
-        let buffer = vec![0u8; 150];
-        // Offset 100, only 50 bytes after offset (need 100)
-        assert!(validate_archive_at_offset(100, &buffer).is_err());
-    }
-
-    #[test]
-    fn test_validate_archive_at_offset_at_end() {
-        let buffer = vec![0u8; 100];
-        // Offset at end of buffer
-        assert!(validate_archive_at_offset(100, &buffer).is_err());
-    }
 
     #[test]
     fn test_detect_sfx_signature_too_close_to_end() {
@@ -310,36 +278,6 @@ mod tests {
         assert!(!result.is_sfx, "Empty file should not be SFX");
     }
 
-    #[test]
-    fn test_validate_archive_at_offset_boundary() {
-        // Test various boundary conditions for validate_archive_at_offset
-        let buffer = vec![0u8; 200];
-
-        // Offset + 100 exactly equals buffer length
-        assert!(validate_archive_at_offset(100, &buffer).is_ok());
-
-        // Offset + 100 > buffer length
-        assert!(validate_archive_at_offset(101, &buffer).is_err());
-
-        // Offset at buffer end
-        assert!(validate_archive_at_offset(200, &buffer).is_err());
-
-        // Offset beyond buffer
-        assert!(validate_archive_at_offset(300, &buffer).is_err());
-    }
-
-    #[test]
-    fn test_validate_archive_at_offset_zero() {
-        // Test offset 0
-        let buffer = vec![0u8; 100];
-        assert!(validate_archive_at_offset(0, &buffer).is_ok());
-    }
-
-    #[test]
-    fn test_validate_archive_empty_buffer() {
-        let buffer: Vec<u8> = vec![];
-        assert!(validate_archive_at_offset(0, &buffer).is_err());
-    }
 
     #[test]
     fn test_detect_sfx_signature_at_different_positions() {

@@ -93,19 +93,36 @@ pub fn extract_bzip2_stream_crc(path: impl AsRef<Path>) -> Result<StreamChecksum
     let mut file = File::open(path.as_ref())
         .map_err(|e| ArchiveError::io("open", path.as_ref().to_path_buf(), e))?;
 
-    // Read entire file to find EOS marker
-    let mut data = Vec::new();
-    file.read_to_end(&mut data)
+    // Read the last 1KB of the file to find EOS marker
+    // The EOS marker (6 bytes) + CRC32 (4 bytes) = 10 bytes minimum,
+    // but we read more to handle padding and alignment
+    let file_len = file.metadata()
+        .map_err(|e| ArchiveError::io("stat", path.as_ref().to_path_buf(), e))?
+        .len();
+
+    let read_size = (file_len.min(1024)) as usize;
+    if read_size < 10 {
+        return Err(ArchiveError::format(
+            None,
+            "BZIP2 file too small to contain EOS marker",
+        ));
+    }
+
+    file.seek(SeekFrom::End(-(read_size as i64)))
+        .map_err(|e| ArchiveError::io("seek", path.as_ref().to_path_buf(), e))?;
+
+    let mut tail = vec![0u8; read_size];
+    file.read_exact(&mut tail)
         .map_err(|e| ArchiveError::io("read", path.as_ref().to_path_buf(), e))?;
 
     // Look for EOS magic: 0x177245385090 (6 bytes)
     let eos_magic = [0x17u8, 0x72, 0x45, 0x38, 0x50, 0x90];
 
-    // Find the EOS marker
-    if let Some(pos) = find_pattern(&data, &eos_magic) {
+    // Search backward in the tail for the EOS marker
+    if let Some(pos) = find_pattern(&tail, &eos_magic) {
         // CRC32 is the 4 bytes after the magic
-        if pos + 10 <= data.len() {
-            let crc_bytes = &data[pos + 6..pos + 10];
+        if pos + 10 <= tail.len() {
+            let crc_bytes = &tail[pos + 6..pos + 10];
             let crc32 =
                 u32::from_be_bytes([crc_bytes[0], crc_bytes[1], crc_bytes[2], crc_bytes[3]]);
 

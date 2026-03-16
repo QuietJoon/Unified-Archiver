@@ -6,6 +6,7 @@
 use crate::archive::{Archive, ArchiveBackend};
 use crate::entry::{ArchiveEntry, EntryType};
 use crate::error::{ArchiveError, ArchiveWarning, Result};
+use crate::error::ops;
 use std::path::{Path, PathBuf};
 
 /// Report from archive integrity validation
@@ -32,7 +33,7 @@ impl Archive {
                 ArchiveBackend::Piz(piz) => piz.list_files(),
                 ArchiveBackend::SevenZ(sevenz) => sevenz.list_files(),
                 ArchiveBackend::ZipWriter(_) => Err(ArchiveError::UnsupportedOperation {
-                    operation: "list_files".to_string(),
+                    operation: ops::LIST_FILES.to_string(),
                     reason: "Cannot list files from an archive in Write mode".to_string(),
                 }),
                 ArchiveBackend::Libarchive(libarchive) => libarchive.list_files(),
@@ -53,7 +54,7 @@ impl Archive {
             ArchiveBackend::Piz(piz) => piz.list_files(),
             ArchiveBackend::SevenZ(sevenz) => sevenz.list_files(),
             ArchiveBackend::ZipWriter(_) => Err(ArchiveError::UnsupportedOperation {
-                operation: "list_files_for_limits".to_string(),
+                operation: ops::LIST_FILES_FOR_LIMITS.to_string(),
                 reason: "Cannot list files from an archive in Write mode".to_string(),
             }),
             ArchiveBackend::Libarchive(libarchive) => libarchive.list_files_metadata_only(),
@@ -116,7 +117,7 @@ impl Archive {
             ArchiveBackend::Libarchive(libarchive) => libarchive.test_integrity()?,
             ArchiveBackend::ZipWriter(_) => {
                 return Err(ArchiveError::UnsupportedOperation {
-                    operation: "validate_integrity".to_string(),
+                    operation: ops::VALIDATE_INTEGRITY.to_string(),
                     reason: "Cannot validate an archive in Write mode".to_string(),
                 });
             }
@@ -386,14 +387,7 @@ impl Archive {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    fn fixture(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("fixtures")
-            .join(name)
-    }
+    use crate::test_utils::fixture;
 
     // ── ValidationReport tests ──
 

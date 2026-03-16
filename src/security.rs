@@ -98,6 +98,36 @@ pub fn get_max_mmap_size() -> u64 {
     DEFAULT_MAX_MMAP_SIZE
 }
 
+/// Normalize entry path by stripping non-normal components (traversal, root, current dir)
+fn normalize_entry_components(entry_path: &str) -> Result<PathBuf> {
+    let normalized = Path::new(entry_path)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .collect::<PathBuf>();
+
+    if normalized.as_os_str().is_empty() {
+        return Err(ArchiveError::InvalidPath {
+            path: entry_path.to_string(),
+            reason: "Path contains only traversal components".to_string(),
+        });
+    }
+
+    Ok(normalized)
+}
+
+/// Validate an archive entry path without creating directories or performing I/O
+///
+/// Pure validation function that checks for path traversal but doesn't create
+/// any directories or touch the filesystem beyond the initial canonicalize of `dest`.
+/// Use this for conflict checking where directories shouldn't be created yet.
+pub fn validate_entry_path(entry_path: &str, dest: &Path) -> Result<PathBuf> {
+    let normalized = normalize_entry_components(entry_path)?;
+    Ok(dest.join(normalized))
+}
+
 /// Sanitize an archive entry path to prevent path traversal attacks
 ///
 /// This function removes:
@@ -134,23 +164,7 @@ pub fn get_max_mmap_size() -> u64 {
 /// # Ok::<(), unified_archive::ArchiveError>(())
 /// ```
 pub fn sanitize_entry_path(entry_path: &str, dest: &Path) -> Result<PathBuf> {
-    // Normalize path by removing all non-normal components
-    let normalized = Path::new(entry_path)
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(name) => Some(name),
-            // Remove: Prefix, RootDir, CurDir, ParentDir
-            _ => None,
-        })
-        .collect::<PathBuf>();
-
-    // If path is empty after normalization, reject it
-    if normalized.as_os_str().is_empty() {
-        return Err(ArchiveError::InvalidPath {
-            path: entry_path.to_string(),
-            reason: "Path contains only traversal components".to_string(),
-        });
-    }
+    let normalized = normalize_entry_components(entry_path)?;
 
     // Join with destination
     let full_path = dest.join(&normalized);

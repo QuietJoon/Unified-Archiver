@@ -5,13 +5,13 @@
 
 use crate::entry::{ArchiveEntry, EntryType};
 use crate::error::{ArchiveError, Result};
-use crate::ffi::common::normalize_path;
+use crate::ffi::common::{copy_with_optional_crc, create_output_file, normalize_path};
 use crate::format::ArchiveFormat;
 use crate::options::ProgressCallback;
-use crate::security::{get_max_mmap_size, sanitize_entry_path, verify_crc32, verify_crc32_value};
+use crate::security::{get_max_mmap_size, sanitize_entry_path, verify_crc32};
 use memmap2::Mmap;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::Read;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -29,15 +29,6 @@ impl PizArchive {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
 
-        // Verify file exists and is readable
-        if !path_buf.exists() {
-            return Err(ArchiveError::io(
-                "open",
-                path_buf.clone(),
-                std::io::Error::new(std::io::ErrorKind::NotFound, "File not found"),
-            ));
-        }
-
         Ok(Self { path: path_buf })
     }
 
@@ -46,34 +37,37 @@ impl PizArchive {
         &self.path
     }
 
-    /// List all files in ZIP archive with CRC32 from metadata
-    ///
-    /// CRC32 is read directly from ZIP central directory (no decompression).
-    /// Piz explicitly exposes CRC32 in FileMetadata.
-    pub fn list_files(&self) -> Result<Vec<ArchiveEntry>> {
-        let file =
-            File::open(&self.path).map_err(|e| ArchiveError::io("open", self.path.clone(), e))?;
+    /// Memory-map the archive file with size limit check
+    fn open_mmap(&self, operation: &str) -> Result<Mmap> {
+        let file = File::open(&self.path)
+            .map_err(|e| ArchiveError::io("open", self.path.clone(), e))?;
 
-        // Check file size before memory mapping to prevent excessive memory usage
         let metadata = file
             .metadata()
             .map_err(|e| ArchiveError::io("stat", self.path.clone(), e))?;
         let max_mmap = get_max_mmap_size();
         if metadata.len() > max_mmap {
             return Err(ArchiveError::UnsupportedOperation {
-                operation: "open".to_string(),
+                operation: operation.to_string(),
                 reason: format!(
                     "ZIP file too large for memory mapping: {} bytes (max {} bytes). \
-                                Set UNIFIED_ARCHIVE_MAX_MMAP_SIZE environment variable to increase limit.",
+                    Set UNIFIED_ARCHIVE_MAX_MMAP_SIZE environment variable to increase limit.",
                     metadata.len(),
                     max_mmap
                 ),
             });
         }
 
-        // Memory map the file (piz requires &[u8])
-        let mapping = unsafe { Mmap::map(&file) }
-            .map_err(|e| ArchiveError::io("mmap", self.path.clone(), e))?;
+        unsafe { Mmap::map(&file) }
+            .map_err(|e| ArchiveError::io("mmap", self.path.clone(), e))
+    }
+
+    /// List all files in ZIP archive with CRC32 from metadata
+    ///
+    /// CRC32 is read directly from ZIP central directory (no decompression).
+    /// Piz explicitly exposes CRC32 in FileMetadata.
+    pub fn list_files(&self) -> Result<Vec<ArchiveEntry>> {
+        let mapping = self.open_mmap("list_files")?;
 
         let archive = piz::ZipArchive::new(&mapping).map_err(|e| {
             ArchiveError::format(Some(ArchiveFormat::Zip), format!("Invalid ZIP: {}", e))
@@ -136,7 +130,6 @@ impl PizArchive {
         entry.compressed_size = compressed_size;
         entry.modified = modified;
         entry.is_encrypted = metadata.encrypted;
-        entry.compute_compression_ratio();
 
         Ok(entry)
     }
@@ -157,28 +150,7 @@ impl PizArchive {
         overwrite: bool,
         verify_crc32: bool,
     ) -> Result<()> {
-        let file =
-            File::open(&self.path).map_err(|e| ArchiveError::io("open", self.path.clone(), e))?;
-
-        // Check file size before memory mapping to prevent excessive memory usage
-        let metadata = file
-            .metadata()
-            .map_err(|e| ArchiveError::io("stat", self.path.clone(), e))?;
-        let max_mmap = get_max_mmap_size();
-        if metadata.len() > max_mmap {
-            return Err(ArchiveError::UnsupportedOperation {
-                operation: "extract_all".to_string(),
-                reason: format!(
-                    "ZIP file too large for memory mapping: {} bytes (max {} bytes)",
-                    metadata.len(),
-                    max_mmap
-                ),
-            });
-        }
-
-        // Memory map the file (piz requires &[u8])
-        let mapping = unsafe { Mmap::map(&file) }
-            .map_err(|e| ArchiveError::io("mmap", self.path.clone(), e))?;
+        let mapping = self.open_mmap("extract_all")?;
 
         let archive = piz::ZipArchive::new(&mapping).map_err(|e| {
             ArchiveError::format(Some(ArchiveFormat::Zip), format!("Invalid ZIP: {}", e))
@@ -240,9 +212,7 @@ impl PizArchive {
                     &mut reader,
                     &mut output_file,
                     expected_crc,
-                    verify_crc32,
                     entry_metadata.path.as_str(),
-                    &self.path,
                     &entry_path,
                 )?;
 
@@ -270,28 +240,7 @@ impl PizArchive {
         overwrite: bool,
         verify_crc32: bool,
     ) -> Result<()> {
-        let file =
-            File::open(&self.path).map_err(|e| ArchiveError::io("open", self.path.clone(), e))?;
-
-        // Check file size before memory mapping to prevent excessive memory usage
-        let metadata = file
-            .metadata()
-            .map_err(|e| ArchiveError::io("stat", self.path.clone(), e))?;
-        let max_mmap = get_max_mmap_size();
-        if metadata.len() > max_mmap {
-            return Err(ArchiveError::UnsupportedOperation {
-                operation: "extract_file".to_string(),
-                reason: format!(
-                    "ZIP file too large for memory mapping: {} bytes (max {} bytes)",
-                    metadata.len(),
-                    max_mmap
-                ),
-            });
-        }
-
-        // Memory map the file (piz requires &[u8])
-        let mapping = unsafe { Mmap::map(&file) }
-            .map_err(|e| ArchiveError::io("mmap", self.path.clone(), e))?;
+        let mapping = self.open_mmap("extract_file")?;
 
         let archive = piz::ZipArchive::new(&mapping).map_err(|e| {
             ArchiveError::format(Some(ArchiveFormat::Zip), format!("Invalid ZIP: {}", e))
@@ -334,9 +283,7 @@ impl PizArchive {
             &mut reader,
             &mut output_file,
             expected_crc,
-            verify_crc32,
             file_path,
-            &self.path,
             &output_path,
         )?;
 
@@ -354,29 +301,7 @@ impl PizArchive {
         file_path: &str,
         verify_crc: bool,
     ) -> Result<Vec<u8>> {
-        let file =
-            File::open(&self.path).map_err(|e| ArchiveError::io("open", self.path.clone(), e))?;
-
-        // Check file size before memory mapping
-        let metadata = file
-            .metadata()
-            .map_err(|e| ArchiveError::io("stat", self.path.clone(), e))?;
-        let max_mmap = get_max_mmap_size();
-        if metadata.len() > max_mmap {
-            return Err(ArchiveError::UnsupportedOperation {
-                operation: "extract_to_memory".to_string(),
-                reason: format!(
-                    "ZIP file too large: {} bytes (max {} bytes). \
-                                Set UNIFIED_ARCHIVE_MAX_MMAP_SIZE environment variable to increase limit.",
-                    metadata.len(),
-                    max_mmap
-                ),
-            });
-        }
-
-        // Memory map the file (piz requires &[u8])
-        let mapping = unsafe { Mmap::map(&file) }
-            .map_err(|e| ArchiveError::io("mmap", self.path.clone(), e))?;
+        let mapping = self.open_mmap("extract_to_memory")?;
 
         let archive = piz::ZipArchive::new(&mapping).map_err(|e| {
             ArchiveError::format(Some(ArchiveFormat::Zip), format!("Invalid ZIP: {}", e))
@@ -436,6 +361,10 @@ impl PizArchive {
     }
 
     /// Extract a single file to a stream
+    ///
+    /// Note: Currently loads the entire file into memory before wrapping in a cursor.
+    /// True streaming would require self-referential borrowing of the memory-mapped data,
+    /// which is not possible with safe Rust lifetimes.
     pub fn extract_to_stream(
         &self,
         file_path: &str,
@@ -487,66 +416,14 @@ impl PizArchive {
     }
 }
 
-fn create_output_file(path: &Path, overwrite: bool) -> Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true);
-    if overwrite {
-        options.create(true).truncate(true);
-    } else {
-        options.create_new(true);
-    }
-    options
-        .open(path)
-        .map_err(|e| ArchiveError::io("create", path.to_path_buf(), e))
-}
-
-fn copy_with_optional_crc<R: Read, W: Write>(
-    reader: &mut R,
-    writer: &mut W,
-    expected_crc: Option<u32>,
-    verify_crc32: bool,
-    entry_path: &str,
-    archive_path: &Path,
-    output_path: &Path,
-) -> Result<u64> {
-    if !verify_crc32 || expected_crc.is_none() {
-        return std::io::copy(reader, writer)
-            .map_err(|e| ArchiveError::io("write", output_path.to_path_buf(), e));
-    }
-
-    let mut hasher = crc32fast::Hasher::new();
-    let mut total = 0u64;
-    let mut buffer = [0u8; 8192];
-
-    loop {
-        let n = reader
-            .read(&mut buffer)
-            .map_err(|e| ArchiveError::io("read", archive_path.to_path_buf(), e))?;
-        if n == 0 {
-            break;
-        }
-        writer
-            .write_all(&buffer[..n])
-            .map_err(|e| ArchiveError::io("write", output_path.to_path_buf(), e))?;
-        hasher.update(&buffer[..n]);
-        total += n as u64;
-    }
-
-    verify_crc32_value(hasher.finalize(), expected_crc, entry_path)?;
-    Ok(total)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn fixtures_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
-    }
+    use crate::test_utils::fixture;
 
     #[test]
     fn test_piz_open_valid_zip() {
-        let path = fixtures_dir().join("test.zip");
+        let path = fixture("test.zip");
         let archive = PizArchive::open(&path);
         assert!(archive.is_ok());
         assert_eq!(archive.unwrap().path(), path);
@@ -554,13 +431,14 @@ mod tests {
 
     #[test]
     fn test_piz_open_nonexistent() {
-        let result = PizArchive::open("/nonexistent/archive.zip");
-        assert!(result.is_err());
+        // open() succeeds lazily; error surfaces on first use (list_files)
+        let archive = PizArchive::open("/nonexistent/archive.zip").unwrap();
+        assert!(archive.list_files().is_err());
     }
 
     #[test]
     fn test_piz_list_files() {
-        let path = fixtures_dir().join("test.zip");
+        let path = fixture("test.zip");
         let archive = PizArchive::open(&path).unwrap();
         let entries = archive.list_files();
         assert!(entries.is_ok());
@@ -583,7 +461,7 @@ mod tests {
 
     #[test]
     fn test_piz_extract_to_memory() {
-        let path = fixtures_dir().join("test.zip");
+        let path = fixture("test.zip");
         let archive = PizArchive::open(&path).unwrap();
         let data = archive.extract_to_memory("test_file.txt");
         assert!(data.is_ok());
@@ -593,7 +471,7 @@ mod tests {
 
     #[test]
     fn test_piz_extract_to_memory_nonexistent_entry() {
-        let path = fixtures_dir().join("test.zip");
+        let path = fixture("test.zip");
         let archive = PizArchive::open(&path).unwrap();
         let result = archive.extract_to_memory("no_such_file.txt");
         assert!(result.is_err());
@@ -602,7 +480,7 @@ mod tests {
     #[test]
     fn test_piz_extract_to_stream() {
         use std::io::Read;
-        let path = fixtures_dir().join("test.zip");
+        let path = fixture("test.zip");
         let archive = PizArchive::open(&path).unwrap();
         let mut stream = archive.extract_to_stream("test_file.txt").unwrap();
         let mut buf = Vec::new();
@@ -613,7 +491,7 @@ mod tests {
     #[test]
     fn test_piz_memory_and_stream_produce_same_data() {
         use std::io::Read;
-        let path = fixtures_dir().join("test.zip");
+        let path = fixture("test.zip");
         let archive = PizArchive::open(&path).unwrap();
 
         let mem_data = archive.extract_to_memory("test_file.txt").unwrap();

@@ -236,9 +236,8 @@ fn test_clear_entries() {
     creator.add_directory_entry("folder").unwrap();
     assert_eq!(creator.entry_count().unwrap(), 3);
 
-    // Clear all entries
-    creator.clear_entries();
-    assert_eq!(creator.entry_count().unwrap(), 0);
+    // Clear all entries - returns error since already-written entries cannot be cleared
+    assert!(creator.clear_entries().is_err());
 }
 
 #[test]

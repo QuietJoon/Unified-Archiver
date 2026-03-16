@@ -45,6 +45,27 @@ pub enum ArchiveError {
     InvalidPath { path: String, reason: String },
 }
 
+/// String constants for operation names used in error construction.
+/// Prevents typos and enables refactoring of operation names.
+pub(crate) mod ops {
+    pub const EXTRACT_ALL: &str = "extract_all";
+    pub const EXTRACT_FILE: &str = "extract_file";
+    pub const EXTRACT_TO_MEMORY: &str = "extract_to_memory";
+    pub const EXTRACT_TO_STREAM: &str = "extract_to_stream";
+    pub const EXTRACT_FILTERED: &str = "extract_filtered";
+    pub const EXTRACT_FILES: &str = "extract_files";
+    pub const EXTRACT_BY_IDS: &str = "extract_by_ids";
+    pub const LIST_FILES: &str = "list_files";
+    pub const LIST_FILES_FOR_LIMITS: &str = "list_files_for_limits";
+    pub const VALIDATE_INTEGRITY: &str = "validate_integrity";
+    pub const MODIFY: &str = "modify";
+    pub const ADD_ENTRY: &str = "add_entry";
+    pub const REMOVE_ENTRY: &str = "remove_entry";
+    pub const COMMIT_CHANGES: &str = "commit_changes";
+    pub const ADD_DIRECTORY_ENTRY: &str = "add_directory_entry";
+    pub const CLEAR_ENTRIES: &str = "clear_entries";
+}
+
 impl std::error::Error for ArchiveError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {

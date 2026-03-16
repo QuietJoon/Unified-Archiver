@@ -43,7 +43,7 @@ pub mod signatures;
 pub mod stub_types;
 
 // Re-export public types
-pub use detection::{detect_sfx, validate_archive_at_offset};
+pub use detection::detect_sfx;
 pub use result::SfxDetectionResult;
 pub use signatures::{Signature, find_first_signature, scan_for_signatures};
 pub use stub_types::StubType;

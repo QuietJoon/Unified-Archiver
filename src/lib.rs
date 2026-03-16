@@ -193,6 +193,9 @@ pub mod extraction;
 pub mod inspection;
 pub mod modification;
 
+#[cfg(test)]
+pub(crate) mod test_utils;
+
 // FFI layer (public for testing)
 pub mod ffi;
 
@@ -210,7 +213,7 @@ pub use modification::ModificationOptions; // Phase 6: Archive modification
 pub use options::{
     CompressionLevel, CompressionOptions, EntryFilter, ExtractionOptions, ProgressCallback,
 };
-pub use security::{ExtractionLimits, check_extraction_safe, sanitize_entry_path, verify_crc32};
+pub use security::{ExtractionLimits, check_extraction_safe, sanitize_entry_path, validate_entry_path, verify_crc32};
 pub use sfx::{SfxDetectionResult, StubType}; // Phase 7: SFX detection
 pub use stream_crc::{
     CheckType, StreamChecksum, extract_bzip2_stream_crc, extract_gzip_stream_crc,

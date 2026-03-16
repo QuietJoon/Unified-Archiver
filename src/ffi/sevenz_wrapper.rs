@@ -5,13 +5,11 @@
 
 use crate::entry::{ArchiveEntry, EntryType};
 use crate::error::{ArchiveError, Result};
-use crate::ffi::common::normalize_path;
+use crate::ffi::common::{copy_with_optional_crc, create_output_file, normalize_path};
 use crate::format::ArchiveFormat;
 use crate::options::ProgressCallback;
-use crate::security::{sanitize_entry_path, verify_crc32_value};
+use crate::security::sanitize_entry_path;
 use sevenz_rust2::{ArchiveReader, Password};
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
@@ -27,15 +25,6 @@ impl SevenZArchive {
     /// Open 7z archive for reading
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
-
-        // Verify file exists and is readable
-        if !path_buf.exists() {
-            return Err(ArchiveError::io(
-                "open",
-                path_buf.clone(),
-                std::io::Error::new(std::io::ErrorKind::NotFound, "File not found"),
-            ));
-        }
 
         Ok(Self {
             path: path_buf,
@@ -152,7 +141,6 @@ impl SevenZArchive {
         entry_parsed.compressed_size = compressed_size;
         entry_parsed.modified = modified;
         entry_parsed.is_encrypted = self.password.is_some();
-        entry_parsed.compute_compression_ratio();
 
         Ok(entry_parsed)
     }
@@ -256,7 +244,6 @@ impl SevenZArchive {
                     entry_reader,
                     &mut output_file,
                     expected_crc,
-                    verify_crc32,
                     &normalized_path,
                     &entry_path,
                 ) {
@@ -346,7 +333,6 @@ impl SevenZArchive {
                     entry_reader,
                     &mut output_file,
                     expected_crc,
-                    verify_crc32,
                     file_path,
                     &output_path,
                 ) {
@@ -448,6 +434,10 @@ impl SevenZArchive {
     }
 
     /// Extract a single file to a stream
+    ///
+    /// Note: Currently loads the entire file into memory before wrapping in a cursor.
+    /// The sevenz-rust2 API uses a callback-based extraction model that doesn't
+    /// support streaming reads.
     pub fn extract_to_stream(
         &self,
         file_path: &str,
@@ -500,65 +490,14 @@ impl SevenZArchive {
     }
 }
 
-fn create_output_file(path: &Path, overwrite: bool) -> Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true);
-    if overwrite {
-        options.create(true).truncate(true);
-    } else {
-        options.create_new(true);
-    }
-    options
-        .open(path)
-        .map_err(|e| ArchiveError::io("create", path.to_path_buf(), e))
-}
-
-fn copy_with_optional_crc<R: Read + ?Sized, W: Write>(
-    reader: &mut R,
-    writer: &mut W,
-    expected_crc: Option<u32>,
-    verify_crc32: bool,
-    entry_path: &str,
-    output_path: &Path,
-) -> Result<u64> {
-    if !verify_crc32 || expected_crc.is_none() {
-        return std::io::copy(reader, writer)
-            .map_err(|e| ArchiveError::io("write", output_path.to_path_buf(), e));
-    }
-
-    let mut hasher = crc32fast::Hasher::new();
-    let mut total = 0u64;
-    let mut buffer = [0u8; 8192];
-
-    loop {
-        let n = reader
-            .read(&mut buffer)
-            .map_err(|e| ArchiveError::io("read", PathBuf::from(entry_path), e))?;
-        if n == 0 {
-            break;
-        }
-        writer
-            .write_all(&buffer[..n])
-            .map_err(|e| ArchiveError::io("write", output_path.to_path_buf(), e))?;
-        hasher.update(&buffer[..n]);
-        total += n as u64;
-    }
-
-    verify_crc32_value(hasher.finalize(), expected_crc, entry_path)?;
-    Ok(total)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn fixtures_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
-    }
+    use crate::test_utils::fixture;
 
     #[test]
     fn test_sevenz_open_valid() {
-        let path = fixtures_dir().join("test.7z");
+        let path = fixture("test.7z");
         let archive = SevenZArchive::open(&path);
         assert!(archive.is_ok());
         assert_eq!(archive.unwrap().path(), path);
@@ -566,13 +505,14 @@ mod tests {
 
     #[test]
     fn test_sevenz_open_nonexistent() {
-        let result = SevenZArchive::open("/nonexistent/archive.7z");
-        assert!(result.is_err());
+        // open() succeeds lazily; error surfaces on first use (list_files)
+        let archive = SevenZArchive::open("/nonexistent/archive.7z").unwrap();
+        assert!(archive.list_files().is_err());
     }
 
     #[test]
     fn test_sevenz_list_files() {
-        let path = fixtures_dir().join("test.7z");
+        let path = fixture("test.7z");
         let archive = SevenZArchive::open(&path).unwrap();
         let entries = archive.list_files();
         assert!(entries.is_ok());
@@ -586,7 +526,7 @@ mod tests {
 
     #[test]
     fn test_sevenz_list_files_have_crc32() {
-        let path = fixtures_dir().join("test.7z");
+        let path = fixture("test.7z");
         let archive = SevenZArchive::open(&path).unwrap();
         let entries = archive.list_files().unwrap();
 
@@ -604,7 +544,7 @@ mod tests {
 
     #[test]
     fn test_sevenz_extract_to_memory() {
-        let path = fixtures_dir().join("test.7z");
+        let path = fixture("test.7z");
         let archive = SevenZArchive::open(&path).unwrap();
         let data = archive.extract_to_memory("test_file.txt");
         assert!(data.is_ok());
@@ -614,7 +554,7 @@ mod tests {
 
     #[test]
     fn test_sevenz_extract_to_memory_nonexistent_entry() {
-        let path = fixtures_dir().join("test.7z");
+        let path = fixture("test.7z");
         let archive = SevenZArchive::open(&path).unwrap();
         let result = archive.extract_to_memory("no_such_file.txt");
         assert!(result.is_err());
@@ -623,7 +563,7 @@ mod tests {
     #[test]
     fn test_sevenz_extract_to_stream() {
         use std::io::Read;
-        let path = fixtures_dir().join("test.7z");
+        let path = fixture("test.7z");
         let archive = SevenZArchive::open(&path).unwrap();
         let mut stream = archive.extract_to_stream("test_file.txt").unwrap();
         let mut buf = Vec::new();
@@ -634,7 +574,7 @@ mod tests {
     #[test]
     fn test_sevenz_memory_and_stream_produce_same_data() {
         use std::io::Read;
-        let path = fixtures_dir().join("test.7z");
+        let path = fixture("test.7z");
         let archive = SevenZArchive::open(&path).unwrap();
 
         let mem_data = archive.extract_to_memory("test_file.txt").unwrap();
