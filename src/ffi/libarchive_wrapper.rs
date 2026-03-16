@@ -546,22 +546,16 @@ impl LibarchiveArchive {
     /// Extract a single file to a stream (Phase 2.4)
     ///
     /// Returns a StreamingExtractor that reads data directly from the archive
-    /// without loading the entire file into memory.
+    /// using `archive_read_data`, without loading the entire file into memory.
     pub fn extract_to_stream(
         &self,
         file_path: &str,
     ) -> Result<crate::streaming::StreamingExtractor> {
-        use std::io::Cursor;
-
-        // For now, use extract_to_memory and wrap in a cursor
-        // TODO: Implement true streaming with archive handle
-        let data = self.extract_to_memory(file_path)?;
-        let size = data.len() as u64;
-        let reader = Box::new(Cursor::new(data));
-
+        let reader = LibarchiveStreamReader::open(&self.path, file_path)?;
+        let size = reader.entry_size;
         Ok(crate::streaming::StreamingExtractor::new(
-            reader,
-            Some(size),
+            Box::new(reader),
+            size,
         ))
     }
 
@@ -1096,4 +1090,108 @@ unsafe fn get_archive_error(archive: *mut Archive) -> String {
     unsafe { CStr::from_ptr(err_ptr) }
         .to_string_lossy()
         .into_owned()
+}
+
+/// Streaming reader that reads directly from a libarchive handle via `archive_read_data`.
+///
+/// Owns the archive handle and frees it on drop. Positioned at the target entry
+/// after construction — subsequent `Read::read` calls pull decompressed data
+/// without buffering the entire file in memory.
+pub(crate) struct LibarchiveStreamReader {
+    archive: *mut Archive,
+    /// Entry size if known (from archive_entry_size)
+    pub(crate) entry_size: Option<u64>,
+    eof: bool,
+}
+
+// SAFETY: The archive handle is exclusively owned by this struct.
+// No other code accesses it after construction until drop.
+unsafe impl Send for LibarchiveStreamReader {}
+
+impl LibarchiveStreamReader {
+    /// Open the archive and position at the target entry for streaming reads.
+    fn open(archive_path: &str, target_entry: &str) -> Result<Self> {
+        let c_path = CString::new(archive_path.to_string())
+            .map_err(|_| ArchiveError::invalid_path(archive_path, "Contains null byte"))?;
+
+        unsafe {
+            let archive = LibarchiveArchive::open_read_handle(&c_path)?;
+
+            let mut entry: *mut LibarchiveEntry = std::ptr::null_mut();
+            loop {
+                let r = archive_read_next_header(archive, &mut entry);
+                if r == ARCHIVE_EOF {
+                    archive_read_free(archive);
+                    return Err(ArchiveError::format(
+                        None,
+                        format!("File '{}' not found in archive", target_entry),
+                    ));
+                }
+                if r != ARCHIVE_OK && r != ARCHIVE_WARN {
+                    let msg = get_archive_error(archive);
+                    archive_read_free(archive);
+                    return Err(ArchiveError::format(None, msg));
+                }
+
+                let pathname = archive_entry_pathname(entry);
+                if pathname.is_null() {
+                    archive_read_data_skip(archive);
+                    continue;
+                }
+
+                let name = CStr::from_ptr(pathname).to_string_lossy();
+                if name.as_ref() == target_entry {
+                    let raw_size = archive_entry_size(entry);
+                    let entry_size = if raw_size > 0 {
+                        Some(raw_size as u64)
+                    } else {
+                        None
+                    };
+                    return Ok(Self {
+                        archive,
+                        entry_size,
+                        eof: false,
+                    });
+                }
+
+                archive_read_data_skip(archive);
+            }
+        }
+    }
+}
+
+impl std::io::Read for LibarchiveStreamReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.eof || buf.is_empty() {
+            return Ok(0);
+        }
+
+        let n = unsafe {
+            archive_read_data(self.archive, buf.as_mut_ptr() as *mut c_void, buf.len())
+        };
+
+        if n == 0 {
+            self.eof = true;
+            Ok(0)
+        } else if n < 0 {
+            self.eof = true;
+            Err(std::io::Error::other(format!(
+                "libarchive read error: {}",
+                unsafe { get_archive_error(self.archive) }
+            )))
+        } else {
+            Ok(n as usize)
+        }
+    }
+}
+
+impl Drop for LibarchiveStreamReader {
+    fn drop(&mut self) {
+        if !self.archive.is_null() {
+            unsafe {
+                archive_read_free(self.archive);
+            }
+            self.archive = std::ptr::null_mut();
+        }
+    }
 }
