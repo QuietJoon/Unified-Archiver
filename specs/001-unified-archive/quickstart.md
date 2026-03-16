@@ -48,7 +48,7 @@ fn main() -> Result<(), ArchiveError> {
         println!("{}: {} bytes", entry.path, entry.size.unwrap_or(0));
 
         // Phase 1: Enhanced metadata
-        if let Some(ratio) = entry.compression_ratio {
+        if let Some(ratio) = entry.compression_ratio() {
             println!("  Compression: {:.1}%", ratio * 100.0);
         }
         if entry.is_encrypted {

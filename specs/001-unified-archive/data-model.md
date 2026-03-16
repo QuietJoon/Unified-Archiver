@@ -94,8 +94,7 @@ pub struct ArchiveEntry {
     // CRC32 checksum, None if not available for format
     pub crc32: Option<u32>,
 
-    // **Phase 1 Enhancement**: Compression ratio (0.0-1.0), computed as compressed_size/size
-    pub compression_ratio: Option<f64>,
+    // compression_ratio() -> Option<f64> — computed from size and compressed_size
 
     // **Phase 1 Enhancement**: Whether this entry is encrypted
     pub is_encrypted: bool,
@@ -144,8 +143,7 @@ pub struct FileAttributes {
 - Directories end with / in path
 - size and compressed_size are Some(0) for empty files, None for directories
 - crc32 is None for directories
-- **Phase 1**: compression_ratio computed as `compressed_size / size` when both Some, range [0.0, 1.0]
-- **Phase 1**: compression_ratio is None for directories or when size/compressed_size unavailable
+- **Phase 1**: compression_ratio() is a computed method returning `compressed_size / size` when both Some, range [0.0, 1.0]; returns None for directories or when size/compressed_size unavailable
 - **Phase 1**: is_encrypted reflects entry-level encryption (format-dependent)
 - **Phase 1**: created/accessed timestamps UTC-normalized from format-specific local times
 - **Phase 1**: FileAttributes platform-specific, None when not preserved by format
@@ -734,7 +732,7 @@ proptest! {
 **ArchiveEntry enhancements** (6 new fields):
 1. `created: Option<SystemTime>` - Creation time (format-dependent)
 2. `accessed: Option<SystemTime>` - Last access time (format-dependent)
-3. `compression_ratio: Option<f64>` - Computed ratio (0.0-1.0)
+3. `compression_ratio()` method - Computed ratio (0.0-1.0), no longer a stored field
 4. `is_encrypted: bool` - Entry-level encryption flag
 5. `comment: Option<String>` - File comment (ZIP, RAR)
 6. `attributes: Option<FileAttributes>` - Platform-specific attributes

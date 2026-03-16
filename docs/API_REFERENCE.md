@@ -322,8 +322,8 @@ pub struct ArchiveEntry {
     /// Last access time (UTC)
     pub accessed: Option<SystemTime>,
 
-    /// Compression ratio (0.0 = perfect, 1.0 = no compression)
-    pub compression_ratio: Option<f64>,
+    // NOTE: compression_ratio is a computed method, not a stored field.
+    // See ArchiveEntry::compression_ratio() below.
 
     /// Whether entry is encrypted/password-protected
     pub is_encrypted: bool,
@@ -346,9 +346,9 @@ Check if this entry is a directory.
 
 Check if this entry is a regular file.
 
-#### `ArchiveEntry::compute_compression_ratio(&mut self)`
+#### `ArchiveEntry::compression_ratio(&self) -> Option<f64>`
 
-Compute and cache the compression ratio if sizes are available.
+Compute compression ratio from sizes (compressed_size / size). Returns `None` if either size is missing or original size is zero.
 
 ---
 

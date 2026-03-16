@@ -192,7 +192,7 @@
 - [X] T096 [P] [US5] Implement archive signature constants in src/sfx/signatures.rs (ZIP, RAR4, RAR5, 7z, TAR magic bytes)
 - [X] T097 [US5] Implement detect_executable_format() in src/sfx/stub_types.rs using goblin Object::parse()
 - [X] T098 [US5] Implement scan_for_signatures() in src/sfx/signatures.rs scanning first 1MB byte-by-byte for 100% accuracy
-- [X] T099 [US5] Implement validate_archive_at_offset() in src/sfx/detection.rs using existing format detection
+- [X] T099 [US5] ~~Implement validate_archive_at_offset()~~ (removed: validation integrated into detect_sfx pipeline)
 - [X] T100 [US5] Implement detect_sfx() in src/sfx/detection.rs orchestrating 3-stage pipeline (Stage 1: exe validation, Stage 2: signature scan, Stage 3: archive validation)
 - [X] T101 [US5] Implement Archive::detect_sfx() in src/sfx/mod.rs as public API
 - [X] T102 [US5] Implement Archive::open_sfx() in src/sfx/mod.rs as convenience method (detect + open_at_offset)

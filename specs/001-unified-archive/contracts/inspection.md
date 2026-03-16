@@ -24,7 +24,7 @@ impl Archive {
 
 **Returns**: All entries with **enhanced** metadata structure (Phase 1):
 - path (normalized with `/`)
-- size, compressed_size, **compression_ratio**
+- size, compressed_size, **compression_ratio()** method
 - modified time (UTC), **created, accessed** (format-dependent)
 - crc32 (if available)
 - **is_encrypted** (entry-level encryption flag)
@@ -48,7 +48,7 @@ for entry in entries {
     println!("{}: {} bytes ({:.1}% compression, CRC: {:08x})",
         entry.path,
         entry.size.unwrap_or(0),
-        entry.compression_ratio.unwrap_or(0.0) * 100.0,
+        entry.compression_ratio().unwrap_or(0.0) * 100.0,
         entry.crc32.unwrap_or(0));
 
     // Phase 1 enhancements
@@ -147,7 +147,7 @@ assert_eq!(std::mem::size_of_val(&zip_entries[0]),
 
 ```rust
 for entry in archive.list_files()? {
-    if let Some(ratio) = entry.compression_ratio {
+    if let Some(ratio) = entry.compression_ratio() {
         println!("{}: {:.1}% compression",
             entry.path, ratio * 100.0);
     }

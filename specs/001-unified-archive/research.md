@@ -1271,6 +1271,7 @@ pub fn detect_sfx(path: impl AsRef<Path>) -> Result<SfxDetectionResult> {
     }
 
     // Stage 3: Validation
+    // Note: validate_archive_at_offset was removed; validation is now integrated into detect_sfx()
     let (offset, format) = signature_result.unwrap();
     match validate_archive_at_offset(path, offset, format) {
         Ok(_) => Ok(SfxDetectionResult {
