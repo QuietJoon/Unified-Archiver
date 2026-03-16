@@ -36,6 +36,7 @@ impl Archive {
                     operation: ops::LIST_FILES.to_string(),
                     reason: "Cannot list files from an archive in Write mode".to_string(),
                 }),
+                ArchiveBackend::ZipReader(zip) => zip.list_files(),
                 ArchiveBackend::Libarchive(libarchive) => libarchive.list_files(),
             })
             .map(|v| v.as_slice())
@@ -57,6 +58,7 @@ impl Archive {
                 operation: ops::LIST_FILES_FOR_LIMITS.to_string(),
                 reason: "Cannot list files from an archive in Write mode".to_string(),
             }),
+            ArchiveBackend::ZipReader(zip) => zip.list_files(),
             ArchiveBackend::Libarchive(libarchive) => libarchive.list_files_metadata_only(),
         }
     }
@@ -115,6 +117,7 @@ impl Archive {
             ArchiveBackend::Piz(piz) => piz.test_integrity()?,
             ArchiveBackend::SevenZ(sevenz) => sevenz.test_integrity()?,
             ArchiveBackend::Libarchive(libarchive) => libarchive.test_integrity()?,
+            ArchiveBackend::ZipReader(zip) => zip.test_integrity()?,
             ArchiveBackend::ZipWriter(_) => {
                 return Err(ArchiveError::UnsupportedOperation {
                     operation: ops::VALIDATE_INTEGRITY.to_string(),

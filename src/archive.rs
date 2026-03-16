@@ -6,6 +6,7 @@ use crate::ffi::libarchive_wrapper::LibarchiveArchive;
 use crate::ffi::piz_wrapper::PizArchive;
 use crate::ffi::sevenz_wrapper::SevenZArchive;
 use crate::ffi::wrapper::UnrarArchive;
+use crate::ffi::zip_wrapper::ZipArchive;
 use crate::ffi::zip_writer::ZipWriter;
 use crate::format::ArchiveFormat;
 use once_cell::sync::OnceCell;
@@ -26,6 +27,7 @@ pub(crate) enum ArchiveBackend {
     Piz(PizArchive),
     SevenZ(SevenZArchive),
     ZipWriter(ZipWriter),
+    ZipReader(ZipArchive),
     Libarchive(LibarchiveArchive),
 }
 
@@ -98,6 +100,7 @@ pub struct Archive {
 // - Piz(PizArchive): Contains only PathBuf (Send+Sync). All operations re-open/mmap the file.
 // - SevenZ(SevenZArchive): Contains PathBuf + Option<String> (Send+Sync).
 // - ZipWriter(ZipWriter): Contains owned zip::ZipWriter<File> which is Send.
+// - ZipReader(ZipArchive): Contains PathBuf + Option<String> (Send+Sync).
 // - Libarchive(LibarchiveArchive): Contains owned String + Option<*mut Archive>.
 //   The raw pointer is only used in Write mode and is accessed exclusively by the owning thread.
 //
@@ -174,12 +177,9 @@ impl Archive {
                 ArchiveBackend::Unrar(unrar)
             }
             ArchiveFormat::Zip => {
-                // Note: piz doesn't support password-protected ZIP yet
-                return Err(ArchiveError::unsupported(
-                    "open_encrypted",
-                    format,
-                    Some("Encrypted ZIP support not yet implemented in piz backend".to_string()),
-                ));
+                // Use zip crate backend for encrypted ZIP (piz can't decrypt)
+                let zip = ZipArchive::open_with_password(&path_buf, password.as_ref())?;
+                ArchiveBackend::ZipReader(zip)
             }
             ArchiveFormat::SevenZip => {
                 let sevenz = SevenZArchive::open_with_password(&path_buf, password.as_ref())?;
@@ -402,6 +402,7 @@ impl Archive {
             // Other formats don't support recovery records
             ArchiveBackend::Piz(_)
             | ArchiveBackend::ZipWriter(_)
+            | ArchiveBackend::ZipReader(_)
             | ArchiveBackend::SevenZ(_)
             | ArchiveBackend::Libarchive(_) => Ok(false),
         }
@@ -442,6 +443,7 @@ impl Archive {
             // Other formats don't support recovery records
             ArchiveBackend::Piz(_)
             | ArchiveBackend::ZipWriter(_)
+            | ArchiveBackend::ZipReader(_)
             | ArchiveBackend::SevenZ(_)
             | ArchiveBackend::Libarchive(_) => Ok(None),
         }
@@ -475,6 +477,7 @@ impl Archive {
             ArchiveBackend::SevenZ(sevenz) => sevenz.is_solid(),
             ArchiveBackend::Piz(_)
             | ArchiveBackend::ZipWriter(_)
+            | ArchiveBackend::ZipReader(_)
             | ArchiveBackend::Libarchive(_) => {
                 // ZIP, TAR, and other formats don't support solid compression
                 Ok(false)
@@ -502,7 +505,10 @@ impl Archive {
                 ArchiveBackend::Libarchive(backend) => {
                     backend.close_write()?;
                 }
-                ArchiveBackend::Unrar(_) | ArchiveBackend::Piz(_) | ArchiveBackend::SevenZ(_) => {
+                ArchiveBackend::Unrar(_)
+                | ArchiveBackend::Piz(_)
+                | ArchiveBackend::SevenZ(_)
+                | ArchiveBackend::ZipReader(_) => {
                     return Err(ArchiveError::read_only_backend("finish"));
                 }
             }
@@ -645,15 +651,12 @@ mod tests {
     }
 
     #[test]
-    fn test_open_encrypted_unsupported_zip() {
+    fn test_open_encrypted_zip() {
+        // Opening an unencrypted ZIP with a password should succeed (ZipReader backend)
         let result = Archive::open_encrypted(fixture("test.zip"), "password");
-        assert!(result.is_err());
-        let err = result.err().unwrap();
-        assert!(
-            matches!(err, crate::error::ArchiveError::Unsupported { .. }),
-            "Expected Unsupported error for encrypted ZIP, got: {:?}",
-            err
-        );
+        assert!(result.is_ok(), "ZIP encrypted open should succeed: {:?}", result.err());
+        let archive = result.unwrap();
+        assert_eq!(archive.format(), ArchiveFormat::Zip);
     }
 
     #[test]

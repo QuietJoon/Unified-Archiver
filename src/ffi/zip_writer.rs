@@ -101,6 +101,28 @@ impl ZipWriter {
         Ok(())
     }
 
+    /// Add a single directory entry (without contents)
+    pub fn add_directory_entry(&mut self, archive_path: &str) -> Result<()> {
+        let writer = self.writer.as_mut().ok_or_else(|| {
+            ArchiveError::format(Some(ArchiveFormat::Zip), "Archive already closed")
+        })?;
+
+        // ZIP format requires trailing slash for directories
+        let dir_path = if archive_path.ends_with('/') {
+            archive_path.to_string()
+        } else {
+            format!("{}/", archive_path)
+        };
+
+        writer
+            .add_directory(&dir_path, self.options)
+            .map_err(|e| {
+                ArchiveError::format(Some(ArchiveFormat::Zip), format!("Add directory: {}", e))
+            })?;
+
+        Ok(())
+    }
+
     /// Add a directory recursively
     pub fn add_directory_recursive(&mut self, dir_path: impl AsRef<Path>) -> Result<()> {
         let dir_path = dir_path.as_ref();

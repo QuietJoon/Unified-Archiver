@@ -60,6 +60,8 @@ pub(crate) struct ModificationTracker {
     pub(crate) removed: HashSet<String>,
     /// Files to add to archive (path, data)
     pub(crate) added: Vec<(String, Vec<u8>)>,
+    /// Directories to add to archive
+    pub(crate) added_directories: Vec<String>,
 }
 
 impl Archive {
@@ -142,12 +144,28 @@ impl Archive {
         Ok(())
     }
 
-    /// Add a directory entry to archive (stub - not yet implemented)
-    pub fn add_directory_entry(&mut self, _path: &str) -> Result<()> {
-        Err(ArchiveError::UnsupportedOperation {
-            operation: ops::ADD_DIRECTORY_ENTRY.to_string(),
-            reason: "Archive modification not yet implemented".to_string(),
-        })
+    /// Add a directory entry to archive (for Modify mode)
+    ///
+    /// In Modify mode, this tracks the directory addition. Changes are applied
+    /// when `commit_changes()` is called.
+    pub fn add_directory_entry(&mut self, path: &str) -> Result<()> {
+        if self.mode != ArchiveMode::Modify {
+            return Err(ArchiveError::UnsupportedOperation {
+                operation: ops::ADD_DIRECTORY_ENTRY.to_string(),
+                reason: "Only available in Modify mode".to_string(),
+            });
+        }
+
+        let modifications =
+            self.modifications
+                .as_mut()
+                .ok_or_else(|| ArchiveError::UnsupportedOperation {
+                    operation: ops::ADD_DIRECTORY_ENTRY.to_string(),
+                    reason: "Archive not in Modify mode".to_string(),
+                })?;
+
+        modifications.added_directories.push(path.to_string());
+        Ok(())
     }
 
     /// Remove an entry from archive (for Modify mode)
@@ -186,7 +204,7 @@ impl Archive {
     pub fn pending_operations(&self) -> usize {
         self.modifications
             .as_ref()
-            .map(|m| m.added.len() + m.removed.len())
+            .map(|m| m.added.len() + m.removed.len() + m.added_directories.len())
             .unwrap_or(0)
     }
 
@@ -195,6 +213,7 @@ impl Archive {
         if let Some(modifications) = self.modifications.as_mut() {
             modifications.added.clear();
             modifications.removed.clear();
+            modifications.added_directories.clear();
         }
     }
 
@@ -236,7 +255,10 @@ impl Archive {
                 })?;
 
         // If no modifications, return early
-        if modifications.added.is_empty() && modifications.removed.is_empty() {
+        if modifications.added.is_empty()
+            && modifications.removed.is_empty()
+            && modifications.added_directories.is_empty()
+        {
             return Ok(());
         }
 
@@ -257,6 +279,11 @@ impl Archive {
             // Extract and re-add entry
             let data = self.extract_to_memory(&entry.path)?;
             new_archive.add_file_from_data(&entry.path, &data)?;
+        }
+
+        // Add new directory entries
+        for dir_path in modifications.added_directories {
+            new_archive.add_directory(&dir_path)?;
         }
 
         // Add new entries
@@ -516,12 +543,38 @@ mod tests {
     // ── add_directory_entry() tests ──
 
     #[test]
-    fn test_add_directory_entry_returns_unsupported() {
+    fn test_add_directory_entry_in_modify_mode() {
         let mut archive = Archive::modify(fixture("test.zip")).unwrap();
+        let result = archive.add_directory_entry("subdir");
+        assert!(result.is_ok());
+        assert_eq!(archive.pending_operations(), 1);
+    }
+
+    #[test]
+    fn test_add_directory_entry_not_in_modify_mode() {
+        let mut archive = Archive::open(fixture("test.zip")).unwrap();
         let result = archive.add_directory_entry("subdir");
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("not yet implemented") || msg.contains("add_directory_entry"));
+        assert!(msg.contains("Modify mode") || msg.contains("add_directory_entry"));
+    }
+
+    #[test]
+    fn test_add_directory_entry_tracks_in_pending() {
+        let mut archive = Archive::modify(fixture("test.zip")).unwrap();
+        archive.add_directory_entry("dir1").unwrap();
+        archive.add_directory_entry("dir2").unwrap();
+        assert_eq!(archive.pending_operations(), 2);
+    }
+
+    #[test]
+    fn test_clear_operations_clears_directories() {
+        let mut archive = Archive::modify(fixture("test.zip")).unwrap();
+        archive.add_directory_entry("dir1").unwrap();
+        archive.add_entry("file.txt", b"data").unwrap();
+        assert_eq!(archive.pending_operations(), 2);
+        archive.clear_operations();
+        assert_eq!(archive.pending_operations(), 0);
     }
 
     // ── remove_entry() tests ──

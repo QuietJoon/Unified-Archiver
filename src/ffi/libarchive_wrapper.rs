@@ -737,6 +737,55 @@ impl LibarchiveArchive {
         Ok(())
     }
 
+    /// Add a directory entry to the archive (without contents)
+    pub fn add_directory_entry(&mut self, archive_path: &str) -> Result<()> {
+        let write_handle = self
+            .write_handle
+            .ok_or_else(|| ArchiveError::UnsupportedOperation {
+                operation: "add_directory_entry".to_string(),
+                reason: "Archive not opened in write mode".to_string(),
+            })?;
+
+        unsafe {
+            let entry = archive_entry_new();
+            if entry.is_null() {
+                return Err(ArchiveError::format(None, "Failed to create entry"));
+            }
+
+            // Ensure trailing slash for directory path
+            let dir_path = if archive_path.ends_with('/') {
+                archive_path.to_string()
+            } else {
+                format!("{}/", archive_path)
+            };
+
+            let c_path = CString::new(dir_path)
+                .map_err(|_| ArchiveError::invalid_path(archive_path, "Contains null byte"))?;
+            archive_entry_set_pathname(entry, c_path.as_ptr());
+
+            archive_entry_set_filetype(entry, AE_IFDIR);
+            archive_entry_set_size(entry, 0);
+            archive_entry_set_perm(entry, 0o755);
+
+            let now = std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            archive_entry_set_mtime(entry, now.as_secs() as i64, 0);
+
+            let header_result = archive_write_header(write_handle, entry);
+            if header_result != ARCHIVE_OK {
+                let error_msg = get_archive_error(write_handle);
+                archive_entry_free(entry);
+                return Err(ArchiveError::format(None, error_msg));
+            }
+
+            archive_write_finish_entry(write_handle);
+            archive_entry_free(entry);
+        }
+
+        Ok(())
+    }
+
     /// Close and finalize the archive (for write mode)
     pub fn close_write(&mut self) -> Result<()> {
         if let Some(write_handle) = self.write_handle.take() {

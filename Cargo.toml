@@ -20,7 +20,7 @@ walkdir = "2.4"
 piz = "0.5"  # Native Rust ZIP backend with parallel extraction and CRC32 metadata
 sevenz-rust2 = "0.19"  # Native Rust 7z backend with CRC32 metadata access (maintained fork)
 memmap2 = "0.9"  # Memory mapping for piz (requires &[u8])
-zip = { version = "2.2", default-features = false, features = ["deflate"] }  # Native Rust ZIP creation
+zip = { version = "2.2", default-features = false, features = ["deflate", "aes-crypto"] }  # Native Rust ZIP creation + encrypted ZIP reading
 
 [dev-dependencies]
 criterion = "0.5"

@@ -64,7 +64,7 @@ impl Archive {
         match &mut self.backend {
             ArchiveBackend::ZipWriter(writer) => writer.add_file_from_data(path, data),
             ArchiveBackend::Libarchive(backend) => backend.add_file_from_data(path, data),
-            ArchiveBackend::Unrar(_) | ArchiveBackend::Piz(_) | ArchiveBackend::SevenZ(_) => {
+            ArchiveBackend::Unrar(_) | ArchiveBackend::Piz(_) | ArchiveBackend::SevenZ(_) | ArchiveBackend::ZipReader(_) => {
                 Err(ArchiveError::read_only_backend("add_file_from_data"))
             }
         }
@@ -99,21 +99,21 @@ impl Archive {
             ArchiveBackend::Libarchive(backend) => {
                 backend.add_file_from_path(fs_path, archive_path)
             }
-            ArchiveBackend::Unrar(_) | ArchiveBackend::Piz(_) | ArchiveBackend::SevenZ(_) => {
+            ArchiveBackend::Unrar(_) | ArchiveBackend::Piz(_) | ArchiveBackend::SevenZ(_) | ArchiveBackend::ZipReader(_) => {
                 Err(ArchiveError::read_only_backend("add_file_from_path_as"))
             }
         }
     }
 
     /// Add a directory entry to archive (without contents)
-    pub fn add_directory(&mut self, _path: &str) -> Result<()> {
-        // TODO: Implement directory entry creation
-        Err(ArchiveError::UnsupportedOperation {
-            operation: "add_directory".to_string(),
-            reason:
-                "Directory entry creation not yet implemented (use add_directory_recursive for now)"
-                    .to_string(),
-        })
+    pub fn add_directory(&mut self, path: &str) -> Result<()> {
+        match &mut self.backend {
+            ArchiveBackend::ZipWriter(writer) => writer.add_directory_entry(path),
+            ArchiveBackend::Libarchive(backend) => backend.add_directory_entry(path),
+            ArchiveBackend::Unrar(_) | ArchiveBackend::Piz(_) | ArchiveBackend::SevenZ(_) | ArchiveBackend::ZipReader(_) => {
+                Err(ArchiveError::read_only_backend("add_directory"))
+            }
+        }
     }
 
     /// Add a directory recursively to archive
@@ -123,7 +123,7 @@ impl Archive {
         match &mut self.backend {
             ArchiveBackend::ZipWriter(writer) => writer.add_directory_recursive(path),
             ArchiveBackend::Libarchive(backend) => backend.add_directory_recursive(path),
-            ArchiveBackend::Unrar(_) | ArchiveBackend::Piz(_) | ArchiveBackend::SevenZ(_) => {
+            ArchiveBackend::Unrar(_) | ArchiveBackend::Piz(_) | ArchiveBackend::SevenZ(_) | ArchiveBackend::ZipReader(_) => {
                 Err(ArchiveError::read_only_backend("add_directory_recursive"))
             }
         }
@@ -284,13 +284,48 @@ mod tests {
     // ── add_directory tests ──
 
     #[test]
-    fn test_add_directory_returns_unsupported() {
+    fn test_add_directory_zip() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("test_dir.zip");
         let options = CompressionOptions::new(ArchiveFormat::Zip);
         let mut archive = Archive::create(&path, options).unwrap();
-        let result = archive.add_directory("mydir");
-        assert!(result.is_err());
+        archive.add_directory("mydir").unwrap();
+        archive
+            .add_file_from_data("mydir/file.txt", b"content")
+            .unwrap();
+        archive.finish().unwrap();
+
+        // Verify by re-opening
+        let reader = Archive::open(&path).unwrap();
+        let entries = reader.list_files().unwrap();
+        // Should have directory entry + file
+        assert!(
+            entries.len() >= 2,
+            "Expected at least 2 entries (dir + file), got {}",
+            entries.len()
+        );
+        assert!(entries.iter().any(|e| e.path.starts_with("mydir")));
+    }
+
+    #[test]
+    fn test_add_directory_tar() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("test_dir.tar");
+        let options = CompressionOptions::new(ArchiveFormat::Tar);
+        let mut archive = Archive::create(&path, options).unwrap();
+        archive.add_directory("mydir").unwrap();
+        archive
+            .add_file_from_data("mydir/file.txt", b"content")
+            .unwrap();
+        archive.finish().unwrap();
+
+        let reader = Archive::open(&path).unwrap();
+        let entries = reader.list_files().unwrap();
+        assert!(
+            entries.len() >= 2,
+            "Expected at least 2 entries (dir + file), got {}",
+            entries.len()
+        );
     }
 
     // ── add_directory_recursive tests ──

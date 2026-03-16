@@ -83,6 +83,9 @@ fn extract_single_entry(
         ArchiveBackend::ZipWriter(_) => {
             Err(ArchiveError::write_mode_only(ops::EXTRACT_FILTERED))
         }
+        ArchiveBackend::ZipReader(zip) => {
+            zip.extract_file_with_options(entry_path, dest, overwrite, verify_crc32)
+        }
         ArchiveBackend::Libarchive(libarchive) => libarchive.extract_file_with_options(
             entry_path,
             dest,
@@ -190,6 +193,12 @@ impl Archive {
                 options.verify_crc32,
             ),
             ArchiveBackend::ZipWriter(_) => Err(ArchiveError::write_mode_only(ops::EXTRACT_ALL)),
+            ArchiveBackend::ZipReader(zip) => zip.extract_all_with_options(
+                &options.destination,
+                options.progress.as_mut(),
+                options.overwrite,
+                options.verify_crc32,
+            ),
             ArchiveBackend::Libarchive(libarchive) => libarchive.extract_all_with_options(
                 &options.destination,
                 options.progress.as_mut(),
@@ -249,6 +258,12 @@ impl Archive {
                 options.verify_crc32,
             ),
             ArchiveBackend::ZipWriter(_) => Err(ArchiveError::write_mode_only(ops::EXTRACT_FILE)),
+            ArchiveBackend::ZipReader(zip) => zip.extract_file_with_options(
+                file_path,
+                &options.destination,
+                options.overwrite,
+                options.verify_crc32,
+            ),
             ArchiveBackend::Libarchive(libarchive) => libarchive.extract_file_with_options(
                 file_path,
                 &options.destination,
@@ -268,6 +283,7 @@ impl Archive {
             ArchiveBackend::Piz(piz) => piz.extract_to_memory(file_path),
             ArchiveBackend::SevenZ(sevenz) => sevenz.extract_to_memory(file_path),
             ArchiveBackend::ZipWriter(_) => Err(ArchiveError::write_mode_only(ops::EXTRACT_TO_MEMORY)),
+            ArchiveBackend::ZipReader(zip) => zip.extract_to_memory(file_path),
             ArchiveBackend::Libarchive(libarchive) => libarchive.extract_to_memory(file_path),
         }
     }
@@ -302,6 +318,7 @@ impl Archive {
             ArchiveBackend::Piz(piz) => piz.extract_to_stream(file_path),
             ArchiveBackend::SevenZ(sevenz) => sevenz.extract_to_stream(file_path),
             ArchiveBackend::ZipWriter(_) => Err(ArchiveError::write_mode_only(ops::EXTRACT_TO_STREAM)),
+            ArchiveBackend::ZipReader(zip) => zip.extract_to_stream(file_path),
             ArchiveBackend::Libarchive(libarchive) => libarchive.extract_to_stream(file_path),
         }
     }

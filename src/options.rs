@@ -136,20 +136,43 @@ where
     }
 }
 
-/// Rate limiter for progress callbacks (stub - not yet implemented)
+/// Rate limiter for progress callbacks
+///
+/// Throttles progress callback frequency using `Instant`-based timing.
+/// Default interval is 16ms (~60 updates/sec).
 pub struct RateLimiter {
-    _private: (),
+    interval: std::time::Duration,
+    last_update: std::time::Instant,
 }
 
 impl RateLimiter {
-    /// Create a new rate limiter
+    /// Create a new rate limiter with default 16ms interval (~60 updates/sec)
     pub fn new() -> Self {
-        Self { _private: () }
+        let interval = std::time::Duration::from_millis(16);
+        Self {
+            interval,
+            // Initialize to now - interval so first call always passes
+            last_update: std::time::Instant::now() - interval,
+        }
+    }
+
+    /// Create a rate limiter with a custom interval
+    pub fn with_interval(interval: std::time::Duration) -> Self {
+        Self {
+            interval,
+            last_update: std::time::Instant::now() - interval,
+        }
     }
 
     /// Check if enough time has elapsed since last update
     pub fn should_update(&mut self) -> bool {
-        true // Stub: always allow updates
+        let now = std::time::Instant::now();
+        if now.duration_since(self.last_update) >= self.interval {
+            self.last_update = now;
+            true
+        } else {
+            false
+        }
     }
 
     /// Check if callback should be called (alias for should_update)
@@ -312,17 +335,41 @@ mod tests {
     // ── RateLimiter ──
 
     #[test]
-    fn test_rate_limiter_new() {
+    fn test_rate_limiter_first_call_passes() {
         let mut limiter = RateLimiter::new();
-        // Stub always returns true
+        // First call should always pass (initialized to now - interval)
         assert!(limiter.should_update());
-        assert!(limiter.should_call());
+    }
+
+    #[test]
+    fn test_rate_limiter_throttles_immediate_second_call() {
+        let mut limiter = RateLimiter::new();
+        assert!(limiter.should_update()); // first call passes
+        assert!(!limiter.should_update()); // immediate second call blocked
+    }
+
+    #[test]
+    fn test_rate_limiter_should_call_alias() {
+        let mut limiter = RateLimiter::new();
+        assert!(limiter.should_call()); // first call passes
+        assert!(!limiter.should_call()); // immediate second call blocked
+    }
+
+    #[test]
+    fn test_rate_limiter_custom_interval() {
+        let mut limiter =
+            RateLimiter::with_interval(std::time::Duration::from_millis(1));
+        assert!(limiter.should_update()); // first call passes
+        // Sleep just past the interval
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(limiter.should_update()); // should pass after interval
     }
 
     #[test]
     fn test_rate_limiter_default() {
         let mut limiter = RateLimiter::default();
         assert!(limiter.should_update());
+        assert!(!limiter.should_update()); // throttled
     }
 
     // ── EntryFilter ──
