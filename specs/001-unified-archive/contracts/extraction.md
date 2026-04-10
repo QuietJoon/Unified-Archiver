@@ -117,9 +117,13 @@ use unified_archive::ProgressCallback;
 
 let options = ExtractionOptions {
     destination: PathBuf::from("output/"),
-    progress: Some(Box::new(|current, total| {
-        println!("Progress: {}/{} bytes ({:.1}%)",
-            current, total, 100.0 * current as f64 / total as f64);
+    progress: Some(Box::new(|current, total: Option<u64>| {
+        if let Some(t) = total {
+            println!("Progress: {}/{} bytes ({:.1}%)",
+                current, t, 100.0 * current as f64 / t as f64);
+        } else {
+            println!("Progress: {} bytes (total unknown)", current);
+        }
 
         // Check for user cancellation
         if user_cancelled() {
@@ -138,7 +142,7 @@ match archive.extract_all(options) {
 }
 ```
 
-**Requirement**: Callbacks update ≥10 times per second (SC-013).
+**Requirement**: Callbacks update at least once per entry.
 
 **Phase 1 Enhancement**: ControlFlow-based cancellation with graceful cleanup.
 
@@ -180,25 +184,17 @@ See [contracts/streaming.md](streaming.md) for full streaming extraction API con
 
 ## Password-Protected Archives (Phase 1)
 
-### Secure Password Handling
+### Password Handling
 
 ```rust
-use secstr::SecStr;
-
-// Password stored securely (auto-zeroing on drop)
 let options = ExtractionOptions {
     destination: PathBuf::from("output/"),
-    password: Some(SecStr::from("my_password")),
+    password: Some(String::from("my_password")),
     ..Default::default()
 };
 
 archive.extract_all(options)?;
 ```
-
-**Security Features**:
-- `SecStr` automatically zeros memory on drop
-- mlock support (prevents swapping to disk)
-- FFI-safe conversion (only exposed during native library call)
 
 ### Password Detection
 
@@ -207,7 +203,7 @@ archive.extract_all(options)?;
 if archive.is_encrypted()? {
     let password = prompt_user_for_password()?;
     let options = ExtractionOptions {
-        password: Some(SecStr::from(password)),
+        password: Some(String::from(password)),
         ..Default::default()
     };
     archive.extract_all(options)?;
@@ -261,7 +257,7 @@ archive.extract_all(ExtractionOptions::default())?;
 **Error handling**:
 ```rust
 match Archive::open("backup.part05.rar") {
-    Err(ArchiveError::InvalidInput { message }) => {
+    Err(ArchiveError::Format { message }) => {
         // Error: "Multi-part RAR: please open the first part (.part01.rar or .rar)"
         let archive = Archive::open("backup.part01.rar")?;
         archive.extract_all(options)?;
@@ -276,7 +272,7 @@ match Archive::open("backup.part05.rar") {
 ```rust
 // Split ZIP (.zip, .z01, .z02, ...) not supported
 match Archive::open("backup.z01") {
-    Err(ArchiveError::UnsupportedFormat { message }) => {
+    Err(ArchiveError::Unsupported { message }) => {
         // Error: "Split ZIP archives are not supported. Please use a tool to merge parts first."
         eprintln!("{}", message);
     }
@@ -296,25 +292,18 @@ cat backup.zip backup.z01 backup.z02 > merged.zip
 
 ## Parallel Extraction (Phase 1)
 
-**Phase 1 Enhancement**: Automatic parallel extraction for multi-file archives (>10 files).
+**Phase 1 Enhancement**: Automatic parallel extraction for archives with enough files.
 
 ```rust
-// Automatically uses Rayon for parallel extraction when beneficial
+// Automatically uses parallel extraction when beneficial
 let archive = Archive::open("1000_files.zip")?;
 archive.extract_all(ExtractionOptions::default())?;
-
-// Performance: ~3-3.5X speedup on 4-core CPU for CPU-bound decompression
 ```
 
 **Behavior**:
-- Sequential extraction: ≤10 files (avoids thread pool overhead)
-- Parallel extraction: >10 files (uses Rayon work-stealing)
-- Thread count: `RAYON_NUM_THREADS` env var or `num_cpus::get()`
-
-**Expected Performance**:
-- 1 file: No parallelism
-- 10 files, 4 cores: ~3-3.5X speedup (CPU-bound)
-- 100 files, disk-bound: ~1.5-2X (I/O overlap)
+- Sequential extraction: fewer than 4 files (avoids thread pool overhead)
+- Parallel extraction: 4 or more files (uses std thread-based parallelism)
+- The 4-file threshold balances thread-spawn cost against decompression gains
 
 ## CRC32 Verification (Phase 1)
 
@@ -323,7 +312,7 @@ archive.extract_all(ExtractionOptions::default())?;
 ```rust
 let options = ExtractionOptions {
     destination: PathBuf::from("output/"),
-    verify_crc: true,  // Default: enabled
+    verify_crc32: true,  // Default: enabled
     ..Default::default()
 };
 
@@ -339,7 +328,7 @@ match archive.extract_all(options) {
 **Behavior**:
 - CRC32 computed during extraction (streaming, <2% overhead)
 - Mismatch returns `ArchiveError::Corruption`
-- Can be disabled with `verify_crc: false` for performance
+- Can be disabled with `verify_crc32: false` for performance
 
 **Format Support**:
 | Format | CRC32 Available | Verification |
@@ -359,6 +348,6 @@ Extraction operations require `&self`, can be called from multiple threads with 
 1. Extract from each supported format (ZIP, 7z, RAR, RAR5, TAR.GZ, BZIP2, XZ, ISO)
 2. Verify extracted files match originals (byte-for-byte)
 3. Test password-protected extraction
-4. Test progress callbacks (≥10 updates/sec)
+4. Test progress callbacks (at least once per entry)
 5. Test memory bounds (<100MB for large archives)
 6. Test performance (within 20% of native 7zip)

@@ -16,13 +16,13 @@ Progress callbacks provide real-time feedback during long-running archive operat
 ```rust
 use std::ops::ControlFlow;
 
-pub trait ProgressCallback {
+pub trait ProgressCallback: Send + Sync {
     /// Called periodically during long-running operations
     ///
     /// # Parameters
     ///
-    /// * `current` - Bytes processed so far (monotonically increasing)
-    /// * `total` - Total bytes to process
+    /// * `processed` - Bytes processed so far (monotonically increasing)
+    /// * `total` - Total bytes to process (None if unknown, e.g. streaming)
     ///
     /// # Returns
     ///
@@ -36,12 +36,12 @@ pub trait ProgressCallback {
     ///
     /// # Thread Safety
     ///
-    /// Not required to be `Send` or `Sync` - callbacks execute on calling thread.
+    /// Must be `Send + Sync`. Callbacks may be invoked from backend threads.
     ///
     /// # Panics
     ///
     /// Panics are caught internally and treated as cancellation requests.
-    fn on_progress(&mut self, current: u64, total: u64) -> ControlFlow<()>;
+    fn on_progress(&mut self, processed: u64, total: Option<u64>) -> ControlFlow<()>;
 }
 ```
 
@@ -53,10 +53,10 @@ pub trait ProgressCallback {
 // Any compatible closure automatically implements ProgressCallback
 impl<F> ProgressCallback for F
 where
-    F: FnMut(u64, u64) -> ControlFlow<()>,
+    F: FnMut(u64, Option<u64>) -> ControlFlow<()> + Send + Sync,
 {
-    fn on_progress(&mut self, current: u64, total: u64) -> ControlFlow<()> {
-        self(current, total)
+    fn on_progress(&mut self, processed: u64, total: Option<u64>) -> ControlFlow<()> {
+        self(processed, total)
     }
 }
 ```
@@ -67,14 +67,19 @@ where
 use std::ops::ControlFlow;
 use unified_archive::{Archive, ExtractionOptions, ProgressCallback};
 
-// Closure-based (most common)
-let mut extracted = 0u64;
-let result = archive.extract_all_with_progress(dest, |current, total| {
-    extracted = current;
-    let percent = (current as f64 / total as f64) * 100.0;
-    println!("Progress: {:.1}%", percent);
-    ControlFlow::Continue(())
-})?;
+// Closure-based via ExtractionOptions (most common)
+let options = ExtractionOptions {
+    destination: dest.to_path_buf(),
+    progress: Some(Box::new(|processed: u64, total: Option<u64>| {
+        if let Some(t) = total {
+            let percent = (processed as f64 / t as f64) * 100.0;
+            println!("Progress: {:.1}%", percent);
+        }
+        ControlFlow::Continue(())
+    })),
+    ..Default::default()
+};
+archive.extract_all(options)?;
 
 // Struct-based (for complex state)
 struct ProgressBar {
@@ -82,13 +87,15 @@ struct ProgressBar {
 }
 
 impl ProgressCallback for ProgressBar {
-    fn on_progress(&mut self, current: u64, total: u64) -> ControlFlow<()> {
+    fn on_progress(&mut self, processed: u64, total: Option<u64>) -> ControlFlow<()> {
         if self.last_update.elapsed() > Duration::from_millis(100) {
-            println!("[{}{}] {:.1}%",
-                "=".repeat((current * 50 / total) as usize),
-                " ".repeat((50 - current * 50 / total) as usize),
-                (current as f64 / total as f64) * 100.0
-            );
+            if let Some(t) = total {
+                println!("[{}{}] {:.1}%",
+                    "=".repeat((processed * 50 / t) as usize),
+                    " ".repeat((50 - processed * 50 / t) as usize),
+                    (processed as f64 / t as f64) * 100.0
+                );
+            }
             self.last_update = Instant::now();
         }
         ControlFlow::Continue(())
@@ -100,51 +107,16 @@ impl ProgressCallback for ProgressBar {
 
 ### Extraction with Progress
 
+Progress is provided through `ExtractionOptions`. There is no separate
+`extract_all_with_progress()` method.
+
 ```rust
 impl Archive {
-    /// Extract all entries with progress reporting
-    pub fn extract_all_with_progress<P>(
-        &self,
-        dest: impl AsRef<Path>,
-        mut progress: P,
-    ) -> Result<()>
-    where
-        P: ProgressCallback,
-    {
-        let entries = self.list_files()?;
-        let total_bytes: u64 = entries.iter()
-            .filter_map(|e| e.size)
-            .sum();
-
-        let mut current_bytes = 0u64;
-
-        for entry in entries {
-            // Extract entry with internal progress tracking
-            self.extract_entry_internal(entry, dest.as_ref(), |bytes_done| {
-                current_bytes += bytes_done;
-
-                // Rate-limited callback
-                if should_call_progress(current_bytes, total_bytes) {
-                    match progress.on_progress(current_bytes, total_bytes) {
-                        ControlFlow::Continue(()) => Ok(()),
-                        ControlFlow::Break(()) => Err(ArchiveError::Cancelled),
-                    }
-                } else {
-                    Ok(())
-                }
-            })?;
-        }
-
-        Ok(())
-    }
-
     /// Extract with options (includes optional progress)
     pub fn extract_all(&self, options: ExtractionOptions) -> Result<()> {
-        if let Some(mut progress) = options.progress {
-            self.extract_all_with_progress(options.destination, progress)
-        } else {
-            self.extract_all_no_progress(options.destination)
-        }
+        // Progress callback, if present, is forwarded to the format-specific
+        // backend which calls it at per-entry granularity via a RateLimiter.
+        // ...
     }
 }
 ```
@@ -154,12 +126,11 @@ impl Archive {
 ```rust
 pub struct ExtractionOptions {
     pub destination: PathBuf,
-    pub password: Option<SecStr>,
+    pub password: Option<String>,
     pub overwrite: bool,
     pub preserve_permissions: bool,
     pub preserve_times: bool,
-    pub preserve_all_times: bool,
-    pub filter: Option<Box<dyn Fn(&ArchiveEntry) -> bool>>,
+    pub filter: Option<EntryFilter>,
 
     /// Progress callback (optional)
     ///
@@ -167,19 +138,11 @@ pub struct ExtractionOptions {
     /// Return `ControlFlow::Break(())` to cancel gracefully.
     pub progress: Option<Box<dyn ProgressCallback>>,
 
-    pub verify_crc: bool,
+    pub verify_crc32: bool,
 }
 
-// Builder pattern for ergonomics
-impl ExtractionOptions {
-    pub fn with_progress<P>(mut self, callback: P) -> Self
-    where
-        P: ProgressCallback + 'static,
-    {
-        self.progress = Some(Box::new(callback));
-        self
-    }
-}
+// No builder method -- set the `progress` field directly when constructing
+// ExtractionOptions. See Usage Example above.
 ```
 
 ## Rate Limiting (Internal)
@@ -241,19 +204,31 @@ impl RateLimiter {
 1. Callback returns `ControlFlow::Break(())`
 2. Current file extraction completes (partial extraction not left on disk)
 3. Cleanup performed (temp files removed, handles closed)
-4. Returns `Err(ArchiveError::Cancelled)`
+4. Returns `Ok(())` -- there is no `ArchiveError::Cancelled` variant.
+   The break simply stops further processing and the operation returns
+   success. Callers that need to distinguish cancellation from normal
+   completion should track the break in their own callback state.
 
 **Example**:
 ```rust
-let cancelled = archive.extract_all_with_progress(dest, |current, total| {
-    if user_pressed_cancel() {
-        ControlFlow::Break(())  // Graceful cancellation
-    } else {
-        ControlFlow::Continue(())
-    }
-})?;
+let mut was_cancelled = false;
+let options = ExtractionOptions {
+    destination: dest.to_path_buf(),
+    progress: Some(Box::new(|processed: u64, _total: Option<u64>| {
+        if user_pressed_cancel() {
+            was_cancelled = true;
+            ControlFlow::Break(())  // Graceful cancellation
+        } else {
+            ControlFlow::Continue(())
+        }
+    })),
+    ..Default::default()
+};
+archive.extract_all(options)?;
 
-// After Break: temp files cleaned, archive closed, no partial state
+if was_cancelled {
+    // Handle cancellation -- partially extracted files may remain
+}
 ```
 
 ### Performance Overhead
@@ -275,34 +250,40 @@ let cancelled = archive.extract_all_with_progress(dest, |current, total| {
 ```rust
 pub(crate) fn call_progress_safe<P: ProgressCallback>(
     progress: &mut P,
-    current: u64,
-    total: u64,
-) -> Result<()> {
+    processed: u64,
+    total: Option<u64>,
+) -> ControlFlow<()> {
     match std::panic::catch_unwind(AssertUnwindSafe(|| {
-        progress.on_progress(current, total)
+        progress.on_progress(processed, total)
     })) {
-        Ok(ControlFlow::Continue(())) => Ok(()),
-        Ok(ControlFlow::Break(())) => Err(ArchiveError::Cancelled),
+        Ok(flow) => flow,
         Err(_panic) => {
             // Treat panic as cancellation request
-            Err(ArchiveError::Cancelled)
+            ControlFlow::Break(())
         }
     }
 }
 ```
 
-## Cross-Format Consistency
+> **Note**: There is no `ArchiveError::Cancelled` variant. Cancellation
+> via `ControlFlow::Break(())` causes the operation to stop and return
+> `Ok(())` or the backend's own error behavior.
 
-Progress callbacks behave identically across all formats:
+## Cross-Format Support
 
-| Format | Total Calculation | Current Updates | Cancellation |
-|--------|-------------------|-----------------|--------------|
-| RAR | Sum of entry sizes | Per-file granularity | ✅ Supported |
-| ZIP | Sum of entry sizes | Per-file granularity | ✅ Supported |
-| 7z | Sum of entry sizes | Per-file granularity | ✅ Supported |
-| TAR.* | Sum of entry sizes | Per-file granularity | ✅ Supported |
+Progress callback support varies by format backend:
 
-**Note**: All formats update `current` after each file extraction completes, not during individual file extraction (future enhancement: chunk-level progress).
+| Format | Total Calculation | Current Updates | Cancellation | Notes |
+|--------|-------------------|-----------------|--------------|-------|
+| RAR | Sum of entry sizes | Per-entry, full support | ✅ Supported | Best progress fidelity |
+| ZIP | Sum of entry sizes | Basic per-entry | ✅ Supported | Updates after each entry completes |
+| 7z | Sum of entry sizes | Basic per-entry | ✅ Supported | Updates after each entry completes |
+| TAR.* | Sum of entry sizes | Per-entry via libarchive | ✅ Supported | Depends on libarchive backend |
+
+**Note**: RAR has full per-entry progress support. ZIP and 7z provide basic
+per-entry progress (updated after each file extraction completes, not during
+individual file extraction). Chunk-level progress within a single entry is
+not currently supported for any format.
 
 ## Testing Strategy
 
@@ -311,54 +292,84 @@ Progress callbacks behave identically across all formats:
 ```rust
 #[test]
 fn test_progress_called_minimum_frequency() {
-    let mut call_count = 0;
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let counter = call_count.clone();
     let start = Instant::now();
 
-    archive.extract_all_with_progress(dest, |_, _| {
-        call_count += 1;
-        ControlFlow::Continue(())
-    })?;
+    let options = ExtractionOptions {
+        destination: dest.to_path_buf(),
+        progress: Some(Box::new(move |_: u64, _: Option<u64>| {
+            counter.fetch_add(1, Ordering::Relaxed);
+            ControlFlow::Continue(())
+        })),
+        ..Default::default()
+    };
+    archive.extract_all(options)?;
 
     let elapsed = start.elapsed();
     let expected_calls = (elapsed.as_secs_f64() * 10.0).ceil() as usize;
 
-    assert!(call_count >= expected_calls,
-        "Expected ≥{} calls, got {}", expected_calls, call_count);
+    assert!(call_count.load(Ordering::Relaxed) >= expected_calls,
+        "Expected ≥{} calls, got {}", expected_calls, call_count.load(Ordering::Relaxed));
 }
 
 #[test]
 fn test_progress_monotonic() {
-    let mut last_current = 0u64;
+    let last_processed = Arc::new(AtomicU64::new(0));
+    let tracker = last_processed.clone();
 
-    archive.extract_all_with_progress(dest, |current, total| {
-        assert!(current >= last_current, "Progress decreased");
-        assert!(current <= total, "Current > total");
-        last_current = current;
-        ControlFlow::Continue(())
-    })?;
+    let options = ExtractionOptions {
+        destination: dest.to_path_buf(),
+        progress: Some(Box::new(move |processed: u64, total: Option<u64>| {
+            let prev = tracker.swap(processed, Ordering::Relaxed);
+            assert!(processed >= prev, "Progress decreased");
+            if let Some(t) = total {
+                assert!(processed <= t, "Current > total");
+            }
+            ControlFlow::Continue(())
+        })),
+        ..Default::default()
+    };
+    archive.extract_all(options)?;
 }
 
 #[test]
 fn test_progress_cancellation() {
-    let result = archive.extract_all_with_progress(dest, |current, _| {
-        if current > 1000 {
-            ControlFlow::Break(())
-        } else {
-            ControlFlow::Continue(())
-        }
-    });
+    let was_cancelled = Arc::new(AtomicBool::new(false));
+    let flag = was_cancelled.clone();
 
-    assert!(matches!(result, Err(ArchiveError::Cancelled)));
-    assert!(!dest.join("partial_file").exists(), "Partial files left behind");
+    let options = ExtractionOptions {
+        destination: dest.to_path_buf(),
+        progress: Some(Box::new(move |processed: u64, _: Option<u64>| {
+            if processed > 1000 {
+                flag.store(true, Ordering::Relaxed);
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })),
+        ..Default::default()
+    };
+    let result = archive.extract_all(options);
+
+    // No ArchiveError::Cancelled -- break returns Ok(()) or backend error
+    assert!(result.is_ok());
+    assert!(was_cancelled.load(Ordering::Relaxed));
 }
 
 #[test]
 fn test_progress_panic_treated_as_cancellation() {
-    let result = archive.extract_all_with_progress(dest, |_, _| {
-        panic!("Simulated panic");
-    });
+    let options = ExtractionOptions {
+        destination: dest.to_path_buf(),
+        progress: Some(Box::new(|_: u64, _: Option<u64>| -> ControlFlow<()> {
+            panic!("Simulated panic");
+        })),
+        ..Default::default()
+    };
+    let result = archive.extract_all(options);
 
-    assert!(matches!(result, Err(ArchiveError::Cancelled)));
+    // Panic is caught and treated as Break -- returns Ok(())
+    assert!(result.is_ok());
 }
 ```
 
@@ -368,12 +379,20 @@ fn test_progress_panic_treated_as_cancellation() {
 #[test]
 fn test_progress_large_archive() {
     // 1GB archive with 1000 files
-    let mut updates = Vec::new();
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let tracker = updates.clone();
 
-    archive.extract_all_with_progress(dest, |current, total| {
-        updates.push((Instant::now(), current, total));
-        ControlFlow::Continue(())
-    })?;
+    let options = ExtractionOptions {
+        destination: dest.to_path_buf(),
+        progress: Some(Box::new(move |processed: u64, total: Option<u64>| {
+            tracker.lock().unwrap().push((Instant::now(), processed, total));
+            ControlFlow::Continue(())
+        })),
+        ..Default::default()
+    };
+    archive.extract_all(options)?;
+
+    let updates = updates.lock().unwrap();
 
     // Verify frequency
     let duration = updates.last().unwrap().0 - updates.first().unwrap().0;
@@ -396,14 +415,23 @@ fn bench_progress_overhead(b: &mut Bencher) {
 
     // Without progress
     b.iter(|| {
-        archive.extract_all_no_progress(temp_dir())
+        let options = ExtractionOptions {
+            destination: temp_dir(),
+            ..Default::default()
+        };
+        archive.extract_all(options)
     });
 
     // With progress
     b.iter(|| {
-        archive.extract_all_with_progress(temp_dir(), |_, _| {
-            ControlFlow::Continue(())
-        })
+        let options = ExtractionOptions {
+            destination: temp_dir(),
+            progress: Some(Box::new(|_: u64, _: Option<u64>| {
+                ControlFlow::Continue(())
+            })),
+            ..Default::default()
+        };
+        archive.extract_all(options)
     });
 
     // Expected: <10ms difference (≤1% overhead for 1GB archive)
@@ -414,39 +442,58 @@ fn bench_progress_overhead(b: &mut Bencher) {
 
 ### Unknown Total Size
 
-For streaming operations where total size is unknown:
+The `total` parameter is `Option<u64>`. When the total is unknown (e.g.,
+streaming operations or formats that do not report sizes upfront), `None`
+is passed:
 
 ```rust
-// Future enhancement: support unknown total
-pub trait ProgressCallback {
-    fn on_progress(&mut self, current: u64, total: Option<u64>) -> ControlFlow<()>;
-}
-
-// Current implementation: estimate total from entry metadata
-let total: u64 = entries.iter().filter_map(|e| e.size).sum();
+// The callback must handle None gracefully
+let options = ExtractionOptions {
+    destination: dest.to_path_buf(),
+    progress: Some(Box::new(|processed: u64, total: Option<u64>| {
+        match total {
+            Some(t) => println!("{}/{} bytes", processed, t),
+            None => println!("{} bytes (total unknown)", processed),
+        }
+        ControlFlow::Continue(())
+    })),
+    ..Default::default()
+};
 ```
 
 ### Empty Archives
 
 ```rust
 // Zero-file archive: no progress callbacks
-let result = archive.extract_all_with_progress(dest, |_, _| {
-    panic!("Should not be called for empty archive");
-})?;
-// No panic, no calls ✅
+let options = ExtractionOptions {
+    destination: dest.to_path_buf(),
+    progress: Some(Box::new(|_: u64, _: Option<u64>| -> ControlFlow<()> {
+        panic!("Should not be called for empty archive");
+    })),
+    ..Default::default()
+};
+let result = archive.extract_all(options)?;
+// No panic, no calls
 ```
 
 ### Single Small File
 
 ```rust
 // <100KB file: may only get 1 callback (at completion)
-let mut call_count = 0;
-archive.extract_all_with_progress(dest, |_, _| {
-    call_count += 1;
-    ControlFlow::Continue(())
-})?;
+let call_count = Arc::new(AtomicUsize::new(0));
+let counter = call_count.clone();
 
-assert!(call_count >= 1, "At least one call for completion");
+let options = ExtractionOptions {
+    destination: dest.to_path_buf(),
+    progress: Some(Box::new(move |_: u64, _: Option<u64>| {
+        counter.fetch_add(1, Ordering::Relaxed);
+        ControlFlow::Continue(())
+    })),
+    ..Default::default()
+};
+archive.extract_all(options)?;
+
+assert!(call_count.load(Ordering::Relaxed) >= 1, "At least one call for completion");
 ```
 
 ## Migration from Other APIs
@@ -463,11 +510,16 @@ IOutCreateCallback callback = new IOutCreateCallback() {
 
 ```rust
 // unified-archive
-archive.extract_all_with_progress(dest, |current, total| {
-    // setTotal called once implicitly (total parameter)
-    // setCompleted called repeatedly (current parameter)
-    ControlFlow::Continue(())
-})?;
+let options = ExtractionOptions {
+    destination: dest.to_path_buf(),
+    progress: Some(Box::new(|processed: u64, total: Option<u64>| {
+        // setTotal maps to total (Some(n) when known)
+        // setCompleted maps to processed (called repeatedly)
+        ControlFlow::Continue(())
+    })),
+    ..Default::default()
+};
+archive.extract_all(options)?;
 ```
 
 ### From indicatif (Rust progress bars)
@@ -475,13 +527,21 @@ archive.extract_all_with_progress(dest, |current, total| {
 ```rust
 use indicatif::ProgressBar;
 
-let bar = ProgressBar::new(0);
+let bar = Arc::new(ProgressBar::new(0));
+let bar_ref = bar.clone();
 
-archive.extract_all_with_progress(dest, |current, total| {
-    bar.set_length(total);
-    bar.set_position(current);
-    ControlFlow::Continue(())
-})?;
+let options = ExtractionOptions {
+    destination: dest.to_path_buf(),
+    progress: Some(Box::new(move |processed: u64, total: Option<u64>| {
+        if let Some(t) = total {
+            bar_ref.set_length(t);
+        }
+        bar_ref.set_position(processed);
+        ControlFlow::Continue(())
+    })),
+    ..Default::default()
+};
+archive.extract_all(options)?;
 
 bar.finish();
 ```

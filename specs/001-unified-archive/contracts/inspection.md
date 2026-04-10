@@ -24,7 +24,7 @@ impl Archive {
 
 **Returns**: All entries with **enhanced** metadata structure (Phase 1):
 - path (normalized with `/`)
-- size, compressed_size, **compression_ratio()** method
+- size, compressed_size (None for libarchive-backed formats), **compression_ratio()** method
 - modified time (UTC), **created, accessed** (format-dependent)
 - crc32 (if available)
 - **is_encrypted** (entry-level encryption flag)
@@ -75,9 +75,11 @@ impl Archive {
 }
 ```
 
-**Purpose**: Get total number of entries without allocating full list.
+**Purpose**: Get total number of entries.
 
-**Performance**: O(n) scan but no Vec allocation.
+**Implementation**: Calls `list_files().len()` internally. The full entry list is cached after the first call, so subsequent calls are O(1).
+
+**Performance**: O(n) on first call (populates cache), O(1) thereafter.
 
 ---
 
@@ -290,9 +292,9 @@ for _ in 0..100 {
 
 ## Thread Safety
 
-All inspection operations are `&self` (immutable), safe for concurrent use from multiple threads with proper synchronization.
+`Archive` is `Send` but NOT `Sync`. Inspection operations use `&self` but the archive handle must not be shared across threads without external synchronization.
 
-**Phase 1**: OnceLock-based caching is thread-safe (built-in synchronization).
+**Phase 1**: OnceLock-based caching is thread-safe (built-in synchronization), but the underlying backend is not `Sync`.
 
 ## Contract Tests
 

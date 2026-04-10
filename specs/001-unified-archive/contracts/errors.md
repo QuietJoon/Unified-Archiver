@@ -34,6 +34,14 @@ pub enum ArchiveError {
         path: String,
         reason: String,
     },
+    CodecUnavailable {
+        codec: String,
+        details: Option<String>,
+    },
+    UnsupportedOperation {
+        operation: String,
+        details: Option<String>,
+    },
 }
 
 impl std::error::Error for ArchiveError {
@@ -77,6 +85,20 @@ impl std::fmt::Display for ArchiveError {
             ArchiveError::InvalidPath { path, reason } => {
                 write!(f, "Invalid path '{}': {}", path, reason)
             }
+            ArchiveError::CodecUnavailable { codec, details } => {
+                if let Some(d) = details {
+                    write!(f, "Codec unavailable '{}': {}", codec, d)
+                } else {
+                    write!(f, "Codec unavailable '{}'", codec)
+                }
+            }
+            ArchiveError::UnsupportedOperation { operation, details } => {
+                if let Some(d) = details {
+                    write!(f, "Unsupported operation '{}': {}", operation, d)
+                } else {
+                    write!(f, "Unsupported operation '{}'", operation)
+                }
+            }
         }
     }
 }
@@ -89,9 +111,11 @@ impl std::fmt::Display for ArchiveError {
 - `Io` (file not found): User can provide correct path
 
 ### Fatal Errors
-- `Corruption`: Archive is damaged, extraction unsafe
-- `Format`: Unsupported or invalid format
-- `Unsupported`: Operation impossible for format, or required codec unavailable (FR-024)
+- `Format`: Open-time failures -- bad magic bytes, truncated header, unsupported or invalid format
+- `Corruption`: Data-integrity failures -- CRC mismatch, bad data during extraction
+- `Unsupported`: Operation impossible for format
+- `CodecUnavailable`: Required codec not available (e.g., missing PPMd support)
+- `UnsupportedOperation`: Operation not applicable in the current context
 
 ## Format-Agnostic Guarantee
 
@@ -99,13 +123,15 @@ impl std::fmt::Display for ArchiveError {
 
 ```rust
 // All formats return same error variants
-match Archive::open("corrupted.zip") {
-    Err(ArchiveError::Corruption { .. }) => { /* Handle */ }
+// Format errors at open time (bad magic, truncated header)
+match Archive::open("bad_header.zip") {
+    Err(ArchiveError::Format { .. }) => { /* Handle open-time failure */ }
     _ => {}
 }
 
-match Archive::open("corrupted.rar") {
-    Err(ArchiveError::Corruption { .. }) => { /* Same handling */ }
+// Corruption errors during extraction (CRC mismatch)
+match archive.extract_all(options) {
+    Err(ArchiveError::Corruption { .. }) => { /* Handle data-integrity failure */ }
     _ => {}
 }
 ```

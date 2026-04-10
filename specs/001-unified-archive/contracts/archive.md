@@ -27,7 +27,7 @@ impl Archive {
 - User has read permissions
 
 **Postconditions**:
-- Archive format is detected automatically (lazy, on first operation)
+- Archive format is detected automatically (eager format detection at open time)
 - Archive handle is in `Read` mode
 - File is opened but not locked (allows concurrent reads)
 
@@ -42,7 +42,7 @@ let archive = Archive::open("document.zip")?;
 
 **Thread Safety**: Safe to call from multiple threads with different paths.
 
-**Performance**: O(1) - Format detection is lazy.
+**Performance**: Eager format detection at open time.
 
 ---
 
@@ -77,7 +77,7 @@ impl Archive {
 let archive = Archive::open_encrypted("secret.7z", "my_password")?;
 ```
 
-**Thread Safety**: Password stored securely (zeroized on drop).
+**Thread Safety**: Password stored as `String` in archive handle.
 
 ---
 
@@ -102,7 +102,7 @@ impl Archive {
 **Postconditions**:
 - Archive file is created (empty)
 - Archive handle is in `Write` mode
-- Entries can be added via `add_file()`, `add_directory()`
+- Entries can be added via `add_file_from_data()`, `add_file_from_path()`, `add_file_from_path_as()`, `add_directory()`, `add_directory_recursive()`
 
 **Error Conditions**:
 - `ArchiveError::Io`: Cannot create file, permission denied
@@ -151,7 +151,7 @@ impl Archive {
 **Example**:
 ```rust
 let mut archive = Archive::modify("existing.zip")?;
-archive.add_file("new_file.txt", &contents)?;
+archive.add_file_from_data("new_file.txt", &contents)?;
 archive.close()?;
 ```
 
@@ -186,7 +186,7 @@ impl Archive {
 **Example**:
 ```rust
 let archive = Archive::create("output.zip", options)?;
-archive.add_file("file.txt", data)?;
+archive.add_file_from_data("file.txt", data)?;
 archive.close()?; // Explicit close
 ```
 
@@ -205,7 +205,7 @@ archive.close()?; // Explicit close
 **Signature**:
 ```rust
 impl Archive {
-    pub fn format(&self) -> Result<ArchiveFormat, ArchiveError>
+    pub fn format(&self) -> ArchiveFormat
 }
 ```
 
@@ -213,25 +213,23 @@ impl Archive {
 - Archive is opened
 
 **Postconditions**:
-- Format is detected (lazy, on first call)
-- Subsequent calls return cached value
+- Returns the format detected at open time (eager detection)
 
-**Error Conditions**:
-- `ArchiveError::Format`: Cannot detect format (corrupted or unsupported)
+**Error Conditions**: None (infallible). Format is determined at `open()` time.
 
 **Example**:
 ```rust
 let archive = Archive::open("file.unknown")?;
-match archive.format()? {
+match archive.format() {
     ArchiveFormat::Zip => println!("ZIP archive"),
     ArchiveFormat::SevenZip => println!("7z archive"),
     _ => println!("Other format"),
 }
 ```
 
-**Thread Safety**: Uses interior mutability (OnceCell) for caching.
+**Thread Safety**: Safe (immutable query).
 
-**Performance**: O(1) after first call (cached).
+**Performance**: O(1) - returns stored value.
 
 ---
 
@@ -357,7 +355,7 @@ let rar_entries = rar_archive.list_files()?;
 
 ```rust
 let archive = Archive::create("output.zip", options)?;
-archive.add_file("data.txt", contents)?;
+archive.add_file_from_data("data.txt", contents)?;
 
 // Explicit close to handle flush errors
 archive.close().expect("Failed to finalize archive");
@@ -367,11 +365,11 @@ archive.close().expect("Failed to finalize archive");
 
 | Operation | Target | Requirement ID |
 |-----------|--------|---------------|
-| `open()` | O(1) | - |
+| `open()` | Eager format detection | - |
 | `create()` | O(1) | - |
 | `close()` (read) | O(1) | - |
 | `close()` (write) | O(n) | Must finalize |
-| `format()` | O(1) after first call | Lazy detection |
+| `format()` | O(1) | Infallible, returns stored value |
 
 ## Compatibility Notes
 
@@ -405,7 +403,7 @@ use unified_archive::{Archive, ArchiveError};
 
 fn main() -> Result<(), ArchiveError> {
     let archive = Archive::open("document.zip")?;
-    println!("Format: {:?}", archive.format()?);
+    println!("Format: {:?}", archive.format());
     archive.close()?;
     Ok(())
 }

@@ -17,7 +17,7 @@ The data model provides a unified, format-agnostic representation of archives an
 **Fields**:
 ```rust
 pub struct Archive {
-    // Backend-specific implementation (UnRAR or libarchive)
+    // Backend-specific implementation (Piz, ZipReader, SevenZ, Libarchive, or UnRAR)
     backend: ArchiveBackend,
     // Entry cache for efficient repeated access (Phase 1 enhancement)
     entry_cache: OnceLock<Vec<ArchiveEntry>>,
@@ -31,6 +31,10 @@ pub struct Archive {
 
 enum ArchiveBackend {
     Unrar(UnrarArchive),
+    Piz(PizArchive),
+    SevenZ(SevenZArchive),
+    ZipWriter(ZipWriter),
+    ZipReader(ZipArchive),
     Libarchive(LibarchiveArchive),
 }
 
@@ -215,14 +219,12 @@ impl ArchiveFormat {
 
 **Fields**:
 ```rust
-use secstr::SecStr;  // Phase 1: Secure password storage
-
 pub struct ExtractionOptions {
     // Destination directory
     pub destination: PathBuf,
 
-    // **Phase 1 Enhancement**: Password for encrypted archives (secure storage with auto-zeroing)
-    pub password: Option<SecStr>,
+    // Password for encrypted archives
+    pub password: Option<String>,
 
     // Overwrite existing files (default: false, fails with error if files exist - FR-023)
     pub overwrite: bool,
@@ -233,9 +235,6 @@ pub struct ExtractionOptions {
     // Preserve modification times
     pub preserve_times: bool,
 
-    // **Phase 1 Enhancement**: Preserve creation and access times (when available)
-    pub preserve_all_times: bool,
-
     // Filter: only extract matching paths
     pub filter: Option<Box<dyn Fn(&ArchiveEntry) -> bool>>,
 
@@ -243,7 +242,7 @@ pub struct ExtractionOptions {
     pub progress: Option<Box<dyn ProgressCallback>>,
 
     // **Phase 1 Enhancement**: Verify CRC32 during extraction
-    pub verify_crc: bool,
+    pub verify_crc32: bool,
 }
 
 impl Default for ExtractionOptions {
@@ -254,17 +253,16 @@ impl Default for ExtractionOptions {
             overwrite: false,
             preserve_permissions: true,
             preserve_times: true,
-            preserve_all_times: false,  // Phase 1: Off by default (format-dependent)
             filter: None,
             progress: None,
-            verify_crc: true,  // Phase 1: Verify by default for integrity
+            verify_crc32: true,  // Phase 1: Verify by default for integrity
         }
     }
 }
 ```
 
 **Relationships**:
-- **Configures**: `Archive::extract()` operation
+- **Configures**: `Archive::extract_all()`, `Archive::extract_file()`, `Archive::extract_to_memory()`, `Archive::extract_to_stream()` operations
 
 **Invariants**:
 - destination must be a directory (not file)
@@ -294,12 +292,6 @@ pub struct CompressionOptions {
     // Split archive into parts (size in bytes)
     pub split_size: Option<u64>,
 
-    // Preserve file permissions
-    pub preserve_permissions: bool,
-
-    // Preserve modification times
-    pub preserve_times: bool,
-
     // Progress callback
     pub progress: Option<Box<dyn ProgressCallback>>,
 }
@@ -320,8 +312,6 @@ impl Default for CompressionOptions {
             level: CompressionLevel::Normal,
             password: None,
             split_size: None,
-            preserve_permissions: true,
-            preserve_times: true,
             progress: None,
         }
     }
@@ -409,21 +399,21 @@ impl std::fmt::Display for ArchiveError {
 ```rust
 use std::ops::ControlFlow;
 
-// **Phase 1 Enhancement**: Zero-cost abstraction with ControlFlow for cancellation
+// **Phase 1 Enhancement**: Boxed trait object with ControlFlow for cancellation
 pub trait ProgressCallback {
     // Called periodically during operation
     // current: bytes processed so far
-    // total: total bytes (if known)
+    // total: total bytes (None if unknown)
     // Returns: ControlFlow::Continue(()) to proceed, ControlFlow::Break(()) to cancel
-    fn on_progress(&mut self, current: u64, total: u64) -> ControlFlow<()>;
+    fn on_progress(&mut self, current: u64, total: Option<u64>) -> ControlFlow<()>;
 }
 
 // Convenience: Implement for any compatible closure
 impl<F> ProgressCallback for F
 where
-    F: FnMut(u64, u64) -> ControlFlow<()>,
+    F: FnMut(u64, Option<u64>) -> ControlFlow<()>,
 {
-    fn on_progress(&mut self, current: u64, total: u64) -> ControlFlow<()> {
+    fn on_progress(&mut self, current: u64, total: Option<u64>) -> ControlFlow<()> {
         self(current, total)
     }
 }
@@ -444,74 +434,58 @@ pub(crate) struct RateLimitedCallback<C: ProgressCallback> {
 **Invariants**:
 - on_progress() called at least 10 times per second for operations >1 second (via rate limiting)
 - current <= total always (monotonically increasing)
-- **Phase 1**: Zero-cost via monomorphization (generic parameter, not trait object)
+- **Phase 1**: Boxed trait object (`Box<dyn ProgressCallback>`)
 - **Phase 1**: Rate limiting ensures ≤10ms overhead per update
 
 **Validation Rules**:
 - Callback does not panic (wrapped in catch_unwind internally)
 - Returning ControlFlow::Break(()) cancels operation gracefully, returns ArchiveError::Cancelled
 
-### 8. EntryReader (Phase 1 New)
+### 8. StreamingExtractor
 
-**Purpose**: Streaming reader for extracting individual archive entries with bounded memory usage.
+**Purpose**: Streaming reader for extracting individual archive entries with bounded memory usage. Created via `Archive::extract_to_stream()`.
 
 **Definition**:
 ```rust
 use std::io::Read;
 
-// **Phase 1 Enhancement**: Streaming extraction with <40KB memory per file
-pub struct EntryReader<'a> {
-    // Backend-specific reader (trait object for unified interface)
-    backend_reader: Box<dyn Read + 'a>,
-    // CRC32 hasher for verification (if enabled)
-    crc_verifier: Option<VerifyingReader<Box<dyn Read + 'a>>>,
-    // Expected CRC32 (from entry metadata)
-    expected_crc32: Option<u32>,
+/// Streaming extractor that implements Read trait
+pub struct StreamingExtractor {
+    /// Internal reader - either from temporary file or direct stream
+    reader: Box<dyn Read + Send>,
+    /// Total bytes available (if known)
+    total_size: Option<u64>,
+    /// Bytes read so far
+    bytes_read: u64,
 }
 
-impl<'a> Read for EntryReader<'a> {
+impl StreamingExtractor {
+    /// Get total size if known
+    pub fn total_size(&self) -> Option<u64>;
+
+    /// Get bytes read so far
+    pub fn bytes_read(&self) -> u64;
+
+    /// Get progress as percentage (0.0 to 1.0) if total size is known
+    pub fn progress(&self) -> Option<f64>;
+}
+
+impl Read for StreamingExtractor {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // Delegates to backend_reader or crc_verifier
-    }
-}
-
-// **Phase 1**: CRC32 verification wrapper
-struct VerifyingReader<R: Read> {
-    inner: R,
-    hasher: crc32fast::Hasher,
-    expected_crc32: Option<u32>,
-}
-
-impl<R: Read> Drop for VerifyingReader<R> {
-    fn drop(&mut self) {
-        // Verify CRC32 on completion
-        if let Some(expected) = self.expected_crc32 {
-            let actual = self.hasher.finalize();
-            if actual != expected {
-                // Log CRC mismatch (cannot return error from Drop)
-            }
-        }
+        // Delegates to internal reader, tracks bytes_read
     }
 }
 ```
 
 **Relationships**:
-- **Created by**: `Archive::entry_reader()` method
-- **Reads from**: Archive backend (UnRAR or libarchive)
+- **Created by**: `Archive::extract_to_stream()` method
+- **Reads from**: Archive backend (boxed `Read + Send`)
 
 **Invariants**:
 - Implements `Read` trait for standard I/O composition
-- Memory bounded: ~24KB (8KB internal buffer + 16KB BufReader)
+- Memory bounded: only the read buffer is held in memory
 - Single-use: consumed after reading to EOF
-- **Phase 1**: CRC32 verification automatic if `expected_crc32` is Some
-- **Phase 1**: Verification happens on Drop (after full read)
-
-**Memory Analysis**:
-- EntryReader struct: ~48 bytes
-- Backend buffer: 8KB
-- BufReader wrapper: 16KB (user-controlled)
-- **Total per file**: ~40KB (vs full file in memory)
-- **For 10GB archive**: 40KB (one entry at a time)
+- Tracks progress via `bytes_read` / `total_size`
 
 ## Entity Relationships Diagram
 
@@ -522,24 +496,22 @@ Archive (1) --contains--> (0..N) ArchiveEntry (enhanced with 6 new fields)
   |
   +--has--> (1) ArchiveFormat
   |
-  +--has--> (1) ArchiveBackend (UnRAR | libarchive)
+  +--has--> (1) ArchiveBackend (Piz | ZipReader | SevenZ | Libarchive | UnRAR)
   |
-  +--creates--> (0..N) EntryReader<'a> (Phase 1 streaming)
+  +--creates--> (0..N) StreamingExtractor (streaming extraction)
   |
   +--uses--> (0..1) ExtractionOptions (enhanced with 3 new fields)
   |          |
   |          +--uses--> (0..1) ProgressCallback (Phase 1: ControlFlow)
-  |          +--uses--> (0..1) SecStr (Phase 1: secure password)
+  |          +--uses--> (0..1) String (password)
   |
   +--uses--> (0..1) CompressionOptions
              |
              +--uses--> (0..1) ProgressCallback
 
-EntryReader (Phase 1)
+StreamingExtractor
   |
-  +--wraps--> VerifyingReader (optional CRC32 check)
-             |
-             +--uses--> crc32fast::Hasher
+  +--wraps--> Box<dyn Read + Send> (backend reader)
 
 All operations return Result<T, ArchiveError>
 ```
@@ -561,8 +533,8 @@ All operations return Result<T, ArchiveError>
 +----------------+  +----------------+  +----------------+
 | Open/Read      |  | Open/Write     |  | Open/Modify    |
 | - list()       |  | - add_file()   |  | - add_file()   |
-| - extract()    |  | - add_dir()    |  | - remove()     |
-| - validate()   |  |                |  | - extract()    |
+| - extract_all()|  | - add_dir()    |  | - remove()     |
+| - validate()   |  |                |  | - extract_all()|
 +----------------+  +----------------+  +----------------+
         |                   |                   |
         +-------------------+-------------------+
@@ -649,7 +621,7 @@ impl Archive {
 
 ```rust
 impl Archive {
-    pub fn extract(&self, options: ExtractionOptions) -> Result<(), ArchiveError> {
+    pub fn extract_all(&self, options: ExtractionOptions) -> Result<(), ArchiveError> {
         // Validate mode
         if self.mode != ArchiveMode::Read {
             return Err(ArchiveError::Unsupported { ... });
@@ -694,7 +666,7 @@ impl Archive {
 | Operation | Space Complexity | Notes |
 |-----------|-----------------|-------|
 | Archive::list_files() | O(n) | Vec<ArchiveEntry> |
-| Archive::extract() | O(1) + buffer | Streaming, fixed buffer size |
+| Archive::extract_all() | O(1) + buffer | Streaming, fixed buffer size |
 | Archive::create() | O(1) + buffer | Streaming writes |
 
 ## Testing Strategy
@@ -737,17 +709,15 @@ proptest! {
 5. `comment: Option<String>` - File comment (ZIP, RAR)
 6. `attributes: Option<FileAttributes>` - Platform-specific attributes
 
-**ExtractionOptions enhancements** (3 new fields):
-1. `password: SecStr` - Secure password storage (auto-zeroing)
-2. `preserve_all_times: bool` - Preserve created/accessed times
-3. `verify_crc: bool` - CRC32 verification during extraction
+**ExtractionOptions enhancements** (2 new fields):
+1. `password: Option<String>` - Password for encrypted archives
+2. `verify_crc32: bool` - CRC32 verification during extraction
 
 ### New Entities
 
 1. **FileAttributes** - Platform-specific file attributes (Windows, Unix xattr)
-2. **EntryReader<'a>** - Streaming reader with bounded memory (<40KB/file)
-3. **VerifyingReader<R>** - CRC32 verification wrapper
-4. **RateLimitedCallback<C>** - Progress callback rate limiter (≥10 updates/sec)
+2. **StreamingExtractor** - Streaming reader via `Archive::extract_to_stream()`
+3. **RateLimitedCallback<C>** - Progress callback rate limiter (≥10 updates/sec)
 
 ### Architectural Changes
 
@@ -757,26 +727,20 @@ proptest! {
    - Returns `&[ArchiveEntry]` (no allocation on repeated access)
 
 2. **Progress Callbacks**: Trait-based with `ControlFlow`
-   - Zero-cost via monomorphization (no vtable)
+   - Boxed trait object (`Box<dyn ProgressCallback>`)
    - Cancellation support via `ControlFlow::Break(())`
    - Rate-limited (≤10ms overhead per update)
 
-3. **Streaming Extraction**: `impl Read for EntryReader`
-   - Memory bounded: ~40KB per file (vs full file in memory)
+3. **Streaming Extraction**: `impl Read for StreamingExtractor`
+   - Memory bounded: only read buffer held in memory
    - Standard library composition (`io::copy`, `BufReader`)
-   - Automatic CRC32 verification on Drop
-
-4. **Secure Password Handling**: `secstr::SecStr`
-   - Auto-zeroing on drop
-   - mlock support (prevents swapping)
-   - FFI-safe conversion
+   - Progress tracking via `bytes_read()` / `total_size()`
 
 ### Dependency Changes
 
 **New dependencies** (Phase 1):
 - `crc32fast` - SIMD-accelerated CRC32 verification
 - `rayon` - Parallel extraction (conditional, >10 files)
-- `secstr` - Secure password storage
 
 ### Constitution Compliance
 

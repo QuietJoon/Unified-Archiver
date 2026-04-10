@@ -72,7 +72,7 @@ fn main() -> Result<(), ArchiveError> {
     let options = ExtractionOptions {
         destination: PathBuf::from("output/"),
         preserve_times: true,
-        verify_crc: true,  // Phase 1: Automatic CRC32 verification
+        verify_crc32: true,  // Phase 1: Automatic CRC32 verification
         ..Default::default()
     };
 
@@ -113,7 +113,7 @@ fn main() -> Result<(), ArchiveError> {
 
 ```rust
 use unified_archive::{Archive, ExtractionOptions};
-use secstr::SecStr;
+// Password is stored as a plain String
 
 fn main() -> Result<(), ArchiveError> {
     let archive = Archive::open("encrypted.zip")?;
@@ -124,7 +124,7 @@ fn main() -> Result<(), ArchiveError> {
 
         let options = ExtractionOptions {
             destination: PathBuf::from("output/"),
-            password: Some(SecStr::from(password)),  // Phase 1: Secure password storage
+            password: Some(password),  // Phase 1: Password as String
             ..Default::default()
         };
 
@@ -146,7 +146,7 @@ fn main() -> Result<(), ArchiveError> {
     let archive = Archive::open("data.zip")?;
 
     // Phase 1: Memory-bounded streaming (~40KB per file)
-    let reader = archive.entry_reader("large.bin")?;
+    let reader = archive.extract_to_stream("large.bin")?;
     let mut output = File::create("output.bin")?;
 
     std::io::copy(&mut BufReader::new(reader), &mut output)?;
@@ -157,14 +157,14 @@ fn main() -> Result<(), ArchiveError> {
 
 ## Phase 1 Enhancements Summary
 
-All Phase 1 design documents are now complete! Here's what we've accomplished:
+Phase 1 design documents are drafted. Note: there is known drift between these specs and the actual implementation. Key differences include eager (not lazy) format detection, `String` instead of `SecStr` for passwords, `extract_to_stream()` instead of `entry_reader()`, and `verify_crc32` instead of `verify_crc`. Here's what was planned:
 
 ### ✅ Completed Phase 1 Deliverables
 
 1. **data-model.md** - Enhanced with 6 new ArchiveEntry fields, new entities (EntryReader, VerifyingReader, FileAttributes), and architectural improvements
 2. **contracts/progress.md** - Complete progress callback API with ControlFlow cancellation and rate limiting
 3. **contracts/streaming.md** - Streaming extraction API with memory bounds and CRC32 verification
-4. **contracts/extraction.md** - Updated with password handling (SecStr), multi-part archive support, parallel extraction, and CRC32 verification
+4. **contracts/extraction.md** - Updated with password handling (String), multi-part archive support, parallel extraction, and CRC32 verification
 5. **contracts/inspection.md** - Updated with entry caching (OnceLock), enhanced metadata fields, and performance improvements
 6. **quickstart.md** - Comprehensive user guide demonstrating all Phase 1 features
 
@@ -182,8 +182,8 @@ All Phase 1 design documents are now complete! Here's what we've accomplished:
 - Parallel extraction with Rayon (3-3.5X speedup)
 - Streaming extraction (~40KB memory per file)
 
-**Security Enhancements**:
-- SecStr for secure password storage (auto-zeroing, mlock)
+**Password & Verification**:
+- Password stored as `String` (no special zeroization)
 - CRC32 verification during extraction (<2% overhead)
 
 **Developer Experience**:
@@ -207,7 +207,7 @@ All Phase 1 enhancements comply with constitution v1.1.0:
 - Create streaming extraction
 - Add CRC32 verification
 - Integrate Rayon for parallel extraction
-- Add password handling with SecStr
+- Add password handling
 
 Would you like to proceed with Phase 2 implementation?
 

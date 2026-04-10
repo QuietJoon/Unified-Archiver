@@ -7,50 +7,58 @@
 
 ## Overview
 
-Streaming extraction enables memory-bounded extraction of large archives (<100MB memory for 10GB+ archives) through the standard `Read` trait. This contract defines the `EntryReader<'a>` API, automatic CRC32 verification, and composition with standard I/O utilities.
+Streaming extraction enables memory-bounded extraction of large archives (<100MB memory for 10GB+ archives) through the standard `Read` trait. This contract defines the `extract_to_stream()` API returning a `StreamingExtractor`, automatic CRC32 verification, and composition with standard I/O utilities.
+
+> **Implementation note**: True streaming (bounded memory regardless of entry size) is currently only achieved via the libarchive backend. Piz, SevenZ, and UnRAR backends buffer the full entry in memory and wrap it in a `Cursor`; the streaming API surface is identical but the memory bound applies only to libarchive-backed archives.
 
 ## Core API
 
-### EntryReader
+### StreamingExtractor
 
 ```rust
 use std::io::Read;
 
-/// Streaming reader for individual archive entries
+/// Streaming extractor that implements Read trait
 ///
-/// Memory bounded: ~40KB per file (8KB buffer + 16KB BufReader)
-/// Implements `Read` trait for standard I/O composition
+/// Allows extracting archive entries directly to a stream without loading
+/// entire files into memory (when backed by libarchive). Implements `Read`
+/// trait for standard I/O composition.
 ///
 /// # Examples
 ///
 /// ```rust
-/// use std::io::{BufReader, Write};
+/// use std::io::{BufReader, Read, Write};
 /// use std::fs::File;
 ///
 /// let archive = Archive::open("data.zip")?;
-/// let reader = archive.entry_reader("document.txt")?;
+/// let mut extractor = archive.extract_to_stream("document.txt")?;
 ///
 /// // Stream to file
 /// let mut output = File::create("output.txt")?;
-/// std::io::copy(&mut BufReader::new(reader), &mut output)?;
+/// std::io::copy(&mut extractor, &mut output)?;
 /// ```
-pub struct EntryReader<'a> {
-    // Internal: backend-specific reader
-    backend_reader: Box<dyn Read + 'a>,
-    // Internal: CRC32 verification wrapper (if enabled)
-    crc_verifier: Option<VerifyingReader<Box<dyn Read + 'a>>>,
-    // Internal: expected CRC32 from metadata
-    expected_crc32: Option<u32>,
+pub struct StreamingExtractor {
+    /// Internal reader - either from temporary file or direct stream
+    reader: Box<dyn Read + Send>,
+    /// Total bytes available (if known)
+    total_size: Option<u64>,
+    /// Bytes read so far
+    bytes_read: u64,
 }
 
-impl<'a> Read for EntryReader<'a> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if let Some(ref mut verifier) = self.crc_verifier {
-            verifier.read(buf)
-        } else {
-            self.backend_reader.read(buf)
-        }
-    }
+impl StreamingExtractor {
+    /// Get total size if known
+    pub fn total_size(&self) -> Option<u64> { ... }
+
+    /// Get bytes read so far
+    pub fn bytes_read(&self) -> u64 { ... }
+
+    /// Get progress as percentage (0.0 to 1.0) if total size is known
+    pub fn progress(&self) -> Option<f64> { ... }
+}
+
+impl Read for StreamingExtractor {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> { ... }
 }
 ```
 
@@ -58,28 +66,25 @@ impl<'a> Read for EntryReader<'a> {
 
 ```rust
 impl Archive {
-    /// Get streaming reader for a specific entry
+    /// Get streaming extractor for a specific entry
     ///
     /// # Parameters
     ///
-    /// * `path` - Path within archive (use forward slashes)
+    /// * `file_path` - Path within archive (use forward slashes)
     ///
     /// # Returns
     ///
-    /// `EntryReader` that implements `Read` trait
+    /// `StreamingExtractor` that implements `Read` trait
     ///
     /// # Memory Usage
     ///
-    /// ~40KB per reader (bounded, regardless of file size)
-    ///
-    /// # CRC32 Verification
-    ///
-    /// Automatic if entry has CRC32 metadata and `verify_crc` enabled.
-    /// Verification occurs on Drop (after full read).
+    /// Depends on backend:
+    /// - libarchive: true streaming, bounded memory regardless of entry size
+    /// - Piz/SevenZ/UnRAR: buffers full entry in memory, then wraps in Cursor
     ///
     /// # Errors
     ///
-    /// * `ArchiveError::EntryNotFound` - Path not in archive
+    /// * `ArchiveError::Format` - Path not found in archive
     /// * `ArchiveError::Io` - Backend read failure
     /// * `ArchiveError::Password` - Entry encrypted, password required
     ///
@@ -87,191 +92,57 @@ impl Archive {
     ///
     /// ```rust
     /// // Basic streaming
-    /// let reader = archive.entry_reader("file.txt")?;
-    /// let content = std::io::read_to_string(reader)?;
+    /// let mut extractor = archive.extract_to_stream("file.txt")?;
+    /// let mut content = String::new();
+    /// extractor.read_to_string(&mut content)?;
     ///
     /// // With buffering
-    /// let reader = archive.entry_reader("large.bin")?;
-    /// let mut buffered = BufReader::new(reader);
+    /// let extractor = archive.extract_to_stream("large.bin")?;
+    /// let mut buffered = BufReader::new(extractor);
     /// // Process in chunks...
     ///
     /// // Stream to file
-    /// let reader = archive.entry_reader("document.pdf")?;
+    /// let mut extractor = archive.extract_to_stream("document.pdf")?;
     /// let mut output = File::create("output.pdf")?;
-    /// io::copy(&mut BufReader::new(reader), &mut output)?;
+    /// io::copy(&mut extractor, &mut output)?;
     /// ```
-    pub fn entry_reader(&self, path: &str) -> Result<EntryReader<'_>> {
-        self.entry_reader_with_options(path, StreamingOptions::default())
-    }
-
-    /// Get streaming reader with options
-    pub fn entry_reader_with_options(
+    pub fn extract_to_stream(
         &self,
-        path: &str,
-        options: StreamingOptions,
-    ) -> Result<EntryReader<'_>> {
-        let entry = self.find_entry(path)?;
-
-        // Check password requirement
-        if entry.is_encrypted && options.password.is_none() {
-            return Err(ArchiveError::Password {
-                message: format!("Entry '{}' is encrypted, password required", path),
-            });
-        }
-
-        // Create backend reader
-        let backend_reader = match &self.backend {
-            ArchiveBackend::Unrar(unrar) => {
-                unrar.open_entry_stream(path, options.password.as_ref())?
+        file_path: &str,
+    ) -> Result<StreamingExtractor> {
+        match &self.backend {
+            ArchiveBackend::Unrar(unrar) => unrar.extract_to_stream(file_path),
+            ArchiveBackend::Piz(piz) => piz.extract_to_stream(file_path),
+            ArchiveBackend::SevenZ(sevenz) => sevenz.extract_to_stream(file_path),
+            ArchiveBackend::ZipWriter(_) => {
+                Err(ArchiveError::write_mode_only("extract_to_stream"))
             }
-            ArchiveBackend::Libarchive(lib) => {
-                lib.open_entry_stream(path, options.password.as_ref())?
-            }
-        };
-
-        // Wrap with CRC32 verifier if enabled
-        let (backend_reader, crc_verifier) = if options.verify_crc && entry.crc32.is_some() {
-            let verifier = VerifyingReader::new(backend_reader, entry.crc32);
-            (Box::new(std::io::empty()) as Box<dyn Read>, Some(verifier))
-        } else {
-            (backend_reader, None)
-        };
-
-        Ok(EntryReader {
-            backend_reader,
-            crc_verifier,
-            expected_crc32: entry.crc32,
-        })
-    }
-
-    /// Extract entry to writer (streaming, memory-bounded)
-    ///
-    /// # Parameters
-    ///
-    /// * `path` - Entry path within archive
-    /// * `writer` - Destination implementing `Write`
-    ///
-    /// # Memory Usage
-    ///
-    /// ~40KB (8KB read buffer + 16KB write buffer)
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// // Extract to file
-    /// let mut output = File::create("output.txt")?;
-    /// archive.extract_to_writer("document.txt", &mut output)?;
-    ///
-    /// // Extract to memory (for small files)
-    /// let mut buffer = Vec::new();
-    /// archive.extract_to_writer("small.txt", &mut buffer)?;
-    ///
-    /// // Extract with compression (gzip)
-    /// use flate2::write::GzEncoder;
-    /// let output = File::create("output.gz")?;
-    /// let mut encoder = GzEncoder::new(output, Compression::default());
-    /// archive.extract_to_writer("large.bin", &mut encoder)?;
-    /// ```
-    pub fn extract_to_writer<W>(
-        &self,
-        path: &str,
-        writer: W,
-    ) -> Result<u64>
-    where
-        W: Write,
-    {
-        let reader = self.entry_reader(path)?;
-        let bytes_written = io::copy(
-            &mut BufReader::new(reader),
-            &mut BufWriter::new(writer),
-        )?;
-        Ok(bytes_written)
-    }
-}
-```
-
-### StreamingOptions
-
-```rust
-use secstr::SecStr;
-
-/// Options for streaming extraction
-#[derive(Default)]
-pub struct StreamingOptions {
-    /// Password for encrypted entries
-    pub password: Option<SecStr>,
-
-    /// Verify CRC32 during read (default: true)
-    pub verify_crc: bool,
-
-    /// Buffer size for reads (default: 8KB)
-    pub buffer_size: usize,
-}
-
-impl Default for StreamingOptions {
-    fn default() -> Self {
-        Self {
-            password: None,
-            verify_crc: true,
-            buffer_size: 8192,
+            ArchiveBackend::ZipReader(zip) => zip.extract_to_stream(file_path),
+            ArchiveBackend::Libarchive(lib) => lib.extract_to_stream(file_path),
         }
     }
 }
 ```
 
-## CRC32 Verification (Internal)
+## CRC32 Verification
+
+CRC32 verification is **not** built into the `StreamingExtractor`. Instead, it is
+handled by:
+
+1. **`ExtractionOptions::verify_crc32`** -- used by `extract_all` / `extract_file` operations,
+   which verify after writing each entry via `security::verify_crc32()`.
+2. **`security::verify_crc32(data, expected_crc, file_path)`** -- public utility that callers
+   can invoke manually after reading the full entry from a `StreamingExtractor`.
 
 ```rust
-use crc32fast::Hasher;
+use unified_archive::security::verify_crc32;
 
-/// Wraps a reader with automatic CRC32 verification
-///
-/// Verification occurs on Drop, after full read
-pub(crate) struct VerifyingReader<R: Read> {
-    inner: R,
-    hasher: Hasher,
-    expected_crc32: Option<u32>,
-    bytes_read: u64,
-}
+let mut extractor = archive.extract_to_stream("file.txt")?;
+let mut data = Vec::new();
+extractor.read_to_end(&mut data)?;
 
-impl<R: Read> VerifyingReader<R> {
-    pub fn new(inner: R, expected_crc32: Option<u32>) -> Self {
-        Self {
-            inner,
-            hasher: Hasher::new(),
-            expected_crc32,
-            bytes_read: 0,
-        }
-    }
-}
-
-impl<R: Read> Read for VerifyingReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        if n > 0 {
-            self.hasher.update(&buf[..n]);
-            self.bytes_read += n as u64;
-        }
-        Ok(n)
-    }
-}
-
-impl<R: Read> Drop for VerifyingReader<R> {
-    fn drop(&mut self) {
-        if let Some(expected) = self.expected_crc32 {
-            let actual = self.hasher.finalize();
-            if actual != expected {
-                // Log CRC mismatch
-                eprintln!(
-                    "CRC32 mismatch: expected 0x{:08x}, got 0x{:08x} ({} bytes read)",
-                    expected, actual, self.bytes_read
-                );
-                // Note: Cannot return error from Drop
-                // User must check extraction result separately
-            }
-        }
-    }
-}
+// Manual CRC32 verification
+verify_crc32(&data, Some(expected_crc), "file.txt")?;
 ```
 
 ## Contract Guarantees
@@ -280,18 +151,21 @@ impl<R: Read> Drop for VerifyingReader<R> {
 
 **Requirement SC-009**: <100MB memory for 10GB+ archives
 
-**Implementation**:
+**Implementation** (libarchive backend -- true streaming):
 ```
-EntryReader memory = backend_buffer + optional_verifier
-                   = 8KB + (0 or 48 bytes)
-                   ≈ 8KB
+StreamingExtractor memory = backend_stream_buffer
+                          ≈ 8KB
 
 With user BufReader: 8KB + 16KB = 24KB per file
 With user BufWriter: 24KB + 16KB = 40KB per operation
 
 For 10GB archive: 40KB (one file at a time)
-✅ <<100MB
+<<100MB
 ```
+
+**Caveat**: Piz, SevenZ, and UnRAR backends call `extract_to_memory` internally and wrap
+the result in a `Cursor`. For those backends, memory usage equals the uncompressed entry
+size. True bounded-memory streaming is only available via the libarchive backend.
 
 **Verification**:
 ```rust
@@ -301,9 +175,9 @@ fn test_memory_bounded_extraction() {
     let start_memory = get_process_memory();
 
     for entry in archive.list_files()? {
-        let reader = archive.entry_reader(&entry.path)?;
+        let mut extractor = archive.extract_to_stream(&entry.path)?;
         let mut output = File::create(dest.join(&entry.path))?;
-        io::copy(&mut BufReader::new(reader), &mut output)?;
+        io::copy(&mut extractor, &mut output)?;
     }
 
     let end_memory = get_process_memory();
@@ -319,55 +193,54 @@ fn test_memory_bounded_extraction() {
 **Guarantee**: Single-pass, forward-only iteration
 
 **Implications**:
-- Cannot seek backwards in EntryReader
-- Cannot reuse EntryReader after EOF
-- Must create new reader for re-extraction
+- Cannot seek backwards in StreamingExtractor
+- Cannot reuse StreamingExtractor after EOF
+- Must create new extractor for re-extraction
 
 **Example**:
 ```rust
-let reader = archive.entry_reader("file.txt")?;
+let mut extractor = archive.extract_to_stream("file.txt")?;
 
 // First read: OK
 let mut buf1 = vec![0u8; 1024];
-reader.read(&mut buf1)?;
+extractor.read(&mut buf1)?;
 
 // Read to EOF: OK
 let mut buf2 = Vec::new();
-reader.read_to_end(&mut buf2)?;
+extractor.read_to_end(&mut buf2)?;
 
 // Second read: returns 0 (EOF)
-let n = reader.read(&mut buf1)?;
+let n = extractor.read(&mut buf1)?;
 assert_eq!(n, 0);
 
-// To re-read: create new reader
-drop(reader);
-let reader2 = archive.entry_reader("file.txt")?;
+// To re-read: create new extractor
+drop(extractor);
+let mut extractor2 = archive.extract_to_stream("file.txt")?;
 ```
 
 ### CRC32 Verification
 
-**Guarantee**: Automatic verification if entry has CRC32 metadata
+**Guarantee**: CRC32 verification is available but **not automatic** in the streaming path.
 
 **Behavior**:
-1. CRC32 computed during read (streaming)
-2. Verification on Drop (after full read)
-3. Mismatch logged to stderr (cannot return error from Drop)
-4. User checks extraction result separately
-
-**Limitation**: Cannot report CRC error immediately (Drop restriction)
-
-**Future enhancement**: Return `Result` from explicit `finalize()` method
+1. `extract_to_stream()` does not perform CRC32 verification
+2. Callers who need verification should use `security::verify_crc32()` after reading the full entry
+3. The `extract_all` / `extract_file` paths verify CRC32 automatically when `ExtractionOptions::verify_crc32` is `true`
 
 ### Backend Consistency
 
-Streaming works identically across backends:
+The `extract_to_stream()` API surface is identical across all backends, but the internal
+strategy differs:
 
-| Backend | Streaming Support | CRC32 Verification | Password Support |
-|---------|-------------------|-------------------|------------------|
-| UnRAR | ✅ Yes | ✅ Yes (metadata) | ✅ Yes |
-| libarchive | ✅ Yes | ⚠️ Computed during extraction | ✅ Yes |
+| Backend | True Streaming | Internal Strategy | Password Support |
+|---------|---------------|-------------------|------------------|
+| libarchive | Yes | Direct stream from archive | Yes |
+| UnRAR | No | `extract_to_memory` + `Cursor` | Yes |
+| Piz | No | `extract_to_memory` + `Cursor` | No |
+| SevenZ | No | `extract_to_memory` + `Cursor` | Yes |
+| ZipReader | No | `extract_to_memory` + `Cursor` | Yes |
 
-**Note**: libarchive doesn't expose CRC32 in metadata, so we compute during extraction for verification.
+**Note**: Piz, SevenZ, UnRAR, and ZipReader buffer the full entry in memory before exposing it through the `Read` trait. True streaming with bounded memory is only available via the libarchive backend.
 
 ## Standard Library Composition
 
@@ -377,13 +250,13 @@ Streaming works identically across backends:
 use std::io::BufReader;
 
 // Automatic buffering for efficient reads
-let reader = archive.entry_reader("large.bin")?;
-let mut buffered = BufReader::with_capacity(64 * 1024, reader); // 64KB buffer
+let extractor = archive.extract_to_stream("large.bin")?;
+let mut buffered = BufReader::with_capacity(64 * 1024, extractor); // 64KB buffer
 
 // Read line-by-line (for text files)
 use std::io::BufRead;
-let reader = archive.entry_reader("lines.txt")?;
-let buffered = BufReader::new(reader);
+let extractor = archive.extract_to_stream("lines.txt")?;
+let buffered = BufReader::new(extractor);
 for line in buffered.lines() {
     println!("{}", line?);
 }
@@ -395,24 +268,25 @@ for line in buffered.lines() {
 use std::io;
 
 // Copy to file
-let reader = archive.entry_reader("source.bin")?;
+let mut extractor = archive.extract_to_stream("source.bin")?;
 let mut output = File::create("destination.bin")?;
-io::copy(&mut BufReader::new(reader), &mut output)?;
+io::copy(&mut extractor, &mut output)?;
 
 // Copy with progress
-let reader = archive.entry_reader("large.bin")?;
+let mut extractor = archive.extract_to_stream("large.bin")?;
 let mut output = File::create("destination.bin")?;
 let mut copied = 0u64;
 let mut buffer = [0u8; 8192];
 
 loop {
-    let n = reader.read(&mut buffer)?;
+    let n = extractor.read(&mut buffer)?;
     if n == 0 {
         break;
     }
     output.write_all(&buffer[..n])?;
     copied += n as u64;
-    println!("Copied {} bytes", copied);
+    println!("Copied {} bytes ({:.1}%)", copied,
+        extractor.progress().unwrap_or(0.0) * 100.0);
 }
 ```
 
@@ -423,26 +297,34 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 
 // Extract and re-compress on the fly
-let reader = archive.entry_reader("uncompressed.bin")?;
+let mut extractor = archive.extract_to_stream("uncompressed.bin")?;
 let output = File::create("compressed.gz")?;
 let mut encoder = GzEncoder::new(output, Compression::default());
 
-io::copy(&mut BufReader::new(reader), &mut encoder)?;
+io::copy(&mut extractor, &mut encoder)?;
 encoder.finish()?;
 
-// Memory usage: ~40KB (streaming, no full file in memory)
+// Memory usage: ~8KB with libarchive backend (streaming, no full file in memory)
+// Note: Piz/SevenZ/UnRAR backends will buffer full entry in memory
 ```
 
 ## Error Handling
 
 ### Entry Not Found
 
+There is no dedicated `EntryNotFound` variant. When an entry path does not exist in the
+archive, backends return `ArchiveError::Format` or `ArchiveError::Io` depending on the
+backend.
+
 ```rust
-match archive.entry_reader("nonexistent.txt") {
-    Err(ArchiveError::EntryNotFound { path }) => {
-        eprintln!("Entry '{}' not found in archive", path);
+match archive.extract_to_stream("nonexistent.txt") {
+    Err(ArchiveError::Format { message, .. }) => {
+        eprintln!("Entry not found or format error: {}", message);
     }
-    Ok(reader) => { /* use reader */ }
+    Err(ArchiveError::Io { context, .. }) => {
+        eprintln!("I/O error looking up entry: {}", context);
+    }
+    Ok(mut extractor) => { /* use extractor */ }
     Err(e) => { /* other errors */ }
 }
 ```
@@ -450,18 +332,15 @@ match archive.entry_reader("nonexistent.txt") {
 ### Password Required
 
 ```rust
-let result = archive.entry_reader("encrypted.txt");
+// Password must be set on the Archive before calling extract_to_stream.
+// extract_to_stream itself does not accept password options.
+let result = archive.extract_to_stream("encrypted.txt");
 
 match result {
     Err(ArchiveError::Password { message }) => {
-        // Retry with password
-        let options = StreamingOptions {
-            password: Some(SecStr::from("secret")),
-            ..Default::default()
-        };
-        let reader = archive.entry_reader_with_options("encrypted.txt", options)?;
+        eprintln!("Password required: {}", message);
     }
-    Ok(reader) => { /* use reader */ }
+    Ok(mut extractor) => { /* use extractor */ }
     Err(e) => { /* other errors */ }
 }
 ```
@@ -469,10 +348,10 @@ match result {
 ### Backend Errors
 
 ```rust
-let reader = archive.entry_reader("corrupted.bin")?;
+let mut extractor = archive.extract_to_stream("corrupted.bin")?;
 let mut output = Vec::new();
 
-match reader.read_to_end(&mut output) {
+match extractor.read_to_end(&mut output) {
     Err(e) if e.kind() == io::ErrorKind::InvalidData => {
         eprintln!("Archive corrupted: {}", e);
     }
@@ -497,9 +376,9 @@ fn bench_streaming_extraction(b: &mut Bencher) {
     let archive = Archive::open("fixtures/1gb_file.zip")?;
 
     b.iter(|| {
-        let reader = archive.entry_reader("large.bin")?;
+        let mut extractor = archive.extract_to_stream("large.bin")?;
         let mut output = io::sink(); // Discard output
-        io::copy(&mut BufReader::new(reader), &mut output)?;
+        io::copy(&mut extractor, &mut output)?;
     });
 
     // Expected: ~500 MB/s (disk-bound, not CPU-bound)
@@ -508,30 +387,12 @@ fn bench_streaming_extraction(b: &mut Bencher) {
 
 ### CRC32 Overhead
 
-**Measurement**: With and without verification
+CRC32 verification is handled by `ExtractionOptions::verify_crc32` during
+`extract_all` / `extract_file` operations, not during `extract_to_stream`.
+The streaming API does not perform inline CRC32 verification; callers who
+need it should use `security::verify_crc32()` after reading the full entry.
 
-```rust
-#[bench]
-fn bench_crc32_overhead(b: &mut Bencher) {
-    let archive = Archive::open("fixtures/1gb_file.zip")?;
-
-    // Without CRC32
-    b.iter(|| {
-        let options = StreamingOptions { verify_crc: false, ..Default::default() };
-        let reader = archive.entry_reader_with_options("large.bin", options)?;
-        io::copy(&mut BufReader::new(reader), &mut io::sink())?;
-    });
-
-    // With CRC32
-    b.iter(|| {
-        let options = StreamingOptions { verify_crc: true, ..Default::default() };
-        let reader = archive.entry_reader_with_options("large.bin", options)?;
-        io::copy(&mut BufReader::new(reader), &mut io::sink())?;
-    });
-
-    // Expected: <2% overhead (crc32fast SIMD ~10GB/s, extraction ~500MB/s)
-}
-```
+**Expected overhead**: <2% (crc32fast SIMD ~10GB/s, extraction ~500MB/s)
 
 ### Memory Usage
 
@@ -540,14 +401,16 @@ fn bench_crc32_overhead(b: &mut Bencher) {
 ```rust
 #[test]
 fn test_streaming_memory_usage() {
+    // Note: this test is only meaningful with libarchive backend.
+    // Piz/SevenZ/UnRAR buffer full entry in memory.
     let archive = Archive::open("fixtures/10gb_archive.zip")?;
     let baseline = get_process_memory();
 
     // Extract all files streaming
     for entry in archive.list_files()? {
-        let reader = archive.entry_reader(&entry.path)?;
+        let mut extractor = archive.extract_to_stream(&entry.path)?;
         let mut output = File::create(temp_dir().join(&entry.path))?;
-        io::copy(&mut BufReader::new(reader), &mut output)?;
+        io::copy(&mut extractor, &mut output)?;
     }
 
     let peak = get_peak_memory();
@@ -563,26 +426,26 @@ fn test_streaming_memory_usage() {
 
 ```rust
 #[test]
-fn test_entry_reader_basic() {
+fn test_extract_to_stream_basic() {
     let archive = Archive::open("fixtures/test.zip")?;
-    let mut reader = archive.entry_reader("test_file.txt")?;
+    let mut extractor = archive.extract_to_stream("test_file.txt")?;
 
     let mut content = String::new();
-    reader.read_to_string(&mut content)?;
+    extractor.read_to_string(&mut content)?;
 
     assert_eq!(content, "Hello, RAR World!\n");
 }
 
 #[test]
-fn test_entry_reader_chunked() {
+fn test_extract_to_stream_chunked() {
     let archive = Archive::open("fixtures/test.zip")?;
-    let mut reader = archive.entry_reader("test_file.txt")?;
+    let mut extractor = archive.extract_to_stream("test_file.txt")?;
 
     let mut chunks = Vec::new();
     let mut buffer = [0u8; 4];
 
     loop {
-        let n = reader.read(&mut buffer)?;
+        let n = extractor.read(&mut buffer)?;
         if n == 0 {
             break;
         }
@@ -594,38 +457,19 @@ fn test_entry_reader_chunked() {
 }
 
 #[test]
-fn test_entry_reader_crc32_verification() {
-    let archive = Archive::open("fixtures/test.rar")?;
-    let reader = archive.entry_reader("test_file.txt")?;
+fn test_extract_to_stream_progress() {
+    let archive = Archive::open("fixtures/test.zip")?;
+    let mut extractor = archive.extract_to_stream("test_file.txt")?;
 
-    // Read to EOF
+    // total_size is known if backend provides it
+    if let Some(total) = extractor.total_size() {
+        assert!(total > 0);
+    }
+
     let mut content = Vec::new();
-    reader.read_to_end(&mut content)?;
+    extractor.read_to_end(&mut content)?;
 
-    // CRC32 verified on Drop (no assertion here, checked in Drop impl)
-    drop(reader);
-}
-
-#[test]
-fn test_entry_reader_password() {
-    let archive = Archive::open("fixtures/encrypted.zip")?;
-
-    // Without password: error
-    assert!(matches!(
-        archive.entry_reader("secret.txt"),
-        Err(ArchiveError::Password { .. })
-    ));
-
-    // With password: OK
-    let options = StreamingOptions {
-        password: Some(SecStr::from("password123")),
-        ..Default::default()
-    };
-    let mut reader = archive.entry_reader_with_options("secret.txt", options)?;
-
-    let mut content = String::new();
-    reader.read_to_string(&mut content)?;
-    assert!(!content.is_empty());
+    assert_eq!(extractor.bytes_read(), content.len() as u64);
 }
 ```
 
@@ -633,12 +477,13 @@ fn test_entry_reader_password() {
 
 ```rust
 #[test]
-fn test_extract_to_writer_file() {
+fn test_extract_to_stream_to_file() {
     let archive = Archive::open("fixtures/test.zip")?;
     let output_path = temp_dir().join("output.txt");
     let mut output = File::create(&output_path)?;
 
-    let bytes_written = archive.extract_to_writer("test_file.txt", &mut output)?;
+    let mut extractor = archive.extract_to_stream("test_file.txt")?;
+    let bytes_written = io::copy(&mut extractor, &mut output)?;
 
     assert_eq!(bytes_written, 18); // "Hello, RAR World!\n"
 
@@ -647,11 +492,12 @@ fn test_extract_to_writer_file() {
 }
 
 #[test]
-fn test_extract_to_writer_memory() {
+fn test_extract_to_stream_to_memory() {
     let archive = Archive::open("fixtures/test.zip")?;
+    let mut extractor = archive.extract_to_stream("test_file.txt")?;
     let mut buffer = Vec::new();
 
-    archive.extract_to_writer("test_file.txt", &mut buffer)?;
+    extractor.read_to_end(&mut buffer)?;
 
     assert_eq!(buffer, b"Hello, RAR World!\n");
 }
@@ -662,9 +508,9 @@ fn test_streaming_large_file() {
     let archive = create_archive_with_large_file(100 * 1024 * 1024)?;
 
     let start_memory = get_process_memory();
-    let reader = archive.entry_reader("large.bin")?;
+    let mut extractor = archive.extract_to_stream("large.bin")?;
     let mut output = io::sink();
-    io::copy(&mut BufReader::new(reader), &mut output)?;
+    io::copy(&mut extractor, &mut output)?;
     let end_memory = get_process_memory();
 
     let memory_delta = end_memory - start_memory;
@@ -681,15 +527,15 @@ fn test_streaming_large_file() {
 // Old: All in memory
 let content = archive.extract_to_memory("large.bin")?; // Loads full file
 
-// New: Streaming (memory-bounded)
-let reader = archive.entry_reader("large.bin")?;
+// New: Streaming
+let mut extractor = archive.extract_to_stream("large.bin")?;
 let mut content = Vec::new();
-reader.read_to_end(&mut content)?; // Still loads to Vec, but streaming read
+extractor.read_to_end(&mut content)?; // Still loads to Vec, but streaming read
 
-// New: Stream to file directly
-let reader = archive.entry_reader("large.bin")?;
+// New: Stream to file directly (memory-bounded with libarchive backend)
+let mut extractor = archive.extract_to_stream("large.bin")?;
 let mut output = File::create("output.bin")?;
-io::copy(&mut BufReader::new(reader), &mut output)?;
+io::copy(&mut extractor, &mut output)?;
 ```
 
 ### From 7zip-JBinding
@@ -703,15 +549,15 @@ archive.extractSlow(index, stream);
 
 ```rust
 // unified-archive
-let reader = archive.entry_reader("file.bin")?;
+let mut extractor = archive.extract_to_stream("file.bin")?;
 let mut output = File::create("output.bin")?;
-io::copy(&mut BufReader::new(reader), &mut output)?;
+io::copy(&mut extractor, &mut output)?;
 ```
 
 ## References
 
 - Phase 0 Research: `research.md` - Streaming extraction architecture decisions
-- Data Model: `data-model.md` - EntryReader and VerifyingReader specifications
+- Data Model: `data-model.md` - StreamingExtractor specification
 - Constitution v1.1.0 Principle II: Pragmatic performance (memory bounds)
 - Rust std::io::Read: https://doc.rust-lang.org/std/io/trait.Read.html
 - crc32fast: https://docs.rs/crc32fast/
