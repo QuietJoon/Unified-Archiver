@@ -236,8 +236,8 @@ impl UnrarArchive {
 
         // Read and parse blocks until we find recovery record or EOF
         loop {
-            // Read block header (minimum 7 bytes: CRC32(4) + size(varint, at least 1) + type(varint, at least 1) + flags(varint, at least 1))
-            let mut block_start = [0u8; 11]; // Conservative: 4 (CRC) + 3*2 (varints) + extra
+            // Read block header (enough for CRC32(4) + 3 max-length vints (up to 10 bytes each))
+            let mut block_start = [0u8; 34];
             let bytes_read = file
                 .read(&mut block_start)
                 .map_err(|e| ArchiveError::io("read", std::path::Path::new(&self.path), e))?;
@@ -256,10 +256,20 @@ impl UnrarArchive {
                 block_start[3],
             ]);
 
-            // Decode variable-length integers
-            let (header_size, offset1) = decode_vint(&block_start[4..])?;
-            let (header_type, offset2) = decode_vint(&block_start[4 + offset1..])?;
-            let (header_flags, _offset3) = decode_vint(&block_start[4 + offset1 + offset2..])?;
+            // Decode variable-length integers with bounds checks
+            let (header_size, offset1) = decode_vint(&block_start[4..bytes_read])?;
+
+            let type_start = 4 + offset1;
+            if type_start >= bytes_read {
+                return Ok(None);
+            }
+            let (header_type, offset2) = decode_vint(&block_start[type_start..bytes_read])?;
+
+            let flags_start = type_start + offset2;
+            if flags_start >= bytes_read {
+                return Ok(None);
+            }
+            let (header_flags, _offset3) = decode_vint(&block_start[flags_start..bytes_read])?;
 
             // Check if this is a recovery record block (type 0x05)
             // RAR5 uses type 5 for recovery records
@@ -389,8 +399,6 @@ impl UnrarArchive {
     }
 
     /// Extract all files to destination directory
-    ///
-    /// Phase 1: Added progress callback support with cancellation
     pub fn extract_all(
         &self,
         dest_path: &std::path::Path,
@@ -416,17 +424,7 @@ impl UnrarArchive {
         // Create fresh handle for extraction (list_files() exhausted the original handle)
         let fresh = self.fresh_handle()?;
 
-        // Convert dest_path to absolute path to avoid changing cwd (thread-safety)
-        let abs_dest = dest_path.canonicalize().or_else(|_| {
-            // If canonicalize fails (dir doesn't exist yet), try to make it absolute
-            if dest_path.is_absolute() {
-                Ok(dest_path.to_path_buf())
-            } else {
-                Ok(std::env::current_dir()
-                    .map_err(|e| ArchiveError::io("getcwd", dest_path.to_path_buf(), e))?
-                    .join(dest_path))
-            }
-        })?;
+        let abs_dest = resolve_dest_path(dest_path)?;
 
         let mut bytes_processed = 0u64;
         let mut rate_limiter = RateLimiter::new();
@@ -511,17 +509,7 @@ impl UnrarArchive {
         // Create fresh handle for extraction (avoid state exhaustion)
         let fresh = self.fresh_handle()?;
 
-        // Convert dest_path to absolute path to avoid changing cwd (thread-safety)
-        let abs_dest = dest_path.canonicalize().or_else(|_| {
-            // If canonicalize fails (dir doesn't exist yet), try to make it absolute
-            if dest_path.is_absolute() {
-                Ok(dest_path.to_path_buf())
-            } else {
-                Ok(std::env::current_dir()
-                    .map_err(|e| ArchiveError::io("getcwd", dest_path.to_path_buf(), e))?
-                    .join(dest_path))
-            }
-        })?;
+        let abs_dest = resolve_dest_path(dest_path)?;
 
         loop {
             match fresh.read_header()? {
@@ -797,10 +785,11 @@ fn parse_header(header: &RARHeaderDataEx) -> Result<ArchiveEntry> {
     entry.size = if is_directory { None } else { Some(unp_size) };
     entry.compressed_size = if is_directory { None } else { Some(pack_size) };
     entry.modified = modified;
-    entry.crc32 = if is_directory || header.file_crc == 0 {
+    // CRC32 value 0 is valid (e.g. empty files) — only skip for directories
+    entry.crc32 = if is_directory {
         None
     } else {
-        Some(header.file_crc) // ✅ CRC32 extracted!
+        Some(header.file_crc)
     };
     entry.permissions = Some(header.file_attr);
 
@@ -871,39 +860,20 @@ fn dos_time_to_system_time(dos_time: u32) -> Option<SystemTime> {
     let month = ((dos_time >> 21) & 0x0F) as u64;
     let year = (((dos_time >> 25) & 0x7F) + 1980) as u64;
 
-    // Validate date components
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
+    super::common::ymd_hms_to_system_time(year, month, day, hours, minutes, seconds)
+}
 
-    // Correct month-day calculation
-    let days_in_prior_years = ((year - 1970) * 365) + ((year - 1969) / 4);
-    let days_before_month = match month {
-        1 => 0,
-        2 => 31,
-        3 => 59,
-        4 => 90,
-        5 => 120,
-        6 => 151,
-        7 => 181,
-        8 => 212,
-        9 => 243,
-        10 => 273,
-        11 => 304,
-        12 => 334,
-        _ => 0,
-    };
-    let mut days_since_epoch = days_in_prior_years + days_before_month + day - 1;
-
-    // Adjust for leap year
-    let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
-    if is_leap && month > 2 {
-        days_since_epoch += 1;
-    }
-
-    let total_seconds = days_since_epoch * 86400 + hours * 3600 + minutes * 60 + seconds;
-
-    Some(UNIX_EPOCH + std::time::Duration::from_secs(total_seconds))
+/// Convert dest_path to an absolute path (thread-safe, avoids changing cwd)
+fn resolve_dest_path(dest_path: &Path) -> Result<std::path::PathBuf> {
+    dest_path.canonicalize().or_else(|_| {
+        if dest_path.is_absolute() {
+            Ok(dest_path.to_path_buf())
+        } else {
+            Ok(std::env::current_dir()
+                .map_err(|e| ArchiveError::io("getcwd", dest_path.to_path_buf(), e))?
+                .join(dest_path))
+        }
+    })
 }
 
 /// Map UnRAR error code to ArchiveError
@@ -942,7 +912,7 @@ fn map_unrar_error(code: c_int, path: &str) -> ArchiveError {
 /// Returns (decoded_value, bytes_consumed)
 fn decode_vint(data: &[u8]) -> Result<(u64, usize)> {
     let mut value = 0u64;
-    let mut shift = 0;
+    let mut shift: u32 = 0;
     let mut bytes_consumed = 0;
 
     for &byte in data {
@@ -950,7 +920,7 @@ fn decode_vint(data: &[u8]) -> Result<(u64, usize)> {
         let data_bits = (byte & 0x7F) as u64;
 
         if shift < 64 {
-            value |= data_bits << shift;
+            value |= data_bits.checked_shl(shift).unwrap_or(0);
         }
 
         if (byte & 0x80) == 0 {

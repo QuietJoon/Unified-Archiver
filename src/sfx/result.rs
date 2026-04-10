@@ -149,10 +149,10 @@ mod tests {
     #[test]
     fn test_summary_probable() {
         let result =
-            SfxDetectionResult::probable(StubType::ShellScript, ArchiveFormat::Rar, 512, 0.75);
+            SfxDetectionResult::probable(StubType::ScriptInterpreter, ArchiveFormat::Rar, 512, 0.75);
         let summary = result.summary();
         assert!(summary.contains("SFX detected"));
-        assert!(summary.contains("Unix shell script"));
+        assert!(summary.contains("Script interpreter"));
         assert!(summary.contains("Rar"));
     }
 
@@ -201,7 +201,7 @@ mod tests {
             StubType::WindowsPE,
             StubType::LinuxELF,
             StubType::MacOSMachO,
-            StubType::ShellScript,
+            StubType::ScriptInterpreter,
         ];
 
         for stub in stub_types {
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn test_detected_with_zero_offset() {
         // Edge case: archive at offset 0
-        let result = SfxDetectionResult::detected(StubType::ShellScript, ArchiveFormat::Zip, 0);
+        let result = SfxDetectionResult::detected(StubType::ScriptInterpreter, ArchiveFormat::Zip, 0);
         assert!(result.is_sfx);
         assert_eq!(result.data_offset, Some(0));
     }
@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn test_debug_format() {
         // Verify Debug trait produces readable output
-        let result = SfxDetectionResult::detected(StubType::ShellScript, ArchiveFormat::Rar, 512);
+        let result = SfxDetectionResult::detected(StubType::ScriptInterpreter, ArchiveFormat::Rar, 512);
         let debug_str = format!("{:?}", result);
 
         assert!(debug_str.contains("SfxDetectionResult"));

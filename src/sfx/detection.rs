@@ -72,22 +72,55 @@ pub fn detect_sfx<P: AsRef<Path>>(path: P) -> Result<SfxDetectionResult> {
         return Ok(SfxDetectionResult::not_sfx());
     }
 
-    // Stage 3: Archive validation (use first signature found)
-    let (offset, format) = signatures_found[0];
+    // Stage 3: Try each candidate signature until one validates
+    for &(offset, format) in &signatures_found {
+        // Check against total file length
+        if (offset as u64) + 100 > file_len {
+            continue;
+        }
 
-    // Basic validation: check if there's enough data after the signature
-    // Check against total file length, not just buffer length
-    if (offset as u64) + 100 > file_len {
-        // Signature too close to end, likely false positive
-        return Ok(SfxDetectionResult::not_sfx());
+        // Format-specific header probe at the detected offset
+        let archive_data = &scan_buffer[offset..];
+        let valid = match format {
+            crate::ArchiveFormat::Zip => {
+                // ZIP: verify local file header signature PK\x03\x04
+                // A local file header is at least 30 bytes
+                archive_data.len() >= 30
+                    && archive_data[0] == 0x50
+                    && archive_data[1] == 0x4B
+                    && archive_data[2] == 0x03
+                    && archive_data[3] == 0x04
+            }
+            crate::ArchiveFormat::Rar => {
+                // RAR4: Rar!\x1a\x07\x00 + archive header
+                archive_data.len() >= 20
+            }
+            crate::ArchiveFormat::Rar5 => {
+                // RAR5: Rar!\x1a\x07\x01\x00 + archive header
+                archive_data.len() >= 20
+            }
+            crate::ArchiveFormat::SevenZip => {
+                // 7z: 6-byte signature + 2 version bytes + header size fields
+                archive_data.len() >= 32
+            }
+            _ => {
+                // Unknown format: require at least 100 bytes of data
+                archive_data.len() >= 100
+            }
+        };
+
+        if valid {
+            // Signature-only match: use probable() since we haven't parsed the archive
+            return Ok(SfxDetectionResult::probable(
+                stub_type,
+                format,
+                offset as u64,
+                0.9,
+            ));
+        }
     }
 
-    // For now, return detected result (full validation would require format-specific parsing)
-    Ok(SfxDetectionResult::detected(
-        stub_type,
-        format,
-        offset as u64,
-    ))
+    Ok(SfxDetectionResult::not_sfx())
 }
 
 /// Validate archive structure at given offset
@@ -135,10 +168,9 @@ mod tests {
 
         let result = detect_sfx(temp.path()).unwrap();
         assert!(result.is_sfx);
-        assert_eq!(result.stub_type, Some(StubType::ShellScript));
+        assert_eq!(result.stub_type, Some(StubType::ScriptInterpreter));
         assert_eq!(result.archive_format, Some(ArchiveFormat::Zip));
     }
-
 
     #[test]
     fn test_detect_sfx_signature_too_close_to_end() {
@@ -277,7 +309,6 @@ mod tests {
         let result = detect_sfx(temp.path()).unwrap();
         assert!(!result.is_sfx, "Empty file should not be SFX");
     }
-
 
     #[test]
     fn test_detect_sfx_signature_at_different_positions() {

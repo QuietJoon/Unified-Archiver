@@ -3,7 +3,7 @@
 //! Tests the modification API for adding, removing, and replacing files in archives.
 
 use std::path::PathBuf;
-use unified_archive::{Archive, ArchiveError, ArchiveFormat, CompressionLevel, CompressionOptions};
+use unified_archive::{Archive, ArchiveFormat, CompressionLevel, CompressionOptions};
 
 #[test]
 fn test_add_files_to_archive() {
@@ -84,7 +84,7 @@ fn test_remove_files_from_archive() {
 }
 
 #[test]
-#[ignore = "ZIP modification via libarchive has known issues - use 7z/tar for modification"]
+#[ignore = "ZIP modification via libarchive has known issues with entry round-tripping"]
 fn test_replace_files_in_archive() {
     // Create a test archive first
     let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_replace.zip");
@@ -118,7 +118,7 @@ fn test_replace_files_in_archive() {
 }
 
 #[test]
-#[ignore = "ZIP modification via libarchive has known issues - use 7z/tar for modification"]
+#[ignore = "ZIP modification via libarchive has known issues with entry round-tripping"]
 fn test_combined_operations() {
     // Create a test archive first
     let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_combined.zip");

@@ -1,7 +1,6 @@
 //! Integration tests for unified-archive
 pub mod concurrency;
 pub mod creation;
-// pub mod creation_roundtrip; // Disabled - outdated API, see tests/creation_roundtrip_test.rs instead
 pub mod extraction;
 pub mod format_compatibility;
 pub mod hardlink_skip;

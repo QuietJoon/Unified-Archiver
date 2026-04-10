@@ -59,6 +59,17 @@ pub fn extract_gzip_stream_crc(path: impl AsRef<Path>) -> Result<StreamChecksum>
     let mut file = File::open(path.as_ref())
         .map_err(|e| ArchiveError::io("open", path.as_ref().to_path_buf(), e))?;
 
+    // Validate GZIP header magic (0x1F 0x8B)
+    let mut magic = [0u8; 2];
+    file.read_exact(&mut magic)
+        .map_err(|e| ArchiveError::io("read_magic", path.as_ref().to_path_buf(), e))?;
+    if magic != [0x1F, 0x8B] {
+        return Err(ArchiveError::format(
+            None,
+            "Not a valid GZIP file (bad magic)",
+        ));
+    }
+
     // Seek to last 8 bytes (GZIP trailer)
     file.seek(SeekFrom::End(-8))
         .map_err(|e| ArchiveError::io("seek", path.as_ref().to_path_buf(), e))?;
@@ -93,10 +104,22 @@ pub fn extract_bzip2_stream_crc(path: impl AsRef<Path>) -> Result<StreamChecksum
     let mut file = File::open(path.as_ref())
         .map_err(|e| ArchiveError::io("open", path.as_ref().to_path_buf(), e))?;
 
+    // Validate BZIP2 header magic ("BZh")
+    let mut magic = [0u8; 3];
+    file.read_exact(&mut magic)
+        .map_err(|e| ArchiveError::io("read_magic", path.as_ref().to_path_buf(), e))?;
+    if magic[0] != b'B' || magic[1] != b'Z' || magic[2] != b'h' {
+        return Err(ArchiveError::format(
+            None,
+            "Not a valid BZIP2 file (bad magic)",
+        ));
+    }
+
     // Read the last 1KB of the file to find EOS marker
     // The EOS marker (6 bytes) + CRC32 (4 bytes) = 10 bytes minimum,
     // but we read more to handle padding and alignment
-    let file_len = file.metadata()
+    let file_len = file
+        .metadata()
         .map_err(|e| ArchiveError::io("stat", path.as_ref().to_path_buf(), e))?
         .len();
 
@@ -118,8 +141,8 @@ pub fn extract_bzip2_stream_crc(path: impl AsRef<Path>) -> Result<StreamChecksum
     // Look for EOS magic: 0x177245385090 (6 bytes)
     let eos_magic = [0x17u8, 0x72, 0x45, 0x38, 0x50, 0x90];
 
-    // Search backward in the tail for the EOS marker
-    if let Some(pos) = find_pattern(&tail, &eos_magic) {
+    // Search backward in the tail for the last EOS marker
+    if let Some(pos) = find_pattern_last(&tail, &eos_magic) {
         // CRC32 is the 4 bytes after the magic
         if pos + 10 <= tail.len() {
             let crc_bytes = &tail[pos + 6..pos + 10];
@@ -193,56 +216,54 @@ pub fn extract_xz_stream_check(path: impl AsRef<Path>) -> Result<StreamChecksum>
 }
 
 /// Auto-detect format and extract stream checksum
+///
+/// Detection prefers magic bytes over file extension to avoid mislabeled files
+/// being handed to the wrong parser.
 pub fn extract_stream_checksum(path: impl AsRef<Path>) -> Result<StreamChecksum> {
     let path_ref = path.as_ref();
 
-    // Try to detect format by extension and magic bytes
-    let extension = path_ref.extension().and_then(|s| s.to_str()).unwrap_or("");
+    // Prefer magic-byte detection for robustness (handles renamed/mislabeled files)
+    let mut file = File::open(path_ref)
+        .map_err(|e| ArchiveError::io("open", path_ref.to_path_buf(), e))?;
 
+    let mut magic = [0u8; 6];
+    file.read_exact(&mut magic)
+        .map_err(|e| ArchiveError::io("read_magic", path_ref.to_path_buf(), e))?;
+    drop(file);
+
+    // GZIP: 0x1F 0x8B
+    if magic[0] == 0x1F && magic[1] == 0x8B {
+        return extract_gzip_stream_crc(path);
+    }
+
+    // BZIP2: "BZh"
+    if magic[0] == b'B' && magic[1] == b'Z' {
+        return extract_bzip2_stream_crc(path);
+    }
+
+    // XZ: 0xFD 7 z X Z 0x00
+    if magic == *b"\xFD7zXZ\x00" {
+        return extract_xz_stream_check(path);
+    }
+
+    // Fall back to extension for files whose magic might not match standard patterns
+    let extension = path_ref.extension().and_then(|s| s.to_str()).unwrap_or("");
     match extension {
         "gz" | "gzip" => extract_gzip_stream_crc(path),
         "bz2" | "bzip2" => extract_bzip2_stream_crc(path),
         "xz" => extract_xz_stream_check(path),
-        _ => {
-            // Try to detect by reading magic bytes
-            let mut file = File::open(path_ref)
-                .map_err(|e| ArchiveError::io("open", path_ref.to_path_buf(), e))?;
-
-            let mut magic = [0u8; 6];
-            file.read_exact(&mut magic)
-                .map_err(|e| ArchiveError::io("read_magic", path_ref.to_path_buf(), e))?;
-
-            // GZIP: 0x1F 0x8B
-            if magic[0] == 0x1F && magic[1] == 0x8B {
-                drop(file);
-                return extract_gzip_stream_crc(path);
-            }
-
-            // BZIP2: "BZ"
-            if magic[0] == b'B' && magic[1] == b'Z' {
-                drop(file);
-                return extract_bzip2_stream_crc(path);
-            }
-
-            // XZ: 0xFD 7 z X Z 0x00
-            if &magic == b"\xFD7zXZ\x00" {
-                drop(file);
-                return extract_xz_stream_check(path);
-            }
-
-            Err(ArchiveError::format(
-                None,
-                format!("Unknown format with magic: {:02X?}", &magic[0..2]),
-            ))
-        }
+        _ => Err(ArchiveError::format(
+            None,
+            format!("Unknown format with magic: {:02X?}", &magic[0..2]),
+        )),
     }
 }
 
-/// Helper function to find a byte pattern in data
-fn find_pattern(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+/// Helper function to find the last occurrence of a byte pattern in data
+fn find_pattern_last(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
-        .position(|window| window == needle)
+        .rposition(|window| window == needle)
 }
 
 #[cfg(test)]
@@ -250,10 +271,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_find_pattern() {
+    fn test_find_pattern_last() {
         let data = b"hello world test";
-        assert_eq!(find_pattern(data, b"world"), Some(6));
-        assert_eq!(find_pattern(data, b"test"), Some(12));
-        assert_eq!(find_pattern(data, b"notfound"), None);
+        assert_eq!(find_pattern_last(data, b"world"), Some(6));
+        assert_eq!(find_pattern_last(data, b"test"), Some(12));
+        assert_eq!(find_pattern_last(data, b"notfound"), None);
+
+        // find_pattern_last returns last occurrence, not first
+        let data = b"abcXYZdefXYZghi";
+        assert_eq!(find_pattern_last(data, b"XYZ"), Some(9));
     }
 }

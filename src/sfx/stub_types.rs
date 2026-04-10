@@ -14,8 +14,10 @@ pub enum StubType {
     LinuxELF,
     /// macOS Mach-O (Mach Object) format
     MacOSMachO,
-    /// Unix shell script with embedded archive
-    ShellScript,
+    /// Script with shebang (#!) — shell, Python, Perl, etc.
+    ScriptInterpreter,
+    /// Unrecognized executable format
+    Unknown,
 }
 
 impl StubType {
@@ -30,7 +32,7 @@ impl StubType {
     pub fn detect(bytes: &[u8]) -> Result<StubType, ArchiveError> {
         // Check for shell script shebang first (most common Unix SFX)
         if bytes.len() >= 2 && bytes[0] == b'#' && bytes[1] == b'!' {
-            return Ok(StubType::ShellScript);
+            return Ok(StubType::ScriptInterpreter);
         }
 
         // Use goblin to parse executable format
@@ -52,7 +54,8 @@ impl StubType {
             StubType::WindowsPE => "Windows PE executable",
             StubType::LinuxELF => "Linux/BSD ELF executable",
             StubType::MacOSMachO => "macOS Mach-O executable",
-            StubType::ShellScript => "Unix shell script",
+            StubType::ScriptInterpreter => "Script interpreter (shebang)",
+            StubType::Unknown => "Unknown executable format",
         }
     }
 
@@ -62,13 +65,18 @@ impl StubType {
         return matches!(self, StubType::WindowsPE);
 
         #[cfg(target_os = "linux")]
-        return matches!(self, StubType::LinuxELF | StubType::ShellScript);
+        return matches!(self, StubType::LinuxELF | StubType::ScriptInterpreter);
 
         #[cfg(target_os = "macos")]
-        return matches!(self, StubType::MacOSMachO | StubType::ShellScript);
+        return matches!(self, StubType::MacOSMachO | StubType::ScriptInterpreter);
 
         #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-        return matches!(self, StubType::ShellScript);
+        return matches!(self, StubType::ScriptInterpreter);
+    }
+
+    /// Check if this is a known (non-Unknown) stub type
+    pub fn is_known(&self) -> bool {
+        !matches!(self, StubType::Unknown)
     }
 }
 
@@ -79,7 +87,7 @@ mod tests {
     #[test]
     fn test_shell_script_detection() {
         let script = b"#!/bin/sh\necho test";
-        assert_eq!(StubType::detect(script).unwrap(), StubType::ShellScript);
+        assert_eq!(StubType::detect(script).unwrap(), StubType::ScriptInterpreter);
     }
 
     #[test]
@@ -96,7 +104,11 @@ mod tests {
             StubType::MacOSMachO.description(),
             "macOS Mach-O executable"
         );
-        assert_eq!(StubType::ShellScript.description(), "Unix shell script");
+        assert_eq!(
+            StubType::ScriptInterpreter.description(),
+            "Script interpreter (shebang)"
+        );
+        assert_eq!(StubType::Unknown.description(), "Unknown executable format");
     }
 
     #[test]
@@ -106,20 +118,20 @@ mod tests {
         {
             assert!(StubType::WindowsPE.is_native());
             assert!(!StubType::LinuxELF.is_native());
-            assert!(!StubType::ShellScript.is_native());
+            assert!(!StubType::ScriptInterpreter.is_native());
         }
 
         #[cfg(target_os = "linux")]
         {
             assert!(StubType::LinuxELF.is_native());
-            assert!(StubType::ShellScript.is_native());
+            assert!(StubType::ScriptInterpreter.is_native());
             assert!(!StubType::WindowsPE.is_native());
         }
 
         #[cfg(target_os = "macos")]
         {
             assert!(StubType::MacOSMachO.is_native());
-            assert!(StubType::ShellScript.is_native());
+            assert!(StubType::ScriptInterpreter.is_native());
             assert!(!StubType::WindowsPE.is_native());
         }
     }
@@ -137,7 +149,7 @@ mod tests {
         for script in scripts {
             assert_eq!(
                 StubType::detect(script).unwrap(),
-                StubType::ShellScript,
+                StubType::ScriptInterpreter,
                 "Failed to detect: {:?}",
                 String::from_utf8_lossy(script)
             );
@@ -213,7 +225,7 @@ mod tests {
         // Just #! with nothing after
         let minimal = b"#!";
         // This should still be detected as shell script
-        assert_eq!(StubType::detect(minimal).unwrap(), StubType::ShellScript);
+        assert_eq!(StubType::detect(minimal).unwrap(), StubType::ScriptInterpreter);
     }
 
     #[test]
@@ -222,7 +234,7 @@ mod tests {
         let unicode_shebang = "#!/usr/bin/日本語\n".as_bytes();
         assert_eq!(
             StubType::detect(unicode_shebang).unwrap(),
-            StubType::ShellScript
+            StubType::ScriptInterpreter
         );
     }
 
@@ -233,7 +245,7 @@ mod tests {
         long_shebang.extend(vec![b'a'; 1000]); // Very long interpreter path
         assert_eq!(
             StubType::detect(&long_shebang).unwrap(),
-            StubType::ShellScript
+            StubType::ScriptInterpreter
         );
     }
 
@@ -258,7 +270,7 @@ mod tests {
         // Verify PartialEq works correctly
         assert_eq!(StubType::WindowsPE, StubType::WindowsPE);
         assert_ne!(StubType::WindowsPE, StubType::LinuxELF);
-        assert_ne!(StubType::MacOSMachO, StubType::ShellScript);
+        assert_ne!(StubType::MacOSMachO, StubType::ScriptInterpreter);
     }
 
     #[test]
@@ -276,7 +288,8 @@ mod tests {
             StubType::WindowsPE,
             StubType::LinuxELF,
             StubType::MacOSMachO,
-            StubType::ShellScript,
+            StubType::ScriptInterpreter,
+            StubType::Unknown,
         ];
 
         for stub in stub_types {
@@ -296,9 +309,9 @@ mod tests {
 
     #[test]
     fn test_is_native_consistency() {
-        // At least ShellScript should be native on Unix-like systems
+        // At least ScriptInterpreter should be native on Unix-like systems
         #[cfg(unix)]
-        assert!(StubType::ShellScript.is_native());
+        assert!(StubType::ScriptInterpreter.is_native());
 
         // WindowsPE should NOT be native on non-Windows
         #[cfg(not(target_os = "windows"))]

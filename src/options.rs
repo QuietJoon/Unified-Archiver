@@ -1,8 +1,8 @@
 //! Configuration options for archive operations
 
+use crate::ArchiveFormat;
 use crate::entry::ArchiveEntry;
 use crate::security::ExtractionLimits;
-use crate::ArchiveFormat;
 use std::path::PathBuf;
 
 /// Entry filter type alias for filtering archive entries
@@ -357,8 +357,7 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_custom_interval() {
-        let mut limiter =
-            RateLimiter::with_interval(std::time::Duration::from_millis(1));
+        let mut limiter = RateLimiter::with_interval(std::time::Duration::from_millis(1));
         assert!(limiter.should_update()); // first call passes
         // Sleep just past the interval
         std::thread::sleep(std::time::Duration::from_millis(2));

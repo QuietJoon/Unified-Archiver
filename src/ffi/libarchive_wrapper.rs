@@ -176,8 +176,6 @@ impl LibarchiveArchive {
     }
 
     /// Extract all files to destination
-    ///
-    /// Phase 1: Added progress callback support with cancellation
     pub fn extract_all(
         &self,
         dest_path: &Path,
@@ -495,11 +493,34 @@ impl LibarchiveArchive {
                 if entry_name.as_ref() == file_path {
                     // Read data blocks directly into memory
                     let size_hint = archive_entry_size(entry);
-                    let mut buffer = if size_hint > 0 {
-                        Vec::with_capacity(size_hint as usize)
+                    let size_usize = if size_hint > 0 {
+                        match usize::try_from(size_hint) {
+                            Ok(s) => Some(s),
+                            Err(_) => {
+                                archive_read_free(archive);
+                                return Err(ArchiveError::UnsupportedOperation {
+                                    operation: "extract_to_memory".to_string(),
+                                    reason: format!(
+                                        "Entry too large for memory: {} bytes",
+                                        size_hint
+                                    ),
+                                });
+                            }
+                        }
                     } else {
-                        Vec::new()
+                        None
                     };
+
+                    let mut buffer = Vec::new();
+                    if let Some(size) = size_usize {
+                        if buffer.try_reserve(size).is_err() {
+                            archive_read_free(archive);
+                            return Err(ArchiveError::UnsupportedOperation {
+                                operation: "extract_to_memory".to_string(),
+                                reason: format!("Failed to allocate {} bytes", size),
+                            });
+                        }
+                    }
 
                     let mut buff: *const c_void = std::ptr::null();
                     let mut size: usize = 0;
@@ -610,36 +631,64 @@ impl LibarchiveArchive {
                 return Err(ArchiveError::format(Some(format), error_msg));
             }
 
-            // Set compression level - only for TAR with filters, not for ZIP/7z
-            match format {
-                crate::ArchiveFormat::TarGzip
-                | crate::ArchiveFormat::TarBzip2
-                | crate::ArchiveFormat::TarXz => {
-                    use crate::options::CompressionLevel;
-                    let compression_value = match options.level {
-                        CompressionLevel::Store => "0",
-                        CompressionLevel::Fastest => "1",
-                        CompressionLevel::Fast => "3",
-                        CompressionLevel::Normal => "5",
-                        CompressionLevel::Maximum => "7",
-                        CompressionLevel::Ultra => "9",
-                    };
+            // Set compression level for all supported formats
+            {
+                use crate::options::CompressionLevel;
+                let compression_value = match options.level {
+                    CompressionLevel::Store => "0",
+                    CompressionLevel::Fastest => "1",
+                    CompressionLevel::Fast => "3",
+                    CompressionLevel::Normal => "6",
+                    CompressionLevel::Maximum => "8",
+                    CompressionLevel::Ultra => "9",
+                };
 
-                    // Safety: These are static strings without null bytes
-                    if let (Ok(compression_opt), Ok(compression_val)) = (
-                        CString::new("compression-level"),
-                        CString::new(compression_value),
-                    ) {
-                        archive_write_set_filter_option(
-                            archive,
-                            std::ptr::null(),
-                            compression_opt.as_ptr(),
-                            compression_val.as_ptr(),
-                        );
+                match format {
+                    crate::ArchiveFormat::TarGzip
+                    | crate::ArchiveFormat::TarBzip2
+                    | crate::ArchiveFormat::TarXz => {
+                        // TAR variants: set filter compression level
+                        if let (Ok(opt), Ok(val)) = (
+                            CString::new("compression-level"),
+                            CString::new(compression_value),
+                        ) {
+                            archive_write_set_filter_option(
+                                archive,
+                                std::ptr::null(),
+                                opt.as_ptr(),
+                                val.as_ptr(),
+                            );
+                        }
                     }
-                }
-                _ => {
-                    // ZIP and 7z handle compression differently, skip filter options
+                    crate::ArchiveFormat::Zip => {
+                        // ZIP: set deflate compression level via format option
+                        if let (Ok(opt), Ok(val)) = (
+                            CString::new("compression-level"),
+                            CString::new(compression_value),
+                        ) {
+                            archive_write_set_format_option(
+                                archive,
+                                std::ptr::null(),
+                                opt.as_ptr(),
+                                val.as_ptr(),
+                            );
+                        }
+                    }
+                    crate::ArchiveFormat::SevenZip => {
+                        // 7z: set LZMA compression level via format option
+                        if let (Ok(opt), Ok(val)) = (
+                            CString::new("compression-level"),
+                            CString::new(compression_value),
+                        ) {
+                            archive_write_set_format_option(
+                                archive,
+                                std::ptr::null(),
+                                opt.as_ptr(),
+                                val.as_ptr(),
+                            );
+                        }
+                    }
+                    _ => {}
                 }
             }
 
@@ -691,8 +740,16 @@ impl LibarchiveArchive {
             }
 
             // Set pathname
-            let c_path = CString::new(archive_path)
-                .map_err(|_| ArchiveError::invalid_path(archive_path, "Contains null byte"))?;
+            let c_path = match CString::new(archive_path) {
+                Ok(c) => c,
+                Err(_) => {
+                    archive_entry_free(entry);
+                    return Err(ArchiveError::invalid_path(
+                        archive_path,
+                        "Contains null byte",
+                    ));
+                }
+            };
             archive_entry_set_pathname(entry, c_path.as_ptr());
 
             // Set file type and size
@@ -727,10 +784,28 @@ impl LibarchiveArchive {
                         std::io::Error::other(error_msg),
                     ));
                 }
+
+                if bytes_written as usize != data.len() {
+                    archive_entry_free(entry);
+                    return Err(ArchiveError::io(
+                        "write_data",
+                        archive_path,
+                        std::io::Error::other(format!(
+                            "Short write: requested {} bytes, wrote {} bytes",
+                            data.len(),
+                            bytes_written
+                        )),
+                    ));
+                }
             }
 
             // Finish entry
-            archive_write_finish_entry(write_handle);
+            let finish_result = archive_write_finish_entry(write_handle);
+            if finish_result != ARCHIVE_OK {
+                let error_msg = get_archive_error(write_handle);
+                archive_entry_free(entry);
+                return Err(ArchiveError::format(None, error_msg));
+            }
             archive_entry_free(entry);
         }
 
@@ -753,14 +828,18 @@ impl LibarchiveArchive {
             }
 
             // Ensure trailing slash for directory path
-            let dir_path = if archive_path.ends_with('/') {
-                archive_path.to_string()
-            } else {
-                format!("{}/", archive_path)
-            };
+            let dir_path = super::common::ensure_trailing_slash(archive_path);
 
-            let c_path = CString::new(dir_path)
-                .map_err(|_| ArchiveError::invalid_path(archive_path, "Contains null byte"))?;
+            let c_path = match CString::new(dir_path) {
+                Ok(c) => c,
+                Err(_) => {
+                    archive_entry_free(entry);
+                    return Err(ArchiveError::invalid_path(
+                        archive_path,
+                        "Contains null byte",
+                    ));
+                }
+            };
             archive_entry_set_pathname(entry, c_path.as_ptr());
 
             archive_entry_set_filetype(entry, AE_IFDIR);
@@ -779,7 +858,12 @@ impl LibarchiveArchive {
                 return Err(ArchiveError::format(None, error_msg));
             }
 
-            archive_write_finish_entry(write_handle);
+            let finish_result = archive_write_finish_entry(write_handle);
+            if finish_result != ARCHIVE_OK {
+                let error_msg = get_archive_error(write_handle);
+                archive_entry_free(entry);
+                return Err(ArchiveError::format(None, error_msg));
+            }
             archive_entry_free(entry);
         }
 
@@ -838,8 +922,16 @@ impl LibarchiveArchive {
             }
 
             // Set pathname
-            let c_path = CString::new(archive_path)
-                .map_err(|_| ArchiveError::invalid_path(archive_path, "Contains null byte"))?;
+            let c_path = match CString::new(archive_path) {
+                Ok(c) => c,
+                Err(_) => {
+                    archive_entry_free(entry);
+                    return Err(ArchiveError::invalid_path(
+                        archive_path,
+                        "Contains null byte",
+                    ));
+                }
+            };
             archive_entry_set_pathname(entry, c_path.as_ptr());
 
             // Set file type and size
@@ -899,10 +991,27 @@ impl LibarchiveArchive {
                         std::io::Error::other(error_msg),
                     ));
                 }
+
+                if bytes_written as usize != bytes_read {
+                    archive_entry_free(entry);
+                    return Err(ArchiveError::io(
+                        "write_data",
+                        archive_path,
+                        std::io::Error::other(format!(
+                            "Short write: requested {} bytes, wrote {} bytes",
+                            bytes_read, bytes_written
+                        )),
+                    ));
+                }
             }
 
             // Finish entry
-            archive_write_finish_entry(write_handle);
+            let finish_result = archive_write_finish_entry(write_handle);
+            if finish_result != ARCHIVE_OK {
+                let error_msg = get_archive_error(write_handle);
+                archive_entry_free(entry);
+                return Err(ArchiveError::format(None, error_msg));
+            }
             archive_entry_free(entry);
         }
 
@@ -938,7 +1047,7 @@ impl LibarchiveArchive {
             })?;
 
             let path = entry.path();
-            if path.is_file() {
+            if entry.file_type().is_file() {
                 // Compute relative path within archive
                 let archive_path = path
                     .strip_prefix(base_path)
@@ -956,31 +1065,67 @@ impl LibarchiveArchive {
 
     /// Test archive integrity by verifying checksums for all files
     ///
-    /// Extracts each file to memory and verifies checksums (CRC32 for TAR, etc.).
+    /// Streams each file and verifies checksums (libarchive validates during read).
     /// Returns a list of file paths that failed verification.
     pub fn test_integrity(&self) -> Result<Vec<String>> {
+        let c_path = CString::new(self.path.clone())
+            .map_err(|_| ArchiveError::invalid_path(&self.path, "Contains null byte"))?;
+
         let mut failed_files = Vec::new();
 
-        // Get all entries
-        let entries = self.list_files()?;
+        unsafe {
+            let archive = Self::open_read_handle(&c_path)?;
 
-        for entry in entries.iter() {
-            // Skip directories
-            if entry.is_directory() {
-                continue;
+            let mut entry_ptr: *mut LibarchiveEntry = std::ptr::null_mut();
+
+            loop {
+                let result = archive_read_next_header(archive, &mut entry_ptr);
+                if result == ARCHIVE_EOF {
+                    break;
+                } else if result != ARCHIVE_OK && result != ARCHIVE_WARN {
+                    let error_msg = get_archive_error(archive);
+                    archive_read_free(archive);
+                    return Err(ArchiveError::format(None, error_msg));
+                }
+
+                let Some(entry) = parse_entry(entry_ptr) else {
+                    archive_read_data_skip(archive);
+                    continue;
+                };
+
+                if entry.entry_type != EntryType::File {
+                    archive_read_data_skip(archive);
+                    continue;
+                }
+
+                let path = entry.path;
+
+                // Stream through data — libarchive validates checksums during read
+                let mut buf: *const c_void = std::ptr::null();
+                let mut size: usize = 0;
+                let mut offset: c_longlong = 0;
+                let mut failed = false;
+                loop {
+                    let r = archive_read_data_block(archive, &mut buf, &mut size, &mut offset);
+                    if r == ARCHIVE_EOF {
+                        break;
+                    }
+                    if r != ARCHIVE_OK {
+                        failed = true;
+                        // Drain remaining blocks so libarchive state stays consistent
+                        while archive_read_data_block(archive, &mut buf, &mut size, &mut offset)
+                            == ARCHIVE_OK
+                        {}
+                        break;
+                    }
+                }
+
+                if failed {
+                    failed_files.push(path);
+                }
             }
 
-            // Try to extract - libarchive computes checksums during extraction
-            match self.extract_to_memory(&entry.path) {
-                Ok(_) => {
-                    // Checksum verification happens during extraction
-                    // If we got here, verification passed
-                }
-                Err(_) => {
-                    // Extraction/verification failed
-                    failed_files.push(entry.path.clone());
-                }
-            }
+            archive_read_free(archive);
         }
 
         Ok(failed_files)
@@ -1020,7 +1165,7 @@ unsafe fn copy_data(ar: *mut Archive, aw: *mut Archive) -> Result<()> {
 
         if r != ARCHIVE_OK {
             let error_msg = unsafe { get_archive_error(ar) };
-            // Phase 2.5: Detect corruption/checksum errors from libarchive
+            // libarchive error strings for checksum failures vary; match on substring
             if error_msg.contains("checksum")
                 || error_msg.contains("CRC")
                 || error_msg.contains("Checksum")
@@ -1215,9 +1360,8 @@ impl std::io::Read for LibarchiveStreamReader {
             return Ok(0);
         }
 
-        let n = unsafe {
-            archive_read_data(self.archive, buf.as_mut_ptr() as *mut c_void, buf.len())
-        };
+        let n =
+            unsafe { archive_read_data(self.archive, buf.as_mut_ptr() as *mut c_void, buf.len()) };
 
         if n == 0 {
             self.eof = true;

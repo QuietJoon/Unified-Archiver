@@ -9,8 +9,8 @@ use crate::options::CompressionOptions;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use zip::write::{SimpleFileOptions, ZipWriter as RawZipWriter};
 use zip::CompressionMethod;
+use zip::write::{SimpleFileOptions, ZipWriter as RawZipWriter};
 
 /// Native Rust ZIP archive writer
 ///
@@ -35,17 +35,19 @@ impl ZipWriter {
 
         let writer = RawZipWriter::new(file);
 
-        // Map compression level to zip crate's compression method
-        let compression = match compression_options.level {
-            crate::options::CompressionLevel::Store => CompressionMethod::Stored,
-            crate::options::CompressionLevel::Fastest => CompressionMethod::Deflated,
-            crate::options::CompressionLevel::Fast => CompressionMethod::Deflated,
-            crate::options::CompressionLevel::Normal => CompressionMethod::Deflated,
-            crate::options::CompressionLevel::Maximum => CompressionMethod::Deflated,
-            crate::options::CompressionLevel::Ultra => CompressionMethod::Deflated,
+        // Map compression level to zip crate's compression method and deflate level
+        let (compression, deflate_level) = match compression_options.level {
+            crate::options::CompressionLevel::Store => (CompressionMethod::Stored, None),
+            crate::options::CompressionLevel::Fastest => (CompressionMethod::Deflated, Some(1)),
+            crate::options::CompressionLevel::Fast => (CompressionMethod::Deflated, Some(3)),
+            crate::options::CompressionLevel::Normal => (CompressionMethod::Deflated, Some(6)),
+            crate::options::CompressionLevel::Maximum => (CompressionMethod::Deflated, Some(8)),
+            crate::options::CompressionLevel::Ultra => (CompressionMethod::Deflated, Some(9)),
         };
 
-        let options = SimpleFileOptions::default().compression_method(compression);
+        let options = SimpleFileOptions::default()
+            .compression_method(compression)
+            .compression_level(deflate_level.map(|l| l as i64));
 
         Ok(Self {
             writer: Some(writer),
@@ -107,18 +109,11 @@ impl ZipWriter {
             ArchiveError::format(Some(ArchiveFormat::Zip), "Archive already closed")
         })?;
 
-        // ZIP format requires trailing slash for directories
-        let dir_path = if archive_path.ends_with('/') {
-            archive_path.to_string()
-        } else {
-            format!("{}/", archive_path)
-        };
+        let dir_path = super::common::ensure_trailing_slash(archive_path);
 
-        writer
-            .add_directory(&dir_path, self.options)
-            .map_err(|e| {
-                ArchiveError::format(Some(ArchiveFormat::Zip), format!("Add directory: {}", e))
-            })?;
+        writer.add_directory(&dir_path, self.options).map_err(|e| {
+            ArchiveError::format(Some(ArchiveFormat::Zip), format!("Add directory: {}", e))
+        })?;
 
         Ok(())
     }
@@ -160,24 +155,13 @@ impl ZipWriter {
                 continue;
             }
 
-            // ZIP format requires forward slashes for cross-platform compatibility
-            let archive_path = relative_path
-                .to_string_lossy()
-                .replace(std::path::MAIN_SEPARATOR, "/");
+            let archive_path = super::common::normalize_path(&relative_path.to_string_lossy());
 
             if entry.file_type().is_file() {
                 // Add file
                 self.add_file_from_path(entry_path, &archive_path)?;
             } else if entry.file_type().is_dir() {
-                // Add directory entry (ZIP requires trailing slash for directories)
-                let writer = self.writer.as_mut().ok_or_else(|| {
-                    ArchiveError::format(Some(ArchiveFormat::Zip), "Archive already closed")
-                })?;
-
-                let dir_path = format!("{}/", archive_path);
-                writer.add_directory(&dir_path, self.options).map_err(|e| {
-                    ArchiveError::format(Some(ArchiveFormat::Zip), format!("Add directory: {}", e))
-                })?;
+                self.add_directory_entry(&archive_path)?;
             }
         }
 

@@ -49,6 +49,10 @@ pub(crate) enum ArchiveBackend {
 /// - Multiple archives can be processed concurrently (different instances)
 /// - No data races on the same archive (no shared mutable access)
 ///
+/// **Backend Caveats**:
+/// - RAR: UnRAR backend has global state; concurrent RAR operations on
+///   different archives may produce CRC errors. Use sequential access for RAR.
+///
 /// # Examples
 ///
 /// ```no_run
@@ -79,7 +83,6 @@ pub struct Archive {
     /// Archive file path
     pub(crate) path: PathBuf,
     /// Access mode
-    #[allow(dead_code)] // Used with Write/Modify modes in Phase 5-6
     pub(crate) mode: ArchiveMode,
     /// Detected format
     pub(crate) format: ArchiveFormat,
@@ -654,7 +657,11 @@ mod tests {
     fn test_open_encrypted_zip() {
         // Opening an unencrypted ZIP with a password should succeed (ZipReader backend)
         let result = Archive::open_encrypted(fixture("test.zip"), "password");
-        assert!(result.is_ok(), "ZIP encrypted open should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "ZIP encrypted open should succeed: {:?}",
+            result.err()
+        );
         let archive = result.unwrap();
         assert_eq!(archive.format(), ArchiveFormat::Zip);
     }

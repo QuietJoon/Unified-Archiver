@@ -3,7 +3,6 @@
 //! Verifies progress reporting and cancellation support
 
 use std::ops::ControlFlow;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use unified_archive::{Archive, ExtractionOptions};
 
@@ -95,7 +94,6 @@ fn test_progress_callback_cancellation() {
 }
 
 #[test]
-#[ignore] // Libarchive has issues reopening archives after list_files() call for progress tracking
 fn test_progress_callback_zip() {
     let archive = Archive::open("tests/fixtures/test.zip").expect("Failed to open ZIP archive");
 
@@ -137,7 +135,6 @@ fn test_progress_callback_zip() {
 }
 
 #[test]
-#[ignore] // Libarchive has issues reopening archives after list_files() call for progress tracking
 fn test_progress_callback_7z() {
     let archive = Archive::open("tests/fixtures/test.7z").expect("Failed to open 7z archive");
 

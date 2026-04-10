@@ -1,7 +1,6 @@
 // Comprehensive integrity checking tests for critical core library validation
 // These tests ensure archive integrity verification works correctly under all conditions
 
-use std::sync::Arc;
 use std::thread;
 use unified_archive::{Archive, ArchiveError};
 
@@ -186,10 +185,6 @@ fn test_validation_empty_file_in_archive() {
                 .expect("Empty file validation should succeed");
 
             // Empty files should still validate (CRC32 of empty = 0x00000000)
-            assert!(
-                report.validated >= 0,
-                "Empty files should not cause validation failure"
-            );
             println!("✓ Empty file validation: {} files", report.validated);
         }
     }

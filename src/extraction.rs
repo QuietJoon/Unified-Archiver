@@ -5,10 +5,11 @@
 
 use crate::archive::{Archive, ArchiveBackend};
 use crate::entry::ArchiveEntry;
-use crate::error::{ArchiveError, Result};
 use crate::error::ops;
+use crate::error::{ArchiveError, Result};
 use crate::options::ExtractionOptions;
 use crate::security::{check_extraction_safe, validate_entry_path};
+use std::collections::HashSet;
 use std::path::Path;
 
 /// Ensure destination directory exists
@@ -25,13 +26,24 @@ fn check_overwrite_conflicts(
     overwrite: bool,
     operation: &str,
 ) -> Result<()> {
-    if overwrite {
-        return Ok(());
-    }
+    let mut seen_outputs = HashSet::new();
 
     for entry in entries.iter().filter(|entry| entry.is_file()) {
         let output_path = validate_entry_path(&entry.path, destination)?;
-        if output_path.exists() {
+
+        // Detect in-batch collisions (multiple entries mapping to same output path)
+        if !seen_outputs.insert(output_path.clone()) {
+            return Err(ArchiveError::UnsupportedOperation {
+                operation: operation.to_string(),
+                reason: format!(
+                    "Multiple entries map to same output path: '{}' (archive entry: '{}')",
+                    output_path.display(),
+                    entry.path
+                ),
+            });
+        }
+
+        if !overwrite && output_path.exists() {
             return Err(ArchiveError::UnsupportedOperation {
                 operation: operation.to_string(),
                 reason: format!(
@@ -80,9 +92,7 @@ fn extract_single_entry(
         ArchiveBackend::SevenZ(sevenz) => {
             sevenz.extract_file_with_options(entry_path, dest, overwrite, verify_crc32)
         }
-        ArchiveBackend::ZipWriter(_) => {
-            Err(ArchiveError::write_mode_only(ops::EXTRACT_FILTERED))
-        }
+        ArchiveBackend::ZipWriter(_) => Err(ArchiveError::write_mode_only(ops::EXTRACT_FILTERED)),
         ArchiveBackend::ZipReader(zip) => {
             zip.extract_file_with_options(entry_path, dest, overwrite, verify_crc32)
         }
@@ -282,7 +292,9 @@ impl Archive {
             ArchiveBackend::Unrar(unrar) => unrar.extract_to_memory(file_path),
             ArchiveBackend::Piz(piz) => piz.extract_to_memory(file_path),
             ArchiveBackend::SevenZ(sevenz) => sevenz.extract_to_memory(file_path),
-            ArchiveBackend::ZipWriter(_) => Err(ArchiveError::write_mode_only(ops::EXTRACT_TO_MEMORY)),
+            ArchiveBackend::ZipWriter(_) => {
+                Err(ArchiveError::write_mode_only(ops::EXTRACT_TO_MEMORY))
+            }
             ArchiveBackend::ZipReader(zip) => zip.extract_to_memory(file_path),
             ArchiveBackend::Libarchive(libarchive) => libarchive.extract_to_memory(file_path),
         }
@@ -317,7 +329,9 @@ impl Archive {
             ArchiveBackend::Unrar(unrar) => unrar.extract_to_stream(file_path),
             ArchiveBackend::Piz(piz) => piz.extract_to_stream(file_path),
             ArchiveBackend::SevenZ(sevenz) => sevenz.extract_to_stream(file_path),
-            ArchiveBackend::ZipWriter(_) => Err(ArchiveError::write_mode_only(ops::EXTRACT_TO_STREAM)),
+            ArchiveBackend::ZipWriter(_) => {
+                Err(ArchiveError::write_mode_only(ops::EXTRACT_TO_STREAM))
+            }
             ArchiveBackend::ZipReader(zip) => zip.extract_to_stream(file_path),
             ArchiveBackend::Libarchive(libarchive) => libarchive.extract_to_stream(file_path),
         }
@@ -373,13 +387,21 @@ impl Archive {
 
         let extract_one = |entry: &&ArchiveEntry| -> Result<()> {
             extract_single_entry(
-                &archive_path, password.as_deref(), &entry.path, &extraction_dest,
-                overwrite, verify_crc32, preserve_permissions, preserve_times,
+                &archive_path,
+                password.as_deref(),
+                &entry.path,
+                &extraction_dest,
+                overwrite,
+                verify_crc32,
+                preserve_permissions,
+                preserve_times,
             )
         };
 
         // Disable parallel extraction for solid archives (sequential decompression required)
-        let use_parallel = to_extract.len() >= 4 && !self.is_solid().unwrap_or(false);
+        // Use the password-aware archive handle for solidness check to avoid
+        // incorrect results when self is an unauthenticated handle
+        let use_parallel = to_extract.len() >= 4 && !archive.is_solid().unwrap_or(false);
 
         if use_parallel {
             // Parallel extraction with early error return
@@ -430,6 +452,10 @@ impl Archive {
             return Ok(());
         }
 
+        // Deduplicate requested paths
+        let mut seen = HashSet::new();
+        let paths: Vec<&str> = paths.iter().copied().filter(|p| seen.insert(*p)).collect();
+
         let listing_archive = if let Some(password) = options.password.as_deref() {
             Some(open_archive_for_extraction(&self.path, Some(password))?)
         } else {
@@ -439,7 +465,7 @@ impl Archive {
 
         let entries = archive.list_files()?;
         let mut to_extract_entries = Vec::with_capacity(paths.len());
-        for &path in paths {
+        for &path in &paths {
             let entry = entries
                 .iter()
                 .find(|entry| entry.path == path)
@@ -472,13 +498,20 @@ impl Archive {
 
         let extract_one = |path: &&str| -> Result<()> {
             extract_single_entry(
-                &archive_path, password.as_deref(), path, &extraction_dest,
-                overwrite, verify_crc32, preserve_permissions, preserve_times,
+                &archive_path,
+                password.as_deref(),
+                path,
+                &extraction_dest,
+                overwrite,
+                verify_crc32,
+                preserve_permissions,
+                preserve_times,
             )
         };
 
         // Disable parallel extraction for solid archives (sequential decompression required)
-        let use_parallel = paths.len() >= 4 && !self.is_solid().unwrap_or(false);
+        // Use the password-aware archive handle for solidness check
+        let use_parallel = paths.len() >= 4 && !archive.is_solid().unwrap_or(false);
 
         if use_parallel {
             // Parallel extraction with early error return
@@ -540,6 +573,10 @@ impl Archive {
             return Ok(());
         }
 
+        // Deduplicate requested IDs
+        let mut seen = HashSet::new();
+        let ids: Vec<usize> = ids.iter().copied().filter(|id| seen.insert(*id)).collect();
+
         let listing_archive = if let Some(password) = options.password.as_deref() {
             Some(open_archive_for_extraction(&self.path, Some(password))?)
         } else {
@@ -552,7 +589,7 @@ impl Archive {
 
         let mut paths = Vec::with_capacity(ids.len());
         let mut to_extract_entries = Vec::with_capacity(ids.len());
-        for &id in ids {
+        for &id in &ids {
             let entry = entries
                 .get(id)
                 .ok_or_else(|| ArchiveError::UnsupportedOperation {
@@ -589,13 +626,20 @@ impl Archive {
 
         let extract_one = |path: &&str| -> Result<()> {
             extract_single_entry(
-                &archive_path, password.as_deref(), path, &extraction_dest,
-                overwrite, verify_crc32, preserve_permissions, preserve_times,
+                &archive_path,
+                password.as_deref(),
+                path,
+                &extraction_dest,
+                overwrite,
+                verify_crc32,
+                preserve_permissions,
+                preserve_times,
             )
         };
 
         // Disable parallel extraction for solid archives (sequential decompression required)
-        let use_parallel = paths.len() >= 4 && !self.is_solid().unwrap_or(false);
+        // Use the password-aware archive handle for solidness check
+        let use_parallel = paths.len() >= 4 && !archive.is_solid().unwrap_or(false);
 
         if use_parallel {
             // Parallel extraction with early error return

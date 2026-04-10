@@ -5,7 +5,9 @@
 
 use crate::entry::{ArchiveEntry, EntryType};
 use crate::error::{ArchiveError, Result};
-use crate::ffi::common::{copy_with_optional_crc, create_output_file, normalize_path};
+use crate::ffi::common::{
+    compute_crc32_reader, copy_with_optional_crc, create_output_file, normalize_path,
+};
 use crate::format::ArchiveFormat;
 use crate::options::ProgressCallback;
 use crate::security::{get_max_mmap_size, sanitize_entry_path, verify_crc32};
@@ -39,8 +41,8 @@ impl PizArchive {
 
     /// Memory-map the archive file with size limit check
     fn open_mmap(&self, operation: &str) -> Result<Mmap> {
-        let file = File::open(&self.path)
-            .map_err(|e| ArchiveError::io("open", self.path.clone(), e))?;
+        let file =
+            File::open(&self.path).map_err(|e| ArchiveError::io("open", self.path.clone(), e))?;
 
         let metadata = file
             .metadata()
@@ -58,8 +60,7 @@ impl PizArchive {
             });
         }
 
-        unsafe { Mmap::map(&file) }
-            .map_err(|e| ArchiveError::io("mmap", self.path.clone(), e))
+        unsafe { Mmap::map(&file) }.map_err(|e| ArchiveError::io("mmap", self.path.clone(), e))
     }
 
     /// List all files in ZIP archive with CRC32 from metadata
@@ -385,29 +386,36 @@ impl PizArchive {
 
     /// Test archive integrity by verifying CRC32 for all files
     ///
-    /// Extracts each file to memory and verifies its CRC32 checksum.
+    /// Opens a single mmap, iterates entries, and stream-verifies CRC32.
     /// Returns a list of file paths that failed verification.
     pub fn test_integrity(&self) -> Result<Vec<String>> {
+        let mapping = self.open_mmap("test_integrity")?;
+        let archive = piz::ZipArchive::new(&mapping).map_err(|e| {
+            ArchiveError::format(Some(ArchiveFormat::Zip), format!("Invalid ZIP: {}", e))
+        })?;
+
         let mut failed_files = Vec::new();
 
-        // Get all entries
-        let entries = self.list_files()?;
-
-        for entry in entries.iter() {
-            // Skip directories
-            if entry.is_directory() {
+        for entry_metadata in archive.entries().iter() {
+            if !entry_metadata.is_file() {
                 continue;
             }
 
-            // Try to extract and verify CRC32
-            match self.extract_to_memory(&entry.path) {
-                Ok(_) => {
-                    // CRC32 verification happens inside extract_to_memory
-                    // If we got here, verification passed
-                }
+            let path = normalize_path(entry_metadata.path.as_ref().as_str());
+            let expected_crc = entry_metadata.crc32;
+
+            match archive.read(entry_metadata) {
+                Ok(mut reader) => match compute_crc32_reader(&mut reader, &self.path) {
+                    Ok(actual_crc) if actual_crc != expected_crc => {
+                        failed_files.push(path);
+                    }
+                    Err(_) => {
+                        failed_files.push(path);
+                    }
+                    _ => {}
+                },
                 Err(_) => {
-                    // Verification failed
-                    failed_files.push(entry.path.clone());
+                    failed_files.push(path);
                 }
             }
         }

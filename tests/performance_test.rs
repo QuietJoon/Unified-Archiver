@@ -10,7 +10,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 use std::time::Instant;
-use unified_archive::{Archive, ExtractionOptions};
+use unified_archive::Archive;
 
 /// Helper to get test fixtures directory
 fn fixtures_dir() -> PathBuf {

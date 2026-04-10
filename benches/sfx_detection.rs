@@ -162,7 +162,7 @@ fn bench_multiple_signatures(c: &mut Criterion) {
     temp.write_all(b"#!/bin/sh\n").unwrap();
 
     // Multiple signatures at different offsets
-    for i in 0..10 {
+    for _i in 0..10 {
         let padding = vec![0u8; 1000];
         temp.write_all(&padding).unwrap();
         temp.write_all(b"PK\x03\x04").unwrap(); // ZIP signature

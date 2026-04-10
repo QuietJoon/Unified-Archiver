@@ -7,15 +7,16 @@
 //! 4. Panic in callback treated as cancellation
 //!
 //! Note: The current API uses ExtractionOptions.progress (a boxed ProgressCallback trait)
-//! rather than a separate extract_all_with_progress method. Progress callbacks only
-//! work reliably for RAR format; ZIP/7z ignore them due to libarchive reopening issues.
+//! rather than a separate extract_all_with_progress method. ZIP (Piz) and 7z (SevenZ)
+//! now support progress callbacks. RAR contract tests remain disabled due to UnRAR
+//! global state issues.
 
 #[path = "../common/mod.rs"]
 mod common;
 
 use common::fixture;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use unified_archive::{Archive, ExtractionOptions};
 
 // ── Contract 1: Progress callback is called ──

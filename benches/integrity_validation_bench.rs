@@ -1,7 +1,7 @@
 // Performance benchmarks for archive integrity validation
 // Critical for ensuring the library performs well in production
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::time::Duration;
 use unified_archive::Archive;
 

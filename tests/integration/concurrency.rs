@@ -4,8 +4,7 @@
 //! - FR-020: Thread-safe APIs for concurrent archive operations on different files
 //! - FR-021: Multiple archive handles used concurrently without blocking
 
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -210,24 +209,6 @@ fn test_concurrent_extraction_different_archives() {
 }
 
 #[test]
-fn test_archive_send_sync_bounds() {
-    // Verify Archive type implements Send (can be transferred between threads)
-    // This is a compile-time check - if it compiles, the test passes
-
-    fn assert_send<T: Send>() {}
-    fn assert_sync<T: Sync>() {}
-
-    // These calls will fail to compile if Archive doesn't implement Send/Sync
-    // Note: We're testing that the types satisfy the bounds, not runtime behavior
-    // assert_send::<unified_archive::Archive>(); // Uncomment if Archive is Send
-    // assert_sync::<unified_archive::Archive>(); // Uncomment if Archive is Sync
-
-    // For now, just document that thread-safety is achieved through
-    // separate Archive instances per thread
-    assert!(true, "Thread-safety achieved via separate instances");
-}
-
-#[test]
 fn test_no_data_races_on_repeated_access() {
     // Test that repeated concurrent access doesn't cause data races
     if !zip_available() {
@@ -314,28 +295,5 @@ fn test_concurrent_performance_no_excessive_blocking() {
         elapsed < Duration::from_secs(10),
         "Concurrent operations took too long: {:?}",
         elapsed
-    );
-}
-
-#[test]
-fn test_thread_safety_documentation() {
-    // Document the thread-safety guarantees (FR-020, FR-021)
-
-    // FR-020: Thread-safe APIs for concurrent archive operations on different files
-    // - Multiple threads can open different archive files simultaneously
-    // - Each thread gets its own Archive instance
-
-    // FR-021: Multiple archive handles can be used concurrently without blocking
-    // - Archive instances are independent
-    // - No global locks that would serialize operations
-
-    // Implementation approach:
-    // - Archive instances do not share mutable state
-    // - FFI calls may have their own synchronization (libarchive is thread-safe)
-    // - Each Archive has its own file handle
-
-    assert!(
-        true,
-        "Thread-safety documented in FR-020/FR-021 requirements"
     );
 }

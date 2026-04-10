@@ -44,6 +44,17 @@ impl SevenZArchive {
         &self.path
     }
 
+    /// Open a 7z ArchiveReader with the stored path and password
+    fn open_reader(&self) -> Result<ArchiveReader<std::fs::File>> {
+        let password = self
+            .password
+            .as_ref()
+            .map_or_else(Password::empty, |p| Password::from(p.as_str()));
+        ArchiveReader::open(&self.path, password).map_err(|e| {
+            ArchiveError::format(Some(ArchiveFormat::SevenZip), format!("Invalid 7z: {}", e))
+        })
+    }
+
     /// Check if archive uses solid compression
     ///
     /// 7z solid compression compresses multiple files together in a single stream,
@@ -54,14 +65,7 @@ impl SevenZArchive {
     /// * `Ok(false)` - Archive uses non-solid (independent file) compression
     /// * `Err(...)` - I/O error or invalid archive
     pub fn is_solid(&self) -> Result<bool> {
-        let password = self
-            .password
-            .as_ref()
-            .map_or_else(Password::empty, |p| Password::from(p.as_str()));
-
-        let reader = ArchiveReader::open(&self.path, password).map_err(|e| {
-            ArchiveError::format(Some(ArchiveFormat::SevenZip), format!("Invalid 7z: {}", e))
-        })?;
+        let reader = self.open_reader()?;
 
         let archive = reader.archive();
 
@@ -73,25 +77,16 @@ impl SevenZArchive {
     ///
     /// CRC32 is read from 7z headers when available.
     pub fn list_files(&self) -> Result<Vec<ArchiveEntry>> {
-        let password = self
-            .password
-            .as_ref()
-            .map_or_else(Password::empty, |p| Password::from(p.as_str()));
-
-        let reader = ArchiveReader::open(&self.path, password).map_err(|e| {
-            ArchiveError::format(Some(ArchiveFormat::SevenZip), format!("Invalid 7z: {}", e))
-        })?;
-
+        let reader = self.open_reader()?;
         let archive = reader.archive();
         let mut entries = Vec::new();
 
         for (index, entry) in archive.files.iter().enumerate() {
             let mut parsed_entry = self.parse_entry(entry)?;
 
-            // CRC32 from 7z metadata
+            // CRC32 from 7z metadata (0 is valid — it's the CRC32 of empty content)
             // Note: entry.crc is u64; validate it fits in u32 before casting
-            // Standard CRC32 should always fit, but corrupted files may have invalid data
-            if entry.crc != 0 && entry.crc <= u32::MAX as u64 {
+            if entry.crc <= u32::MAX as u64 {
                 parsed_entry.crc32 = Some(entry.crc as u32);
             }
 
@@ -161,14 +156,7 @@ impl SevenZArchive {
         overwrite: bool,
         verify_crc32: bool,
     ) -> Result<()> {
-        let password = self
-            .password
-            .as_ref()
-            .map_or_else(Password::empty, |p| Password::from(p.as_str()));
-
-        let mut reader = ArchiveReader::open(&self.path, password).map_err(|e| {
-            ArchiveError::format(Some(ArchiveFormat::SevenZip), format!("Invalid 7z: {}", e))
-        })?;
+        let mut reader = self.open_reader()?;
 
         // Calculate total size for progress
         let total_bytes: u64 = if progress.is_some() {
@@ -234,7 +222,7 @@ impl SevenZArchive {
                     }
                 };
 
-                let expected_crc = if verify_crc32 && entry.crc != 0 {
+                let expected_crc = if verify_crc32 {
                     Some(entry.crc as u32)
                 } else {
                     None
@@ -286,14 +274,7 @@ impl SevenZArchive {
         overwrite: bool,
         verify_crc32: bool,
     ) -> Result<()> {
-        let password = self
-            .password
-            .as_ref()
-            .map_or_else(Password::empty, |p| Password::from(p.as_str()));
-
-        let mut reader = ArchiveReader::open(&self.path, password).map_err(|e| {
-            ArchiveError::format(Some(ArchiveFormat::SevenZip), format!("Invalid 7z: {}", e))
-        })?;
+        let mut reader = self.open_reader()?;
 
         let mut found = false;
         // Sanitize entry path to prevent path traversal
@@ -323,7 +304,7 @@ impl SevenZArchive {
                     }
                 };
 
-                let expected_crc = if verify_crc32 && entry.crc != 0 {
+                let expected_crc = if verify_crc32 {
                     Some(entry.crc as u32)
                 } else {
                     None
@@ -366,14 +347,7 @@ impl SevenZArchive {
 
     /// Extract a single file to memory
     pub fn extract_to_memory(&self, file_path: &str) -> Result<Vec<u8>> {
-        let password = self
-            .password
-            .as_ref()
-            .map_or_else(Password::empty, |p| Password::from(p.as_str()));
-
-        let mut reader = ArchiveReader::open(&self.path, password).map_err(|e| {
-            ArchiveError::format(Some(ArchiveFormat::SevenZip), format!("Invalid 7z: {}", e))
-        })?;
+        let mut reader = self.open_reader()?;
 
         let mut result: Option<Vec<u8>> = None;
         let mut extraction_error: Option<ArchiveError> = None;
@@ -462,29 +436,40 @@ impl SevenZArchive {
     /// 7z format includes CRC32 validation during extraction.
     /// Returns a list of file paths that failed verification.
     pub fn test_integrity(&self) -> Result<Vec<String>> {
+        let mut reader = self.open_reader()?;
+
         let mut failed_files = Vec::new();
 
-        // Get all entries
-        let entries = self.list_files()?;
-
-        for entry in entries.iter() {
-            // Skip directories
-            if entry.is_directory() {
-                continue;
-            }
-
-            // Try to extract - sevenz_rust2 verifies CRC32 during extraction
-            match self.extract_to_memory(&entry.path) {
-                Ok(_) => {
-                    // CRC32 verification happens during extraction
-                    // If we got here, verification passed
+        // Single-pass: sevenz-rust2 verifies CRC32 during decompression
+        reader
+            .for_each_entries(|entry, entry_reader| {
+                if entry.is_directory {
+                    return Ok(true);
                 }
-                Err(_) => {
-                    // Extraction/verification failed
-                    failed_files.push(entry.path.clone());
+
+                let path = normalize_path(&entry.name);
+                let mut buf = [0u8; 8192];
+                loop {
+                    match entry_reader.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(_) => continue,
+                        Err(_) => {
+                            // Drain remaining data to keep decompression stream aligned
+                            // (required for solid archives)
+                            while entry_reader.read(&mut buf).unwrap_or(0) > 0 {}
+                            failed_files.push(path);
+                            return Ok(true);
+                        }
+                    }
                 }
-            }
-        }
+                Ok(true)
+            })
+            .map_err(|e| {
+                ArchiveError::format(
+                    Some(ArchiveFormat::SevenZip),
+                    format!("test_integrity: {}", e),
+                )
+            })?;
 
         Ok(failed_files)
     }

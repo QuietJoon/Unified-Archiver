@@ -4,7 +4,7 @@
 
 use std::io::Read;
 use std::path::PathBuf;
-use unified_archive::{Archive, StreamingExtractor};
+use unified_archive::Archive;
 
 /// Helper to get test fixtures directory
 fn fixtures_dir() -> PathBuf {
@@ -12,7 +12,6 @@ fn fixtures_dir() -> PathBuf {
 }
 
 #[test]
-#[ignore = "RAR streaming extraction temp file issue - file not found in temp directory"]
 fn test_streaming_extraction_rar() {
     // Test streaming extraction from RAR archive
     let archive = Archive::open(fixtures_dir().join("test.rar")).expect("Failed to open archive");

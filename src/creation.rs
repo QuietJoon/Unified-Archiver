@@ -11,7 +11,7 @@ use once_cell::sync::OnceCell;
 use std::path::Path;
 
 impl Archive {
-    /// Create a new archive (stub - not yet implemented)
+    /// Create a new archive
     ///
     /// # Arguments
     /// * `path` - Output archive path
@@ -25,6 +25,18 @@ impl Archive {
         options: crate::options::CompressionOptions,
     ) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
+
+        if path_buf.exists() {
+            return Err(ArchiveError::io(
+                "create",
+                &path_buf,
+                std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "Output file already exists; remove it first or use a different path",
+                ),
+            ));
+        }
+
         let format = options.format;
 
         // Route to appropriate backend based on format
@@ -64,7 +76,10 @@ impl Archive {
         match &mut self.backend {
             ArchiveBackend::ZipWriter(writer) => writer.add_file_from_data(path, data),
             ArchiveBackend::Libarchive(backend) => backend.add_file_from_data(path, data),
-            ArchiveBackend::Unrar(_) | ArchiveBackend::Piz(_) | ArchiveBackend::SevenZ(_) | ArchiveBackend::ZipReader(_) => {
+            ArchiveBackend::Unrar(_)
+            | ArchiveBackend::Piz(_)
+            | ArchiveBackend::SevenZ(_)
+            | ArchiveBackend::ZipReader(_) => {
                 Err(ArchiveError::read_only_backend("add_file_from_data"))
             }
         }
@@ -99,7 +114,10 @@ impl Archive {
             ArchiveBackend::Libarchive(backend) => {
                 backend.add_file_from_path(fs_path, archive_path)
             }
-            ArchiveBackend::Unrar(_) | ArchiveBackend::Piz(_) | ArchiveBackend::SevenZ(_) | ArchiveBackend::ZipReader(_) => {
+            ArchiveBackend::Unrar(_)
+            | ArchiveBackend::Piz(_)
+            | ArchiveBackend::SevenZ(_)
+            | ArchiveBackend::ZipReader(_) => {
                 Err(ArchiveError::read_only_backend("add_file_from_path_as"))
             }
         }
@@ -110,9 +128,10 @@ impl Archive {
         match &mut self.backend {
             ArchiveBackend::ZipWriter(writer) => writer.add_directory_entry(path),
             ArchiveBackend::Libarchive(backend) => backend.add_directory_entry(path),
-            ArchiveBackend::Unrar(_) | ArchiveBackend::Piz(_) | ArchiveBackend::SevenZ(_) | ArchiveBackend::ZipReader(_) => {
-                Err(ArchiveError::read_only_backend("add_directory"))
-            }
+            ArchiveBackend::Unrar(_)
+            | ArchiveBackend::Piz(_)
+            | ArchiveBackend::SevenZ(_)
+            | ArchiveBackend::ZipReader(_) => Err(ArchiveError::read_only_backend("add_directory")),
         }
     }
 
@@ -123,7 +142,10 @@ impl Archive {
         match &mut self.backend {
             ArchiveBackend::ZipWriter(writer) => writer.add_directory_recursive(path),
             ArchiveBackend::Libarchive(backend) => backend.add_directory_recursive(path),
-            ArchiveBackend::Unrar(_) | ArchiveBackend::Piz(_) | ArchiveBackend::SevenZ(_) | ArchiveBackend::ZipReader(_) => {
+            ArchiveBackend::Unrar(_)
+            | ArchiveBackend::Piz(_)
+            | ArchiveBackend::SevenZ(_)
+            | ArchiveBackend::ZipReader(_) => {
                 Err(ArchiveError::read_only_backend("add_directory_recursive"))
             }
         }
@@ -194,9 +216,11 @@ mod tests {
         let path = temp.path().join("test_add.zip");
         let options = CompressionOptions::new(ArchiveFormat::Zip);
         let mut archive = Archive::create(&path, options).unwrap();
-        assert!(archive
-            .add_file_from_data("hello.txt", b"Hello, World!")
-            .is_ok());
+        assert!(
+            archive
+                .add_file_from_data("hello.txt", b"Hello, World!")
+                .is_ok()
+        );
         archive.finish().unwrap();
     }
 
@@ -206,9 +230,11 @@ mod tests {
         let path = temp.path().join("test_add.tar");
         let options = CompressionOptions::new(ArchiveFormat::Tar);
         let mut archive = Archive::create(&path, options).unwrap();
-        assert!(archive
-            .add_file_from_data("hello.txt", b"Hello, World!")
-            .is_ok());
+        assert!(
+            archive
+                .add_file_from_data("hello.txt", b"Hello, World!")
+                .is_ok()
+        );
         archive.finish().unwrap();
     }
 

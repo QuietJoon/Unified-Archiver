@@ -4,8 +4,8 @@
 //! or replacing entries using a copy-on-write strategy.
 
 use crate::archive::{Archive, ArchiveBackend, ArchiveMode};
-use crate::error::{ArchiveError, Result};
 use crate::error::ops;
+use crate::error::{ArchiveError, Result};
 use crate::format::ArchiveFormat;
 use std::collections::HashSet;
 use std::path::Path;
@@ -80,7 +80,7 @@ impl Archive {
     /// # Supported Formats
     /// - ZIP ✅
     /// - 7z ✅
-    /// - TAR variants ✅
+    /// - TAR variants ❌ (not yet implemented)
     /// - RAR ❌ (read-only)
     pub fn modify(path: impl AsRef<Path>) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
@@ -92,6 +92,17 @@ impl Archive {
                 operation: ops::MODIFY.to_string(),
                 reason: format!("{:?} archives do not support modification", format),
             });
+        }
+
+        // Reject encrypted archives — password-aware modification not yet supported
+        {
+            let check = Archive::open(&path_buf)?;
+            if check.is_encrypted()? {
+                return Err(ArchiveError::UnsupportedOperation {
+                    operation: ops::MODIFY.to_string(),
+                    reason: "Encrypted archives cannot be modified (password-aware modification not yet supported)".to_string(),
+                });
+            }
         }
 
         // Open for reading to validate
@@ -262,45 +273,50 @@ impl Archive {
             return Ok(());
         }
 
-        // Create temporary file path
-        let temp_path = self.path.with_extension("tmp");
+        // Create unique temporary file path (PID suffix avoids races with concurrent modifications)
+        let temp_path = self.path.with_extension(format!("tmp.{}", std::process::id()));
 
-        // Create new archive with same format
-        let options = crate::options::CompressionOptions::new(self.format);
-        let mut new_archive = Self::create(&temp_path, options)?;
+        // Use a closure so that temp file is cleaned up on any failure
+        let result = (|| -> Result<()> {
+            // Create new archive with same format
+            let options = crate::options::CompressionOptions::new(self.format);
+            let mut new_archive = Self::create(&temp_path, options)?;
 
-        // Copy all entries from original except removed ones
-        let entries = self.list_files()?;
-        for entry in entries {
-            if modifications.removed.contains(&entry.path) {
-                continue; // Skip removed entries
+            // Copy all entries from original except removed ones
+            let entries = self.list_files()?;
+            for entry in entries {
+                if modifications.removed.contains(&entry.path) {
+                    continue; // Skip removed entries
+                }
+
+                // Extract and re-add entry
+                let data = self.extract_to_memory(&entry.path)?;
+                new_archive.add_file_from_data(&entry.path, &data)?;
             }
 
-            // Extract and re-add entry
-            let data = self.extract_to_memory(&entry.path)?;
-            new_archive.add_file_from_data(&entry.path, &data)?;
-        }
+            // Add new directory entries
+            for dir_path in modifications.added_directories {
+                new_archive.add_directory(&dir_path)?;
+            }
 
-        // Add new directory entries
-        for dir_path in modifications.added_directories {
-            new_archive.add_directory(&dir_path)?;
-        }
+            // Add new entries
+            for (path, data) in modifications.added {
+                new_archive.add_file_from_data(&path, &data)?;
+            }
 
-        // Add new entries
-        for (path, data) in modifications.added {
-            new_archive.add_file_from_data(&path, &data)?;
-        }
+            // Finalize new archive
+            new_archive.finish()?;
 
-        // Finalize new archive
-        new_archive.finish()?;
+            // Replace original file with new one
+            rename_with_overwrite(&temp_path, &self.path)
+        })();
 
-        // Replace original file with new one
-        if let Err(e) = rename_with_overwrite(&temp_path, &self.path) {
+        // Clean up temp file on any failure (finish, write, or rename)
+        if result.is_err() {
             let _ = std::fs::remove_file(&temp_path);
-            return Err(e);
         }
 
-        Ok(())
+        result
     }
 }
 

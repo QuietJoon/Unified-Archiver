@@ -12,49 +12,9 @@ use std::fs::File;
 use std::io::Read;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 use zip::ZipArchive as RawZipArchive;
 
-/// Convert zip crate DateTime to SystemTime without requiring the "time" feature
-fn datetime_to_system_time(dt: zip::DateTime) -> Option<SystemTime> {
-    // Days from year 0 to Unix epoch (1970-01-01)
-    // Use a simplified calculation: days in each month (non-leap default)
-    let days_in_month: [u64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let year = dt.year() as u64;
-
-    if year < 1970 {
-        return None;
-    }
-
-    // Count days from 1970 to the given year
-    let mut days: u64 = 0;
-    for y in 1970..year {
-        days += if is_leap_year(y) { 366 } else { 365 };
-    }
-
-    // Add days for months in the current year
-    let month = dt.month() as usize;
-    for m in 1..month {
-        days += days_in_month[m - 1];
-        if m == 2 && is_leap_year(year) {
-            days += 1;
-        }
-    }
-
-    // Add day of month (1-based)
-    days += (dt.day() as u64).saturating_sub(1);
-
-    let secs = days * 86400
-        + dt.hour() as u64 * 3600
-        + dt.minute() as u64 * 60
-        + dt.second() as u64;
-
-    Some(UNIX_EPOCH + std::time::Duration::from_secs(secs))
-}
-
-fn is_leap_year(year: u64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
-}
+use super::common::{compute_crc32_reader, copy_with_optional_crc, create_output_file};
 
 /// Open a ZIP entry by index, using password decryption if provided
 fn open_entry_by_index<'a>(
@@ -77,7 +37,10 @@ fn open_entry_by_index<'a>(
         })
     } else {
         zip.by_index(index).map_err(|e| {
-            ArchiveError::format(Some(ArchiveFormat::Zip), format!("Read entry {}: {}", index, e))
+            ArchiveError::format(
+                Some(ArchiveFormat::Zip),
+                format!("Read entry {}: {}", index, e),
+            )
         })
     }
 }
@@ -97,18 +60,25 @@ fn open_entry_by_name<'a>(
             } else {
                 ArchiveError::format(
                     Some(ArchiveFormat::Zip),
-                    format!("File '{}' not found in archive", name),
+                    format!("Read entry '{}': {}", name, e),
                 )
             }
         })
     } else {
-        zip.by_name(name).map_err(|_| {
+        zip.by_name(name).map_err(|e| {
             ArchiveError::format(
                 Some(ArchiveFormat::Zip),
-                format!("File '{}' not found in archive", name),
+                format!("Read entry '{}': {}", name, e),
             )
         })
     }
+}
+
+/// Open a ZIP file and create a RawZipArchive
+fn open_zip(path: &Path) -> Result<RawZipArchive<File>> {
+    let file = File::open(path).map_err(|e| ArchiveError::io("open", path.to_path_buf(), e))?;
+    RawZipArchive::new(file)
+        .map_err(|e| ArchiveError::format(Some(ArchiveFormat::Zip), format!("Invalid ZIP: {}", e)))
 }
 
 /// Native Rust ZIP archive wrapper
@@ -143,41 +113,26 @@ impl ZipArchive {
         &self.path
     }
 
-    /// List all files in ZIP archive with CRC32 from metadata
+    /// List all files in ZIP archive with CRC32 from central directory metadata
     ///
-    /// CRC32 Strategy:
-    /// 1. Read CRC32 from ZIP central directory (fast, no decompression)
-    /// 2. If CRC32 is null/0, compute it by decompressing (fallback)
+    /// CRC32 is read directly from the ZIP central directory (no decompression needed).
+    /// A CRC32 value of 0 is preserved as valid (it's the correct CRC32 for empty content).
     pub fn list_files(&self) -> Result<Vec<ArchiveEntry>> {
-        let file =
-            File::open(&self.path).map_err(|e| ArchiveError::io("open", self.path.clone(), e))?;
-
-        let mut zip = RawZipArchive::new(file).map_err(|e| {
-            ArchiveError::format(Some(ArchiveFormat::Zip), format!("Invalid ZIP: {}", e))
-        })?;
+        let mut zip = open_zip(&self.path)?;
 
         let mut entries = Vec::new();
 
         for i in 0..zip.len() {
-            let mut zip_file = zip.by_index(i).map_err(|e| {
+            let zip_file = zip.by_index(i).map_err(|e| {
                 ArchiveError::format(Some(ArchiveFormat::Zip), format!("Read entry {}: {}", i, e))
             })?;
 
             // Parse entry metadata
             let mut entry = self.parse_entry(&zip_file)?;
 
-            // CRC32 strategy: read from metadata first, compute if missing
+            // CRC32 from central directory metadata (0 is valid — it's the CRC32 of empty content)
             if entry.entry_type == EntryType::File {
-                let metadata_crc = zip_file.crc32();
-
-                if metadata_crc != 0 {
-                    // CRC32 available in metadata (common case - fast!)
-                    entry.crc32 = Some(metadata_crc);
-                } else if !entry.is_encrypted {
-                    // CRC32 is null/0 and not encrypted - compute by decompressing
-                    entry.crc32 = Some(self.compute_crc32(&mut zip_file)?);
-                }
-                // else: encrypted with no CRC32 in metadata - leave as None
+                entry.crc32 = Some(zip_file.crc32());
             }
 
             entry.id = i;
@@ -187,31 +142,10 @@ impl ZipArchive {
         Ok(entries)
     }
 
-    /// Compute CRC32 by decompressing file data (fallback for null CRC32)
-    fn compute_crc32<R: Read>(&self, reader: &mut R) -> Result<u32> {
-        use crc32fast::Hasher;
-
-        let mut hasher = Hasher::new();
-        let mut buffer = vec![0u8; 8192];
-
-        loop {
-            let bytes_read = reader
-                .read(&mut buffer)
-                .map_err(|e| ArchiveError::io("read", self.path.clone(), e))?;
-
-            if bytes_read == 0 {
-                break;
-            }
-
-            hasher.update(&buffer[..bytes_read]);
-        }
-
-        Ok(hasher.finalize())
-    }
-
     /// Parse ZIP entry into ArchiveEntry
     fn parse_entry(&self, zip_file: &zip::read::ZipFile) -> Result<ArchiveEntry> {
-        let path = zip_file.name().to_string();
+        // Normalize path separators for consistency with Piz backend
+        let path = zip_file.name().replace('\\', "/");
         let is_dir = zip_file.is_dir();
 
         let entry_type = if is_dir {
@@ -231,7 +165,14 @@ impl ZipArchive {
         // Last modified time - convert DateTime fields to Unix timestamp manually
         // (zip crate's to_time() requires the "time" feature which we don't enable)
         let modified = zip_file.last_modified().and_then(|dt| {
-            datetime_to_system_time(dt)
+            super::common::ymd_hms_to_system_time(
+                dt.year() as u64,
+                dt.month() as u64,
+                dt.day() as u64,
+                dt.hour() as u64,
+                dt.minute() as u64,
+                dt.second() as u64,
+            )
         });
 
         let mut entry = ArchiveEntry::new(path, 0);
@@ -248,126 +189,50 @@ impl ZipArchive {
     pub fn extract_all(
         &self,
         dest_path: &Path,
-        mut progress: Option<&mut Box<dyn ProgressCallback>>,
+        progress: Option<&mut Box<dyn ProgressCallback>>,
     ) -> Result<()> {
-        std::fs::create_dir_all(dest_path)
-            .map_err(|e| ArchiveError::io("create_dir", dest_path.to_path_buf(), e))?;
-
-        let file =
-            File::open(&self.path).map_err(|e| ArchiveError::io("open", self.path.clone(), e))?;
-
-        let mut zip = RawZipArchive::new(file).map_err(|e| {
-            ArchiveError::format(Some(ArchiveFormat::Zip), format!("Invalid ZIP: {}", e))
-        })?;
-
-        // Calculate total size for progress
-        let total_bytes: u64 = if progress.is_some() {
-            let mut total = 0u64;
-            for i in 0..zip.len() {
-                if let Ok(f) = zip.by_index(i) {
-                    total += f.size();
-                }
-            }
-            total
-        } else {
-            0
-        };
-
-        let mut bytes_processed = 0u64;
-        let num_entries = zip.len();
-
-        // Extract each entry
-        for i in 0..num_entries {
-            // Check cancellation
-            if let Some(callback) = progress.as_mut() {
-                if let ControlFlow::Break(()) =
-                    callback.on_progress(bytes_processed, Some(total_bytes))
-                {
-                    return Err(ArchiveError::format(None, "Extraction cancelled by user"));
-                }
-            }
-
-            let mut zip_file = open_entry_by_index(&mut zip, i, self.password.as_deref())?;
-
-            let entry_path = sanitize_entry_path(zip_file.name(), dest_path)?;
-
-            // Create parent directories
-            if let Some(parent) = entry_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| ArchiveError::io("create_dir", parent.to_path_buf(), e))?;
-            }
-
-            // Extract file or create directory
-            if zip_file.is_dir() {
-                std::fs::create_dir_all(&entry_path)
-                    .map_err(|e| ArchiveError::io("create_dir", entry_path.clone(), e))?;
-            } else {
-                let mut output_file = File::create(&entry_path)
-                    .map_err(|e| ArchiveError::io("create", entry_path.clone(), e))?;
-
-                std::io::copy(&mut zip_file, &mut output_file)
-                    .map_err(|e| ArchiveError::io("write", entry_path.clone(), e))?;
-
-                bytes_processed += zip_file.size();
-            }
-        }
-
-        // Final progress update (100%)
-        if let Some(callback) = progress.as_mut() {
-            let _ = callback.on_progress(total_bytes, Some(total_bytes));
-        }
-
-        Ok(())
+        self.extract_all_with_options(dest_path, progress, true, false)
     }
 
     /// Extract a single file by path
     pub fn extract_file(&self, file_path: &str, dest_path: &Path) -> Result<()> {
-        std::fs::create_dir_all(dest_path)
-            .map_err(|e| ArchiveError::io("create_dir", dest_path.to_path_buf(), e))?;
-
-        let file =
-            File::open(&self.path).map_err(|e| ArchiveError::io("open", self.path.clone(), e))?;
-
-        let mut zip = RawZipArchive::new(file).map_err(|e| {
-            ArchiveError::format(Some(ArchiveFormat::Zip), format!("Invalid ZIP: {}", e))
-        })?;
-
-        // Find the file in archive (with optional password decryption)
-        let mut zip_file = open_entry_by_name(&mut zip, file_path, self.password.as_deref())?;
-
-        let output_path = sanitize_entry_path(zip_file.name(), dest_path)?;
-
-        // Create parent directories
-        if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| ArchiveError::io("create_dir", parent.to_path_buf(), e))?;
-        }
-
-        // Extract file
-        let mut output_file = File::create(&output_path)
-            .map_err(|e| ArchiveError::io("create", output_path.clone(), e))?;
-
-        std::io::copy(&mut zip_file, &mut output_file)
-            .map_err(|e| ArchiveError::io("write", output_path, e))?;
-
-        Ok(())
+        self.extract_file_with_options(file_path, dest_path, true, false)
     }
 
     /// Extract a single file to memory
     pub fn extract_to_memory(&self, file_path: &str) -> Result<Vec<u8>> {
-        let file =
-            File::open(&self.path).map_err(|e| ArchiveError::io("open", self.path.clone(), e))?;
-
-        let mut zip = RawZipArchive::new(file).map_err(|e| {
-            ArchiveError::format(Some(ArchiveFormat::Zip), format!("Invalid ZIP: {}", e))
-        })?;
+        let mut zip = open_zip(&self.path)?;
 
         let mut zip_file = open_entry_by_name(&mut zip, file_path, self.password.as_deref())?;
 
-        let mut buffer = Vec::with_capacity(zip_file.size() as usize);
+        let size = zip_file.size();
+        let size_usize = usize::try_from(size).map_err(|_| ArchiveError::UnsupportedOperation {
+            operation: "extract_to_memory".to_string(),
+            reason: format!("Entry too large for memory: {} bytes", size),
+        })?;
+        let mut buffer = Vec::new();
+        buffer
+            .try_reserve(size_usize)
+            .map_err(|_| ArchiveError::UnsupportedOperation {
+                operation: "extract_to_memory".to_string(),
+                reason: format!("Failed to allocate {} bytes", size),
+            })?;
         zip_file
             .read_to_end(&mut buffer)
             .map_err(|e| ArchiveError::io("read", self.path.clone(), e))?;
+
+        // Verify CRC32 to catch corrupt/tampered payloads
+        let expected_crc = zip_file.crc32();
+        let actual_crc = crc32fast::hash(&buffer);
+        if actual_crc != expected_crc {
+            return Err(ArchiveError::corruption(
+                file_path,
+                format!(
+                    "CRC32 mismatch: expected {:08x}, got {:08x}",
+                    expected_crc, actual_crc
+                ),
+            ));
+        }
 
         Ok(buffer)
     }
@@ -383,12 +248,7 @@ impl ZipArchive {
         std::fs::create_dir_all(dest_path)
             .map_err(|e| ArchiveError::io("create_dir", dest_path.to_path_buf(), e))?;
 
-        let file =
-            File::open(&self.path).map_err(|e| ArchiveError::io("open", self.path.clone(), e))?;
-
-        let mut zip = RawZipArchive::new(file).map_err(|e| {
-            ArchiveError::format(Some(ArchiveFormat::Zip), format!("Invalid ZIP: {}", e))
-        })?;
+        let mut zip = open_zip(&self.path)?;
 
         // Calculate total size for progress
         let total_bytes: u64 = if progress.is_some() {
@@ -429,41 +289,25 @@ impl ZipArchive {
                 std::fs::create_dir_all(&entry_path)
                     .map_err(|e| ArchiveError::io("create_dir", entry_path.clone(), e))?;
             } else {
-                if !overwrite && entry_path.exists() {
-                    return Err(ArchiveError::UnsupportedOperation {
-                        operation: "extract_all".to_string(),
-                        reason: format!(
-                            "Destination file already exists: '{}'",
-                            entry_path.display()
-                        ),
-                    });
-                }
+                let expected_crc = if verify_crc32 {
+                    Some(zip_file.crc32())
+                } else {
+                    None
+                };
 
-                let mut output_file = File::create(&entry_path)
-                    .map_err(|e| ArchiveError::io("create", entry_path.clone(), e))?;
+                let entry_name = zip_file.name().to_string();
+                let entry_size = zip_file.size();
+                let mut output_file = create_output_file(&entry_path, overwrite)?;
 
-                std::io::copy(&mut zip_file, &mut output_file)
-                    .map_err(|e| ArchiveError::io("write", entry_path.clone(), e))?;
+                copy_with_optional_crc(
+                    &mut zip_file,
+                    &mut output_file,
+                    expected_crc,
+                    &entry_name,
+                    &entry_path,
+                )?;
 
-                if verify_crc32 {
-                    let expected_crc = zip_file.crc32();
-                    if expected_crc != 0 {
-                        let data = std::fs::read(&entry_path)
-                            .map_err(|e| ArchiveError::io("read", entry_path.clone(), e))?;
-                        let actual_crc = crc32fast::hash(&data);
-                        if actual_crc != expected_crc {
-                            return Err(ArchiveError::corruption(
-                                entry_path.to_string_lossy(),
-                                format!(
-                                    "CRC32 mismatch: expected {:08X}, got {:08X}",
-                                    expected_crc, actual_crc
-                                ),
-                            ));
-                        }
-                    }
-                }
-
-                bytes_processed += zip_file.size();
+                bytes_processed += entry_size;
             }
         }
 
@@ -485,12 +329,7 @@ impl ZipArchive {
         std::fs::create_dir_all(dest_path)
             .map_err(|e| ArchiveError::io("create_dir", dest_path.to_path_buf(), e))?;
 
-        let file =
-            File::open(&self.path).map_err(|e| ArchiveError::io("open", self.path.clone(), e))?;
-
-        let mut zip = RawZipArchive::new(file).map_err(|e| {
-            ArchiveError::format(Some(ArchiveFormat::Zip), format!("Invalid ZIP: {}", e))
-        })?;
+        let mut zip = open_zip(&self.path)?;
 
         let mut zip_file = open_entry_by_name(&mut zip, file_path, self.password.as_deref())?;
 
@@ -501,63 +340,46 @@ impl ZipArchive {
                 .map_err(|e| ArchiveError::io("create_dir", parent.to_path_buf(), e))?;
         }
 
-        if !overwrite && output_path.exists() {
-            return Err(ArchiveError::UnsupportedOperation {
-                operation: "extract_file".to_string(),
-                reason: format!(
-                    "Destination file already exists: '{}'",
-                    output_path.display()
-                ),
-            });
-        }
+        let expected_crc = if verify_crc32 {
+            Some(zip_file.crc32())
+        } else {
+            None
+        };
 
-        let mut output_file = File::create(&output_path)
-            .map_err(|e| ArchiveError::io("create", output_path.clone(), e))?;
+        let mut output_file = create_output_file(&output_path, overwrite)?;
 
-        std::io::copy(&mut zip_file, &mut output_file)
-            .map_err(|e| ArchiveError::io("write", output_path.clone(), e))?;
-
-        if verify_crc32 {
-            let expected_crc = zip_file.crc32();
-            if expected_crc != 0 {
-                let data = std::fs::read(&output_path)
-                    .map_err(|e| ArchiveError::io("read", output_path.clone(), e))?;
-                let actual_crc = crc32fast::hash(&data);
-                if actual_crc != expected_crc {
-                    return Err(ArchiveError::corruption(
-                        output_path.to_string_lossy(),
-                        format!(
-                            "CRC32 mismatch: expected {:08X}, got {:08X}",
-                            expected_crc, actual_crc
-                        ),
-                    ));
-                }
-            }
-        }
+        copy_with_optional_crc(
+            &mut zip_file,
+            &mut output_file,
+            expected_crc,
+            file_path,
+            &output_path,
+        )?;
 
         Ok(())
     }
 
-    /// Test integrity of all entries by extracting to memory and verifying CRC32
+    /// Test integrity of all entries by verifying CRC32
+    ///
+    /// Opens the ZIP once and stream-verifies each file entry in a single pass.
+    /// IO/password errors propagate; only CRC mismatches are collected as failures.
     pub fn test_integrity(&self) -> Result<Vec<String>> {
-        let entries = self.list_files()?;
+        let mut zip = open_zip(&self.path)?;
         let mut failed = Vec::new();
 
-        for entry in &entries {
-            if entry.entry_type == EntryType::File {
-                match self.extract_to_memory(&entry.path) {
-                    Ok(data) => {
-                        if let Some(expected_crc) = entry.crc32 {
-                            let actual_crc = crc32fast::hash(&data);
-                            if actual_crc != expected_crc {
-                                failed.push(entry.path.clone());
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        failed.push(entry.path.clone());
-                    }
-                }
+        for i in 0..zip.len() {
+            let mut zip_file = open_entry_by_index(&mut zip, i, self.password.as_deref())?;
+
+            if zip_file.is_dir() {
+                continue;
+            }
+
+            let expected_crc = zip_file.crc32();
+            let path = zip_file.name().to_string();
+            let actual_crc = compute_crc32_reader(&mut zip_file, &self.path)?;
+
+            if actual_crc != expected_crc {
+                failed.push(path);
             }
         }
 

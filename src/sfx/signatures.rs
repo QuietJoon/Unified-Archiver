@@ -25,12 +25,6 @@ pub const SIGNATURES: &[Signature] = &[
         format: ArchiveFormat::Zip,
         fixed_offset: None,
     },
-    // ZIP format (central directory)
-    Signature {
-        bytes: b"PK\x01\x02",
-        format: ArchiveFormat::Zip,
-        fixed_offset: None,
-    },
     // RAR 4.x format
     Signature {
         bytes: b"Rar!\x1a\x07\x00",
@@ -48,12 +42,6 @@ pub const SIGNATURES: &[Signature] = &[
         bytes: b"7z\xbc\xaf\x27\x1c",
         format: ArchiveFormat::SevenZip,
         fixed_offset: None,
-    },
-    // POSIX tar (ustar) - at offset 257
-    Signature {
-        bytes: b"ustar",
-        format: ArchiveFormat::Tar,
-        fixed_offset: Some(257),
     },
     // gzip format
     Signature {
@@ -235,25 +223,13 @@ mod tests {
     }
 
     #[test]
-    fn test_tar_fixed_offset() {
-        // TAR signature at specific offset 257
+    fn test_tar_removed_from_sfx_signatures() {
+        // TAR was removed from SFX SIGNATURES — ustar at any offset should not match
         let mut data = vec![0u8; 500];
         data[257..262].copy_from_slice(b"ustar");
 
         let results = scan_for_signatures(&data, 512);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, 257);
-        assert_eq!(results[0].1, ArchiveFormat::Tar);
-    }
-
-    #[test]
-    fn test_tar_wrong_offset() {
-        // TAR signature at wrong offset (not 257) - should not be found
-        let mut data = vec![0u8; 500];
-        data[100..105].copy_from_slice(b"ustar"); // Wrong offset
-
-        let results = scan_for_signatures(&data, 512);
-        assert_eq!(results.len(), 0); // Should not find TAR at wrong offset
+        assert_eq!(results.len(), 0, "TAR should not be in SFX signatures");
     }
 
     #[test]
@@ -369,20 +345,15 @@ mod tests {
     }
 
     #[test]
-    fn test_tar_at_wrong_offset_multiple_places() {
-        // TAR has fixed offset requirement (257)
+    fn test_tar_removed_no_matches_anywhere() {
+        // TAR removed from SFX SIGNATURES — ustar at any offset should not match
         let mut data = vec![0u8; 500];
-        // Put "ustar" at multiple wrong offsets
         data[0..5].copy_from_slice(b"ustar");
         data[100..105].copy_from_slice(b"ustar");
-        data[200..205].copy_from_slice(b"ustar");
-        // And at correct offset
         data[257..262].copy_from_slice(b"ustar");
 
         let results = scan_for_signatures(&data, 512);
-        assert_eq!(results.len(), 1, "Only TAR at offset 257 should match");
-        assert_eq!(results[0].0, 257);
-        assert_eq!(results[0].1, ArchiveFormat::Tar);
+        assert_eq!(results.len(), 0, "TAR should not be in SFX signatures");
     }
 
     #[test]
@@ -409,7 +380,6 @@ mod tests {
         // Ensure each signature format can be detected in isolation
         let test_cases: Vec<(&[u8], ArchiveFormat)> = vec![
             (b"PK\x03\x04", ArchiveFormat::Zip),
-            (b"PK\x01\x02", ArchiveFormat::Zip),
             (b"Rar!\x1a\x07\x00", ArchiveFormat::Rar),
             (b"Rar!\x1a\x07\x01\x00", ArchiveFormat::Rar5),
             (b"7z\xbc\xaf\x27\x1c", ArchiveFormat::SevenZip),
@@ -443,9 +413,8 @@ mod tests {
         assert!(!sig.bytes.is_empty());
         assert!(sig.fixed_offset.is_none());
 
-        // Find TAR signature (has fixed offset)
+        // TAR signature was removed from SFX SIGNATURES (not a real-world SFX format)
         let tar_sig = SIGNATURES.iter().find(|s| s.format == ArchiveFormat::Tar);
-        assert!(tar_sig.is_some());
-        assert_eq!(tar_sig.unwrap().fixed_offset, Some(257));
+        assert!(tar_sig.is_none());
     }
 }

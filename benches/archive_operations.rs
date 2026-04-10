@@ -6,10 +6,10 @@
 //! - File extraction
 //! - Streaming extraction
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use std::io::Read;
 use std::path::PathBuf;
-use unified_archive::{Archive, ExtractionOptions};
+use unified_archive::Archive;
 
 /// Helper to get test fixtures directory
 fn fixtures_dir() -> PathBuf {
@@ -57,7 +57,7 @@ fn bench_entry_listing(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("first_call", format_name),
             &archive,
-            |b, archive| {
+            |b, _archive| {
                 b.iter(|| {
                     // Drop and reopen to test uncached performance
                     let fresh_archive = Archive::open(black_box(&path)).unwrap();

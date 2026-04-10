@@ -5,8 +5,8 @@
 
 use crate::archive::{Archive, ArchiveBackend};
 use crate::entry::{ArchiveEntry, EntryType};
-use crate::error::{ArchiveError, ArchiveWarning, Result};
 use crate::error::ops;
+use crate::error::{ArchiveError, ArchiveWarning, Result};
 use std::path::{Path, PathBuf};
 
 /// Report from archive integrity validation
@@ -170,6 +170,94 @@ impl Archive {
         }
 
         Ok(sum)
+    }
+
+    /// Calculate the manifest digest for archive identity
+    ///
+    /// Computes a CRC32-based digest from sorted per-entry CRC32 values.
+    /// This is deterministic: same entries (regardless of order in archive)
+    /// produce the same digest.
+    ///
+    /// Used by AdvancedDeduplicator for content-identity matching — two archives
+    /// with identical file contents produce the same manifest_digest even if
+    /// compressed differently or stored in different archive formats.
+    ///
+    /// Unlike [`calculate_archive_crc`] (wrapping sum — less collision-resistant),
+    /// this method sorts individual CRC32 hex representations and hashes the
+    /// joined string, preserving per-entry identity.
+    ///
+    /// Returns empty string if no file entries have CRC32 values.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Collect CRC32 from each file entry (skip directories, entries without CRC32)
+    /// 2. Convert each CRC32 to 8-char hex (big-endian bytes)
+    /// 3. Sort lexicographically
+    /// 4. Join with ","
+    /// 5. CRC32-hash the joined string
+    /// 6. Return as 8-char lowercase hex
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use unified_archive::Archive;
+    ///
+    /// let archive = Archive::open("file.zip")?;
+    /// let digest = archive.calculate_manifest_digest()?;
+    /// if !digest.is_empty() {
+    ///     println!("Manifest digest: {}", digest);
+    /// }
+    /// # Ok::<(), unified_archive::ArchiveError>(())
+    /// ```
+    pub fn calculate_manifest_digest(&self) -> Result<String> {
+        let entries = self.list_files()?;
+
+        let mut hashes: Vec<String> = entries
+            .iter()
+            .filter(|e| e.entry_type == EntryType::File)
+            .map(|e| {
+                if let Some(crc) = e.crc32 {
+                    crc.to_be_bytes()
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>()
+                } else {
+                    // Fallback for entries without CRC32: use path + size
+                    format!("{}:{}", e.path, e.size.unwrap_or(0))
+                }
+            })
+            .collect();
+
+        if hashes.is_empty() {
+            return Ok(String::new());
+        }
+
+        hashes.sort();
+        let joined = hashes.join(",");
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(joined.as_bytes());
+        Ok(format!("{:08x}", hasher.finalize()))
+    }
+
+    /// Calculate content-multiset digest and total uncompressed file size
+    ///
+    /// Returns a tuple of (digest, total_uncompressed_size) where:
+    /// - `digest` is a content-multiset identity hash (same as `calculate_manifest_digest`)
+    /// - `total_uncompressed_size` is the sum of all file entry sizes
+    ///
+    /// The digest represents content identity, not archive layout — archives with the
+    /// same files but different names/directory structures may produce identical digests.
+    pub fn calculate_manifest_summary(&self) -> Result<(String, u64)> {
+        let entries = self.list_files()?;
+
+        let total_size: u64 = entries
+            .iter()
+            .filter(|e| e.entry_type == EntryType::File)
+            .filter_map(|e| e.size)
+            .sum();
+
+        let digest = self.calculate_manifest_digest()?;
+        Ok((digest, total_size))
     }
 
     /// Detect if this archive is part of a multi-part archive set (FR-019)
@@ -599,6 +687,70 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    // ── calculate_manifest_digest tests ──
+
+    #[test]
+    fn test_calculate_manifest_digest_deterministic() {
+        let archive = Archive::open(fixture("test.zip")).unwrap();
+        let digest1 = archive.calculate_manifest_digest().unwrap();
+        let digest2 = archive.calculate_manifest_digest().unwrap();
+        assert_eq!(digest1, digest2, "manifest_digest should be deterministic");
+        assert!(
+            !digest1.is_empty(),
+            "ZIP with entries should produce non-empty digest"
+        );
+    }
+
+    #[test]
+    fn test_calculate_manifest_digest_differs_from_archive_crc() {
+        let archive = Archive::open(fixture("test.zip")).unwrap();
+        let digest = archive.calculate_manifest_digest().unwrap();
+        let crc = archive.calculate_archive_crc().unwrap();
+        // manifest_digest and archive_crc use different algorithms —
+        // they should (almost certainly) differ
+        assert_ne!(
+            digest,
+            format!("{crc:08x}"),
+            "manifest_digest and archive_crc should differ (different algorithms)"
+        );
+    }
+
+    #[test]
+    fn test_calculate_manifest_digest_matches_manual_computation() {
+        let archive = Archive::open(fixture("test.zip")).unwrap();
+        let entries = archive.list_files().unwrap();
+
+        // Manual computation: same algorithm as the method
+        let mut hashes: Vec<String> = entries
+            .iter()
+            .filter(|e| e.entry_type == EntryType::File)
+            .filter_map(|e| e.crc32)
+            .map(|crc| {
+                crc.to_be_bytes()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            })
+            .collect();
+        hashes.sort();
+        let joined = hashes.join(",");
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(joined.as_bytes());
+        let expected = format!("{:08x}", hasher.finalize());
+
+        let actual = archive.calculate_manifest_digest().unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_calculate_manifest_digest_7z() {
+        let archive = Archive::open(fixture("test.7z")).unwrap();
+        let digest = archive.calculate_manifest_digest().unwrap();
+        // 7z may or may not have CRC32 per entry — just check it doesn't error
+        let digest2 = archive.calculate_manifest_digest().unwrap();
+        assert_eq!(digest, digest2);
+    }
+
     // ── detect_multipart tests ──
 
     #[test]
@@ -644,7 +796,6 @@ mod tests {
                 ArchiveWarning::SkippedHardLink { path } => {
                     assert!(!path.is_empty());
                 }
-                _ => {}
             }
         }
     }
