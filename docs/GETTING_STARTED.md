@@ -195,14 +195,18 @@ fn extract_archive(archive_path: &str, output_dir: &str) -> Result<(), Box<dyn s
 ### Use Case 2: Extract Specific Files
 
 ```rust
-use unified_archive::Archive;
+use unified_archive::{Archive, ExtractionOptions};
 use std::path::PathBuf;
 
 fn extract_readme(archive_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let archive = Archive::open(archive_path)?;
 
     // Extract a single file
-    archive.extract_file("README.md", &PathBuf::from("./"))?;
+    let options = ExtractionOptions {
+        destination: PathBuf::from("./"),
+        ..Default::default()
+    };
+    archive.extract_file("README.md", options)?;
 
     println!("README.md extracted!");
     Ok(())

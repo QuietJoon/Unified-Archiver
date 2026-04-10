@@ -143,17 +143,20 @@
 //! | **RAR**   | ✅   | ✅      | 🪟*    | ✅    | ✅         | ✅            |
 //! | **RAR5**  | ✅   | ✅      | 🪟*    | ✅    | ✅         | ✅            |
 //! | **ZIP**   | ✅   | ✅      | ✅     | ✅    | ✅         | ✅            |
-//! | **7z**    | ✅   | ✅      | ✅     | ✅    | ⏳         | ✅            |
+//! | **7z**    | ✅   | ✅      | ✅     | ✅    | ✅†        | ✅            |
 //! | **TAR**   | ✅   | ✅      | ✅     | ✅    | ❌         | ❌            |
 //! | **TAR.GZ**| ✅   | ✅      | ✅     | ✅    | ❌         | ❌            |
 //! | **TAR.BZ2**| ✅  | ✅      | ✅     | ✅    | ❌         | ❌            |
 //! | **TAR.XZ**| ✅   | ✅      | ✅     | ✅    | ❌         | ❌            |
-//! | **GZIP**  | ✅   | ✅      | ❌     | ✅    | ❌         | ❌            |
-//! | **BZIP2** | ✅   | ✅      | ❌     | ✅    | ❌         | ❌            |
-//! | **XZ**    | ✅   | ✅      | ❌     | ✅    | ❌         | ❌            |
+//! | **GZIP**  | ✅‡  | ✅‡     | ❌     | ✅    | ❌         | ❌            |
+//! | **BZIP2** | ✅‡  | ✅‡     | ❌     | ✅    | ❌         | ❌            |
+//! | **XZ**    | ✅‡  | ✅‡     | ❌     | ✅    | ❌         | ❌            |
 //! | **ISO**   | ✅   | ✅      | ❌     | ⏳    | ❌         | ❌            |
 //!
 //! *🪟 RAR creation requires WinRAR on Windows with `external-rar-create` feature flag*
+//! *† 7z encryption: read-only via `open_encrypted()`*
+//! *‡ Standalone `.gz`/`.bz2`/`.xz` files are not yet supported. These formats currently
+//! only work as part of TAR compound formats (`.tar.gz`, `.tar.bz2`, `.tar.xz`).*
 //!
 //! ## Performance
 //!
@@ -163,8 +166,11 @@
 //!
 //! ## Architecture
 //!
-//! This library uses two backend engines:
-//! - **libarchive**: ZIP, 7z, TAR, and compressed formats
+//! This library uses four backend engines:
+//! - **piz**: ZIP read/extract (memory-mapped, default for unencrypted ZIP)
+//! - **zip**: ZIP read/extract for encrypted archives, ZIP creation
+//! - **sevenz-rust2**: 7z read/extract (native Rust)
+//! - **libarchive**: TAR family, single-file compressed formats, ISO, and archive creation
 //! - **UnRAR**: RAR/RAR5 with full CRC32 support (statically linked)
 //!
 //! Format detection is automatic using magic byte signatures.
@@ -213,7 +219,9 @@ pub use modification::ModificationOptions; // Phase 6: Archive modification
 pub use options::{
     CompressionLevel, CompressionOptions, EntryFilter, ExtractionOptions, ProgressCallback,
 };
-pub use security::{ExtractionLimits, check_extraction_safe, sanitize_entry_path, validate_entry_path, verify_crc32};
+pub use security::{
+    ExtractionLimits, check_extraction_safe, sanitize_entry_path, validate_entry_path, verify_crc32,
+};
 pub use sfx::{SfxDetectionResult, StubType}; // Phase 7: SFX detection
 pub use stream_crc::{
     CheckType, StreamChecksum, extract_bzip2_stream_crc, extract_gzip_stream_crc,

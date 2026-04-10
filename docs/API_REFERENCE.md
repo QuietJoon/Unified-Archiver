@@ -32,7 +32,10 @@ use unified_archive::Archive;
 let archive = Archive::open("data.zip")?;
 ```
 
-**Supported formats:** RAR, RAR5, ZIP, 7z, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, GZIP, BZIP2, XZ
+**Supported formats:** RAR, RAR5, ZIP, 7z, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, ISO
+
+> **Note:** `Gzip`, `Bzip2`, and `Xz` variants exist in `ArchiveFormat` but currently only work
+> as part of TAR compound formats. Standalone `.gz`/`.bz2`/`.xz` files are not yet supported.
 
 **Errors:**
 - `ArchiveError::NotFound` - File does not exist
@@ -50,7 +53,7 @@ Open a password-protected archive.
 let archive = Archive::open_encrypted("secret.rar", "mypassword")?;
 ```
 
-**Supported formats:** RAR, RAR5 (ZIP/7z encryption coming soon)
+**Supported formats:** RAR, RAR5, ZIP, 7z
 
 **Errors:**
 - `ArchiveError::Password` - Wrong password or password required
@@ -77,9 +80,9 @@ match archive.format() {
 
 ---
 
-#### `Archive::list_files(&self) -> Result<Vec<ArchiveEntry>>`
+#### `Archive::list_files(&self) -> Result<&[ArchiveEntry]>`
 
-List all files and directories in the archive.
+List all files and directories in the archive. Results are cached after the first call.
 
 **Example:**
 ```rust
@@ -89,9 +92,9 @@ for entry in entries {
 }
 ```
 
-**Returns:** Vector of `ArchiveEntry` structs with metadata
+**Returns:** Borrowed slice of `ArchiveEntry` structs with metadata (cached)
 
-**Performance Note:** For ZIP/7z/TAR, CRC32 is computed during this call by reading file data.
+**Performance Note:** For libarchive-backed formats (TAR), CRC32 is computed during listing by reading file data. ZIP and 7z use central directory metadata.
 
 **Errors:**
 - `ArchiveError::Format` - Cannot read archive structure
@@ -152,7 +155,59 @@ if !report.failed.is_empty() {
 
 **Returns:** `ValidationReport` with validation results
 
-**Note:** This only checks CRC32 metadata presence. For true verification, extract the files.
+**Note:** Verification behavior varies by backend: UnRAR uses native test mode (`RAR_TEST`), ZIP/7z/piz extract entries to memory and verify CRC32, libarchive streams entries and checks read errors.
+
+---
+
+#### `Archive::calculate_archive_crc(&self) -> Result<u32>`
+
+Calculate an archive-level CRC32 by summing all per-file CRC32 values with 32-bit wrapping overflow. This matches the "Archive CRC" shown by 7-Zip.
+
+**Example:**
+```rust
+let crc = archive.calculate_archive_crc()?;
+println!("Archive CRC: {:08X}", crc);
+```
+
+**Returns:** `u32` — wrapping sum of all per-file CRC32 values
+
+**Properties:**
+- Deterministic: same files always produce the same result
+- Order-independent: addition is commutative
+- Format-independent: same files in ZIP, 7z, or RAR produce the same CRC
+- Returns `0` if no entries have CRC32 values
+
+---
+
+#### `Archive::calculate_manifest_digest(&self) -> Result<String>`
+
+Calculate a content-identity digest from per-entry CRC32 values. Unlike `calculate_archive_crc` (wrapping sum), this sorts individual CRC32 hex strings and hashes the joined result, making it more collision-resistant.
+
+Designed for deduplication: two archives with identical file contents produce the same digest regardless of archive format, compression method, or entry order.
+
+**Algorithm:**
+1. Collect CRC32 from each file entry (skip directories, entries without CRC32)
+2. Convert each to 8-char hex (big-endian bytes)
+3. Sort lexicographically
+4. Join with `,`
+5. CRC32-hash the joined string
+6. Return as 8-char lowercase hex
+
+**Example:**
+```rust
+let digest = archive.calculate_manifest_digest()?;
+if !digest.is_empty() {
+    println!("Manifest digest: {}", digest);
+}
+```
+
+**Returns:** `String` — 8-char hex digest, or empty string if no file entries have CRC32 values
+
+**Properties:**
+- Deterministic and order-independent
+- Format-independent: same files in ZIP vs 7z produce the same digest
+- More collision-resistant than `calculate_archive_crc` (sorted + hashed vs wrapping sum)
+- Used by AdvancedDeduplicator for content-identity matching
 
 ---
 
@@ -187,23 +242,27 @@ archive.extract_all(options)?;
 
 ---
 
-#### `Archive::extract_file(&self, file_path: &str, dest: &Path) -> Result<()>`
+#### `Archive::extract_file(&self, file_path: &str, options: ExtractionOptions) -> Result<()>`
 
 Extract a single file from the archive.
 
 **Example:**
 ```rust
+use unified_archive::ExtractionOptions;
 use std::path::PathBuf;
 
 archive.extract_file(
     "document.pdf",
-    &PathBuf::from("./output")
+    ExtractionOptions {
+        destination: PathBuf::from("./output"),
+        ..Default::default()
+    }
 )?;
 ```
 
 **Parameters:**
 - `file_path` - Path of file within archive
-- `dest` - Destination directory (file will be created inside)
+- `options` - Extraction options including destination directory, password, overwrite, etc.
 
 **Errors:**
 - `ArchiveError::Format` - File not found in archive
@@ -257,7 +316,7 @@ println!("Config: {}", text);
 
 **Returns:** File contents as byte vector
 
-**Note:** Uses temporary file internally. Contents are read into memory after extraction.
+**Note:** Returns bytes directly in memory. No temporary file is used.
 
 ---
 
@@ -307,10 +366,10 @@ pub struct ArchiveEntry {
     /// Last modification time (UTC)
     pub modified: Option<SystemTime>,
 
-    /// CRC32 checksum (computed for ZIP/7z, direct for RAR)
+    /// CRC32 checksum, None if not available
     pub crc32: Option<u32>,
 
-    /// Entry type (File, Directory, Symlink, Other)
+    /// Entry type (File, Directory, Symlink, HardLink, Other)
     pub entry_type: EntryType,
 
     /// Unix permissions (e.g., 0o755)
@@ -333,6 +392,9 @@ pub struct ArchiveEntry {
 
     /// Platform-specific file attributes
     pub attributes: Option<FileAttributes>,
+
+    /// Sequential entry ID (0-based, assigned during listing)
+    pub id: usize,
 }
 ```
 
@@ -358,17 +420,18 @@ Enumeration of supported archive formats.
 
 ```rust
 pub enum ArchiveFormat {
-    Rar,      // RAR 4.x
-    Rar5,     // RAR 5.0+
-    Zip,      // ZIP
-    SevenZ,   // 7z
-    Tar,      // TAR (uncompressed)
-    TarGz,    // TAR + Gzip
-    TarBz2,   // TAR + Bzip2
-    TarXz,    // TAR + XZ
-    Gzip,     // Gzip (single file)
-    Bzip2,    // Bzip2 (single file)
-    Xz,       // XZ (single file)
+    Rar,       // RAR 4.x
+    Rar5,      // RAR 5.0+
+    Zip,       // ZIP
+    SevenZip,  // 7z
+    Tar,       // TAR (uncompressed)
+    TarGzip,   // TAR + Gzip
+    TarBzip2,  // TAR + Bzip2
+    TarXz,     // TAR + XZ
+    Gzip,      // Gzip — currently only as part of TarGzip
+    Bzip2,     // Bzip2 — currently only as part of TarBzip2
+    Xz,        // XZ — currently only as part of TarXz
+    Iso,       // ISO 9660
 }
 ```
 
@@ -456,10 +519,13 @@ pub struct ExtractionLimits {
 Trait for monitoring extraction progress.
 
 ```rust
-pub trait ProgressCallback {
-    fn on_progress(&mut self, current: u64, total: u64) -> ControlFlow<()>;
+pub trait ProgressCallback: Send + Sync {
+    fn on_progress(&mut self, processed: u64, total: Option<u64>) -> ControlFlow<()>;
 }
 ```
+
+> **Note:** `total` is `Option<u64>` because some backends (e.g., libarchive streaming)
+> cannot determine total size in advance.
 
 ### Example Implementation
 
@@ -498,7 +564,7 @@ pub struct ValidationReport {
     /// Total number of entries checked
     pub total_entries: usize,
 
-    /// Number of entries with valid CRC32
+    /// Number of entries successfully validated (= total_entries - failed.len())
     pub validated: usize,
 
     /// Paths of entries that failed validation
@@ -514,26 +580,29 @@ Error types for archive operations.
 
 ```rust
 pub enum ArchiveError {
-    /// File not found
-    NotFound { path: String },
+    /// I/O error during file operations
+    Io { operation: String, path: PathBuf, source: std::io::Error },
 
-    /// Invalid file path
+    /// Archive format error (wrong magic bytes, truncated headers, etc.)
+    Format { format: Option<ArchiveFormat>, message: String },
+
+    /// Archive corruption detected (CRC mismatch, bad data)
+    Corruption { path: String, details: String },
+
+    /// Password authentication error
+    Password { message: String },
+
+    /// Operation not supported for a specific format
+    Unsupported { operation: String, format: ArchiveFormat, details: Option<String> },
+
+    /// Codec not available (requires installation)
+    CodecUnavailable { codec: String, format: ArchiveFormat, install_instructions: String },
+
+    /// Operation not yet implemented (format-agnostic)
+    UnsupportedOperation { operation: String, reason: String },
+
+    /// Invalid path
     InvalidPath { path: String, reason: String },
-
-    /// Unsupported archive format
-    UnsupportedFormat { format: Option<String> },
-
-    /// Format-specific error
-    Format { format: Option<ArchiveFormat>, details: String },
-
-    /// I/O error
-    Io { operation: &'static str, path: PathBuf, source: std::io::Error },
-
-    /// Password error
-    Password { details: String },
-
-    /// Archive corruption detected
-    Corruption { format: Option<ArchiveFormat>, details: String },
 }
 ```
 
@@ -542,11 +611,11 @@ pub enum ArchiveError {
 ```rust
 match Archive::open("file.rar") {
     Ok(archive) => { /* use archive */ },
-    Err(ArchiveError::NotFound { path }) => {
-        eprintln!("File not found: {}", path);
+    Err(ArchiveError::Io { path, source, .. }) => {
+        eprintln!("I/O error at {}: {}", path.display(), source);
     },
-    Err(ArchiveError::Password { details }) => {
-        eprintln!("Password required: {}", details);
+    Err(ArchiveError::Password { message }) => {
+        eprintln!("Password required: {}", message);
     },
     Err(ArchiveError::Corruption { details, .. }) => {
         eprintln!("Corrupted: {}", details);
@@ -676,18 +745,14 @@ unified-archive = { version = "0.1.0", default-features = false }
 ### Extract with Progress
 
 ```rust
-struct Progress;
-impl ProgressCallback for Progress {
-    fn on_progress(&mut self, current: u64, total: u64) -> ControlFlow<()> {
-        print!("\rProgress: {:.1}%", (current as f64 / total as f64) * 100.0);
-        ControlFlow::Continue(())
-    }
-}
-
-let mut progress = Box::new(Progress) as Box<dyn ProgressCallback>;
 let options = ExtractionOptions {
     destination: PathBuf::from("./output"),
-    progress_callback: Some(&mut progress),
+    progress: Some(Box::new(|current: u64, total: Option<u64>| {
+        if let Some(t) = total {
+            print!("\rProgress: {:.1}%", (current as f64 / t as f64) * 100.0);
+        }
+        ControlFlow::Continue(())
+    })),
     ..Default::default()
 };
 

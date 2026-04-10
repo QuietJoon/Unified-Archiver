@@ -9,6 +9,7 @@ Comprehensive guide to understanding checksums in compression and archive format
 3. [Multi-File Archive Formats](#multi-file-archive-formats)
 4. [Summary Table](#summary-table)
 5. [Implementation](#implementation)
+6. [Use Cases](#use-cases)
 
 ---
 
@@ -19,7 +20,7 @@ There are two types of CRC32 checksums in compressed files:
 ### 1. Per-File CRC32 (Content CRC32)
 - **What**: Checksum of each individual file's uncompressed content
 - **Purpose**: Verify file integrity after extraction
-- **Available in**: All archive formats (ZIP, 7z, RAR, TAR)
+- **Available in**: ZIP, 7z, RAR (TAR does not store per-file CRC32)
 - **unified-archive**: Accessible via `ArchiveEntry.crc32`
 
 ### 2. Stream CRC32 (Container CRC32)
@@ -239,8 +240,10 @@ for entry in archive.list_files()? {
 // Per-file CRC32 (available)
 let archive = Archive::open("file.rar")?;
 for entry in archive.list_files()? {
-    // RAR4/RAR5 always have CRC32
-    println!("{}: CRC32={:08X}", entry.path, entry.crc32.unwrap());
+    // RAR4/RAR5 always have CRC32; RAR5 may use BLAKE2 instead
+    if let Some(crc) = entry.crc32 {
+        println!("{}: CRC32={:08X}", entry.path, crc);
+    }
 }
 
 // BLAKE2 hash (RAR5 only, not yet exposed)
@@ -330,6 +333,38 @@ for entry in archive.list_files()? {
 
 ---
 
+#### Computed Archive Checksums
+
+unified-archive provides two derived checksums computed from per-file CRC32 values. Neither is stored in the archive — both are calculated on-the-fly.
+
+**Archive CRC** (`calculate_archive_crc`):
+```rust
+let crc = archive.calculate_archive_crc()?;
+println!("Archive CRC: {:08X}", crc);
+```
+Wrapping sum of all per-file CRC32 values. Matches 7-Zip's "Archive CRC" display. Simple and fast, but wrapping addition is prone to collisions (e.g., swapping two files' CRCs doesn't change the sum).
+
+**Manifest Digest** (`calculate_manifest_digest`):
+```rust
+let digest = archive.calculate_manifest_digest()?;
+println!("Manifest digest: {}", digest); // e.g. "a1b2c3d4"
+```
+Sorts per-entry CRC32 hex strings, joins with `,`, then CRC32-hashes the result. More collision-resistant than archive CRC because sorting preserves per-entry identity instead of collapsing it into a sum.
+
+**Comparison:**
+
+| Property | Archive CRC | Manifest Digest |
+|----------|-------------|-----------------|
+| Algorithm | Wrapping sum | Sort + join + CRC32 hash |
+| Output | `u32` | 8-char hex string |
+| Collision resistance | Low (addition is lossy) | Higher (preserves per-entry identity) |
+| Use case | Quick comparison, 7-Zip compatibility | Content-identity deduplication |
+| Empty archive | `0` | `""` (empty string) |
+
+Both are order-independent and format-independent: the same file contents produce the same result whether stored in ZIP, 7z, or RAR.
+
+---
+
 ## Use Cases
 
 ### When to Use Stream CRC32
@@ -363,7 +398,27 @@ assert_eq!(crc.crc32.unwrap(), 0x9A0D2606);
 let archive = Archive::open("backup.zip")?;
 let report = archive.validate_integrity()?;
 if report.failed.is_empty() {
-    println!("✅ All {} files verified", report.validated);
+    println!("All {} files verified", report.validated);
+}
+```
+
+### When to Use Manifest Digest
+
+**Good for**:
+- Deduplicating archives across different formats (ZIP vs 7z vs RAR with same files)
+- Content-identity matching regardless of compression method or entry order
+- Building a content-addressable archive index
+
+**Example**:
+```rust
+let zip = Archive::open("backup.zip")?;
+let sevenz = Archive::open("backup.7z")?;
+
+let d1 = zip.calculate_manifest_digest()?;
+let d2 = sevenz.calculate_manifest_digest()?;
+
+if d1 == d2 {
+    println!("Archives contain identical files");
 }
 ```
 

@@ -14,7 +14,7 @@ use std::env;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use unified_archive::{Archive, ArchiveError};
+use unified_archive::Archive;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command line arguments

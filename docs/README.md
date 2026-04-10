@@ -193,7 +193,7 @@ archive.validate_integrity()
 
 // Extraction
 archive.extract_all(options)
-archive.extract_file(path, dest)
+archive.extract_file(path, options)
 archive.extract_filtered(predicate, options)
 archive.extract_to_memory(path)
 archive.extract_to_stream(path)
