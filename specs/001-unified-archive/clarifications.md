@@ -6,7 +6,13 @@
 
 ## Overview
 
-This document records clarification questions asked during the specification review phase and the decisions made to resolve ambiguities. All decisions have been encoded back into the specification and related design documents.
+This document records clarification questions asked during the specification review phase and the decisions made to resolve ambiguities.
+
+> **Historical context.** The decisions below were made during the pre-implementation review (2025-10-30). Several have since been superseded by implementation changes. Superseded decisions are marked with inline notes, and a consolidated summary appears in the "Updated Entities" section. The original decision text is preserved for traceability.
+>
+> Key supersessions:
+> - `CodecUnavailable` was split out from `Unsupported` for missing-codec errors; `Unsupported` retains its `details: Option<String>` field for non-codec cases.
+> - `EntryType` now includes `Symlink`, `HardLink`, and `Other` variants for metadata representation, while extraction still skips symlinks/hardlinks per FR-022.
 
 ## Clarification Session 1: 2025-10-30
 
@@ -34,14 +40,18 @@ Pre-implementation review identified 3 critical ambiguities in edge case handlin
 - Aligns with robustness principle from constitution
 
 **Implementation Impact**:
-- `EntryType` enum simplified (removed `SymbolicLink` variant)
+
+*Representation (data model):* `EntryType` includes `Symlink`, `HardLink`, and `Other` variants so that archive metadata can be inspected without loss. These variants exist for listing and inspection purposes.
+
+*Operation policy (extraction/creation):* Symlinks and hardlinks are skipped with warnings during extraction (FR-022). This is enforced as an operation-level policy, independent of the data model.
+
 - Added FR-022: Library MUST skip symbolic links and hard links with warnings
 - Updated `ArchiveEntry` invariants to document skip behavior
 - Edge case marked as [RESOLVED]
 
 **Files Updated**:
 - `spec.md` - Added FR-022
-- `data-model.md` - Updated `EntryType`, removed symlink handling
+- `data-model.md` - Updated `EntryType`. **Final state:** `EntryType` includes `File`, `Directory`, `Symlink`, `HardLink`, and `Other`. Symlinks/hardlinks are represented in metadata for inspection but skipped during extraction per FR-022.
 - Edge cases section updated
 
 ---
@@ -89,7 +99,9 @@ Pre-implementation review identified 3 critical ambiguities in edge case handlin
 3. Partial extraction - Extract compatible files, skip others
 4. Bundled codecs - Include all codecs in library
 
-**Decision**: Option 1 - Return `ArchiveError::Unsupported` with codec name and installation instructions
+**Decision**: Option 1 - Return error with codec name and installation instructions
+
+> **Superseded:** Missing codecs now use `ArchiveError::CodecUnavailable { codec, format, install_instructions }`, not `Unsupported`. Overwrite conflicts use `ArchiveError::Io` with `AlreadyExists` kind.
 
 **Rationale**:
 - Actionable error messages (constitution Principle V: Clear Contracts)
@@ -99,15 +111,14 @@ Pre-implementation review identified 3 critical ambiguities in edge case handlin
 - Aligns with explicit error handling requirement (FR-010)
 
 **Implementation Impact**:
-- Added FR-024: Library MUST return `ArchiveError::Unsupported` with codec name and instructions
-- Enhanced `ArchiveError::Unsupported` variant with `details: Option<String>` field
-- Updated Display implementation to show codec details
+- Added FR-024: Library MUST return error with codec name and instructions
+- **Superseded:** `ArchiveError::CodecUnavailable { codec, format, install_instructions }` now handles this case instead of `Unsupported` with `details`
 - Updated extraction contract error conditions
 - Edge case marked as [RESOLVED]
 
 **Files Updated**:
 - `spec.md` - Added FR-024
-- `contracts/errors.md` - Enhanced `Unsupported` variant, updated Display impl
+- `contracts/errors.md` - Added `CodecUnavailable` variant (supersedes original `Unsupported` enhancement)
 - `contracts/extraction.md` - Added codec error to error conditions
 
 ---
@@ -122,20 +133,19 @@ Pre-implementation review identified 3 critical ambiguities in edge case handlin
 
 ### Updated Entities
 
-**ArchiveError::Unsupported**:
+**ArchiveError — Codec handling** (superseded):
 ```rust
-// Before
-Unsupported {
-    operation: String,
-    format: ArchiveFormat,
-}
+// Original decision: add details to Unsupported
+// Unsupported { operation, format, details: Option<String> }
 
-// After
-Unsupported {
-    operation: String,
+// Shipped implementation: dedicated CodecUnavailable variant
+CodecUnavailable {
+    codec: String,
     format: ArchiveFormat,
-    details: Option<String>, // Codec name, installation instructions
+    install_instructions: String,
 }
+// Unsupported variant retained for non-codec cases, still carries details:
+// Unsupported { operation: String, format: ArchiveFormat, details: Option<String> }
 ```
 
 **EntryType**:
@@ -147,26 +157,26 @@ pub enum EntryType {
     SymbolicLink { target: String },
 }
 
-// After
+// After (original clarification decision)
 pub enum EntryType {
     File,
     Directory,
     // Note: Symbolic links skipped (FR-022)
 }
+// **Superseded:** Current enum: File, Directory, Symlink, HardLink, Other
+// Symlinks/hardlinks are still skipped during extraction (FR-022) but represented in metadata.
 ```
 
 **ExtractionOptions.overwrite** (clarified):
 - Default: `false` (fail on collision)
-- Behavior: Extraction aborts with `ArchiveError::Io` if files exist
+- Behavior: Extraction aborts with `ArchiveError::Io` with `AlreadyExists` kind if files exist (per AD 0017)
 
 ### Edge Cases Resolved
 
-3 out of 10 edge cases resolved:
+3 of the original 10 edge cases were resolved by this clarification session (the spec has since grown to 14 edge cases, all marked resolved or deferred at the implementation level; documentation across contract files may still contain inconsistencies on cancellation, memory bounds, and comments that require separate reconciliation):
 - ✅ Symbolic links and hard links → Skip with warnings
 - ✅ Overwrite behavior → Error by default, configurable
 - ✅ Missing codecs → Clear error with installation instructions
-
-7 edge cases remain for future clarification or implementation decisions.
 
 ---
 
@@ -179,27 +189,11 @@ All clarification decisions align with project constitution:
 | I. Robustness & Stability | ✅ | Error-first defaults (FR-023), explicit skip behavior (FR-022) |
 | II. Performance First | ✅ | No performance impact from these decisions |
 | III. Minimal Dependencies | ✅ | No codec bundling (FR-024), system-provided codecs |
-| IV. Comprehensive Testing | ✅ | Decisions create testable behaviors (error conditions, skip patterns) |
+| IV. Comprehensive Testing | ⚠️ | Decisions create testable behaviors (error conditions, skip patterns); testability is confirmed but full verification coverage has not yet been independently assessed |
 | V. Clear Contracts | ✅ | Actionable error messages (FR-024), explicit defaults documented |
 
 ---
 
 ## Next Steps
 
-With these clarifications resolved, the specification is ready for implementation:
-
-1. ✅ Critical edge cases resolved
-2. ✅ All decisions encoded in specification
-3. ✅ API contracts updated
-4. ✅ Data model aligned with decisions
-5. **Ready for**: `/speckit.implement` to begin Phase 1 (Setup)
-
-**Remaining Edge Cases** (can be addressed during implementation):
-- Unicode/special character handling in filenames
-- Insufficient disk space handling
-- Concurrent archive access patterns
-- Cross-platform permission preservation
-- Password error handling specifics
-- Non-standard extension handling
-
-These remaining edge cases are either already covered by existing FRs or can be handled with standard error patterns during implementation.
+**Historical note:** Implementation is complete. This clarification record is preserved as design history.

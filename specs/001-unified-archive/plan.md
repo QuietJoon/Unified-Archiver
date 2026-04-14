@@ -3,66 +3,68 @@
 **Branch**: `001-unified-archive` | **Date**: 2025-11-11 | **Spec**: [spec.md](./spec.md)
 **Input**: Feature specification from `/specs/001-unified-archive/spec.md`
 
-**Note**: This template is filled in by the `/speckit.plan` command. See `.specify/templates/commands/plan.md` for the execution workflow.
+**Note**: Generated from speckit template (no longer present in repo).
 
 ## Summary
 
-This project implements a unified archive library for Rust that provides a single, format-agnostic API for handling multiple archive formats (7z, RAR, RAR5, ZIP, TAR, GZIP, BZIP2, XZ, ISO). The library recently added **SFX (Self-Extracting Archive) detection** capabilities to identify and extract embedded archives from executable files across multiple platforms (Windows PE, Linux/macOS ELF, Unix shell scripts).
+This project implements a unified archive library for Rust that provides a single, format-agnostic API for handling multiple archive formats (7z, RAR, RAR5, ZIP, TAR compound formats, ISO). Standalone gz/bz2/xz streams are not supported as independent formats — only their TAR compound variants (TAR.GZ, TAR.BZ2, TAR.XZ) are handled (per AD 0018). The library includes **SFX (Self-Extracting Archive) detection** capabilities to identify embedded archives and report detection metadata (format, offset, confidence) from executable files across multiple platforms (Windows PE, Linux ELF, macOS Mach-O, Unix shell scripts).
 
 **Primary Requirements**:
-1. Unified interface for archive operations (inspection, extraction, creation, modification) across all formats
+1. Unified interface for archive operations (inspection, extraction, creation, modification) across supported formats (standalone gz/bz2/xz excluded per AD 0018; documented caveats per format)
 2. Automatic format detection from file content (magic bytes)
 3. SFX detection with platform-agnostic API supporting Windows, Linux, macOS executables and shell scripts
 4. Cross-platform compatibility (Windows, macOS, Linux) without JVM dependency
 5. RAR/RAR5 format support through UnRAR SDK
-6. Performance within 20% of native 7zip tools
+6. Performance target: within 20% of native 7zip tools (under verification, not yet a settled guarantee)
 
 **Technical Approach**:
 - FFI bindings to proven native libraries (UnRAR SDK, libarchive)
 - Rust 2024 edition with enhanced unsafe code requirements
 - Pattern matching on file signatures for format and SFX detection
-- Streaming APIs for memory-efficient large archive handling
+- Streaming APIs for memory-efficient large archive handling (libarchive-backed formats; Piz, ZipReader, SevenZ, and UnRAR backends buffer entries)
 - Platform-specific optimizations with unified public API
 
 ## Technical Context
 
 **Language/Version**: Rust 2024 edition (minimum version 1.85)
-**Primary Dependencies**:
-- Core: once_cell 1.20+, crc32fast 1.4+, rayon 1.8+, secstr 0.5+, walkdir 2.4+
-- FFI: UnRAR SDK (RAR/RAR5), libarchive (ZIP/7z/TAR/etc)
-- Native Rust Backends: piz 0.5+ (ZIP extraction with parallel decompression), sevenz-rust2 0.19+ (7z extraction), zip 2.2+ (ZIP creation), memmap2 0.9+ (memory-mapped file access for piz)
+**Primary Dependencies** (split-backend architecture):
+- Core: once_cell 1.20+, crc32fast 1.4+, rayon 1.8+, walkdir 2.4+ (secstr deferred — passwords use `Option<String>`)
+- Piz 0.5+ (ZIP extraction with parallel decompression), memmap2 0.9+ (memory-mapped file access for Piz)
+- zip 2.2+ (encrypted ZIP extraction, ZIP creation) — referred to as ZipReader backend
+- sevenz-rust2 0.19+ (7z extraction) — SevenZ backend
+- libarchive (TAR family: TAR, TAR.GZ, TAR.BZ2, TAR.XZ; ISO support; archive creation) — Libarchive backend
+- UnRAR SDK (RAR/RAR5 extraction) — UnRAR backend
 - SFX Detection: goblin 0.9+ (PE/ELF/Mach-O parsing, fuzzed, pure Rust)
 
 **Storage**: Files (archive files on disk, streaming for large archives)
-**Testing**: cargo test, integration tests with real archive samples, property-based tests for invariants
-**Target Platform**: Cross-platform library (Windows 10+, macOS 11+, Linux kernel 4.4+)
+**Testing**: cargo test, integration tests with archive samples (synthetic only for SFX; official-tool samples planned but not yet available — SFX testing gates are incomplete), property-based tests for invariants
+**Target Platform**: Cross-platform library (Windows 10+, macOS 11+, Linux kernel 4.4+). **Note**: Primary development is on macOS; cross-platform verification is a target (SC-011).
 **Project Type**: Single library crate with FFI bindings
 
-**Performance Goals**:
+**Performance Goals** (targets under verification — not yet settled as guarantees):
 - Archive inspection: <1s for 10,000 files
 - Extraction: within 20% of native 7zip performance (measured by extraction throughput MB/s on identical hardware)
 - SFX detection: <100ms for files up to 10MB
-- Memory: 64KB read buffers with <50MB total library overhead, enabling 10GB+ archives in <100MB total process memory (streaming)
+- Memory usage is backend-dependent. Libarchive truly streams; Piz/SevenZ/UnRAR buffer entries in memory. See per-module notes below.
 
-**Per-Module Memory Budgets** (Constitution requirement):
-- `src/extraction.rs`: 35MB max (read buffers + decompression state)
-- `src/inspection.rs`: 10MB max (entry metadata caching)
-- `src/sfx/`: 5MB max (signature scanning + executable parsing)
-- `src/creation.rs`: 30MB max (compression buffers + write state)
-- `src/modification.rs`: 40MB max (modification tracking + temp buffers)
-- Remaining modules: 10MB combined (error handling, format detection, etc.)
+**Per-Module Memory Notes**:
+- `src/extraction.rs`: Libarchive streams with small read buffers; Piz/SevenZ/UnRAR buffer full entries
+- `src/inspection.rs`: Entry metadata cached after first list call
+- `src/sfx.rs` + `src/sfx/`: Module root re-exports; detection scans first 1MB only; minimal memory footprint
+- `src/creation.rs`: Libarchive handles compression streaming; buffer sizes vary by format
+- `src/modification.rs`: Copy-on-write strategy via commit_changes(); temp file overhead proportional to archive size
 
 **Constraints**:
 - Zero JVM dependency (pure Rust + FFI to native libs)
-- Zero false positives for SFX detection on 100+ non-SFX executables
-- 100% detection rate for official SFX tools (7-Zip, WinRAR, makeself)
-- Thread-safe for concurrent archive operations on different files
+- Low false-positive rate for SFX detection on synthetic test corpus (larger negative corpus planned, SC-018)
+- Synthetic SFX detection coverage for all stub types (PE, ELF, Mach-O, ScriptInterpreter, Unknown); unknown/custom stubs proceed to signature scanning (OI-027-001 resolved)
+- Thread-safe for concurrent archive operations on different files. RAR FFI calls are serialized via a process-wide mutex (`UNRAR_LOCK`); concurrent caller access is safe but RAR operations execute sequentially (OI-026-004 resolved).
 
 **Scale/Scope**:
-- Support 10+ archive formats (7z, RAR, RAR5, ZIP, TAR, GZIP, BZIP2, XZ, ISO)
-- Handle archives up to 10GB efficiently
+- Support 9 openable archive formats (7z, RAR, RAR5, ZIP, TAR.GZ, TAR.BZ2, TAR.XZ, TAR, ISO). Standalone GZIP/BZIP2/XZ enum variants exist but are not supported through `Archive::open()` (AD 0018).
+- Target: handle archives up to 10GB (streaming extraction via libarchive is memory-efficient; Piz/SevenZ/UnRAR buffer entries and may require proportional memory)
 - Process up to 10,000 files per archive
-- Support 4 SFX stub types (PE, ELF, Mach-O, shell script)
+- 5 stub types enumerated (WindowsPE, LinuxELF, MacOSMachO, ScriptInterpreter, Unknown); all 5 reach signature scanning — Unknown stubs proceed to Stage 2 and return `probable()` with confidence 0.9 when an archive signature is found (OI-027-001 resolved)
 
 ## Constitution Check
 
@@ -70,7 +72,7 @@ This project implements a unified archive library for Rust that provides a singl
 
 ### I. Robustness & Stability (NON-NEGOTIABLE)
 
-**Status**: ✅ PASS
+**Status**: ⚠️ PARTIAL — tracked exceptions: open_at_offset deferred (returns Unsupported placeholder). Creation progress (OI-025-003) and unknown-stub SFX (OI-027-001) are resolved.
 
 - All error conditions explicitly handled (FR-010: distinguishes I/O, format, corruption errors)
 - Input validation at boundaries (FR-030: graceful false positive handling for SFX detection)
@@ -80,53 +82,53 @@ This project implements a unified archive library for Rust that provides a singl
 
 ### II. Pragmatic Performance
 
-**Status**: ✅ PASS
+**Status**: ✅ PASS (conditional) — tracked exceptions: performance targets under verification. Creation progress is now wired per-entry (OI-025-003 resolved).
 
 **Planned Optimizations**:
-- SFX detection scans only first 1MB with 512-byte aligned chunks (FR-025) - **Small change, significant gain** (eliminates full file scans)
+- SFX detection scans only first 1MB for archive signatures (FR-025) - **Small change, significant gain** (eliminates full file scans)
 - CRC32 validation uses crc32fast crate with SIMD acceleration - **Small change, 10x+ speedup**
 - Parallel extraction with rayon work-stealing - **Medium change, multi-core scaling**
-- Streaming APIs for large archives (FR-012) - **Medium change, enables 10GB+ archives in <100MB memory**
+- Streaming APIs for large archives (FR-012) - **Medium change, targets <100MB memory for 10GB+ archives via libarchive streaming** (ZIP/7z/RAR backends buffer entries in memory; overall target under verification)
 
-All optimizations measured against benchmarks, targeting 20% of native 7zip performance (SC-010).
+All optimizations measured against benchmarks, targeting within 20% of native 7zip performance (SC-010, under verification).
 
 ### III. Unified Interface with Platform-Optimized Backends
 
-**Status**: ✅ PASS
+**Status**: ✅ PASS (conditional) — standalone gz/bz2/xz excluded (AD 0018), RAR concurrency caveated, SFX offset opening deferred.
 
 - Unified public API across all platforms (FR-001, FR-008)
-- Multiple backend libraries used (UnRAR SDK for RAR, libarchive for others)
+- Multiple backend libraries used: Piz for ZIP extraction (parallel decompression), ZipReader (zip crate) for encrypted ZIP extraction, SevenZ (sevenz-rust2) for 7z extraction, UnRAR SDK for RAR/RAR5 extraction, libarchive for TAR family/ISO and all creation
 - Backend selection transparent to consumers (FR-004)
 - Format auto-detection eliminates explicit format specification (FR-002)
 
-**Dependency Justification**: See spec.md "Technology Stack" section (lines 197-213) for detailed dependency justifications including UnRAR SDK, libarchive, once_cell, crc32fast, rayon, and secstr.
+**Dependency Justification**: See spec.md "Technology Stack" section for detailed dependency justifications including UnRAR SDK, libarchive, once_cell, crc32fast, and rayon. Note: secstr is deferred; passwords currently use `Option<String>`.
 
 **SFX Detection**: goblin 0.9+ - Battle-tested with extensive fuzzing coverage (https://github.com/m4b/goblin - 100M+ inputs via cargo-fuzz, documented in repo CI), pure Rust, PE/ELF/Mach-O support, Rust 2024 compatible
 
 ### IV. Comprehensive Testing
 
-**Status**: ✅ PASS
+**Status**: ⚠️ PARTIAL — SFX tests are synthetic only (official-tool samples planned but not available), coverage verification pending. Creation progress is now wired per-entry (OI-025-003 resolved).
 
 Testing strategy defined:
 - Unit tests for SFX detection logic (>90% coverage target)
-- Integration tests with real SFX samples from official tools (SC-016: 100% detection)
+- Integration tests with synthetic SFX samples (real official-tool samples planned)
 - Contract tests for public API (SfxDetectionResult structure, FR-026)
 - Property-based tests for SFX detection invariants (no false positives, SC-018)
 - Performance regression tests for detection latency (SC-017: <100ms for 10MB files)
 
 ### V. Clear Contracts & Documentation
 
-**Status**: ✅ PASS
+**Status**: ⚠️ PARTIAL — SFX output contract includes confidence; usage examples in quickstart.md. Performance target pending formal benchmark verification; open_at_offset contract deferred.
 
 Contracts defined for SFX detection:
-- Input: File path or byte stream
-- Output: SfxDetectionResult (is_sfx, archive_format, data_offset, stub_type) (FR-026)
+- Input: File path
+- Output: SfxDetectionResult (is_sfx, archive_format, data_offset, stub_type, confidence) (FR-026)
 - Error conditions: Corrupted files, invalid formats, I/O errors (FR-030)
-- Performance guarantees: <100ms for files up to 10MB (SC-017)
+- Performance target: <100ms for files up to 10MB (SC-017, pending formal benchmark verification)
 - Thread-safety: Concurrent detection on different files (FR-020)
-- Usage examples planned in quickstart.md
+- Usage examples available in quickstart.md
 
-**Overall Gate Status**: ✅ PASS - All clarifications resolved (goblin 0.9 selected for SFX detection)
+**Overall Gate Status**: ⚠️ PARTIAL with tracked exceptions (open_at_offset deferred, performance targets under verification, standalone formats excluded per AD 0018, SFX testing synthetic only). OI-025-003, OI-026-004, and OI-027-001 are resolved.
 
 ## Project Structure
 
@@ -134,12 +136,12 @@ Contracts defined for SFX detection:
 
 ```text
 specs/[###-feature]/
-├── plan.md              # This file (/speckit.plan command output)
-├── research.md          # Phase 0 output (/speckit.plan command)
-├── data-model.md        # Phase 1 output (/speckit.plan command)
-├── quickstart.md        # Phase 1 output (/speckit.plan command)
-├── contracts/           # Phase 1 output (/speckit.plan command)
-└── tasks.md             # Phase 2 output (/speckit.tasks command - NOT created by /speckit.plan)
+├── plan.md              # This file
+├── research.md          # Phase 0 research and decisions
+├── data-model.md        # Core entity definitions
+├── quickstart.md        # Usage examples and getting started
+├── contracts/           # API contracts per operation area
+└── tasks.md             # Implementation task ledger
 ```
 
 ### Source Code (repository root)
@@ -151,55 +153,59 @@ src/
 ├── entry.rs                  # ArchiveEntry, file metadata
 ├── error.rs                  # Error types (ArchiveError)
 ├── format.rs                 # ArchiveFormat enum, detection logic
-├── compression.rs            # CompressionOptions, CompressionLevel
-├── extraction.rs             # Extraction APIs (stub)
-├── creation.rs               # Creation APIs (stub)
-├── modification.rs           # Modification APIs (stub)
-├── inspection.rs             # Inspection APIs (stub)
-├── sfx/                      # NEW: SFX detection module
-│   ├── mod.rs               # Public SFX API
-│   ├── detection.rs         # Core detection logic
+├── options.rs                # ExtractionOptions, CompressionOptions, CompressionLevel
+├── stream_crc.rs             # CRC32 streaming validation
+├── streaming.rs              # Streaming extraction APIs
+├── extraction.rs             # Extraction APIs
+├── creation.rs               # Creation APIs
+├── modification.rs           # Modification APIs (copy-on-write via commit_changes())
+├── inspection.rs             # Inspection APIs
+├── sfx.rs                    # SFX module root (re-exports)
+├── sfx/                      # SFX detection module
+│   ├── detection.rs         # Core detection logic (3-stage pipeline)
 │   ├── signatures.rs        # Archive signatures (PK, Rar!, 7z)
 │   ├── stub_types.rs        # Executable format detection (PE/ELF/Mach-O)
 │   └── result.rs            # SfxDetectionResult structure
 ├── ffi/                      # FFI bindings
 │   ├── mod.rs
+│   ├── common.rs            # Shared FFI utilities
 │   ├── unrar.rs             # UnRAR SDK bindings
 │   ├── libarchive.rs        # libarchive bindings
-│   └── bindings.rs          # Auto-generated bindings (stub)
-└── utils/                    # Utilities
-    ├── crc32.rs             # CRC32 validation
-    └── streaming.rs         # Streaming APIs
+│   ├── wrapper.rs           # Safe wrapper types (RAII)
+│   ├── piz_wrapper.rs       # Piz backend wrapper
+│   ├── sevenz_wrapper.rs    # SevenZ backend wrapper
+│   ├── zip_wrapper.rs       # ZipReader backend wrapper
+│   ├── zip_writer.rs        # ZIP creation wrapper
+│   └── libarchive_wrapper.rs # libarchive safe wrapper
+├── security.rs               # Security checks (path traversal, zip bomb, CRC32)
 
 tests/
-├── integration/
-│   ├── mod.rs
-│   ├── inspection.rs        # Archive inspection tests
-│   ├── extraction.rs        # Extraction tests
-│   ├── creation.rs          # Creation tests
-│   ├── modification.rs      # Modification tests
-│   ├── sfx_detection.rs     # NEW: SFX detection integration tests
-│   ├── sfx_false_positives.rs # NEW: SFX false positive tests
-│   └── concurrency.rs       # NEW: Thread-safety tests (T120-T120c)
+├── integration/              # Integration test modules
+│   ├── sfx_detection.rs     # SFX detection integration tests
+│   ├── sfx_false_positives.rs # SFX false positive tests
+│   ├── concurrency.rs       # Thread-safety tests (T120-T120c)
+│   └── ...                  # Additional integration tests
+├── contract/                 # Contract tests
+├── creation_roundtrip_test.rs # Creation roundtrip validation
 └── fixtures/
     ├── test.rar             # Test archives
-    ├── test_rar5.rar
-    └── sfx/                 # NEW: SFX test fixtures
+    └── test_rar5.rar        # (SFX tests use synthetic in-memory fixtures, no sfx/ directory)
 
 examples/
-├── list_archive.rs          # Inspection example
+├── inspect_archive.rs       # Inspection example
 ├── extract_archive.rs       # Extraction example
+├── streaming_extract.rs     # Streaming extraction example
 ├── create_archive.rs        # Creation example
-└── detect_sfx.rs            # NEW: SFX detection example
+└── detect_sfx.rs            # SFX detection example
 ```
 
-**Structure Decision**: Single library crate structure. The project is a Rust library providing archive manipulation capabilities. The `src/sfx/` module is newly added for SFX detection, containing detection logic, signature matching, executable format identification, and result structures. The FFI bindings to UnRAR SDK and libarchive are isolated in `src/ffi/` for safety and maintainability.
+**Structure Decision**: Single library crate structure. The project is a Rust library providing archive manipulation capabilities. SFX detection is split between `src/sfx.rs` (module root, re-exports) and `src/sfx/` (detection logic, signature matching, executable format identification, result structures). The FFI layer in `src/ffi/` contains multiple per-backend wrappers (piz_wrapper.rs, sevenz_wrapper.rs, zip_wrapper.rs, zip_writer.rs, libarchive_wrapper.rs) plus raw bindings (unrar.rs, libarchive.rs) and shared utilities (common.rs, wrapper.rs). Modification logic lives in `src/modification.rs` using a copy-on-write strategy via `commit_changes()`.
 
 ## Complexity Tracking
 
 > **Fill ONLY if Constitution Check has violations that must be justified**
 
-No constitutional violations. All complexity is justified:
-- Multiple backend libraries (UnRAR SDK, libarchive) justified by format complexity and proven stability
+No untracked constitutional violations. All complexity is justified (tracked exceptions in constitution gates above):
+- Multiple backend libraries (Piz, ZipReader/zip, sevenz-rust2, UnRAR SDK, libarchive) justified by format complexity and proven stability
 - FFI complexity justified by performance requirements (20% of native 7zip)
 - SFX detection complexity justified by security use case and cross-platform requirements

@@ -2,7 +2,7 @@
 
 **Feature**: 001-unified-archive
 **Date**: 2025-10-31 (Updated for Phase 1 enhancements)
-**Status**: Phase 1 Design
+**Status**: Implemented (retrospective documentation)
 **Purpose**: Extract files from archives with unified interface across all formats
 
 ## Core Operations
@@ -15,7 +15,7 @@ impl Archive {
 }
 ```
 
-**Unified Interface**: Same method extracts ZIP, 7z, RAR, RAR5, TAR.GZ, etc.
+**Unified Interface**: Shared method name (`extract_all`) with format-dependent behavior — each backend delegates to its native library while presenting the same call shape to the caller.
 
 **Preconditions**:
 - Archive is opened for reading
@@ -26,15 +26,15 @@ impl Archive {
 **Postconditions**:
 - All files extracted to destination
 - Directory structure preserved
-- File metadata preserved (if `options.preserve_*`)
+- File metadata preservation is best-effort and backend-dependent when `options.preserve_*` flags are set (e.g., not all backends can restore Unix permissions or nanosecond timestamps)
 
 **Error Conditions**:
 - `ArchiveError::Password`: Wrong or missing password
-- `ArchiveError::Io`: Disk full, permission denied, file exists when overwrite=false
+- `ArchiveError::Io`: Disk full, permission denied, or overwrite conflict when file exists and `overwrite=false` (uses `AlreadyExists` I/O kind)
 - `ArchiveError::Corruption`: CRC mismatch detected
-- `ArchiveError::Unsupported`: Archive requires unavailable compression codec
+- `ArchiveError::CodecUnavailable`: Archive requires unavailable compression codec
 
-**Performance**: Within 20% of native 7zip (SC-010).
+**Performance**: _Target_ — within 20% of native 7zip (SC-010). No benchmark artifacts exist yet; this is an aspirational target, not a verified claim.
 
 **Example**:
 ```rust
@@ -92,9 +92,14 @@ impl Archive {
     pub fn extract_filtered<F>(&self, predicate: F, options: ExtractionOptions)
         -> Result<(), ArchiveError>
     where
-        F: Fn(&ArchiveEntry) -> bool
+        F: Fn(&ArchiveEntry) -> bool + Sync,
 }
 ```
+
+> The predicate is a generic parameter bounded by `Fn(&ArchiveEntry) -> bool + Sync`.
+> Callers pass a closure or function directly; no boxing is required.
+> (A separate `EntryFilter` type alias exists in `src/options.rs` for the
+> `ExtractionOptions::filter` field, but `extract_filtered` itself is generic.)
 
 **Purpose**: Extract only files matching predicate.
 
@@ -125,8 +130,9 @@ let options = ExtractionOptions {
             println!("Progress: {} bytes (total unknown)", current);
         }
 
-        // Check for user cancellation
-        if user_cancelled() {
+        // Check for cancellation (pseudocode — replace with your own
+        // cancellation signal, e.g., an AtomicBool or channel check)
+        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
             ControlFlow::Break(())  // Cancel extraction
         } else {
             ControlFlow::Continue(())  // Continue extraction
@@ -135,22 +141,27 @@ let options = ExtractionOptions {
     ..Default::default()
 };
 
+// Cancellation semantics — see data-model.md §7 "Cancellation Semantics"
+// (canonical source) for the authoritative definition.
+//
+// Summary: ControlFlow::Break(()) from on_progress() causes the backend
+// to surface an ArchiveError (typically Format { message: "cancelled" }).
+// There is no dedicated Cancelled variant. Partial output may remain on
+// disk; cleanup is the caller's responsibility.
 match archive.extract_all(options) {
-    Ok(()) => println!("Extraction complete"),
-    Err(ArchiveError::Cancelled) => println!("Extraction cancelled by user"),
-    Err(e) => eprintln!("Extraction failed: {}", e),
+    Ok(_) => println!("Extraction complete"),
+    Err(e) => {
+        // Cancellation via Break surfaces as an ArchiveError, not Ok(())
+        eprintln!("Extraction stopped: {}", e);
+    }
 }
 ```
 
-**Requirement**: Callbacks update at least once per entry.
-
-**Phase 1 Enhancement**: ControlFlow-based cancellation with graceful cleanup.
-
-See [contracts/progress.md](progress.md) for full progress callback API contract.
+**Cadence and cancellation**: See [data-model.md §7](../data-model.md) for the canonical ProgressCallback definition and cancellation semantics (authoritative source). See [contracts/progress.md](progress.md) for cadence guarantees and callback API usage patterns.
 
 ## Format-Agnostic Guarantee
 
-**Critical (FR-001, SC-001)**: Same extraction code works for all formats.
+**Critical (FR-001, SC-001)**: Same primary API surface (`Archive::open` + `extract_all`) works for all formats. Backend behavior varies by format (e.g., streaming vs. buffered, parallel vs. sequential, metadata fidelity, password support) and some formats have specific caveats (see RAR concurrency, TAR CRC limitations, ZIP split unsupported). The caller's code shape is identical, but format-specific edge cases may still surface through errors or differing postconditions.
 
 ```rust
 fn extract_any(path: &Path) -> Result<(), ArchiveError> {
@@ -159,7 +170,7 @@ fn extract_any(path: &Path) -> Result<(), ArchiveError> {
         ..Default::default()
     };
 
-    Archive::open(path)?.extract_all(options) // Works for ANY format
+    Archive::open(path)?.extract_all(options) // Works for any supported archive format
 }
 
 extract_any(Path::new("file.zip"))?;  // Works
@@ -170,15 +181,13 @@ extract_any(Path::new("file.tar.gz"))?; // Works
 
 ## Streaming & Memory Bounds (Phase 1 Enhanced)
 
-**Requirement (SC-009)**: <100MB memory for 10GB archives.
+**Aspirational target (SC-009, libarchive-only, unshipped)**: <100MB memory for 10GB archives. This target has not been validated with benchmarks and should be treated as a backlog/research item. The bound would apply only to libarchive-backed formats (TAR family, ISO) which stream with a fixed read buffer. Native backends (Piz, ZipReader, SevenZ, UnRAR) buffer full entries in memory and are not subject to this bound.
 
-Implementation uses streaming:
-- Read compressed data in chunks
-- Decompress on-the-fly
-- Write to disk immediately
-- No full file buffering in memory
+Implementation uses `StreamingExtractor` (implements `Read`) for streaming extraction:
+- **Libarchive backends** (TAR family, ISO): Read compressed data in chunks, decompress on-the-fly, write to disk immediately
+- **Native backends**: Buffer full entry in memory, then wrap in `Cursor<Vec<u8>>`
 
-**Phase 1 Enhancement**: `EntryReader<'a>` provides `Read` trait for memory-bounded extraction (~40KB per file).
+**Note**: ZIP (Piz), 7z (SevenZ), and RAR (UnRAR) backends currently buffer the full entry in memory before constructing `StreamingExtractor`. True bounded-memory streaming currently applies to libarchive-backed formats only.
 
 See [contracts/streaming.md](streaming.md) for full streaming extraction API contract.
 
@@ -199,17 +208,23 @@ archive.extract_all(options)?;
 ### Password Detection
 
 ```rust
-// Check if archive requires password
+// Check if archive requires password and supply it programmatically.
+// Interactive password prompts are out of scope (see mvp-scope.md);
+// the caller is responsible for obtaining the password before extraction.
 if archive.is_encrypted()? {
-    let password = prompt_user_for_password()?;
+    let password = get_password_from_config_or_env()?; // caller-provided
     let options = ExtractionOptions {
+        destination: PathBuf::from("output/"),
         password: Some(String::from(password)),
         ..Default::default()
     };
     archive.extract_all(options)?;
 } else {
-    // No password needed
-    archive.extract_all(ExtractionOptions::default())?;
+    let options = ExtractionOptions {
+        destination: PathBuf::from("output/"),
+        ..Default::default()
+    };
+    archive.extract_all(options)?;
 }
 
 // Check individual entry encryption
@@ -227,15 +242,19 @@ for entry in archive.list_files()? {
 
 ### Cross-Format Password Support
 
-| Format | Password Support | Entry-Level Encryption | Archive-Level Encryption |
-|--------|------------------|------------------------|--------------------------|
-| RAR | ✅ Yes | ✅ Yes | ✅ Yes (header encryption) |
-| RAR5 | ✅ Yes | ✅ Yes | ✅ Yes (header encryption) |
-| ZIP | ✅ Yes | ✅ Yes | ❌ No |
-| 7z | ✅ Yes | ❌ No | ✅ Yes (solid encryption) |
-| TAR.* | ❌ No | ❌ No | ❌ No |
+| Format | Password Support | Entry-Level Encryption | Archive-Level Encryption | Backend |
+|--------|------------------|------------------------|--------------------------|---------|
+| RAR | ✅ Yes | ✅ Yes | ✅ Yes (header encryption) | UnRAR |
+| RAR5 | ✅ Yes | ✅ Yes | ✅ Yes (header encryption) | UnRAR |
+| ZIP | ✅ Yes | ✅ Yes | ❌ No | ZipReader |
+| 7z | ✅ Yes | ❌ No | ✅ Yes (solid encryption) | SevenZ |
+| TAR.* | ❌ No | ❌ No | ❌ No | libarchive |
+
+> **Notes**: ZIP encrypted-archive support uses the ZipReader backend (not Piz, which does not support decryption). 7z "entry-level" encryption is not individually addressable because 7z uses solid blocks. See [data-model.md](../data-model.md) for backend selection logic and password-handling caveats.
 
 ## Multi-Part Archive Support (Phase 1)
+
+> **Scope**: Full multipart extraction (open first part, chain automatically) is RAR-only. ZIP and 7z split archives are unsupported for extraction — see the ZIP section below. 7z split archives (`.7z.001`, `.7z.002`, ...) are detected at open time; callers observe detection through error handling (e.g., `ArchiveError::Unsupported`) when parts are missing or the format is unrecognized. There is no dedicated "is_multipart" query.
 
 ### RAR Volumes (Supported ✅)
 
@@ -257,7 +276,7 @@ archive.extract_all(ExtractionOptions::default())?;
 **Error handling**:
 ```rust
 match Archive::open("backup.part05.rar") {
-    Err(ArchiveError::Format { message }) => {
+    Err(ArchiveError::Format { format, message }) => {
         // Error: "Multi-part RAR: please open the first part (.part01.rar or .rar)"
         let archive = Archive::open("backup.part01.rar")?;
         archive.extract_all(options)?;
@@ -272,9 +291,9 @@ match Archive::open("backup.part05.rar") {
 ```rust
 // Split ZIP (.zip, .z01, .z02, ...) not supported
 match Archive::open("backup.z01") {
-    Err(ArchiveError::Unsupported { message }) => {
+    Err(ArchiveError::Unsupported { operation, format, details }) => {
         // Error: "Split ZIP archives are not supported. Please use a tool to merge parts first."
-        eprintln!("{}", message);
+        eprintln!("Operation '{}' unsupported for {:?}: {:?}", operation, format, details);
     }
     _ => unreachable!(),
 }
@@ -282,13 +301,11 @@ match Archive::open("backup.z01") {
 
 **Rationale**: Split ZIP support requires reassembly (complex, rare format). Use standard tools to merge before extraction.
 
-**Workaround**:
-```bash
-# Merge split ZIP files
-cat backup.zip backup.z01 backup.z02 > merged.zip
-
-# Then extract with unified-archive
-```
+> **Troubleshooting**: Split ZIP detection returns `ArchiveError::Unsupported` at open time. As a workaround, merge parts into a standard ZIP before extraction using shell tools:
+> - **Unix/macOS**: `cat backup.z01 backup.z02 backup.zip > merged.zip`
+> - **Windows**: `copy /b backup.z01+backup.z02+backup.zip merged.zip`
+>
+> Note: Merged output may not work for all split-ZIP variants (e.g., ZIP64 splits).
 
 ## Parallel Extraction (Phase 1)
 
@@ -301,9 +318,10 @@ archive.extract_all(ExtractionOptions::default())?;
 ```
 
 **Behavior**:
-- Sequential extraction: fewer than 4 files (avoids thread pool overhead)
-- Parallel extraction: 4 or more files (uses std thread-based parallelism)
-- The 4-file threshold balances thread-spawn cost against decompression gains
+- Sequential extraction for small archives; parallel extraction for archives with enough files to amortize thread-pool overhead (uses Rayon work-stealing parallelism)
+- **RAR note (OI-026-004 resolved)**: UnRAR FFI calls are serialized via a process-wide mutex (`UNRAR_LOCK`). RAR archives use sequential extraction. Concurrent caller access is safe; the mutex prevents cross-archive corruption.
+
+> _Implementation note_: The current threshold is 4 files. This is a heuristic that may change; callers should not depend on the exact cutoff.
 
 ## CRC32 Verification (Phase 1)
 
@@ -326,28 +344,32 @@ match archive.extract_all(options) {
 ```
 
 **Behavior**:
-- CRC32 computed during extraction (streaming, <2% overhead)
+- CRC32 computed during extraction (streaming; overhead is estimated at <2% but this figure is a rough estimate, not a verified benchmark result)
 - Mismatch returns `ArchiveError::Corruption`
 - Can be disabled with `verify_crc32: false` for performance
+- The `verify_crc32()` function is also exposed as a public utility in `unified_archive::security` for callers who need standalone CRC verification outside of extraction (see API_REFERENCE.md)
 
 **Format Support**:
-| Format | CRC32 Available | Verification |
-|--------|-----------------|--------------|
-| RAR | ✅ Metadata | ✅ Automatic |
-| RAR5 | ✅ Metadata | ✅ Automatic |
-| ZIP | ✅ Metadata | ✅ Automatic |
-| 7z | ✅ Metadata | ✅ Automatic |
-| TAR | ❌ Not available | ⚠️ Skipped |
+| Format | CRC32 Available | Verification | Method |
+|--------|-----------------|--------------|--------|
+| RAR | ✅ Metadata | ✅ Automatic | CRC32 comparison against stored checksum |
+| RAR5 | ✅ Metadata | ✅ Automatic | CRC32 comparison against stored checksum |
+| ZIP | ✅ Metadata | ✅ Automatic | CRC32 comparison against stored checksum |
+| 7z | ✅ Metadata | ✅ Automatic | CRC32 comparison against stored checksum |
+| TAR | ❌ No stored CRC | ⚠️ Read-based | Integrity detected via libarchive read errors (decompression failure, truncation), not CRC comparison |
 
 ## Thread Safety
 
-Extraction operations require `&self`, can be called from multiple threads with external synchronization. Each extraction operation is independent.
+`Archive` is `Send` but not `Sync`. A single `Archive` instance must not be shared across threads without external synchronization. To extract from the same file on multiple threads, open separate `Archive` handles per thread. Note that the UnRAR backend has additional restrictions due to its sequential C API — concurrent extraction from a single UnRAR handle is not supported even with synchronization.
 
 ## Contract Tests
 
-1. Extract from each supported format (ZIP, 7z, RAR, RAR5, TAR.GZ, BZIP2, XZ, ISO)
+**Guaranteed (implemented in CI)**:
+1. Extract from each supported format (ZIP, 7z, RAR, RAR5, TAR.GZ, TAR.BZ2, TAR.XZ, ISO) — standalone BZIP2/XZ not supported per AD 0018
 2. Verify extracted files match originals (byte-for-byte)
 3. Test password-protected extraction
-4. Test progress callbacks (at least once per entry)
-5. Test memory bounds (<100MB for large archives)
-6. Test performance (within 20% of native 7zip)
+4. Test progress callbacks fire and respect `ControlFlow::Break` (cadence is backend-dependent)
+
+**Backlog / research (not yet implemented)**:
+5. Memory-bound validation: <100MB for 10GB archives (aspirational, libarchive-backed formats only; native backends buffer full entries) — requires benchmark harness and large test archives
+6. Performance comparison: within 20% of native 7zip (SC-010) — requires benchmark harness and reference artifacts that do not yet exist

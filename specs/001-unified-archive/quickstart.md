@@ -15,22 +15,29 @@ unified-archive = "0.1.0"
 
 ### Build Requirements
 
+The crate links against native C/C++ libraries at build time. You need:
+- **pkg-config** (to locate libarchive headers/libraries)
+- **make** and a **C++ compiler** (g++ or clang++) for building the UnRAR SDK
+- **libarchive** development headers
+
 **Linux:**
 ```bash
 # Ubuntu/Debian
-sudo apt-get install libarchive-dev
+sudo apt-get install libarchive-dev pkg-config make g++
 
 # Fedora/RHEL
-sudo dnf install libarchive-devel
+sudo dnf install libarchive-devel pkgconf-pkg-config make gcc-c++
 ```
 
 **macOS:**
 ```bash
+# Xcode Command Line Tools provide make, clang++, and pkg-config
+xcode-select --install
 brew install libarchive
 ```
 
 **Windows:**
-Dependencies bundled automatically.
+Windows support is not yet tested; macOS is the primary platform, Linux secondary. See `build.rs` for current linking status.
 
 ## 5-Minute Tutorial
 
@@ -40,7 +47,9 @@ Dependencies bundled automatically.
 use unified_archive::{Archive, ArchiveError};
 
 fn main() -> Result<(), ArchiveError> {
-    // Works for ANY format: .zip, .7z, .rar, .tar.gz, etc.
+    // Works for all supported formats: .zip, .7z, .rar, .tar.gz, .tar.bz2, .tar.xz, .tar, .iso
+    // Standalone .gz/.bz2/.xz not directly openable (AD 0018).
+    // See "Implementation Status" at the end of this guide for format-specific limitations.
     let archive = Archive::open("data.zip")?;
 
     // Phase 1: Returns &[ArchiveEntry] (cached for repeated access)
@@ -63,7 +72,7 @@ fn main() -> Result<(), ArchiveError> {
 ### 2. Extract Archive
 
 ```rust
-use unified_archive::{Archive, ExtractionOptions};
+use unified_archive::{Archive, ArchiveError, ExtractionOptions};
 use std::path::PathBuf;
 
 fn main() -> Result<(), ArchiveError> {
@@ -85,19 +94,23 @@ fn main() -> Result<(), ArchiveError> {
 ### 3. Extract with Progress
 
 ```rust
-use unified_archive::{Archive, ExtractionOptions};
+use unified_archive::{Archive, ArchiveError, ExtractionOptions};
 use std::ops::ControlFlow;
+use std::path::PathBuf;
 
 fn main() -> Result<(), ArchiveError> {
     let archive = Archive::open("large.zip")?;
 
     let options = ExtractionOptions {
         destination: PathBuf::from("output/"),
-        progress: Some(Box::new(|current, total| {
-            let percent = (current as f64 / total as f64) * 100.0;
-            print!("\rProgress: {:.1}%", percent);
+        progress: Some(Box::new(|processed, total| {
+            if let Some(t) = total {
+                print!("\rProgress: {:.1}%", processed as f64 / t as f64 * 100.0);
+            } else {
+                print!("\rProcessed: {} bytes", processed);
+            }
 
-            // Phase 1: Cancellation support
+            // Cancellation support via ControlFlow
             ControlFlow::Continue(())
         })),
         ..Default::default()
@@ -111,20 +124,24 @@ fn main() -> Result<(), ArchiveError> {
 
 ### 4. Password-Protected Archives
 
+> **Note:** This snippet is illustrative, not self-contained. Password
+> acquisition is application-specific; replace the hard-coded string with
+> your own input method (CLI prompt, environment variable, GUI dialog).
+
 ```rust
-use unified_archive::{Archive, ExtractionOptions};
-// Password is stored as a plain String
+// Illustrative — password acquisition is application-specific.
+use unified_archive::{Archive, ArchiveError, ExtractionOptions};
+use std::path::PathBuf;
 
 fn main() -> Result<(), ArchiveError> {
     let archive = Archive::open("encrypted.zip")?;
 
-    // Phase 1: Detect encryption
     if archive.is_encrypted()? {
-        let password = rpassword::prompt_password("Password: ")?;
+        let password = String::from("user-supplied"); // replace with real input
 
         let options = ExtractionOptions {
             destination: PathBuf::from("output/"),
-            password: Some(password),  // Phase 1: Password as String
+            password: Some(password),  // Password stored as plain String
             ..Default::default()
         };
 
@@ -137,15 +154,20 @@ fn main() -> Result<(), ArchiveError> {
 
 ### 5. Streaming Extraction
 
+> **Note:** This snippet is illustrative. The `extract_to_stream` API
+> shown here reflects the design contract; check the current API surface
+> for exact signatures.
+
 ```rust
-use unified_archive::Archive;
+use unified_archive::{Archive, ArchiveError};
 use std::io::{BufReader, Write};
 use std::fs::File;
 
-fn main() -> Result<(), ArchiveError> {
-    let archive = Archive::open("data.zip")?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let archive = Archive::open("data.tar.gz")?;
 
-    // Phase 1: Memory-bounded streaming (~40KB per file)
+    // Streaming extraction (memory-bounded for libarchive-backed formats like TAR.GZ;
+    // Piz/ZipReader/SevenZ/UnRAR buffer full entries in memory)
     let reader = archive.extract_to_stream("large.bin")?;
     let mut output = File::create("output.bin")?;
 
@@ -155,64 +177,34 @@ fn main() -> Result<(), ArchiveError> {
 }
 ```
 
-## Phase 1 Enhancements Summary
+## Implementation Status
 
-Phase 1 design documents are drafted. Note: there is known drift between these specs and the actual implementation. Key differences include eager (not lazy) format detection, `String` instead of `SecStr` for passwords, `extract_to_stream()` instead of `entry_reader()`, and `verify_crc32` instead of `verify_crc`. Here's what was planned:
+Phase 1 is implemented with tracked gaps. The items below are grouped by
+maturity so callers know what works today and what is still in progress.
 
-### ✅ Completed Phase 1 Deliverables
+### Deferred / Partial
 
-1. **data-model.md** - Enhanced with 6 new ArchiveEntry fields, new entities (EntryReader, VerifyingReader, FileAttributes), and architectural improvements
-2. **contracts/progress.md** - Complete progress callback API with ControlFlow cancellation and rate limiting
-3. **contracts/streaming.md** - Streaming extraction API with memory bounds and CRC32 verification
-4. **contracts/extraction.md** - Updated with password handling (String), multi-part archive support, parallel extraction, and CRC32 verification
-5. **contracts/inspection.md** - Updated with entry caching (OnceLock), enhanced metadata fields, and performance improvements
-6. **quickstart.md** - Comprehensive user guide demonstrating all Phase 1 features
+- **Creation progress** — per-entry progress now invoked during creation with `total=None` (OI-025-003 resolved, AD 0021)
+- **Unknown-stub SFX scanning** — unknown stubs now proceed to signature scanning (OI-027-001 resolved)
+- **Modification metadata loss** — some backends discard mtime/atime during round-trip extraction
+- **`open_at_offset`** — opening an archive at an arbitrary byte offset is deferred
+- **Standalone gz/bz2/xz** — not directly openable as archives (AD 0018)
 
-### Key Features Added
+### Shipped
 
-**Enhanced Metadata (6 new fields)**:
-- `created`, `accessed` timestamps
-- `compression_ratio` calculation
-- `is_encrypted` flag
-- `comment` field
-- `attributes` (platform-specific)
+- **Entry caching** via `OnceCell` (zero-cost repeated access)
+- **Progress callbacks** with `ControlFlow` cancellation for extraction; signature: `fn on_progress(&mut self, processed: u64, total: Option<u64>)`
+- **Streaming extraction**: memory-bounded for libarchive-backed formats; Piz, ZipReader, SevenZ, and UnRAR buffer entries
+- **Password handling**: password stored as plain `String`
+- **CRC32 verification** during extraction
+- **SFX detection** with `SfxDetectionResult` (includes `confidence` field)
+- **EntryType** variants: `File`, `Directory`, `Symlink`, `HardLink`, `Other`
+- **ArchiveError** variants: `Io`, `Format`, `Corruption`, `Password`, `Unsupported`, `CodecUnavailable`, `UnsupportedOperation`, `InvalidPath`
 
-**Performance Improvements**:
-- Entry caching with OnceLock (zero-cost repeated access)
-- Parallel extraction with Rayon (3-3.5X speedup)
-- Streaming extraction (~40KB memory per file)
-
-**Password & Verification**:
-- Password stored as `String` (no special zeroization)
-- CRC32 verification during extraction (<2% overhead)
-
-**Developer Experience**:
-- Progress callbacks with cancellation (ControlFlow)
-- Multi-part RAR support (automatic volume chaining)
-- Memory-bounded operations (<100MB for 10GB+ archives)
-
-### Constitution Compliance
-
-All Phase 1 enhancements comply with constitution v1.1.0:
-- ✅ **Principle II (Pragmatic Performance)**: All changes meet effort-to-benefit criteria
-- ✅ **Principle III (Unified Interface + Minimal Deps)**: 3 new dependencies justified
-- ✅ **Principle I (Robustness)**: All patterns maintain error handling and safety
-
-### Next Steps
-
-**Ready for Phase 2 (Implementation)**:
-- Implement enhanced ArchiveEntry fields
-- Add entry caching layer
-- Implement progress callbacks
-- Create streaming extraction
-- Add CRC32 verification
-- Integrate Rayon for parallel extraction
-- Add password handling
-
-Would you like to proceed with Phase 2 implementation?
+See `Open_Issues.md` for the full deferred-items list and known gaps.
 
 ## License
 
-Dual licensed under Apache-2.0 OR MIT (your choice).
+Licensed under the MIT License.
 
 **RAR Support Note**: UnRAR license applies (free for non-commercial use). Commercial use requires license from RARLAB. Disable with `--no-default-features` if needed.

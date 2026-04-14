@@ -3,11 +3,12 @@
 **Feature**: 001-unified-archive
 **Date**: 2025-10-31
 **Phase**: Phase 1 Enhancement
-**Status**: Draft
+**Status**: Implemented (retrospective documentation)
+**Scope**: Extraction and creation progress. Creation progress (`CompressionOptions.progress`) is invoked per-entry by both ZIP and libarchive backends with `total=None` (AD 0021 / OI-025-003 resolved).
 
 ## Overview
 
-Progress callbacks provide real-time feedback during long-running archive operations (extraction, creation, validation). The API is designed for zero-cost abstraction via monomorphization, built-in cancellation support, and automatic rate limiting to ensure ≥10 updates/second without excessive overhead.
+Progress callbacks are implemented for both extraction and creation via dispatch through boxed trait objects (`Box<dyn ProgressCallback>`). Creation progress is invoked per-entry by both ZIP and libarchive backends; `total` is `None` because creation cannot pre-size streamed sources. There is no separate validation-progress API. The implementation includes built-in cancellation support and automatic rate limiting (must not exceed ~60 callbacks/sec; actual frequency varies by backend and is often much lower).
 
 ## Core Trait
 
@@ -31,16 +32,18 @@ pub trait ProgressCallback: Send + Sync {
     ///
     /// # Frequency
     ///
-    /// Called at least 10 times per second for operations lasting >1 second.
-    /// Rate-limited to prevent excessive overhead (max every 100ms or 100KB).
+    /// Rate-limited to ~60 updates/sec maximum (time-based interval, default 16ms).
+    /// Actual frequency varies by backend.
     ///
     /// # Thread Safety
     ///
-    /// Must be `Send + Sync`. Callbacks may be invoked from backend threads.
+    /// Must be `Send + Sync`. Callbacks should be written to be thread-safe as a
+    /// defensive measure; in practice, current backends call from the caller's thread,
+    /// but this is not a guaranteed invariant across future backends.
     ///
     /// # Panics
     ///
-    /// Panics are caught internally and treated as cancellation requests.
+    /// Panics in callbacks propagate normally (no `catch_unwind` wrapper).
     fn on_progress(&mut self, processed: u64, total: Option<u64>) -> ControlFlow<()>;
 }
 ```
@@ -65,7 +68,11 @@ where
 
 ```rust
 use std::ops::ControlFlow;
+use std::path::Path;
 use unified_archive::{Archive, ExtractionOptions, ProgressCallback};
+
+let archive = Archive::open("data.zip")?;
+let dest = Path::new("./output");
 
 // Closure-based via ExtractionOptions (most common)
 let options = ExtractionOptions {
@@ -82,6 +89,8 @@ let options = ExtractionOptions {
 archive.extract_all(options)?;
 
 // Struct-based (for complex state)
+use std::time::{Instant, Duration};
+
 struct ProgressBar {
     last_update: Instant,
 }
@@ -107,8 +116,8 @@ impl ProgressCallback for ProgressBar {
 
 ### Extraction with Progress
 
-Progress is provided through `ExtractionOptions`. There is no separate
-`extract_all_with_progress()` method.
+Progress is configured via the `progress` field on `ExtractionOptions`
+(type `Option<Box<dyn ProgressCallback>>`), then passed to `extract_all(options)`.
 
 ```rust
 impl Archive {
@@ -123,100 +132,60 @@ impl Archive {
 
 ### ExtractionOptions Integration
 
-```rust
-pub struct ExtractionOptions {
-    pub destination: PathBuf,
-    pub password: Option<String>,
-    pub overwrite: bool,
-    pub preserve_permissions: bool,
-    pub preserve_times: bool,
-    pub filter: Option<EntryFilter>,
-
-    /// Progress callback (optional)
-    ///
-    /// Called at least 10 times per second during extraction.
-    /// Return `ControlFlow::Break(())` to cancel gracefully.
-    pub progress: Option<Box<dyn ProgressCallback>>,
-
-    pub verify_crc32: bool,
-}
-
-// No builder method -- set the `progress` field directly when constructing
-// ExtractionOptions. See Usage Example above.
-```
+The `progress` field on `ExtractionOptions` accepts an `Option<Box<dyn ProgressCallback>>`.
+Set it directly when constructing the struct (see Usage Example above).
+For the full `ExtractionOptions` definition, see `src/options.rs`.
 
 ## Rate Limiting (Internal)
 
-```rust
-pub(crate) struct RateLimiter {
-    last_call: Instant,
-    last_bytes: u64,
-    min_interval: Duration,  // 100ms
-    min_bytes: u64,          // 100KB
-}
-
-impl RateLimiter {
-    pub fn should_call(&mut self, current_bytes: u64) -> bool {
-        let elapsed = self.last_call.elapsed();
-        let bytes_delta = current_bytes.saturating_sub(self.last_bytes);
-
-        if elapsed >= self.min_interval || bytes_delta >= self.min_bytes {
-            self.last_call = Instant::now();
-            self.last_bytes = current_bytes;
-            true
-        } else {
-            false
-        }
-    }
-}
-```
+Each backend wraps its progress dispatch in a time-based rate limiter (default minimum interval: 16ms). The limiter tracks the wall-clock time since the last dispatched callback and suppresses calls that arrive before the interval elapses. There is no byte-based threshold component. See `src/options.rs` for the `RateLimiter` implementation.
 
 ## Contract Guarantees
 
 ### Frequency
 
-**Requirement SC-013**: Progress callbacks called ≥10 times per second
+**Requirement SC-013**: Progress callbacks must not exceed ~60 callbacks/sec (16ms minimum interval between dispatches). This is an upper-bound guarantee only; actual callback frequency is often much lower and depends on backend entry granularity.
 
 **Implementation**:
-- Minimum interval: 100ms (ensures 10 updates/sec)
-- Minimum bytes: 100KB (ensures progress on fast operations)
-- Whichever threshold reached first triggers callback
-
-**Examples**:
-- 1MB/s operation: Called every 100ms (10 Hz)
-- 10MB/s operation: Called every 100KB (~100 Hz, rate-limited to 10 Hz)
-- 100MB/s operation: Called every 100KB (~1000 Hz, rate-limited to 10 Hz)
+- Minimum interval: 16ms (time-based only, no byte-based threshold)
+- Callback fires when the time interval has elapsed since the last call
+- No minimum cadence is guaranteed; backends with few entries may fire very infrequently
 
 ### Monotonicity
 
-**Guarantee**: `current <= total` always holds
+**Guarantee (processed)**: The `processed` parameter is monotonically non-decreasing across successive callbacks within a single operation.
 
-**Implementation**:
-- `current` only increases (never decreases)
-- `total` computed once at operation start
-- If backend reports size changes, `total` remains constant (original estimate)
+**Guarantee (processed vs total)**: When `total` is `Some(t)`, `processed <= t` holds. When `total` is `None`, only the monotonicity of `processed` is guaranteed; no upper-bound assertion is possible.
+
+> **Implementation note**: In the current implementation, `total` is computed once at operation start from the sum of known entry sizes. If a backend later reports different sizes, `total` is not revised (it retains the original estimate). This is an implementation detail, not a contract guarantee, and may change.
 
 ### Cancellation
 
-**Guarantee**: `ControlFlow::Break(())` cancels operation gracefully
+**Guarantee**: Returning `ControlFlow::Break(())` from a progress callback requests graceful cancellation.
 
-**Implementation**:
-1. Callback returns `ControlFlow::Break(())`
-2. Current file extraction completes (partial extraction not left on disk)
-3. Cleanup performed (temp files removed, handles closed)
-4. Returns `Ok(())` -- there is no `ArchiveError::Cancelled` variant.
-   The break simply stops further processing and the operation returns
-   success. Callers that need to distinguish cancellation from normal
-   completion should track the break in their own callback state.
+**Semantics**:
+1. The callback returns `ControlFlow::Break(())`
+2. Processing stops as soon as the backend checks the return value (best-effort; may not be immediate)
+3. The enclosing `extract_all` call returns `Err(ArchiveError)`. There is no dedicated `ArchiveError::Cancelled` variant; the error is typically a format-level error with "Extraction cancelled by user" or similar message. Callers who need to distinguish cancellation from other errors should track the cancellation decision in their callback (e.g., via an `AtomicBool`).
 
-**Example**:
+**Important**: Cancellation is best-effort. Partially extracted files may remain on disk depending on the backend and timing. Callers should verify output directory state after cancellation.
+
+**Example** (pseudocode -- `user_cancelled` is application-specific logic):
 ```rust
-let mut was_cancelled = false;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// Application-specific cancellation signal (e.g., set by a UI button handler)
+let user_cancelled: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
+let was_cancelled = Arc::new(AtomicBool::new(false));
+let cancel_signal = user_cancelled.clone();
+let flag = was_cancelled.clone();
 let options = ExtractionOptions {
     destination: dest.to_path_buf(),
-    progress: Some(Box::new(|processed: u64, _total: Option<u64>| {
-        if user_pressed_cancel() {
-            was_cancelled = true;
+    progress: Some(Box::new(move |processed: u64, _total: Option<u64>| {
+        if cancel_signal.load(Ordering::Relaxed) {
+            flag.store(true, Ordering::Relaxed);
             ControlFlow::Break(())  // Graceful cancellation
         } else {
             ControlFlow::Continue(())
@@ -224,78 +193,60 @@ let options = ExtractionOptions {
     })),
     ..Default::default()
 };
-archive.extract_all(options)?;
+let result = archive.extract_all(options);
 
-if was_cancelled {
-    // Handle cancellation -- partially extracted files may remain
+if was_cancelled.load(Ordering::Relaxed) || result.is_err() {
+    // Cancellation surfaces as an error. Partially extracted files may remain
+    // on disk depending on the backend and timing. Verify output directory state.
 }
 ```
 
 ### Performance Overhead
 
-**Target**: ≤10ms overhead per operation
+**Target**: Negligible overhead relative to I/O-bound extraction work.
 
-**Measured overhead**:
-- Callback dispatch: ~100ns (monomorphization, zero vtable lookup)
-- Rate limiting check: ~50ns (Instant::elapsed)
-- **Total per call**: ~150ns
-
-**Worst case** (100KB threshold, 100MB/s):
-- Calls per second: 1000
-- Overhead: 1000 * 150ns = 150μs = 0.15ms ✅ <<10ms
+**Design expectation**: Callback dispatch (dynamic dispatch via `Box<dyn ProgressCallback>`) and rate-limiter checks (`Instant::elapsed`) are lightweight relative to I/O-bound extraction. At the capped rate of ~60 calls/sec the aggregate overhead is expected to be imperceptible. No formal benchmarks exist in this repository to substantiate specific nanosecond-level figures.
 
 ### Error Handling
 
-**Panic Safety**:
-```rust
-pub(crate) fn call_progress_safe<P: ProgressCallback>(
-    progress: &mut P,
-    processed: u64,
-    total: Option<u64>,
-) -> ControlFlow<()> {
-    match std::panic::catch_unwind(AssertUnwindSafe(|| {
-        progress.on_progress(processed, total)
-    })) {
-        Ok(flow) => flow,
-        Err(_panic) => {
-            // Treat panic as cancellation request
-            ControlFlow::Break(())
-        }
-    }
-}
-```
-
-> **Note**: There is no `ArchiveError::Cancelled` variant. Cancellation
-> via `ControlFlow::Break(())` causes the operation to stop and return
-> `Ok(())` or the backend's own error behavior.
+> **Note**: There is no `catch_unwind` wrapper around callback invocation.
+> If a callback panics, the panic propagates normally. Cancellation semantics
+> are documented in the Cancellation section above; in short, cancellation
+> surfaces as `Err(ArchiveError)` (not `Ok(())`).
 
 ## Cross-Format Support
 
-Progress callback support varies by format backend:
+> **Implementation note**: The per-entry update patterns described in this table reflect
+> current backend behaviour and are not contractual guarantees. Backend internals may
+> change without notice; the contract guarantees are limited to the properties in
+> [Contract Guarantees](#contract-guarantees) above (rate limiting, monotonicity,
+> cancellation semantics).
 
-| Format | Total Calculation | Current Updates | Cancellation | Notes |
-|--------|-------------------|-----------------|--------------|-------|
-| RAR | Sum of entry sizes | Per-entry, full support | ✅ Supported | Best progress fidelity |
-| ZIP | Sum of entry sizes | Basic per-entry | ✅ Supported | Updates after each entry completes |
-| 7z | Sum of entry sizes | Basic per-entry | ✅ Supported | Updates after each entry completes |
-| TAR.* | Sum of entry sizes | Per-entry via libarchive | ✅ Supported | Depends on libarchive backend |
+| Format | Total Calculation | Current Update Pattern | Cancellation | Notes |
+|--------|-------------------|------------------------|--------------|-------|
+| RAR | Sum of entry sizes | Per-entry cumulative update after each entry completes | Supported | Reports after full entry decompression |
+| ZIP | Sum of entry sizes | Pre-entry and post-entry callbacks per entry | Supported | No intra-entry streaming progress |
+| 7z | Sum of entry sizes | Pre-entry and post-entry callbacks per entry | Supported | No intra-entry streaming progress |
+| TAR.* | Sum of entry sizes | Per-entry via libarchive | Supported | Granularity depends on libarchive backend |
 
-**Note**: RAR has full per-entry progress support. ZIP and 7z provide basic
-per-entry progress (updated after each file extraction completes, not during
-individual file extraction). Chunk-level progress within a single entry is
-not currently supported for any format.
+**Note**: No format currently provides chunk-level (intra-entry) streaming progress. All updates are at entry boundaries. All formats report `total` as `Some(n)` computed from entry metadata when opened via the path-based `Archive::open()` API.
 
 ## Testing Strategy
 
 ### Unit Tests
 
+> **Note**: The following unit tests are illustrative pseudocode showing the intended
+> contract verification approach. They are not compiled as part of the test suite.
+> See `tests/` for actual shipped tests.
+
 ```rust
 #[test]
-fn test_progress_called_minimum_frequency() {
+fn test_progress_callbacks_invoked() {
     let call_count = Arc::new(AtomicUsize::new(0));
     let counter = call_count.clone();
-    let start = Instant::now();
 
+    let archive = Archive::open("tests/fixtures/test.zip")?;
+    let dest = Path::new("./output");
     let options = ExtractionOptions {
         destination: dest.to_path_buf(),
         progress: Some(Box::new(move |_: u64, _: Option<u64>| {
@@ -306,11 +257,11 @@ fn test_progress_called_minimum_frequency() {
     };
     archive.extract_all(options)?;
 
-    let elapsed = start.elapsed();
-    let expected_calls = (elapsed.as_secs_f64() * 10.0).ceil() as usize;
-
-    assert!(call_count.load(Ordering::Relaxed) >= expected_calls,
-        "Expected ≥{} calls, got {}", expected_calls, call_count.load(Ordering::Relaxed));
+    // Verify that at least one callback was invoked for a non-empty archive.
+    // Note: No *minimum frequency* is guaranteed — only that the maximum rate
+    // does not exceed ~60/sec. For empty archives, zero callbacks is correct.
+    assert!(call_count.load(Ordering::Relaxed) > 0,
+        "Expected at least one progress callback for a non-empty archive");
 }
 
 #[test]
@@ -318,6 +269,8 @@ fn test_progress_monotonic() {
     let last_processed = Arc::new(AtomicU64::new(0));
     let tracker = last_processed.clone();
 
+    let archive = Archive::open("tests/fixtures/test.zip")?;
+    let dest = Path::new("./output");
     let options = ExtractionOptions {
         destination: dest.to_path_buf(),
         progress: Some(Box::new(move |processed: u64, total: Option<u64>| {
@@ -338,6 +291,8 @@ fn test_progress_cancellation() {
     let was_cancelled = Arc::new(AtomicBool::new(false));
     let flag = was_cancelled.clone();
 
+    let archive = Archive::open("tests/fixtures/test.zip")?;
+    let dest = Path::new("./output");
     let options = ExtractionOptions {
         destination: dest.to_path_buf(),
         progress: Some(Box::new(move |processed: u64, _: Option<u64>| {
@@ -352,13 +307,16 @@ fn test_progress_cancellation() {
     };
     let result = archive.extract_all(options);
 
-    // No ArchiveError::Cancelled -- break returns Ok(()) or backend error
-    assert!(result.is_ok());
-    assert!(was_cancelled.load(Ordering::Relaxed));
+    // Cancellation surfaces as an error (no ArchiveError::Cancelled variant).
+    // The exact error depends on the backend — typically a format error.
+    assert!(result.is_err() || was_cancelled.load(Ordering::Relaxed));
 }
 
 #[test]
-fn test_progress_panic_treated_as_cancellation() {
+#[should_panic(expected = "Simulated panic")]
+fn test_progress_panic_propagates() {
+    let archive = Archive::open("tests/fixtures/test.zip")?;
+    let dest = Path::new("./output");
     let options = ExtractionOptions {
         destination: dest.to_path_buf(),
         progress: Some(Box::new(|_: u64, _: Option<u64>| -> ControlFlow<()> {
@@ -366,19 +324,20 @@ fn test_progress_panic_treated_as_cancellation() {
         })),
         ..Default::default()
     };
-    let result = archive.extract_all(options);
-
-    // Panic is caught and treated as Break -- returns Ok(())
-    assert!(result.is_ok());
+    // Panic propagates -- no catch_unwind wrapper around callbacks
+    let _ = archive.extract_all(options);
 }
 ```
 
 ### Integration Tests
 
+> **Note**: The following test is schematic (illustrative pseudocode). It is not
+> compiled as part of the test suite. See `tests/` for actual integration tests.
+
 ```rust
 #[test]
 fn test_progress_large_archive() {
-    // 1GB archive with 1000 files
+    // Schematic: assumes a 1GB archive with 1000 files
     let updates = Arc::new(Mutex::new(Vec::new()));
     let tracker = updates.clone();
 
@@ -394,10 +353,14 @@ fn test_progress_large_archive() {
 
     let updates = updates.lock().unwrap();
 
-    // Verify frequency
+    // Verify bounded rate: contractual max is ~60/sec (16ms interval).
+    // The 75 Hz threshold here provides a safety margin for timer jitter
+    // and measurement granularity.
     let duration = updates.last().unwrap().0 - updates.first().unwrap().0;
     let calls_per_sec = updates.len() as f64 / duration.as_secs_f64();
-    assert!(calls_per_sec >= 10.0, "Expected ≥10 Hz, got {:.1} Hz", calls_per_sec);
+    assert!(calls_per_sec <= 75.0,
+        "Expected ≤75 Hz (contractual ~60 Hz + jitter margin), got {:.1} Hz",
+        calls_per_sec);
 
     // Verify monotonicity
     for window in updates.windows(2) {
@@ -408,43 +371,22 @@ fn test_progress_large_archive() {
 
 ## Performance Benchmarks
 
-```rust
-#[bench]
-fn bench_progress_overhead(b: &mut Bencher) {
-    let archive = Archive::open("fixtures/1gb_archive.zip")?;
-
-    // Without progress
-    b.iter(|| {
-        let options = ExtractionOptions {
-            destination: temp_dir(),
-            ..Default::default()
-        };
-        archive.extract_all(options)
-    });
-
-    // With progress
-    b.iter(|| {
-        let options = ExtractionOptions {
-            destination: temp_dir(),
-            progress: Some(Box::new(|_: u64, _: Option<u64>| {
-                ControlFlow::Continue(())
-            })),
-            ..Default::default()
-        };
-        archive.extract_all(options)
-    });
-
-    // Expected: <10ms difference (≤1% overhead for 1GB archive)
-}
-```
+> **Note**: Performance benchmarks use [Criterion](https://docs.rs/criterion/) for stable, statistically rigorous measurement. The unstable `#[bench]` API is not used. See `benches/` directory for actual benchmark implementations.
 
 ## Edge Cases
 
+> **Note**: The snippets below assume `archive` and `dest` are defined as in the
+> [Usage Example](#usage-example) section (e.g., `let archive = Archive::open("data.zip")?;`
+> and `let dest = Path::new("./output");`).
+
 ### Unknown Total Size
 
-The `total` parameter is `Option<u64>`. When the total is unknown (e.g.,
-streaming operations or formats that do not report sizes upfront), `None`
-is passed:
+The `total` parameter is `Option<u64>`. When the total is unknown, `None`
+is passed. Callbacks must handle `None` gracefully.
+
+**Per-backend behaviour**:
+- **RAR, ZIP, 7z**: `total` is `Some(n)` computed from entry metadata at the start of extraction. Virtually always available.
+- **TAR.\***: `total` is `Some(n)` when the archive is a seekable file with readable entry headers. In principle, `total` could be `None` if the underlying reader cannot determine entry sizes upfront, but the public `Archive::open()` API accepts file paths (seekable), so `None` is uncommon in practice. (Backend implementation detail: a future non-path-based API for stdin/pipe input would surface `None` more often.)
 
 ```rust
 // The callback must handle None gracefully
@@ -479,7 +421,9 @@ let result = archive.extract_all(options)?;
 ### Single Small File
 
 ```rust
-// <100KB file: may only get 1 callback (at completion)
+// <100KB file: may only get 1 callback (at completion), or none at all
+// if the backend completes too quickly for the rate limiter to fire.
+// The contract guarantees a maximum rate, NOT a minimum number of callbacks.
 let call_count = Arc::new(AtomicUsize::new(0));
 let counter = call_count.clone();
 
@@ -493,7 +437,10 @@ let options = ExtractionOptions {
 };
 archive.extract_all(options)?;
 
-assert!(call_count.load(Ordering::Relaxed) >= 1, "At least one call for completion");
+// Note: Do NOT assert call_count >= 1 here. The contract does not guarantee
+// a minimum number of callbacks. A very small, fast extraction may complete
+// without any rate-limiter window opening.
+println!("Received {} callback(s)", call_count.load(Ordering::Relaxed));
 ```
 
 ## Migration from Other APIs

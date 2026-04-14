@@ -23,7 +23,8 @@ From Technical Context, we need to resolve:
 - **Pros**: Mature, widely available on Linux/macOS, supports many formats
 - **Cons**: C++ codebase, complex API, limited Windows support, maintenance concerns
 - **License**: LGPL + unRAR restriction
-- **Format support**: Excellent (7z, ZIP, TAR, GZIP, BZIP2, XZ, RAR read-only, ISO)
+- **Format support**: Excellent (7z, ZIP, TAR compounds, RAR read-only, ISO)
+  > **Historical note (R040-083, AD 0018)**: Standalone GZIP/BZIP2/XZ are not directly openable via `Archive::open`. This was decided in AD 0018; these formats are only supported as TAR compound wrappers (e.g., `.tar.gz`).
 
 **Option B: libarchive**
 - **Pros**: C library, well-maintained, cross-platform, clean API
@@ -35,7 +36,8 @@ From Technical Context, we need to resolve:
 - **Pros**: Official implementation, best format compatibility, actively maintained
 - **Cons**: Windows-centric, requires careful cross-platform build setup
 - **License**: Public domain (LZMA SDK) + LGPL (7z library)
-- **Format support**: Comprehensive (7z, ZIP, GZIP, BZIP2, XZ, TAR, RAR read)
+- **Format support**: Comprehensive (7z, ZIP, TAR compounds, RAR read)
+  > **Historical note (R040-084, AD 0018)**: Same standalone-format limitation applies -- standalone GZIP/BZIP2/XZ are not directly openable. Only TAR compound wrappers are supported.
 
 **Option D: Reference projects approach**
 - Reference compress-tools (uses libarchive)
@@ -46,16 +48,23 @@ From Technical Context, we need to resolve:
 
 **Selected: Hybrid approach - libarchive + unrar library**
 
+> **Retrospective correction (R040-024)**: The original decision framed this as a two-backend "libarchive + unrar" hybrid. The shipped architecture is a five-backend split: **Piz** (ZIP read), **ZipReader** (encrypted ZIP read), **SevenZ** (7z read), **UnRAR** (RAR read), and **libarchive** (TAR/ISO read + all archive creation). The rationale below reflects the original design-time thinking; the "Implementation strategy" section that follows documents the final state.
+
 **Rationale**:
-1. **libarchive** provides excellent cross-platform support for most formats (7z, ZIP, TAR, GZIP, BZIP2, XZ, ISO)
+1. **libarchive** provides excellent cross-platform support for TAR variants, ISO, and archive creation
 2. **unrar library** (from rarlab) provides RAR/RAR5 read support with official implementation
 3. **License compatibility**: BSD-2-Clause (libarchive) + unRAR license (free for non-commercial, commercial requires license)
 4. **Proven approach**: compress-tools reference shows libarchive works well in Rust ecosystem
 5. **Maintainability**: Well-documented C APIs, active communities
 
-**Implementation strategy**:
-- Use libarchive for: 7z, ZIP, TAR variants (TAR.GZ, TAR.BZ2, TAR.XZ), GZIP, BZIP2, XZ, ISO
+> **Post-implementation note (R040-025)**: libarchive's current role is narrower than originally envisioned -- it handles TAR/ISO read and all archive creation. ZIP read is handled by Piz/ZipReader and 7z read by SevenZ, each chosen for better Rust-native ergonomics in those formats.
+
+**Implementation strategy** *(updated post-implementation)*:
+- Use libarchive for: TAR variants (TAR.GZ, TAR.BZ2, TAR.XZ), ISO, archive creation
+- Use Piz/ZipReader for: ZIP (read), ZipWriter for: ZIP (write)
+- Use SevenZ for: 7z (read)
 - Use unrar library for: RAR, RAR5 (read-only per FR-005, creation not required)
+- Standalone GZIP, BZIP2, XZ not currently supported (AD 0018)
 - Unified Rust wrapper provides format-agnostic interface
 
 **Alternatives considered and rejected**:
@@ -88,37 +97,29 @@ From reference projects at `/Volumes/Common/QJoon/unified-archive/`:
 
 ### Decision
 
-**Selected: bindgen for libarchive + manual bindings for unrar**
+**Selected: Manual checked-in bindings for both libarchive and unrar**
+
+The build uses `pkg-config` to locate libarchive and checked-in manual bindings for both libarchive and unrar. `bindgen` is not used at build time.
 
 **Rationale**:
-1. libarchive has large C API surface → bindgen automation saves effort
-2. unrar has smaller, stable C API → manual bindings for fine control
-3. Wrap both in safe Rust abstractions (`wrapper.rs` per structure)
-4. compress-tools reference shows bindgen works well for libarchive
+1. Manual bindings give full control over the exposed API surface
+2. No clang/LLVM dependency at build time
+3. Both C APIs are stable enough that manual maintenance is low-effort
+4. Raw bindings and safe wrappers are split explicitly:
+   - `src/ffi/libarchive.rs` -- raw `extern "C"` bindings for libarchive
+   - `src/ffi/wrapper.rs` -- safe Rust wrapper for UnRAR FFI calls
+   - Each backend (Piz, ZipReader, SevenZ) uses its own Rust-native crate API, not FFI
 
-**Implementation approach**:
+> *Considered but rejected*: bindgen was originally planned for libarchive's large API surface, and compress-tools showed it works. However, manual bindings proved simpler and removed the build-time clang dependency.
+
 ```rust
-// build.rs: Generate libarchive bindings
-bindgen::Builder::default()
-    .header("wrapper.h")
-    .allowlist_function("archive_.*")
-    .generate()
-
-// src/ffi/libarchive_wrapper.rs: Safe Rust wrappers
-pub struct Archive {
-    handle: *mut ffi::archive,
-}
-
-impl Archive {
-    pub fn open(path: &Path) -> Result<Self, ArchiveError> {
-        // Safe wrapper around unsafe FFI calls
-    }
-}
+// build.rs: Link libarchive via pkg-config (no bindgen)
+// Manual bindings in src/ffi/libarchive.rs (raw bindings) and src/ffi/wrapper.rs (safe UnRAR wrapper)
 ```
 
 **Alternatives rejected**:
 - **cxx**: Not applicable (no C++ for libarchive/unrar C APIs)
-- **All manual**: Too much maintenance burden for large libarchive API
+- **bindgen**: Originally planned but manual bindings proved simpler and removed the clang dependency
 
 ## Decision 3: Compression Codec Dependencies
 
@@ -138,18 +139,22 @@ impl Archive {
 **Selected: System-provided codecs via pkg-config**
 
 **Rationale**:
-1. Use system libarchive installation on Linux/macOS (via pkg-config)
-2. Bundle or statically link on Windows (via vcpkg or source build)
-3. unrar built from source (small, self-contained)
-4. Documented in build requirements (README.md)
+1. Use system libarchive installation via pkg-config
+2. unrar built from source (small, self-contained)
+3. Documented in build requirements (README.md)
 
-**Build approach**:
+**Platform support matrix**:
+| Platform | libarchive linking | Status |
+|----------|-------------------|--------|
+| macOS    | pkg-config        | Primary (supported) |
+| Linux    | pkg-config        | Secondary (supported) |
+| Windows  | vcpkg (planned)   | Not yet tested; macOS primary, Linux secondary |
+
+**Build approach** *(updated to match shipped Cargo.toml)*:
 ```toml
 # Cargo.toml
 [build-dependencies]
-bindgen = "0.69"
 pkg-config = "0.3"
-cc = "1.0"
 
 [package.metadata.docs.rs]
 # Document build requirements
@@ -158,6 +163,7 @@ cc = "1.0"
 **Alternatives rejected**:
 - **Bundle all codecs**: Increases binary size unnecessarily
 - **Pure Rust codecs**: Fragmented, incomplete format support
+- **vcpkg/static bundling on Windows**: Not yet tested on Windows; macOS primary, Linux secondary. Tracked as future work
 
 ## Decision 4: Property-Based Testing Framework
 
@@ -225,15 +231,19 @@ proptest! {
 **Rationale**:
 1. criterion provides statistical rigor for performance measurement (SC-010 requirement)
 2. Custom CI scripts track performance over time (criterion-compare)
-3. Benchmark suites for:
-   - Archive inspection speed (10k files target)
-   - Extraction throughput (10GB archive target)
-   - Memory usage profiling (100MB limit validation)
-4. Meets constitution Principle II (Performance First) measurement requirement
+3. Meets constitution Principle II (Performance First) measurement requirement
 
-**Benchmark structure**:
+#### Pending verification: benchmark fixtures (R040-087)
+
+The following benchmark suites are target-state goals. **Large-archive fixtures have not yet landed**, so these benchmarks cannot run today:
+
+- Archive inspection speed (10k files target)
+- Extraction throughput (10GB archive target)
+- Memory usage profiling (100MB limit target -- libarchive-backed streaming only)
+
+Once fixtures are generated and committed, the benchmark structure will look like:
 ```rust
-// benches/inspection.rs
+// benches/inspection.rs (hypothetical -- requires fixtures)
 fn bench_inspection(c: &mut Criterion) {
     c.bench_function("inspect_10k_files", |b| {
         b.iter(|| {
@@ -244,9 +254,9 @@ fn bench_inspection(c: &mut Criterion) {
 }
 ```
 
-**CI integration**:
+**CI integration** *(hypothetical -- no CI benchmark workflow exists yet; R040-088)*:
 ```yaml
-# .github/workflows/bench.yml
+# .github/workflows/bench.yml (example, not yet implemented)
 - run: cargo bench --bench inspection -- --save-baseline main
 - run: cargo bench --bench inspection -- --baseline main
 ```
@@ -275,10 +285,10 @@ fn bench_inspection(c: &mut Criterion) {
 
 ### Decision
 
-**Selected: Dual licensing strategy with clear documentation**
+**Selected: MIT licensing with clear documentation**
 
 **Approach**:
-1. **Crate license**: Apache-2.0 OR MIT (permissive, standard Rust practice)
+1. **Crate license**: MIT (permissive)
 2. **Dependency notice**: Document unRAR license implications in README
 3. **Conditional compilation**: Make unRAR support optional via feature flag
 
@@ -321,18 +331,18 @@ rar-support = []  # Includes unrar library (requires license compliance)
 
 | Question | Decision | Key Rationale |
 |---------|----------|---------------|
-| Native library | libarchive + unrar hybrid | Best cross-platform support, proven in compress-tools |
-| C/C++ interop | bindgen + manual bindings | Automation for large API, control for small API |
+| Native library | Split-backend (Piz, ZipReader, SevenZ, UnRAR, libarchive) | Best cross-platform support; see retrospective R040-024 |
+| C/C++ interop | Manual checked-in bindings + pkg-config | Full control, no clang dependency |
 | Codec dependencies | System-provided via pkg-config | Reduces binary size, leverages system packages |
 | Property testing | proptest | Superior shrinking for FFI debugging |
 | Performance testing | criterion + CI tracking | Statistical rigor meets constitution requirements |
-| Licensing | Dual license with feature flag | Flexibility for commercial users, clear compliance path |
+| Licensing | MIT with feature flag for RAR | Flexibility for commercial users, clear compliance path |
 
 ## Implementation Impact
 
 **Technical Context updates** (resolved NEEDS CLARIFICATION):
-- **Primary Dependencies**: libarchive (BSD-2-Clause), unrar (conditional), bindgen (build-only)
-- **C/C++ interop layer**: bindgen for libarchive, manual for unrar
+- **Primary Dependencies**: libarchive (BSD-2-Clause), unrar (conditional), pkg-config (build-only)
+- **C/C++ interop layer**: Manual checked-in bindings for both libarchive and unrar
 - **Compression codecs**: System-provided (lzma, zlib, bzip2) via pkg-config
 - **Property testing**: proptest for invariant testing
 - **Performance testing**: criterion with statistical analysis and CI tracking
@@ -342,10 +352,7 @@ rar-support = []  # Includes unrar library (requires license compliance)
 - ✅ Principle II (Performance): criterion provides measurement framework
 - ✅ Principle IV (Testing): proptest enables comprehensive property-based testing
 
-**Next phase** (Phase 1 - Design):
-- data-model.md: Define Archive, ArchiveEntry, error types
-- contracts/: Define API signatures based on 7zip-JBinding patterns
-- quickstart.md: User guide with example code
+**Retrospective note**: Phase 1 design documents (data-model.md, contracts/, quickstart.md) have been created and iterated through implementation. See the current spec set for shipped designs.
 
 ## Phase 0: Enhancement Features Research
 
@@ -367,7 +374,7 @@ rar-support = []  # Includes unrar library (requires license compliance)
 - **Cons**:
   - Cannot update once set (must use mutable reference)
   - Single-threaded OnceCell not Sync
-- **Thread-safety**: Use `OnceLock<Vec<ArchiveEntry>>` for thread-safe caching
+- **Thread-safety**: Use `OnceCell<Vec<ArchiveEntry>>` (`once_cell::sync::OnceCell`) for thread-safe caching
 - **Memory overhead**: Single Vec allocation (~48 bytes + entries)
 
 **Option B: Mutex<Option<Vec<ArchiveEntry>>>**
@@ -392,7 +399,9 @@ rar-support = []  # Includes unrar library (requires license compliance)
 
 ### Decision
 
-**Selected: OnceLock<Vec<ArchiveEntry>> for unified caching**
+**Selected: OnceCell<Vec<ArchiveEntry>> for unified caching**
+
+**Shipped implementation** uses `once_cell::sync::OnceCell` (not `std::sync::OnceLock`).
 
 **Rationale**:
 1. **Performance**: No locking overhead after first access (critical path)
@@ -405,7 +414,7 @@ rar-support = []  # Includes unrar library (requires license compliance)
 ```rust
 pub struct Archive {
     backend: ArchiveBackend,
-    entry_cache: OnceLock<Vec<ArchiveEntry>>,
+    entry_cache: OnceCell<Vec<ArchiveEntry>>,  // once_cell::sync::OnceCell
 }
 
 impl Archive {
@@ -459,38 +468,32 @@ impl Archive {
 
 ### Decision
 
-**Selected: Trait-based with Option parameter for zero-cost abstraction**
+**Selected: ~~Trait-based with Option parameter for zero-cost abstraction~~ Boxed trait objects in options structs**
 
-**Rationale**:
-1. **Zero-cost**: Static dispatch via monomorphization (no vtable, no Box)
-2. **Cancellation**: Return `ControlFlow` from callback (Continue/Break)
-3. **Ergonomics**: Option wrapping allows omitting callback
-4. **Constitution**: Meets Principle II (pragmatic performance)
+**Original rationale** (pre-implementation):
+1. Zero-cost static dispatch via monomorphization
+2. Cancellation via `ControlFlow` return (Continue/Break)
+3. Option wrapping allows omitting callback
 
-**Implementation**:
+**Shipped design**: The implementation uses `Box<dyn ProgressCallback>` stored in `ExtractionOptions` and `CompressionOptions`, with `Send + Sync` bounds. Callbacks are not monomorphized.
+
+**Shipped implementation**:
 ```rust
-pub trait ProgressCallback {
-    fn on_progress(&mut self, current: u64, total: u64) -> ControlFlow<()>;
+pub trait ProgressCallback: Send + Sync {
+    fn on_progress(&mut self, processed: u64, total: Option<u64>) -> ControlFlow<()>;
 }
 
-impl Archive {
-    pub fn extract_all<P>(&self, dest: &Path, progress: Option<&mut P>) -> Result<()>
-    where
-        P: ProgressCallback,
-    {
-        // Rate limiting: only call every N bytes or M milliseconds
-        if let Some(callback) = progress {
-            if callback.on_progress(bytes_done, total_bytes).is_break() {
-                return Err(ArchiveError::Cancelled);
-            }
-        }
-    }
-}
+// Callbacks are passed via ExtractionOptions:
+let options = ExtractionOptions {
+    progress: Some(Box::new(my_callback)),
+    ..Default::default()
+};
+archive.extract_all(options)?;
+// Cancellation via ControlFlow::Break surfaces as an ArchiveError (no Cancelled variant).
 ```
 
-**Rate limiting strategy**:
-- Call callback every 100KB or 100ms (whichever comes first)
-- Ensures ≥10 updates/sec for typical extraction speeds
+**Shipped rate limiting**:
+- Time-based 16ms interval (~60 updates/sec max), no byte-based threshold
 
 **Alternatives rejected**:
 - **Closure-only**: Requires generic or Box (breaks zero-cost)
@@ -498,7 +501,7 @@ impl Archive {
 
 ### Research 9: Streaming Extraction Architecture
 
-**Problem**: <100MB memory for 10GB+ archives
+**Problem**: <100MB memory for 10GB+ archives (applies to libarchive-backed streaming paths; native backends buffer entries)
 
 **Key patterns from research**:
 
@@ -524,47 +527,40 @@ impl Archive {
 
 ### Decision
 
-**Selected: Read trait with bounded buffering**
+**Selected: ~~Read trait with bounded buffering~~ `StreamingExtractor` with backend-dependent memory**
+
+**Shipped design**: The streaming type is `StreamingExtractor` in `src/streaming.rs`. Memory behavior depends on backend:
+- **Libarchive-backed formats** (TAR family, ISO): Truly stream with bounded memory (~40KB per entry)
+- **Piz, ZipReader, SevenZ, UnRAR**: Buffer the full entry in memory, then wrap in a `Cursor` for the `Read` interface
 
 **Rationale**:
 1. **Standard**: Uses std::io traits (no external dependencies)
-2. **Memory bounded**: BufReader(16KB) + extraction buffer(8KB) = ~24KB per file
+2. **Memory bounded** (libarchive only): ~40KB per file for TAR-family formats
 3. **Backpressure**: Automatic via blocked writes
 4. **Composition**: Works with io::copy, compression decoders, etc.
-5. **Constitution**: Meets Principle III (minimal dependencies)
 
-**Implementation**:
+**Shipped implementation**:
 ```rust
-pub struct EntryReader<'a> {
-    backend_reader: Box<dyn Read + 'a>,
-    buffer: [u8; 8192],
+// src/streaming.rs
+pub struct StreamingExtractor {
+    // Internal reader: direct libarchive stream, or Cursor<Vec<u8>> for buffered backends
 }
 
-impl<'a> Read for EntryReader<'a> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.backend_reader.read(buf)
-    }
-}
+impl Read for StreamingExtractor { /* ... */ }
 
-impl Archive {
-    pub fn extract_file_streaming<W>(&self, path: &str, writer: W) -> Result<()>
-    where
-        W: Write,
-    {
-        let reader = self.get_entry_reader(path)?;
-        io::copy(&mut BufReader::new(reader), &mut BufWriter::new(writer))?;
-        Ok(())
-    }
-}
+// Public API:
+let extractor = archive.extract_to_stream("path/in/archive.txt")?;
+// extractor implements Read
 ```
 
-**Memory analysis**:
+**Memory analysis** (libarchive-backed formats only):
 - Entry metadata: ~200 bytes
 - BufReader: 16KB
 - BufWriter: 16KB
 - Working buffer: 8KB
-- **Total per file**: ~40KB
-- **For 10GB archive with 10k files**: 40KB (one at a time, not 10k * 40KB)
+- **Total per file**: ~40KB (libarchive streaming path only)
+- **For 10GB archive with 10k files (libarchive)**: 40KB (one at a time, not 10k * 40KB)
+- **Non-libarchive backends** (Piz, ZipReader, SevenZ, UnRAR): Full entry buffered in memory — the 40KB estimate does not apply
 
 **Alternatives rejected**:
 - **Async streams**: Unnecessary dependency
@@ -602,34 +598,14 @@ impl Archive {
 4. **Integration**: `Hasher::update()` matches streaming pattern
 5. **Small dependency**: Single crate, permissive license
 
-**Implementation**:
+**Shipped implementation**: `VerifyingReader` was not implemented as a standalone type. CRC32 verification is handled inline by each backend via the `verify_crc32` option in `ExtractionOptions`. The crc32fast `Hasher` is used directly in backend extraction paths.
+
 ```rust
+// Research design (not shipped as a standalone type):
 use crc32fast::Hasher;
 
-pub struct VerifyingReader<R: Read> {
-    inner: R,
-    hasher: Hasher,
-    expected_crc32: Option<u32>,
-}
-
-impl<R: Read> Read for VerifyingReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        self.hasher.update(&buf[..n]);
-        Ok(n)
-    }
-}
-
-impl<R: Read> Drop for VerifyingReader<R> {
-    fn drop(&mut self) {
-        if let Some(expected) = self.expected_crc32 {
-            let actual = self.hasher.finalize();
-            if actual != expected {
-                // Log or report CRC mismatch
-            }
-        }
-    }
-}
+// Actual verification happens inline in backend extraction code
+// when ExtractionOptions { verify_crc32: true, .. } is set.
 ```
 
 **Performance impact**:
@@ -666,32 +642,33 @@ impl<R: Read> Drop for VerifyingReader<R> {
 
 **Selected: Rayon file-level parallelism with conditional enable**
 
+**Shipped**: The API is `extract_all(&self, ExtractionOptions)` with Rayon parallel dispatch for 4+ files (not 10 as originally planned).
+
 **Rationale**:
 1. **Simplicity**: Single `.par_iter()` change (pragmatic per Principle II)
 2. **CPU utilization**: Saturates cores for CPU-bound decompression
 3. **Memory scaling**: Rayon manages thread pool, no manual allocation
-4. **Conditional**: Only enable for >10 files (avoid overhead for small archives)
+4. **Conditional**: Enable for 4+ files (threshold lowered from original 10)
 5. **Constitution**: Large change (Rayon dependency) justified by 10%+ gain on multi-file extraction
 
-**Implementation**:
+**Shipped implementation**:
 ```rust
 impl Archive {
-    pub fn extract_all(&self, dest: &Path) -> Result<()> {
+    pub fn extract_all(&self, options: ExtractionOptions) -> Result<ExtractionResult> {
         let entries = self.list_files()?;
 
-        if entries.len() > 10 {
-            // Parallel extraction
+        if entries.len() >= 4 {
+            // Parallel extraction via Rayon
             entries.par_iter().try_for_each(|entry| {
-                self.extract_file(&entry.path, dest.join(&entry.path))
+                self.extract_file(&entry.path, options.clone())
             })?;
         } else {
-            // Sequential extraction (avoid thread overhead)
+            // Sequential extraction
             for entry in entries {
-                self.extract_file(&entry.path, dest.join(&entry.path))?;
+                self.extract_file(&entry.path, options.clone())?;
             }
         }
-
-        Ok(())
+        // ...
     }
 }
 ```
@@ -731,48 +708,30 @@ impl Archive {
 
 ### Decision
 
-**Selected: secstr for password storage with FFI considerations**
+**Selected: ~~secstr for password storage~~ Plain `Option<String>` (secstr deferred)**
 
-**Rationale**:
-1. **Security**: Auto-zeroing + mlock prevents memory dump exposure
-2. **FFI-safe**: Convert to CString only during FFI call, immediately drop
-3. **Constitution**: Small dependency, critical security benefit
-4. **Unified API**: Same SecStr type for both backends
+The shipped API uses `Option<String>` for passwords. The secstr approach was researched but not integrated.
 
-**Implementation**:
+**Original rationale** (pre-implementation):
+1. Security: Auto-zeroing + mlock prevents memory dump exposure
+2. FFI-safe: Convert to CString only during FFI call
+3. Small dependency, critical security benefit
+
+**Shipped implementation**:
 ```rust
-use secstr::SecStr;
-
 pub struct ExtractionOptions {
-    pub password: Option<SecStr>,
-}
-
-impl Archive {
-    pub fn extract_all(&self, dest: &Path, options: ExtractionOptions) -> Result<()> {
-        match &self.backend {
-            ArchiveBackend::Unrar(unrar) => {
-                if let Some(password) = &options.password {
-                    let c_password = CString::new(password.unsecure())?;
-                    unrar.set_password(c_password.as_ptr());
-                    // c_password dropped here, zeroed
-                }
-                unrar.extract_all(dest)
-            }
-            ArchiveBackend::Libarchive(lib) => {
-                // Similar pattern
-            }
-        }
-    }
+    pub password: Option<String>,
+    // ...
 }
 ```
 
 **Password detection**:
 - UnRAR: `archive_read_has_encrypted_entries()` FFI call
 - libarchive: `archive_entry_is_encrypted()` per entry
-- Expose as `ArchiveEntry::is_encrypted` field
+- Exposed via `Archive::is_encrypted() -> Result<bool>`
 
-**Alternatives rejected**:
-- **Plain String**: Memory dump vulnerability
+**Alternatives considered**:
+- **secstr**: Researched but deferred; adds dependency for marginal security gain in CLI context
 - **zeroize only**: No mlock, manual zeroing error-prone
 
 ### Research 13: Multi-Part Archive Support
@@ -819,14 +778,15 @@ impl Archive {
 
                 // Check if multi-part and ensure first part
                 if unrar.is_multipart() && !unrar.is_first_part() {
-                    return Err(ArchiveError::InvalidInput(
-                        "Multi-part RAR: please open the first part (.part01.rar or .rar)".into()
-                    ));
+                    return Err(ArchiveError::Format {
+                        format: "RAR".into(),
+                        message: "Multi-part RAR: please open the first part (.part01.rar or .rar)".into(),
+                    });
                 }
 
                 Ok(Archive {
                     backend: ArchiveBackend::Unrar(unrar),
-                    entry_cache: OnceLock::new(),
+                    entry_cache: OnceCell::new(),
                 })
             }
             ArchiveFormat::Zip => {
@@ -838,14 +798,15 @@ impl Archive {
                     .map(|s| s.starts_with('z') && s[1..].parse::<u32>().is_ok())
                     .unwrap_or(false)
                 {
-                    return Err(ArchiveError::UnsupportedFormat(
-                        "Split ZIP archives are not supported. Please use a tool to merge parts first.".into()
-                    ));
+                    return Err(ArchiveError::Unsupported {
+                        format: "ZIP".into(),
+                        details: "Split ZIP archives are not supported. Please use a tool to merge parts first.".into(),
+                    });
                 }
 
                 Ok(Archive {
                     backend: ArchiveBackend::Libarchive(lib),
-                    entry_cache: OnceLock::new(),
+                    entry_cache: OnceCell::new(),
                 })
             }
             // Other formats...
@@ -877,43 +838,39 @@ impl Archive {
 
 | Topic | Decision | Key Rationale | Dependency Impact |
 |-------|----------|---------------|-------------------|
-| Entry caching | OnceLock<Vec> | Zero-cost after init, no locking | None (std) |
-| Progress callbacks | Trait with ControlFlow | Zero-cost via monomorphization | None (std) |
-| Streaming extraction | Read trait + buffering | Standard, <40KB memory | None (std) |
+| Entry caching | OnceCell<Vec> (once_cell) | Zero-cost after init, no locking | +once_cell |
+| Progress callbacks | Boxed trait objects (Send+Sync) | Stored in ExtractionOptions | None (std) |
+| Streaming extraction | StreamingExtractor | Libarchive: ~40KB; others: buffer full entry | None (std) |
 | CRC32 verification | crc32fast | SIMD, <2% overhead, battle-tested | +crc32fast |
-| Parallel extraction | Rayon file-level | 10%+ gain, simple, conditional | +rayon |
-| Password handling | secstr | Auto-zeroing, mlock, FFI-safe | +secstr |
+| Parallel extraction | Rayon file-level (4+ files) | 10%+ gain, simple, conditional | +rayon |
+| Password handling | Option<String> (secstr deferred) | Plain strings, secstr not integrated | None |
 | Multi-part support | RAR yes, ZIP no | RAR free, ZIP complex for rare case | None |
 
 **Constitution Compliance**:
 - ✅ **Principle II (Pragmatic Performance)**: All changes meet effort-to-benefit criteria
-  - OnceLock: Small change, significant caching gain
+  - OnceCell: Small change, significant caching gain
   - Rayon: Large dependency justified by >10% multi-file speedup
   - CRC32: <2% overhead (acceptable per pragmatic threshold)
-- ✅ **Principle III (Unified Interface + Minimal Deps)**: 3 new dependencies, all justified
+- ✅ **Principle III (Unified Interface + Minimal Deps)**: Dependencies justified
   - crc32fast: Critical for integrity verification
   - rayon: Standard parallelism, significant performance gain
-  - secstr: Critical security benefit
+  - once_cell: Thread-safe caching
 - ✅ **Principle I (Robustness)**: All patterns maintain error handling and safety
 
-**Next Steps** (Phase 1 - Design):
-- Update data-model.md with enhanced ArchiveEntry fields
-- Create contracts/progress.md defining callback API
-- Create contracts/streaming.md defining Read-based extraction
-- Update contracts/extraction.md with password and multi-part semantics
+**Retrospective note**: Phase 1 design documents (data-model.md, contracts/progress.md, contracts/streaming.md, contracts/extraction.md) have been created and iterated through implementation.
 
 ## Performance Baseline Established
 
 **Date**: 2025-10-31
-**System**: macOS (Darwin 24.6.0), Rust 1.75+, Release mode
+**System**: macOS (Darwin 24.6.0), Rust 2024 edition (1.85+), Release mode
 **Archives tested**: Small test fixtures (test.rar, test.zip, test.7z with ~1 file each)
 
 ### Current Performance (Release Build)
 
-**Test Suite Execution**:
-- 40 integration tests: **PASS** (100%)
+**Test Suite Execution** *(snapshot at time of initial baseline; current suite has 867+ tests)*:
+- 40 integration tests at baseline: **PASS** (100%)
 - Total execution time: <0.03s
-- Test breakdown:
+- Test breakdown (initial baseline):
   - Extraction tests: 9 tests, 0.01s
   - Format compatibility: 10 tests, 0.00s
   - Unified API: 6 tests, 0.00s
@@ -944,7 +901,7 @@ impl Archive {
 3. **Memory profiling** (for memory constraint):
    - Create fixture: 10GB+ archive
    - Measure: Peak RSS during extraction
-   - Target: <100MB memory (SC-009)
+   - Target: <100MB memory (SC-009) — applies to libarchive-backed formats only; native backends buffer entries
 
 4. **Backend comparison**:
    - UnRAR vs libarchive speed for equivalent formats
@@ -953,8 +910,8 @@ impl Archive {
 ### Action Items for Comprehensive Baseline
 
 **Phase 1 Task**: Create performance test fixtures and benchmarks
-- `benches/extraction_bench.rs` with criterion
-- `tests/fixtures/large_archive.*` (10k files, 1GB, 10GB variants)
+- `benches/extraction.rs` with Criterion (shipped)
+- Large-archive fixture creation for comprehensive benchmarking (not yet landed)
 - CI integration for regression tracking
 
 **Metrics to track**:
@@ -964,8 +921,8 @@ impl Archive {
 - CPU utilization
 - Backend performance delta
 
-**Current Status**: ✅ Baseline established for correctness (40 tests pass)
-**Next**: Establish performance baseline in Phase 1 with realistic workloads
+**Current Status**: ✅ Baseline established for correctness (867+ tests pass as of current implementation)
+**Next**: Establish comprehensive performance baseline with realistic workloads (large-archive fixtures not yet landed)
 
 ## Phase 0: SFX Detection Research (2025-11-11)
 
@@ -1020,7 +977,7 @@ fn detect_executable_format(bytes: &[u8]) -> Result<StubType> {
         Object::PE(_) => Ok(StubType::WindowsPE),
         Object::Elf(_) => Ok(StubType::LinuxELF),
         Object::Mach(_) => Ok(StubType::MacOSMachO),
-        _ => Err(ArchiveError::InvalidFormat("Not an executable"))
+        _ => Err(ArchiveError::Format { format: "SFX".into(), message: "Not an executable".into() })
     }
 }
 ```
@@ -1043,18 +1000,18 @@ fn detect_executable_format(bytes: &[u8]) -> Result<StubType> {
 - Read first 4KB for header parsing
 - Use goblin to identify PE/ELF/Mach-O/Script
 - Early exit if not executable (performance optimization)
-- Shell script detection via shebang (`#!`) or POSIX tar magic
+- Shell/script detection via shebang (`#!`) only (per shipped stub-type detection)
 
 **Stage 2: Archive Signature Scanning** (~10-50ms)
-- Scan first 1MB in 512-byte aligned chunks (FR-025)
+- Scan first 1MB for all candidate signatures (per AD 0015: iterate all candidates, not first-match)
 - Search for archive signatures:
-  - ZIP: `PK\x03\x04` or `PK\x05\x06` (central directory)
+  - ZIP: `PK\x03\x04` (local file header only; central-directory `PK\x01\x02` demoted per AD 0015)
   - RAR4: `Rar!\x1a\x07\x00`
   - RAR5: `Rar!\x1a\x07\x01\x00`
   - 7z: `7z\xbc\xaf\x27\x1c`
-  - TAR: `ustar` at offset 257
-- Early exit on first signature match
-- 512-byte alignment reduces I/O (reads 2048 chunks for 1MB)
+  - ~~GZIP/BZIP2/XZ~~: removed from SFX detection signatures (AD 0015 — standalone compressed streams and TAR compounds are not real-world SFX payloads)
+  - ~~TAR `ustar`~~: removed from SFX signatures (AD 0015 — TAR SFX not a real-world use case)
+- All candidate offsets collected and validated in Stage 3
 
 **Stage 3: Archive Validation** (~10-20ms)
 - Validate archive structure at detected offset
@@ -1062,26 +1019,26 @@ fn detect_executable_format(bytes: &[u8]) -> Result<StubType> {
 - Confirm valid archive (reject false positives)
 - Return SfxDetectionResult with offset and format
 
-**Performance Characteristics**:
-- Best case: 1ms (non-executable, Stage 1 exit)
-- Average case: 15-70ms (meets <100ms requirement, SC-017)
-- Worst case: 80ms (custom stub near 1MB boundary)
+**Performance Characteristics** (illustrative estimates from synthetic fixtures — no dedicated benchmark artifact exists; real-sample corpus not yet landed):
+- Best case: ~1ms (non-executable, Stage 1 exit)
+- Average case: ~15-70ms (target: <100ms, SC-017)
+- Worst case: ~80ms (custom stub near 1MB boundary)
 
 **False Positive Mitigation**:
 1. Executable format validation (Stage 1) reduces search space
 2. Archive header validation (Stage 3) confirms genuine archives
 3. Multiple signature checks (magic bytes + structure)
-4. Heuristic scoring for ambiguous cases
+4. Confidence scoring for ambiguous cases (unknown stubs proceed to signature scanning, OI-027-001 resolved)
 
 **Rationale**:
-- Meets SC-017 (<100ms for 10MB files)
-- Meets SC-018 (zero false positives via validation)
-- Meets FR-025 (1MB scan limit with aligned chunks)
+- Targets SC-017 (<100ms for 10MB files) — estimated from synthetic fixtures only, no benchmark artifact
+- Targets SC-018 (zero false positives via validation) — zero false positives observed on synthetic fixtures only; real-sample corpus needed to validate against production binaries
+- Meets FR-025 (1MB scan limit)
 - Constitution Principle II (pragmatic - scans only what's needed)
 
 **Alternatives rejected**:
 - Full file scan: Multi-second for large executables (violates performance)
-- Fixed offsets: Fails for custom stubs (violates 100% detection)
+- Fixed offsets: Fails for custom stubs (reduces detection coverage for unknown stub layouts)
 - Heuristic-only: High false positive rate (violates SC-018)
 
 ---
@@ -1094,20 +1051,18 @@ fn detect_executable_format(bytes: &[u8]) -> Result<StubType> {
 
 **API Design**:
 ```rust
-// Dedicated SFX detection API
+// Dedicated SFX detection API (fully implemented)
 pub fn detect_sfx(path: impl AsRef<Path>) -> Result<SfxDetectionResult>;
 
-// Open archive from SFX (convenience method)
-pub fn open_sfx(path: impl AsRef<Path>) -> Result<Archive>;
-
-// Manual workflow for advanced use cases
+// Detection-only workflow (open_at_offset is deferred — returns ArchiveError::Unsupported)
 let sfx_result = Archive::detect_sfx(path)?;
 if sfx_result.is_sfx {
-    let archive = Archive::open_at_offset(
-        path,
-        sfx_result.data_offset,
-        Some(sfx_result.archive_format)
-    )?;
+    // Currently detection-only: offset opening is not yet implemented
+    let offset = sfx_result.data_offset.unwrap();
+    println!("SFX detected: format={:?}, offset={}", sfx_result.archive_format, offset);
+
+    // This will return Err(ArchiveError::Unsupported { .. }):
+    // let archive = Archive::open_at_offset(path, offset)?;
 }
 ```
 
@@ -1125,14 +1080,15 @@ pub enum StubType {
     WindowsPE,
     LinuxELF,
     MacOSMachO,
-    ShellScript,
+    ScriptInterpreter,  // Renamed from ShellScript (AD 0016)
+    Unknown,            // Added for future use (AD 0016)
 }
 ```
 
 **Rationale**:
 1. **Separation of concerns**: SFX detection is distinct from archive operations
 2. **Performance**: Users can skip detection for known archives
-3. **FR-031**: Separate stub extraction possible via offset manipulation
+3. **FR-031**: Separate stub extraction via `extract_stub()` returns `Vec<u8>` (does not solve direct offset opening)
 4. **Unified interface**: Same Archive type works for both SFX and regular archives
 
 **Alternatives rejected**:
@@ -1143,9 +1099,11 @@ pub enum StubType {
 
 ### Research 17: Cross-Platform SFX Testing Strategy
 
-**Problem**: Ensure 100% detection rate (SC-016) and zero false positives (SC-018)
+**Problem**: Approach high detection coverage (SC-016 targets 100%) and minimize false positives (SC-018)
 
-**Decision**: Comprehensive test matrix with official samples
+**Decision**: Comprehensive test matrix with official samples (future-state target — unknown/custom-stub scanning resolved per OI-027-001; real-sample corpus not yet landed)
+
+**Note:** The described sample matrix (10 Windows, 5 ELF/macOS, 3 shell, 100+ negatives) is planned but not yet implemented. Current tests use synthetic fixtures.
 
 **Test Categories**:
 
@@ -1158,22 +1116,22 @@ pub enum StubType {
 **2. Linux/macOS ELF SFX** (5 samples):
 - 7-Zip SFX: Linux 7zCon.sfx module
 - makeself: Various wrapper versions (2.4, 2.5)
-- Custom ELF + TAR.GZ
+- Custom ELF + ZIP/RAR/7z payloads (TAR removed from SFX signatures per AD 0015)
 
 **3. Shell Script SFX** (3 samples):
-- shar (shell archive) with tar.gz
-- makeself with different compression (gzip, bzip2, xz)
-- Custom shell + archive combinations
+- Script with embedded ZIP/RAR/7z payloads
+- makeself with supported archive formats
+- Custom script + archive combinations (TAR/shar-based cases removed per AD 0015)
 
 **4. Negative Tests** (100+ samples):
 - **Regular executables** (50): System binaries, applications across platforms
 - **Regular archives** (30): Pure ZIP/RAR/7z files without stubs
 - **Other files** (20): Text, images, PDFs, documents
 
-**Sample Collection**:
-- Store in `tests/fixtures/sfx/{windows,linux,macos,shell,negative}/`
+**Sample Collection** (future corpus layout, not yet landed):
+- Planned location: `tests/fixtures/sfx/{windows,linux,macos,shell,negative}/`
 - Version-tag samples (e.g., `7zip_24.08_console.exe`)
-- Include metadata.json describing creation tool/version
+- Current tests use synthetic fixtures in `tests/integration/` (not tests/fixtures/sfx/)
 
 **Validation Criteria**:
 ```rust
@@ -1185,13 +1143,12 @@ fn test_sfx_detection_official_samples() {
         assert_eq!(result.archive_format, Some(sample.expected_format));
         assert!(result.data_offset.is_some());
 
-        // SC-019: Verify extraction works
-        let archive = Archive::open_at_offset(
+        // Detection-only validation (open_at_offset is deferred, returns ArchiveError::Unsupported)
+        let err = Archive::open_at_offset(
             &sample.path,
             result.data_offset.unwrap(),
-            result.archive_format
-        ).unwrap();
-        // Extract and verify...
+        ).unwrap_err();
+        assert!(matches!(err, ArchiveError::Unsupported { .. }));
     }
 }
 
@@ -1206,22 +1163,23 @@ fn test_sfx_false_positive_prevention() {
 
 **Performance Benchmarking** (SC-017):
 ```rust
-#[bench]
-fn bench_sfx_detection(b: &mut Bencher) {
-    b.iter(|| {
-        for sample in benchmark_samples() {  // 1MB - 10MB files
-            let result = detect_sfx(&sample).unwrap();
-            assert!(result.duration() < Duration::from_millis(100));
-        }
+// Criterion-based benchmark (shipped approach)
+fn bench_sfx_detection(c: &mut Criterion) {
+    c.bench_function("sfx_detection", |b| {
+        b.iter(|| {
+            for sample in benchmark_samples() {  // 1MB - 10MB files
+                let _result = detect_sfx(&sample).unwrap();
+            }
+        });
     });
 }
 ```
 
 **Rationale**:
-- Covers all specified acceptance scenarios (spec lines 92-99)
-- Validates success criteria SC-016 through SC-020
-- Comprehensive negative testing prevents regressions
-- Real samples ensure compatibility with actual SFX tools
+- Covers all specified acceptance scenarios
+- Targets success criteria SC-016 through SC-020
+- Negative testing prevents regressions
+- Real samples (when landed) will ensure compatibility with actual SFX tools
 
 ---
 
@@ -1229,64 +1187,45 @@ fn bench_sfx_detection(b: &mut Bencher) {
 
 **Problem**: Distinguish detection failures from file errors (FR-030)
 
-**Decision**: Hierarchical error types with specific recovery
+**Decision**: ~~Hierarchical error types~~ Unified `ArchiveError` model
 
-**Error Categories**:
+The shipped crate uses the unified `ArchiveError` type for all SFX errors; the planned `SfxError` hierarchy was not implemented. Non-SFX files return `SfxDetectionResult::not_sfx()` (a result, not an error). I/O failures surface as `ArchiveError::Io`.
 
 ```rust
-pub enum SfxError {
-    // File-level errors (propagate immediately)
-    IoError(std::io::Error),
+// Original research design (not shipped):
+// pub enum SfxError { IoError, NotExecutable, NotSfx, CorruptedArchive, ... }
 
-    // Detection results (not errors, just negative)
-    NotExecutable,        // Not PE/ELF/Mach-O format
-    NotSfx,              // Executable but no embedded archive
-
-    // Validation errors (require user action)
-    CorruptedArchive {
-        detected_format: ArchiveFormat,
-        offset: u64,
-        reason: String,
-    },
-
-    // Parse errors
-    InvalidExecutableFormat(String),
-}
+// Shipped approach: uses ArchiveError variants
+// - I/O failures → ArchiveError::Io { operation, path, source }
+// - Non-SFX files → SfxDetectionResult::not_sfx() (success, not error)
+// - Format issues → ArchiveError::Format { format, message }
 ```
 
-**Error Handling Pattern**:
+**Shipped Error Handling Pattern**:
 ```rust
 pub fn detect_sfx(path: impl AsRef<Path>) -> Result<SfxDetectionResult> {
-    // Stage 1: Executable format
-    let bytes = read_first_4kb(path)?;  // Propagate I/O errors
-    let exe_format = match parse_executable(&bytes) {
-        Ok(fmt) => fmt,
+    // Stage 1: Executable format — identifies StubType
+    let bytes = read_first_bytes(path)?;  // Propagate I/O errors
+    let stub_type = match parse_executable(&bytes) {
+        Ok(st) => st,
         Err(_) => return Ok(SfxDetectionResult::not_sfx())  // Not an error
     };
 
-    // Stage 2: Signature scan
-    let signature_result = scan_for_signatures(path, 1_048_576)?;
-    if signature_result.is_none() {
+    // Stage 2: Signature scan — collects all candidates
+    let candidates = scan_for_signatures(&bytes)?;
+    if candidates.is_empty() {
         return Ok(SfxDetectionResult::not_sfx())  // Not an error
     }
 
-    // Stage 3: Validation
-    // Note: validate_archive_at_offset was removed; validation is now integrated into detect_sfx()
-    let (offset, format) = signature_result.unwrap();
-    match validate_archive_at_offset(path, offset, format) {
-        Ok(_) => Ok(SfxDetectionResult {
-            is_sfx: true,
-            archive_format: Some(format),
-            data_offset: Some(offset),
-            stub_type: Some(exe_format),
-            confidence: 1.0,
-        }),
-        Err(e) => Err(SfxError::CorruptedArchive {
-            detected_format: format,
-            offset,
-            reason: e.to_string(),
-        })
+    // Stage 3: Validate candidates (iterate all per AD 0015)
+    for (offset, format) in &candidates {
+        if validate_format_probe(&bytes[*offset..], *format) {
+            return Ok(SfxDetectionResult::probable(
+                stub_type, *format, *offset as u64, 0.9,  // 0.9 is the detector's current policy value, not a type contract
+            ));
+        }
     }
+    Ok(SfxDetectionResult::not_sfx())
 }
 ```
 
@@ -1315,7 +1254,10 @@ pub fn extract_stub(
     result: &SfxDetectionResult
 ) -> Result<Vec<u8>> {
     if !result.is_sfx {
-        return Err(ArchiveError::InvalidOperation("Not an SFX file"));
+        return Err(ArchiveError::Unsupported {
+            format: "SFX".into(),
+            details: "extract_stub requires an SFX file".into(),
+        });
     }
 
     let offset = result.data_offset.unwrap();
@@ -1343,27 +1285,23 @@ pub fn extract_stub(
 | Research Question | Decision | Key Rationale | Dependency Impact |
 |-------------------|----------|---------------|-------------------|
 | Binary format parsing | goblin crate | Battle-tested, fuzzed, pure Rust | +goblin 0.9 |
-| Detection algorithm | 3-stage pipeline | Meets <100ms, zero false positives | None |
+| Detection algorithm | 3-stage pipeline | Targets <100ms, iterate-all-candidates (AD 0015) | None |
 | Integration pattern | Optional preprocessing | Maintains unified interface, no overhead | None |
-| Testing strategy | 18+ samples + 100 negative | Validates 100% detection, zero FP | None |
-| Error handling | Hierarchical types | Clear user guidance, robust | None |
+| Testing strategy | Synthetic fixtures (real-sample corpus planned) | Detection verified on synthetic fixtures only; coverage of real-world SFX binaries unknown | None |
+| Error handling | Unified ArchiveError | Clear user guidance, robust | None |
 | Stub extraction | Byte-range API | Simple, meets FR-031 | None |
 
 **Constitution Compliance**:
 - ✅ **Principle I (Robustness)**: Explicit error handling, validation at each stage
-- ✅ **Principle II (Performance)**: <100ms detection, early exit optimization
+- ✅ **Principle II (Performance)**: Targets <100ms detection, early exit optimization
 - ✅ **Principle III (Minimal Deps)**: Only goblin added, pure Rust, well-justified
-- ✅ **Principle IV (Testing)**: Comprehensive test matrix, 100+ samples
-- ✅ **Principle V (Documentation)**: Clear contracts, usage examples planned
+- ✅ **Principle IV (Testing)**: Synthetic test matrix; comprehensive 100+ real-sample corpus planned
+- ✅ **Principle V (Documentation)**: Clear contracts, usage examples shipped (e.g., `examples/detect_sfx.rs`)
 
 **Technical Context Resolved**:
 - ~~NEEDS CLARIFICATION: Binary parsing library~~ → **goblin 0.9**
 
-**Next Phase** (Phase 1 - Design):
-- Update data-model.md with SfxDetectionResult and StubType
-- Create contracts/sfx_detection.md defining API
-- Update quickstart.md with SFX detection examples
-- Update constitution check with goblin dependency justification
+**Retrospective note**: SFX types (SfxDetectionResult, StubType) are defined in `src/sfx/result.rs` and `src/sfx/stub_types.rs`. Detection is implemented in `src/sfx/detection.rs`. The quickstart and data-model documents have been updated with SFX examples.
 
 ## References
 
@@ -1373,10 +1311,12 @@ pub fn extract_stub(
 - libarchive documentation: https://www.libarchive.org/
 - unrar license: https://www.rarlab.com/rar_add.htm
 - Rust FFI best practices: The Rustonomicon (FFI chapter)
-- OnceLock documentation: https://doc.rust-lang.org/std/sync/struct.OnceLock.html
+- once_cell documentation: https://docs.rs/once_cell/latest/once_cell/
 - Rayon documentation: https://docs.rs/rayon/latest/rayon/
 - crc32fast: https://docs.rs/crc32fast/
-- secstr: https://docs.rs/secstr/
 - Rust async streams: https://blog.yoshuawuyts.com/rust-streams/
+
+**Future hardening references** (not currently integrated):
+- secstr: https://docs.rs/secstr/ (researched for password handling, deferred per Decision 12)
 - goblin crate: https://docs.rs/goblin/
 - goblin GitHub: https://github.com/m4b/goblin
