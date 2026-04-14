@@ -66,6 +66,8 @@ pub enum CompressionLevel {
 }
 
 /// Configuration for archive creation operations
+///
+/// `Clone` copies all settings but drops the progress callback (non-cloneable trait object).
 pub struct CompressionOptions {
     /// Output archive format
     pub format: ArchiveFormat,
@@ -81,6 +83,30 @@ pub struct CompressionOptions {
 
     /// Progress callback
     pub progress: Option<Box<dyn ProgressCallback>>,
+}
+
+impl Clone for CompressionOptions {
+    fn clone(&self) -> Self {
+        Self {
+            format: self.format,
+            level: self.level,
+            password: self.password.clone(),
+            split_size: self.split_size,
+            progress: None, // trait object cannot be cloned
+        }
+    }
+}
+
+impl std::fmt::Debug for CompressionOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompressionOptions")
+            .field("format", &self.format)
+            .field("level", &self.level)
+            .field("password", &self.password.as_ref().map(|_| "***"))
+            .field("split_size", &self.split_size)
+            .field("progress", &self.progress.is_some())
+            .finish()
+    }
 }
 
 impl CompressionOptions {

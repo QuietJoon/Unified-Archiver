@@ -11,7 +11,7 @@
 //! - ✨ **Unified Interface** - Same API for all formats
 //! - 🔍 **Automatic Format Detection** - Magic byte and extension-based detection
 //! - 🚀 **High Performance** - SIMD CRC32, streaming architecture
-//! - 💾 **Memory Efficient** - <100MB memory for multi-GB archives
+//! - 💾 **Memory Efficient** - <100MB memory for multi-GB archives (for libarchive-backed formats; native ZIP/7z/RAR backends buffer entries during streaming)
 //! - 🔐 **Password Support** - Encrypted archives (RAR, RAR5, ZIP, 7z)
 //! - ✅ **Integrity Validation** - CRC32 verification
 //! - 📊 **Rich Metadata** - Sizes, timestamps, CRC32, permissions
@@ -80,7 +80,8 @@
 //! let mut buffer = [0u8; 8192];
 //! while let Ok(n) = stream.read(&mut buffer) {
 //!     if n == 0 { break; }
-//!     // Process chunk without loading entire file into memory
+//!     // Process chunk — note that actual streaming behavior depends on backend
+//!     // (libarchive truly streams; native backends may buffer)
 //! }
 //! # Ok::<(), unified_archive::ArchiveError>(())
 //! ```
@@ -161,7 +162,9 @@
 //! ## Performance
 //!
 //! - **CRC32**: SIMD-accelerated checksum validation
-//! - **Memory**: <100MB for multi-GB archives (streaming architecture)
+//! - **Memory**: <100MB for multi-GB archives with libarchive-backed formats (streaming architecture);
+//!   native ZIP (Piz), 7z (SevenZ), and RAR (UnRAR) backends buffer individual entries in memory
+//!   during streaming extraction
 //! - **Detection**: <100ms for SFX detection (first 1MB scan)
 //!
 //! ## Architecture
@@ -220,7 +223,8 @@ pub use options::{
     CompressionLevel, CompressionOptions, EntryFilter, ExtractionOptions, ProgressCallback,
 };
 pub use security::{
-    ExtractionLimits, check_extraction_safe, sanitize_entry_path, validate_entry_path, verify_crc32,
+    ExtractionLimits, check_archive_ratio, check_extraction_safe, sanitize_entry_path,
+    validate_entry_path, verify_crc32,
 };
 pub use sfx::{SfxDetectionResult, StubType}; // Phase 7: SFX detection
 pub use stream_crc::{

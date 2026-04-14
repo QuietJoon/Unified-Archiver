@@ -150,6 +150,8 @@ impl ZipArchive {
 
         let entry_type = if is_dir {
             EntryType::Directory
+        } else if zip_file.is_symlink() {
+            EntryType::Symlink
         } else {
             EntryType::File
         };
@@ -283,6 +285,11 @@ impl ZipArchive {
             if let Some(parent) = entry_path.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| ArchiveError::io("create_dir", parent.to_path_buf(), e))?;
+            }
+
+            // Skip symlinks for security
+            if zip_file.is_symlink() {
+                continue;
             }
 
             if zip_file.is_dir() {

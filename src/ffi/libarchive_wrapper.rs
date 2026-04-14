@@ -15,6 +15,9 @@ use std::time::UNIX_EPOCH;
 pub struct LibarchiveArchive {
     path: String,
     write_handle: Option<*mut Archive>, // For creation mode
+    progress: Option<Box<dyn crate::options::ProgressCallback>>,
+    bytes_written: u64,
+    entries_written: usize,
 }
 
 impl LibarchiveArchive {
@@ -32,6 +35,10 @@ impl LibarchiveArchive {
         }
 
         unsafe { archive_read_support_format_all(archive) };
+        // Enable "raw" pseudo-format as lowest-priority fallback: standalone
+        // compressed files (.gz, .bz2, .xz) that aren't tar archives are
+        // exposed as a single-entry archive.
+        unsafe { archive_read_support_format_raw(archive) };
         unsafe { archive_read_support_filter_all(archive) };
 
         let result = unsafe { archive_read_open_filename(archive, c_path.as_ptr(), 10240) };
@@ -73,6 +80,9 @@ impl LibarchiveArchive {
         Ok(Self {
             path: path_str,
             write_handle: None,
+            progress: None,
+            bytes_written: 0,
+            entries_written: 0,
         })
     }
 
@@ -115,6 +125,15 @@ impl LibarchiveArchive {
                 }
 
                 if let Some(mut entry) = parse_entry(entry_ptr) {
+                    // Raw format (standalone .gz/.bz2/.xz) returns "data" as the
+                    // entry name. Replace with the archive filename sans compression
+                    // extension for a meaningful path.
+                    if entry.path == "data" {
+                        if let Some(stem) = Path::new(&self.path).file_stem() {
+                            entry.path = stem.to_string_lossy().to_string();
+                        }
+                    }
+
                     // Compute CRC32 by reading file data (for files only) if requested
                     if compute_crc && entry.entry_type == EntryType::File && entry.size.is_some() {
                         let mut hasher = crc32fast::Hasher::new();
@@ -276,7 +295,17 @@ impl LibarchiveArchive {
                 if !entry_ptr.is_null() {
                     let pathname_ptr = archive_entry_pathname(entry_ptr);
                     if !pathname_ptr.is_null() {
-                        let pathname = CStr::from_ptr(pathname_ptr).to_string_lossy();
+                        let raw_name = CStr::from_ptr(pathname_ptr).to_string_lossy();
+                        // Raw format (standalone .gz/.bz2/.xz) returns "data";
+                        // replace with archive filename sans compression extension.
+                        let pathname = if raw_name == "data" {
+                            Path::new(&self.path)
+                                .file_stem()
+                                .map(|s| std::borrow::Cow::Owned(s.to_string_lossy().to_string()))
+                                .unwrap_or(raw_name)
+                        } else {
+                            raw_name
+                        };
                         let full_path = match sanitize_entry_path(pathname.as_ref(), dest_path) {
                             Ok(path) => path,
                             Err(err) => {
@@ -584,7 +613,7 @@ impl LibarchiveArchive {
     pub fn create(
         path: impl AsRef<Path>,
         format: crate::ArchiveFormat,
-        options: &crate::options::CompressionOptions,
+        options: &mut crate::options::CompressionOptions,
     ) -> Result<Self> {
         let path_str = path.as_ref().to_string_lossy().to_string();
         let c_path = CString::new(path_str.clone())
@@ -719,8 +748,20 @@ impl LibarchiveArchive {
             Ok(Self {
                 path: path_str,
                 write_handle: Some(archive),
+                progress: options.progress.take(),
+                bytes_written: 0,
+                entries_written: 0,
             })
         }
+    }
+
+    fn notify_progress(&mut self, additional: u64) -> Result<()> {
+        super::common::notify_creation_progress(
+            &mut self.progress,
+            &mut self.bytes_written,
+            additional,
+            None,
+        )
     }
 
     /// Add a file to the archive from byte data
@@ -761,7 +802,7 @@ impl LibarchiveArchive {
             let now = std::time::SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default();
-            archive_entry_set_mtime(entry, now.as_secs() as i64, 0);
+            archive_entry_set_mtime(entry, now.as_secs() as i64, now.subsec_nanos() as c_longlong);
 
             // Write header
             let header_result = archive_write_header(write_handle, entry);
@@ -809,7 +850,108 @@ impl LibarchiveArchive {
             archive_entry_free(entry);
         }
 
-        Ok(())
+        self.entries_written += 1;
+        self.notify_progress(data.len() as u64)
+    }
+
+    /// Add a file from byte data, preserving metadata from an existing `ArchiveEntry`.
+    ///
+    /// Used by `commit_changes()` to round-trip entries without losing timestamps
+    /// and permissions.
+    pub fn add_file_from_data_with_metadata(
+        &mut self,
+        archive_path: &str,
+        data: &[u8],
+        metadata: &crate::entry::ArchiveEntry,
+    ) -> Result<()> {
+        let write_handle = self
+            .write_handle
+            .ok_or_else(|| ArchiveError::UnsupportedOperation {
+                operation: "add_file_from_data_with_metadata".to_string(),
+                reason: "Archive not opened in write mode".to_string(),
+            })?;
+
+        unsafe {
+            let entry = archive_entry_new();
+            if entry.is_null() {
+                return Err(ArchiveError::format(None, "Failed to create entry"));
+            }
+
+            let c_path = match CString::new(archive_path) {
+                Ok(c) => c,
+                Err(_) => {
+                    archive_entry_free(entry);
+                    return Err(ArchiveError::invalid_path(archive_path, "Contains null byte"));
+                }
+            };
+            archive_entry_set_pathname(entry, c_path.as_ptr());
+
+            archive_entry_set_filetype(entry, AE_IFREG);
+            archive_entry_set_size(entry, data.len() as c_longlong);
+
+            // Restore permissions from original entry, default to 0o644
+            let perm = metadata.permissions.unwrap_or(0o644);
+            archive_entry_set_perm(entry, perm as i32);
+
+            // Restore modification time from original entry, fall back to now
+            let duration = metadata
+                .modified
+                .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+                .unwrap_or_else(|| {
+                    std::time::SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                });
+            archive_entry_set_mtime(
+                entry,
+                duration.as_secs() as i64,
+                duration.subsec_nanos() as c_longlong,
+            );
+
+            let header_result = archive_write_header(write_handle, entry);
+            if header_result != ARCHIVE_OK {
+                let error_msg = get_archive_error(write_handle);
+                archive_entry_free(entry);
+                return Err(ArchiveError::format(None, error_msg));
+            }
+
+            if !data.is_empty() {
+                let bytes_written =
+                    archive_write_data(write_handle, data.as_ptr() as *const c_void, data.len());
+                if bytes_written < 0 {
+                    let error_msg = get_archive_error(write_handle);
+                    archive_entry_free(entry);
+                    return Err(ArchiveError::io(
+                        "write_data",
+                        archive_path,
+                        std::io::Error::other(error_msg),
+                    ));
+                }
+                if bytes_written as usize != data.len() {
+                    archive_entry_free(entry);
+                    return Err(ArchiveError::io(
+                        "write_data",
+                        archive_path,
+                        std::io::Error::other(format!(
+                            "Short write: requested {} bytes, wrote {} bytes",
+                            data.len(),
+                            bytes_written
+                        )),
+                    ));
+                }
+            }
+
+            let finish_result = archive_write_finish_entry(write_handle);
+            if finish_result != ARCHIVE_OK {
+                let error_msg = get_archive_error(write_handle);
+                archive_entry_free(entry);
+                return Err(ArchiveError::format(None, error_msg));
+            }
+            archive_entry_free(entry);
+        }
+
+        self.entries_written += 1;
+        self.notify_progress(data.len() as u64)
     }
 
     /// Add a directory entry to the archive (without contents)
@@ -849,7 +991,7 @@ impl LibarchiveArchive {
             let now = std::time::SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default();
-            archive_entry_set_mtime(entry, now.as_secs() as i64, 0);
+            archive_entry_set_mtime(entry, now.as_secs() as i64, now.subsec_nanos() as c_longlong);
 
             let header_result = archive_write_header(write_handle, entry);
             if header_result != ARCHIVE_OK {
@@ -867,7 +1009,13 @@ impl LibarchiveArchive {
             archive_entry_free(entry);
         }
 
+        self.entries_written += 1;
         Ok(())
+    }
+
+    /// Number of entries written so far (write mode only)
+    pub fn entries_written(&self) -> usize {
+        self.entries_written
     }
 
     /// Close and finalize the archive (for write mode)
@@ -1015,7 +1163,8 @@ impl LibarchiveArchive {
             archive_entry_free(entry);
         }
 
-        Ok(())
+        self.entries_written += 1;
+        self.notify_progress(metadata.len())
     }
 
     /// Add directory recursively to archive

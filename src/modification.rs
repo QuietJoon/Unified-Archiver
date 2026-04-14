@@ -10,10 +10,10 @@ use crate::format::ArchiveFormat;
 use std::collections::HashSet;
 use std::path::Path;
 
-/// Configuration options for archive modification operations (stub)
+/// Configuration options for archive modification operations
 #[derive(Debug, Clone)]
 pub struct ModificationOptions {
-    /// Whether to preserve original file metadata
+    /// Whether to preserve original file metadata (timestamps, permissions)
     pub preserve_metadata: bool,
 
     /// Whether to create a backup of the original archive
@@ -21,6 +21,10 @@ pub struct ModificationOptions {
 
     /// Suffix for backup files
     pub backup_suffix: String,
+
+    /// Compression settings for the recreated archive.
+    /// When `None`, uses format defaults (`CompressionLevel::Normal`, no password).
+    pub compression: Option<crate::options::CompressionOptions>,
 }
 
 impl ModificationOptions {
@@ -30,6 +34,7 @@ impl ModificationOptions {
             preserve_metadata: true,
             create_backup: false,
             backup_suffix: ".bak".to_string(),
+            compression: None,
         }
     }
 
@@ -127,7 +132,29 @@ impl Archive {
             format,
             entry_cache: once_cell::sync::OnceCell::new(),
             modifications: Some(ModificationTracker::default()),
+            mod_options: None,
         })
+    }
+
+    /// Open an archive for modification with explicit [`ModificationOptions`].
+    ///
+    /// Behaves identically to [`Archive::modify`] except the supplied
+    /// `options` are honored at `commit_changes()` time. When `None` is
+    /// desired (i.e. defaults), call `modify(path)` instead.
+    ///
+    /// Honored fields as of Phase B.2:
+    /// - `create_backup` + `backup_suffix`: original archive is copied to
+    ///   `<path>.<backup_suffix>` immediately before the temp file is renamed
+    ///   into place.
+    /// - `preserve_metadata`: accepted; full metadata fidelity (timestamps,
+    ///   permissions, archive-level settings) lands with Phase C.1/C.2.
+    pub fn modify_with_options(
+        path: impl AsRef<Path>,
+        options: ModificationOptions,
+    ) -> Result<Self> {
+        let mut archive = Self::modify(path)?;
+        archive.mod_options = Some(options);
+        Ok(archive)
     }
 
     /// Add an entry to archive (for Modify mode)
@@ -265,7 +292,11 @@ impl Archive {
                     reason: "No modification tracker".to_string(),
                 })?;
 
-        // If no modifications, return early
+        // Snapshot modification options (defaults if unset).
+        let mod_options = self.mod_options.take().unwrap_or_default();
+
+        // If no modifications, return early. We deliberately do *not* create a
+        // backup in this branch — there is nothing to roll back to.
         if modifications.added.is_empty()
             && modifications.removed.is_empty()
             && modifications.added_directories.is_empty()
@@ -278,9 +309,14 @@ impl Archive {
 
         // Use a closure so that temp file is cleaned up on any failure
         let result = (|| -> Result<()> {
-            // Create new archive with same format
-            let options = crate::options::CompressionOptions::new(self.format);
+            // Use caller-supplied compression settings, or format defaults
+            let options = mod_options
+                .compression
+                .clone()
+                .unwrap_or_else(|| crate::options::CompressionOptions::new(self.format));
             let mut new_archive = Self::create(&temp_path, options)?;
+
+            let preserve = mod_options.preserve_metadata;
 
             // Copy all entries from original except removed ones
             let entries = self.list_files()?;
@@ -289,9 +325,24 @@ impl Archive {
                     continue; // Skip removed entries
                 }
 
-                // Extract and re-add entry
                 let data = self.extract_to_memory(&entry.path)?;
-                new_archive.add_file_from_data(&entry.path, &data)?;
+
+                if preserve {
+                    // Preserve original entry metadata (timestamps, permissions)
+                    match &mut new_archive.backend {
+                        ArchiveBackend::ZipWriter(w) => {
+                            w.add_file_from_data_with_metadata(&entry.path, &data, &entry)?;
+                        }
+                        ArchiveBackend::Libarchive(b) => {
+                            b.add_file_from_data_with_metadata(&entry.path, &data, &entry)?;
+                        }
+                        _ => {
+                            new_archive.add_file_from_data(&entry.path, &data)?;
+                        }
+                    }
+                } else {
+                    new_archive.add_file_from_data(&entry.path, &data)?;
+                }
             }
 
             // Add new directory entries
@@ -307,6 +358,17 @@ impl Archive {
             // Finalize new archive
             new_archive.finish()?;
 
+            // If a backup is requested, copy the original aside before the
+            // atomic replace. We use copy (not rename) so the new file can
+            // still take the original's path. A failure here aborts the
+            // commit so the caller can decide whether to retry without
+            // backups; we have not touched the original yet.
+            if mod_options.create_backup {
+                let backup_path = backup_path_for(&self.path, &mod_options.backup_suffix);
+                std::fs::copy(&self.path, &backup_path)
+                    .map_err(|e| ArchiveError::io("backup", &backup_path, e))?;
+            }
+
             // Replace original file with new one
             rename_with_overwrite(&temp_path, &self.path)
         })();
@@ -318,6 +380,25 @@ impl Archive {
 
         result
     }
+}
+
+/// Compose the backup path for a given archive path and suffix.
+///
+/// Suffixes that already begin with a dot are appended verbatim
+/// (e.g. `.bak` → `archive.zip.bak`); suffixes without a leading dot get
+/// one added (`bak` → `archive.zip.bak`). An empty suffix is treated as
+/// `.bak` to avoid the surprising case of overwriting the original.
+fn backup_path_for(archive_path: &Path, suffix: &str) -> std::path::PathBuf {
+    let normalized = if suffix.is_empty() {
+        ".bak".to_string()
+    } else if suffix.starts_with('.') {
+        suffix.to_string()
+    } else {
+        format!(".{suffix}")
+    };
+    let mut path = archive_path.as_os_str().to_owned();
+    path.push(&normalized);
+    std::path::PathBuf::from(path)
 }
 
 /// Platform-specific rename that overwrites existing files

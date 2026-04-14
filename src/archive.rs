@@ -50,8 +50,10 @@ pub(crate) enum ArchiveBackend {
 /// - No data races on the same archive (no shared mutable access)
 ///
 /// **Backend Caveats**:
-/// - RAR: UnRAR backend has global state; concurrent RAR operations on
-///   different archives may produce CRC errors. Use sequential access for RAR.
+/// - RAR: UnRAR has global state, but all FFI calls are serialized via an
+///   internal `UNRAR_LOCK` mutex so concurrent callers on different RAR
+///   archives are safe. Per-archive extraction still runs sequentially
+///   because of the underlying SDK's iterator shape.
 ///
 /// # Examples
 ///
@@ -90,6 +92,8 @@ pub struct Archive {
     pub(crate) entry_cache: OnceCell<Vec<ArchiveEntry>>,
     /// Modification tracker (for Modify mode)
     pub(crate) modifications: Option<crate::modification::ModificationTracker>,
+    /// Modification options (Modify mode only). `None` means defaults are used.
+    pub(crate) mod_options: Option<crate::modification::ModificationOptions>,
 }
 
 // SAFETY: Archive can be moved between threads (Send) but not shared (&Archive from multiple threads).
@@ -127,6 +131,7 @@ impl Archive {
             format,
             entry_cache: OnceCell::new(),
             modifications: None,
+            mod_options: None,
         }
     }
 
@@ -227,21 +232,31 @@ impl Archive {
 
     /// Open a self-extracting archive (SFX) for reading
     ///
-    /// Phase 7: Convenience method that detects SFX and opens the embedded archive
-    /// in one operation. This is equivalent to calling detect_sfx() followed by
-    /// open_at_offset().
+    /// Convenience method that detects SFX and forwards to `open_at_offset()`.
+    ///
+    /// **Status (deferred)**: `open_at_offset()` currently returns
+    /// `ArchiveError::Unsupported`, so `open_sfx()` will return the same error
+    /// on positive detection. Callers that need to inspect SFX contents today
+    /// should call [`detect_sfx()`](Self::detect_sfx) and then use
+    /// [`extract_stub()`](Self::extract_stub) to separate the stub from the
+    /// embedded archive. Direct in-place opening is tracked as future work
+    /// (see FR-029).
     ///
     /// # Returns
-    /// - `Ok(Archive)` if SFX detected and archive opened successfully
-    /// - `Err(ArchiveError::InvalidFormat)` if not an SFX file
+    /// - `Err(ArchiveError::Format)` if the file is not an SFX
+    /// - `Err(ArchiveError::Unsupported)` on positive detection (deferred)
     ///
     /// # Example
     /// ```no_run
     /// use unified_archive::Archive;
     ///
-    /// // Open SFX directly without manual detection
-    /// let archive = Archive::open_sfx("installer.exe")?;
-    /// let entries = archive.list_files()?;
+    /// // Detection-only usage (opening the embedded archive is deferred):
+    /// let detection = Archive::detect_sfx("installer.exe")?;
+    /// if detection.is_sfx {
+    ///     if let Some(offset) = detection.data_offset {
+    ///         println!("Embedded archive starts at offset {offset}");
+    ///     }
+    /// }
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
     pub fn open_sfx(path: impl AsRef<Path>) -> Result<Self> {

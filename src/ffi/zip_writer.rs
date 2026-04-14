@@ -5,7 +5,7 @@
 
 use crate::error::{ArchiveError, Result};
 use crate::format::ArchiveFormat;
-use crate::options::CompressionOptions;
+use crate::options::{CompressionOptions, ProgressCallback};
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -20,13 +20,16 @@ pub struct ZipWriter {
     writer: Option<RawZipWriter<File>>,
     path: PathBuf,
     options: SimpleFileOptions,
+    progress: Option<Box<dyn ProgressCallback>>,
+    bytes_written: u64,
+    entries_written: usize,
 }
 
 impl ZipWriter {
     /// Create a new ZIP archive for writing
     pub fn create(
         path: impl AsRef<Path>,
-        compression_options: &CompressionOptions,
+        compression_options: &mut CompressionOptions,
     ) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
 
@@ -53,12 +56,29 @@ impl ZipWriter {
             writer: Some(writer),
             path: path_buf,
             options,
+            progress: compression_options.progress.take(),
+            bytes_written: 0,
+            entries_written: 0,
         })
+    }
+
+    fn notify_progress(&mut self, additional: u64) -> Result<()> {
+        super::common::notify_creation_progress(
+            &mut self.progress,
+            &mut self.bytes_written,
+            additional,
+            Some(ArchiveFormat::Zip),
+        )
     }
 
     /// Get archive path
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Number of entries written so far
+    pub fn entries_written(&self) -> usize {
+        self.entries_written
     }
 
     /// Add a file from byte data
@@ -75,10 +95,56 @@ impl ZipWriter {
             .write_all(data)
             .map_err(|e| ArchiveError::io("write", self.path.clone(), e))?;
 
-        Ok(())
+        self.entries_written += 1;
+        self.notify_progress(data.len() as u64)
+    }
+
+    /// Add a file from byte data, preserving metadata from an existing `ArchiveEntry`.
+    ///
+    /// Used by `commit_changes()` to round-trip entries without losing timestamps
+    /// and permissions.
+    pub fn add_file_from_data_with_metadata(
+        &mut self,
+        archive_path: &str,
+        data: &[u8],
+        metadata: &crate::entry::ArchiveEntry,
+    ) -> Result<()> {
+        let mut file_options = self.options;
+
+        // Restore modification time
+        if let Some(mtime) = metadata.modified {
+            if let Some(dt) = super::common::system_time_to_zip_datetime(mtime) {
+                file_options = file_options.last_modified_time(dt);
+            }
+        }
+
+        // Restore Unix permissions
+        #[cfg(unix)]
+        if let Some(perm) = metadata.permissions {
+            file_options = file_options.unix_permissions(perm);
+        }
+
+        let writer = self.writer.as_mut().ok_or_else(|| {
+            ArchiveError::format(Some(ArchiveFormat::Zip), "Archive already closed")
+        })?;
+
+        writer
+            .start_file(archive_path, file_options)
+            .map_err(|e| {
+                ArchiveError::format(Some(ArchiveFormat::Zip), format!("Start file: {}", e))
+            })?;
+
+        writer
+            .write_all(data)
+            .map_err(|e| ArchiveError::io("write", self.path.clone(), e))?;
+
+        self.entries_written += 1;
+        self.notify_progress(data.len() as u64)
     }
 
     /// Add a file from filesystem path with custom archive path
+    ///
+    /// Preserves the source file's modification time and Unix permissions.
     pub fn add_file_from_path(
         &mut self,
         fs_path: impl AsRef<Path>,
@@ -89,18 +155,41 @@ impl ZipWriter {
         let mut file =
             File::open(fs_path).map_err(|e| ArchiveError::io("open", fs_path.to_path_buf(), e))?;
 
+        let metadata = file
+            .metadata()
+            .map_err(|e| ArchiveError::io("metadata", fs_path.to_path_buf(), e))?;
+
+        let mut file_options = self.options;
+
+        // Preserve modification time
+        if let Ok(mtime) = metadata.modified() {
+            if let Some(dt) = super::common::system_time_to_zip_datetime(mtime) {
+                file_options = file_options.last_modified_time(dt);
+            }
+        }
+
+        // Preserve Unix permissions
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file_options = file_options.unix_permissions(metadata.permissions().mode());
+        }
+
         let writer = self.writer.as_mut().ok_or_else(|| {
             ArchiveError::format(Some(ArchiveFormat::Zip), "Archive already closed")
         })?;
 
-        writer.start_file(archive_path, self.options).map_err(|e| {
-            ArchiveError::format(Some(ArchiveFormat::Zip), format!("Start file: {}", e))
-        })?;
+        writer
+            .start_file(archive_path, file_options)
+            .map_err(|e| {
+                ArchiveError::format(Some(ArchiveFormat::Zip), format!("Start file: {}", e))
+            })?;
 
-        std::io::copy(&mut file, writer)
+        let copied = std::io::copy(&mut file, writer)
             .map_err(|e| ArchiveError::io("write", self.path.clone(), e))?;
 
-        Ok(())
+        self.entries_written += 1;
+        self.notify_progress(copied)
     }
 
     /// Add a single directory entry (without contents)
@@ -115,6 +204,7 @@ impl ZipWriter {
             ArchiveError::format(Some(ArchiveFormat::Zip), format!("Add directory: {}", e))
         })?;
 
+        self.entries_written += 1;
         Ok(())
     }
 
@@ -202,8 +292,8 @@ mod tests {
         let path = temp_zip_path("test_create.zip");
         let _ = std::fs::remove_file(&path);
 
-        let opts = CompressionOptions::new(ArchiveFormat::Zip);
-        let mut writer = ZipWriter::create(&path, &opts).unwrap();
+        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
         writer
             .add_file_from_data("hello.txt", b"Hello, world!")
             .unwrap();
@@ -222,8 +312,8 @@ mod tests {
         let path = temp_zip_path("test_multi.zip");
         let _ = std::fs::remove_file(&path);
 
-        let opts = CompressionOptions::new(ArchiveFormat::Zip);
-        let mut writer = ZipWriter::create(&path, &opts).unwrap();
+        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
         writer
             .add_file_from_data("file1.txt", b"content 1")
             .unwrap();
@@ -250,7 +340,7 @@ mod tests {
 
         let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
         opts.level = CompressionLevel::Store;
-        let mut writer = ZipWriter::create(&path, &opts).unwrap();
+        let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
         writer
             .add_file_from_data("stored.txt", b"stored content")
             .unwrap();
@@ -265,8 +355,8 @@ mod tests {
         let path = temp_zip_path("test_empty_file.zip");
         let _ = std::fs::remove_file(&path);
 
-        let opts = CompressionOptions::new(ArchiveFormat::Zip);
-        let mut writer = ZipWriter::create(&path, &opts).unwrap();
+        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
         writer.add_file_from_data("empty.txt", b"").unwrap();
         writer.finish().unwrap();
 
@@ -279,8 +369,8 @@ mod tests {
         let path = temp_zip_path("test_dir.zip");
         let _ = std::fs::remove_file(&path);
 
-        let opts = CompressionOptions::new(ArchiveFormat::Zip);
-        let mut writer = ZipWriter::create(&path, &opts).unwrap();
+        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
         writer.add_file_from_data("mydir/", b"").unwrap(); // Directory entry
         writer
             .add_file_from_data("mydir/file.txt", b"content")
@@ -297,8 +387,8 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         {
-            let opts = CompressionOptions::new(ArchiveFormat::Zip);
-            let mut writer = ZipWriter::create(&path, &opts).unwrap();
+            let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+            let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
             writer
                 .add_file_from_data("auto.txt", b"auto finish")
                 .unwrap();
@@ -317,8 +407,8 @@ mod tests {
         let test_content = b"Hello from roundtrip test!";
 
         // Write
-        let opts = CompressionOptions::new(ArchiveFormat::Zip);
-        let mut writer = ZipWriter::create(&path, &opts).unwrap();
+        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
         writer
             .add_file_from_data("roundtrip.txt", test_content)
             .unwrap();

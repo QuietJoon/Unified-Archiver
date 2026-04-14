@@ -27,24 +27,26 @@ impl StubType {
     /// * `bytes` - First 4KB of the file for header analysis
     ///
     /// # Returns
-    /// * `Ok(StubType)` if a supported executable format is detected
-    /// * `Err(ArchiveError)` if the format is not recognized or invalid
+    /// * `Ok(StubType)` — always returns a variant. Returns `StubType::Unknown`
+    ///   when the bytes don't match any recognized executable format so that
+    ///   callers (notably `detect_sfx`) can still proceed to signature scanning
+    ///   for SFX archives with custom / unknown stubs.
+    /// * `Err(ArchiveError)` — reserved for future I/O failures; format
+    ///   recognition failures are not considered errors.
     pub fn detect(bytes: &[u8]) -> Result<StubType, ArchiveError> {
         // Check for shell script shebang first (most common Unix SFX)
         if bytes.len() >= 2 && bytes[0] == b'#' && bytes[1] == b'!' {
             return Ok(StubType::ScriptInterpreter);
         }
 
-        // Use goblin to parse executable format
+        // Use goblin to parse executable format. Any parse failure or
+        // unrecognized Object variant maps to StubType::Unknown so that
+        // unknown-stub SFX heuristic scanning can run in Stage 2.
         match Object::parse(bytes) {
             Ok(Object::PE(_)) => Ok(StubType::WindowsPE),
             Ok(Object::Elf(_)) => Ok(StubType::LinuxELF),
             Ok(Object::Mach(_)) => Ok(StubType::MacOSMachO),
-            Ok(_) => Err(ArchiveError::format(None, "Unrecognized executable format")),
-            Err(e) => Err(ArchiveError::format(
-                None,
-                format!("Failed to parse executable: {}", e),
-            )),
+            Ok(_) | Err(_) => Ok(StubType::Unknown),
         }
     }
 
@@ -93,7 +95,7 @@ mod tests {
     #[test]
     fn test_invalid_format() {
         let invalid = b"Not an executable";
-        assert!(StubType::detect(invalid).is_err());
+        assert_eq!(StubType::detect(invalid).unwrap(), StubType::Unknown);
     }
 
     #[test]
@@ -158,22 +160,22 @@ mod tests {
 
     #[test]
     fn test_partial_shebang() {
-        // Test that a single # without ! is not detected as shell script
+        // Test that a single # without ! is not classified as a script
         let not_script = b"#This is a comment";
-        assert!(StubType::detect(not_script).is_err());
+        assert_eq!(StubType::detect(not_script).unwrap(), StubType::Unknown);
     }
 
     #[test]
     fn test_empty_input() {
         let empty = b"";
-        assert!(StubType::detect(empty).is_err());
+        assert_eq!(StubType::detect(empty).unwrap(), StubType::Unknown);
     }
 
     #[test]
     fn test_short_input() {
         // Test input shorter than minimum executable header
         let short = b"PK"; // Too short for any format
-        assert!(StubType::detect(short).is_err());
+        assert_eq!(StubType::detect(short).unwrap(), StubType::Unknown);
     }
 
     // ============================================================
@@ -184,21 +186,21 @@ mod tests {
     fn test_detect_with_single_byte() {
         // Single byte input (too short for any format)
         let single = b"#";
-        assert!(StubType::detect(single).is_err());
+        assert_eq!(StubType::detect(single).unwrap(), StubType::Unknown);
     }
 
     #[test]
     fn test_detect_with_null_bytes() {
-        // Buffer of null bytes (invalid executable)
+        // Buffer of null bytes (no recognizable header)
         let nulls = &[0u8; 100];
-        assert!(StubType::detect(nulls).is_err());
+        assert_eq!(StubType::detect(nulls).unwrap(), StubType::Unknown);
     }
 
     #[test]
     fn test_detect_with_random_data() {
         // Random-looking data that doesn't match any format
         let random = b"\x12\x34\x56\x78\x9a\xbc\xde\xf0garbage";
-        assert!(StubType::detect(random).is_err());
+        assert_eq!(StubType::detect(random).unwrap(), StubType::Unknown);
     }
 
     #[test]

@@ -51,6 +51,10 @@ impl SfxDetectionResult {
     }
 
     /// Create a result for a probable SFX (signature found but not fully validated)
+    ///
+    /// Note: `is_sfx` is always set to `true` regardless of `confidence`.
+    /// A zero confidence still marks the result as SFX; callers should check
+    /// `confidence` directly when gating on detection quality.
     pub fn probable(
         stub_type: StubType,
         archive_format: ArchiveFormat,
@@ -66,9 +70,12 @@ impl SfxDetectionResult {
         }
     }
 
-    /// Check if detection result is confirmed (confidence == 1.0)
+    /// Check if detection result is confirmed (confidence is exactly 1.0)
+    ///
+    /// Only results created via [`detected()`](Self::detected) have confidence 1.0.
+    /// Results from [`probable()`](Self::probable) use values < 1.0 and are never confirmed.
     pub fn is_confirmed(&self) -> bool {
-        self.confidence >= 0.99
+        self.confidence == 1.0
     }
 
     /// Get a human-readable summary of the detection result
@@ -87,9 +94,15 @@ impl SfxDetectionResult {
             .map(|o| format!("{}", o))
             .unwrap_or_else(|| "Unknown".to_string());
 
+        let confidence_label = if self.is_confirmed() {
+            "confirmed".to_string()
+        } else {
+            format!("probable, {:.0}% confidence", self.confidence * 100.0)
+        };
+
         format!(
-            "SFX detected: {} stub, {} archive at offset {}",
-            stub, format, offset
+            "SFX detected ({}): {} stub, {} archive at offset {}",
+            confidence_label, stub, format, offset
         )
     }
 }
@@ -141,6 +154,7 @@ mod tests {
         let result = SfxDetectionResult::detected(StubType::WindowsPE, ArchiveFormat::Zip, 1024);
         let summary = result.summary();
         assert!(summary.contains("SFX detected"));
+        assert!(summary.contains("confirmed"));
         assert!(summary.contains("Windows PE executable"));
         assert!(summary.contains("Zip"));
         assert!(summary.contains("1024"));
@@ -152,6 +166,8 @@ mod tests {
             SfxDetectionResult::probable(StubType::ScriptInterpreter, ArchiveFormat::Rar, 512, 0.75);
         let summary = result.summary();
         assert!(summary.contains("SFX detected"));
+        assert!(summary.contains("probable"));
+        assert!(summary.contains("75%"));
         assert!(summary.contains("Script interpreter"));
         assert!(summary.contains("Rar"));
     }
@@ -180,10 +196,14 @@ mod tests {
 
     #[test]
     fn test_is_confirmed_boundary() {
-        // Test boundary case for is_confirmed (>= 0.99)
+        // Only exactly 1.0 is confirmed; 0.99 is still probable
+        let result_100 =
+            SfxDetectionResult::probable(StubType::WindowsPE, ArchiveFormat::Zip, 100, 1.0);
+        assert!(result_100.is_confirmed());
+
         let result_99 =
             SfxDetectionResult::probable(StubType::WindowsPE, ArchiveFormat::Zip, 100, 0.99);
-        assert!(result_99.is_confirmed());
+        assert!(!result_99.is_confirmed());
 
         let result_98 =
             SfxDetectionResult::probable(StubType::WindowsPE, ArchiveFormat::Zip, 100, 0.98);

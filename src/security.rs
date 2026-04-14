@@ -321,6 +321,53 @@ pub fn check_extraction_safe(entries: &[ArchiveEntry], limits: &ExtractionLimits
     Ok(())
 }
 
+/// Check overall archive compression ratio using archive file size.
+///
+/// This complements `check_extraction_safe` for formats where per-file
+/// compressed sizes are unavailable (TAR.GZ, TAR.BZ2, TAR.XZ via libarchive).
+/// Uses the archive file size on disk as the compressed size denominator.
+pub fn check_archive_ratio(
+    entries: &[ArchiveEntry],
+    archive_path: &Path,
+    limits: &ExtractionLimits,
+) -> Result<()> {
+    // Skip if ratio limit is effectively unlimited
+    if limits.max_compression_ratio >= f64::MAX {
+        return Ok(());
+    }
+
+    let archive_size = std::fs::metadata(archive_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    if archive_size == 0 {
+        return Ok(());
+    }
+
+    let total_uncompressed: u64 = entries
+        .iter()
+        .filter(|e| !e.is_directory())
+        .filter_map(|e| e.size)
+        .sum();
+
+    if total_uncompressed == 0 {
+        return Ok(());
+    }
+
+    let ratio = total_uncompressed as f64 / archive_size as f64;
+    if ratio > limits.max_compression_ratio {
+        return Err(ArchiveError::UnsupportedOperation {
+            operation: "extract".to_string(),
+            reason: format!(
+                "Archive compression ratio {:.1}:1 exceeds limit of {:.1}:1 (possible zip bomb)",
+                ratio, limits.max_compression_ratio
+            ),
+        });
+    }
+
+    Ok(())
+}
+
 /// Verify CRC32 checksum of extracted data
 ///
 /// Compares the computed CRC32 of the data against the expected value

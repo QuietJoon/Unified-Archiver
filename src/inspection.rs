@@ -23,8 +23,8 @@ pub struct ValidationReport {
 impl Archive {
     /// List all files in the archive
     ///
-    /// Phase 1: Returns cached &[ArchiveEntry] (zero-cost repeated access)
-    /// - First call: reads from backend, caches in OnceLock
+    /// Returns cached `&[ArchiveEntry]` (zero-cost repeated access).
+    /// - First call: reads from backend, caches in `OnceCell`
     /// - Subsequent calls: returns cached slice (O(1), no allocation)
     pub fn list_files(&self) -> Result<&[ArchiveEntry]> {
         self.entry_cache
@@ -37,7 +37,9 @@ impl Archive {
                     reason: "Cannot list files from an archive in Write mode".to_string(),
                 }),
                 ArchiveBackend::ZipReader(zip) => zip.list_files(),
-                ArchiveBackend::Libarchive(libarchive) => libarchive.list_files(),
+                // Skip the CRC-walk variant on the public listing path — CRC
+                // verification belongs in `validate_integrity()`, not routine listing.
+                ArchiveBackend::Libarchive(libarchive) => libarchive.list_files_metadata_only(),
             })
             .map(|v| v.as_slice())
     }
@@ -64,7 +66,18 @@ impl Archive {
     }
 
     /// Get count of entries in archive
+    ///
+    /// In Read/Modify mode, returns the number of entries listed in the archive.
+    /// In Write mode, returns the number of entries added so far.
     pub fn entry_count(&self) -> Result<usize> {
+        use crate::archive::ArchiveMode;
+        if self.mode == ArchiveMode::Write {
+            return Ok(match &self.backend {
+                ArchiveBackend::ZipWriter(w) => w.entries_written(),
+                ArchiveBackend::Libarchive(b) => b.entries_written(),
+                _ => 0,
+            });
+        }
         self.list_files().map(|entries| entries.len())
     }
 
@@ -217,10 +230,7 @@ impl Archive {
             .filter(|e| e.entry_type == EntryType::File)
             .map(|e| {
                 if let Some(crc) = e.crc32 {
-                    crc.to_be_bytes()
-                        .iter()
-                        .map(|b| format!("{b:02x}"))
-                        .collect::<String>()
+                    format!("{crc:08x}")
                 } else {
                     // Fallback for entries without CRC32: use path + size
                     format!("{}:{}", e.path, e.size.unwrap_or(0))
@@ -434,9 +444,9 @@ impl Archive {
 
     /// Check for symlinks in archive and return warnings (FR-022)
     ///
-    /// Symlinks and hard links are skipped during extraction with warnings due to
-    /// limited cross-platform support. This method scans the archive and returns
-    /// warnings for any symlinks/hard links that would be skipped.
+    /// Scans entries for symlink and hard link types. Currently reliable only on
+    /// libarchive-backed formats (TAR variants); native backends (ZIP, 7z, RAR) do
+    /// not yet classify link entries and may return false negatives.
     ///
     /// # Examples
     ///

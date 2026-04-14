@@ -99,8 +99,15 @@ impl PizArchive {
         let path = normalize_path(metadata.path.as_ref().as_str());
         let is_dir = !metadata.is_file();
 
+        // Detect symlinks via Unix mode bits (S_IFLNK = 0xA000)
+        let is_symlink = metadata
+            .unix_mode
+            .is_some_and(|m| (m & 0xF000) == 0xA000);
+
         let entry_type = if is_dir {
             EntryType::Directory
+        } else if is_symlink {
+            EntryType::Symlink
         } else {
             EntryType::File
         };
@@ -190,6 +197,14 @@ impl PizArchive {
             if let Some(parent) = entry_path.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| ArchiveError::io("create_dir", parent.to_path_buf(), e))?;
+            }
+
+            // Skip symlinks for security (detected via Unix mode bits)
+            let is_symlink = entry_metadata
+                .unix_mode
+                .is_some_and(|m| (m & 0xF000) == 0xA000);
+            if is_symlink {
+                continue;
             }
 
             if !entry_metadata.is_file() {

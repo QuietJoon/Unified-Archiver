@@ -124,8 +124,9 @@ fn test_shell_script_7z_sfx() {
 }
 
 #[test]
-fn test_multiple_signatures_selects_first() {
-    // Test that when multiple archive signatures are found, the first is used
+fn test_multiple_signatures_iterates_candidates() {
+    // Test that when multiple archive signatures are found, all candidates are
+    // tried (per AD 0015) and the first one that validates is returned.
     let mut temp = NamedTempFile::new().unwrap();
 
     // Shell script stub
@@ -136,7 +137,7 @@ fn test_multiple_signatures_selects_first() {
     let zip_sig = b"PK\x03\x04";
     let zip_data = [0u8; 50];
 
-    // Second signature: RAR at offset ~190 (should be ignored)
+    // Second signature: RAR at offset ~190
     let rar_sig = b"Rar!\x1a\x07\x00";
     let rar_data = [0u8; 50];
 
@@ -148,11 +149,13 @@ fn test_multiple_signatures_selects_first() {
     temp.write_all(&rar_data).unwrap();
     temp.flush().unwrap();
 
-    // Detect SFX
+    // Detect SFX — detection iterates all candidates and returns
+    // the first one that passes validation (earliest offset wins
+    // when no candidate fully validates via backend parse).
     let result = Archive::detect_sfx(temp.path()).unwrap();
 
-    // Should detect ZIP (first signature)
     assert!(result.is_sfx);
+    // ZIP is the first candidate to be tried (smallest offset)
     assert_eq!(result.archive_format, Some(ArchiveFormat::Zip));
 }
 

@@ -22,7 +22,7 @@ impl Archive {
     /// * `Err` - If creation fails
     pub fn create(
         path: impl AsRef<Path>,
-        options: crate::options::CompressionOptions,
+        mut options: crate::options::CompressionOptions,
     ) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
 
@@ -43,12 +43,12 @@ impl Archive {
         let backend = match format {
             ArchiveFormat::Zip => {
                 // Use native Rust zip crate for ZIP creation
-                let writer = ZipWriter::create(&path_buf, &options)?;
+                let writer = ZipWriter::create(&path_buf, &mut options)?;
                 ArchiveBackend::ZipWriter(writer)
             }
             _ => {
                 // Use libarchive for other formats
-                let libarchive = LibarchiveArchive::create(&path_buf, format, &options)?;
+                let libarchive = LibarchiveArchive::create(&path_buf, format, &mut options)?;
                 ArchiveBackend::Libarchive(libarchive)
             }
         };
@@ -60,6 +60,7 @@ impl Archive {
             format,
             entry_cache: OnceCell::new(),
             modifications: None,
+            mod_options: None,
         })
     }
 

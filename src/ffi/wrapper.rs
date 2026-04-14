@@ -12,12 +12,34 @@ use std::ffi::CString;
 use std::ops::ControlFlow;
 use std::os::raw::{c_int, c_uint};
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::common::{TempDirGuard, normalize_path};
 
 /// Seconds between Windows FILETIME epoch (1601-01-01) and Unix epoch (1970-01-01)
 const FILETIME_UNIX_EPOCH_DIFF_SECS: u64 = 11_644_473_600;
+
+/// Process-wide serialization lock for UnRAR FFI calls.
+///
+/// The UnRAR C library maintains mutable global state (parser buffers,
+/// encryption tables, error codes) that is not safe to touch from multiple
+/// threads even when the threads operate on *different* archive handles.
+/// Guard every FFI entry point with this mutex to prevent the cross-thread
+/// CRC / header corruption observed in concurrent-use testing.
+///
+/// The lock is acquired at small scopes (one `unsafe { ffi_call() }` each),
+/// never re-entrantly, so throughput is only affected when multiple threads
+/// actually contend. Poisoning is recovered by reading past the poison — each
+/// FFI call is stateless with respect to the poisoned thread's archive
+/// handle, so there is no cross-contamination risk.
+static UNRAR_LOCK: Mutex<()> = Mutex::new(());
+
+/// Acquire the UnRAR FFI lock, recovering from poison.
+#[inline]
+fn unrar_lock() -> MutexGuard<'static, ()> {
+    UNRAR_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Safe wrapper around UnRAR archive handle
 ///
@@ -46,6 +68,7 @@ impl UnrarArchive {
                 ..Default::default()
             };
 
+            let _guard = unrar_lock();
             let handle = RAROpenArchiveEx(&mut open_data);
 
             if handle.is_null() || open_data.open_result != ERAR_SUCCESS as u32 {
@@ -77,6 +100,7 @@ impl UnrarArchive {
             .map_err(|_| ArchiveError::password("Password contains null byte"))?;
 
         unsafe {
+            let _guard = unrar_lock();
             RARSetPassword(archive.handle, c_password.as_ptr());
         }
 
@@ -103,7 +127,9 @@ impl UnrarArchive {
     pub fn read_header(&self) -> Result<Option<ArchiveEntry>> {
         unsafe {
             let mut header = RARHeaderDataEx::default();
+            let _guard = unrar_lock();
             let result = RARReadHeaderEx(self.handle, &mut header);
+            drop(_guard);
 
             match result {
                 ERAR_SUCCESS => Ok(Some(parse_header(&header)?)),
@@ -118,6 +144,7 @@ impl UnrarArchive {
     /// Skip current entry (move to next)
     pub fn skip_entry(&self) -> Result<()> {
         unsafe {
+            let _guard = unrar_lock();
             let result = RARProcessFile(self.handle, RAR_SKIP, std::ptr::null(), std::ptr::null());
 
             if result == ERAR_SUCCESS {
@@ -197,8 +224,8 @@ impl UnrarArchive {
 
     /// Parse recovery percentage from RAR file structure
     ///
-    /// RAR recovery records are stored as special blocks with type 0x78 (RAR4) or 0x01 (RAR5).
-    /// The recovery percentage is encoded in the block header.
+    /// RAR recovery records are stored as special blocks: type 0x78 in RAR4,
+    /// service header (type 3, name "RR") in RAR5.
     fn parse_recovery_percentage(&self) -> Result<Option<u8>> {
         use std::fs::File;
         use std::io::Read;
@@ -226,37 +253,34 @@ impl UnrarArchive {
     /// Parse RAR5 recovery record blocks
     ///
     /// RAR5 uses a new block format with variable-length headers.
-    /// Recovery records have block type 0x01 (Recovery Record).
+    /// Recovery records are service headers (type 3) with name "RR".
+    /// End of archive is type 5.
     fn parse_rar5_recovery(&self, file: &mut std::fs::File) -> Result<Option<u8>> {
         use std::io::{Read, Seek, SeekFrom};
 
-        // Skip main RAR5 header (already read 8 bytes signature + 8 bytes we need to analyze)
+        // Skip RAR5 signature (8 bytes: "Rar!\x1A\x07\x01\x00")
         file.seek(SeekFrom::Start(8))
             .map_err(|e| ArchiveError::io("seek", std::path::Path::new(&self.path), e))?;
 
-        // Read and parse blocks until we find recovery record or EOF
         loop {
-            // Read block header (enough for CRC32(4) + 3 max-length vints (up to 10 bytes each))
-            let mut block_start = [0u8; 34];
+            let block_pos = file
+                .stream_position()
+                .map_err(|e| ArchiveError::io("tell", std::path::Path::new(&self.path), e))?;
+
+            // Read enough for CRC32(4) + several max-length vints
+            let mut block_start = [0u8; 50];
             let bytes_read = file
                 .read(&mut block_start)
                 .map_err(|e| ArchiveError::io("read", std::path::Path::new(&self.path), e))?;
 
             if bytes_read < 7 {
-                // End of file or truncated
                 return Ok(None);
             }
 
-            // Parse RAR5 block header
-            // Format: CRC32(4) | HeaderSize(vint) | HeaderType(vint) | HeaderFlags(vint) | ExtraSize(opt vint) | Data(...)
-            let _crc = u32::from_le_bytes([
-                block_start[0],
-                block_start[1],
-                block_start[2],
-                block_start[3],
-            ]);
-
-            // Decode variable-length integers with bounds checks
+            // Parse RAR5 block header:
+            // CRC32(4) | HeaderSize(vint) | HeaderType(vint) | HeaderFlags(vint) | ...
+            // HeaderSize counts bytes from HeaderType to end of header (excludes CRC32 and itself).
+            // Data area (if HFLAGS_DATA) follows the header and is NOT in HeaderSize.
             let (header_size, offset1) = decode_vint(&block_start[4..bytes_read])?;
 
             let type_start = 4 + offset1;
@@ -269,47 +293,60 @@ impl UnrarArchive {
             if flags_start >= bytes_read {
                 return Ok(None);
             }
-            let (header_flags, _offset3) = decode_vint(&block_start[flags_start..bytes_read])?;
+            let (header_flags, offset3) = decode_vint(&block_start[flags_start..bytes_read])?;
 
-            // Check if this is a recovery record block (type 0x05)
-            // RAR5 uses type 5 for recovery records
-            if header_type == 0x05 {
-                // Recovery record found
-                // The percentage is stored in the recovery record data
-                // For now, common values are 1-15% (WinRAR UI shows these as options)
+            // Parse optional ExtraSize and DataSize vints from the header
+            let mut next_field = flags_start + offset3;
+            if header_flags & 0x0001 != 0 && next_field < bytes_read {
+                // HFLAGS_EXTRA: skip ExtraSize vint
+                let (_, extra_vint_len) = decode_vint(&block_start[next_field..bytes_read])?;
+                next_field += extra_vint_len;
+            }
+            let mut data_area_size: u64 = 0;
+            if header_flags & 0x0002 != 0 && next_field < bytes_read {
+                // HFLAGS_DATA: parse DataSize vint
+                let (ds, _) = decode_vint(&block_start[next_field..bytes_read])?;
+                data_area_size = ds;
+            }
 
-                // Read the recovery record data
-                let data_size = header_size.saturating_sub(7); // Subtract header overhead
-                let mut rec_data = vec![0u8; data_size.min(1024) as usize];
+            // End of archive (type 5)
+            if header_type == 5 {
+                return Ok(None);
+            }
+
+            // Service header (type 3) — recovery records are service blocks named "RR"
+            if header_type == 3 {
+                // Compute offset of remaining header content after standard fields
+                let header_overhead = (offset2 + offset3) as u64;
+                let remaining = header_size.saturating_sub(header_overhead);
+
+                // Seek to start of type-specific header content
+                let content_pos = block_pos + 4 + offset1 as u64 + header_overhead;
+                file.seek(SeekFrom::Start(content_pos))
+                    .map_err(|e| ArchiveError::io("seek", std::path::Path::new(&self.path), e))?;
+
+                let read_size = remaining.min(1024) as usize;
+                let mut rec_data = vec![0u8; read_size];
                 file.read_exact(&mut rec_data)
                     .map_err(|e| ArchiveError::io("read", std::path::Path::new(&self.path), e))?;
 
-                // The percentage is typically in the first few bytes of the recovery data
-                // RAR5 recovery records store the revision number and protection percentage
-                // Byte structure varies, but percentage is commonly at offset 8-16
-                if rec_data.len() >= 2 {
-                    // Try to extract percentage (commonly stored as single byte value 1-15)
-                    for &byte in rec_data.iter().take(20) {
+                // Check for "RR" service name in the header content
+                if rec_data.windows(2).any(|w| w == b"RR") {
+                    // Recovery record found — scan for percentage value (1-15%)
+                    for &byte in rec_data.iter().take(64) {
                         if (1..=15).contains(&byte) {
-                            // Found a plausible percentage value
                             return Ok(Some(byte));
                         }
                     }
+                    // Recovery record exists but couldn't determine percentage
+                    return Ok(None);
                 }
-
-                // Could not determine exact percentage, but recovery exists
-                return Ok(None);
             }
 
-            // Skip to next block
-            file.seek(SeekFrom::Current(header_size as i64))
+            // Skip to next block: CRC(4) + HeaderSize_vint(offset1) + header(header_size) + data(data_area_size)
+            let next_block = block_pos + 4 + offset1 as u64 + header_size + data_area_size;
+            file.seek(SeekFrom::Start(next_block))
                 .map_err(|e| ArchiveError::io("seek", std::path::Path::new(&self.path), e))?;
-
-            // Check for end marker (type 0x01 is ENDARC)
-            if header_type == 0x01 && (header_flags & 0x0001) != 0 {
-                // End of archive
-                return Ok(None);
-            }
         }
     }
 
@@ -379,10 +416,21 @@ impl UnrarArchive {
                 return Ok(None);
             }
 
-            // Skip to next block
-            // head_size includes the 7-byte header, so skip (head_size - 7) more bytes
-            if head_size >= 7 {
-                file.seek(SeekFrom::Current((head_size - 7) as i64))
+            // Skip to next block.
+            // head_size includes the 7-byte basic header.
+            // LONG_BLOCK flag (0x8000) means an ADD_SIZE (u32) data area follows the header.
+            let mut skip = (head_size as i64) - 7;
+            if head_flags & 0x8000 != 0 && head_size >= 11 {
+                // ADD_SIZE is at header bytes 7-10 (right after basic header)
+                let mut add_bytes = [0u8; 4];
+                file.read_exact(&mut add_bytes)
+                    .map_err(|e| ArchiveError::io("read", std::path::Path::new(&self.path), e))?;
+                let add_size = u32::from_le_bytes(add_bytes);
+                // We already read 4 bytes of ADD_SIZE from the remaining header
+                skip = (head_size as i64) - 11 + add_size as i64;
+            }
+            if skip > 0 {
+                file.seek(SeekFrom::Current(skip))
                     .map_err(|e| ArchiveError::io("seek", std::path::Path::new(&self.path), e))?;
             }
 
@@ -413,15 +461,22 @@ impl UnrarArchive {
         mut progress: Option<&mut Box<dyn ProgressCallback>>,
         overwrite: bool,
     ) -> Result<()> {
-        // Calculate total size for progress tracking (uses cached entries)
-        let total_bytes = if progress.is_some() {
-            let entries = self.list_files()?;
-            entries.iter().filter_map(|e| e.size).sum()
+        // Compute total_bytes from a dedicated fresh handle. The original
+        // `self.handle` may already be EOF-positioned (e.g., after
+        // `list_files_for_limits()` during open), so calling `self.list_files()`
+        // here yields zero entries and `total_bytes == 0`, breaking progress.
+        let total_bytes: u64 = if progress.is_some() {
+            let prescan = self.fresh_handle()?;
+            prescan
+                .list_files()?
+                .iter()
+                .filter_map(|e| e.size)
+                .sum()
         } else {
             0
         };
 
-        // Create fresh handle for extraction (list_files() exhausted the original handle)
+        // Fresh handle for extraction (the pre-scan handle above is exhausted).
         let fresh = self.fresh_handle()?;
 
         let abs_dest = resolve_dest_path(dest_path)?;
@@ -439,6 +494,15 @@ impl UnrarArchive {
                         return Err(ArchiveError::format(None, "Extraction cancelled by user"));
                     }
                 }
+            }
+
+            // Skip symlinks and hardlinks for security
+            if entry.entry_type == EntryType::Symlink || entry.entry_type == EntryType::HardLink {
+                unsafe {
+                    let _guard = unrar_lock();
+                    RARProcessFile(fresh.handle, RAR_SKIP, std::ptr::null(), std::ptr::null());
+                }
+                continue;
             }
 
             // Sanitize path to prevent traversal attacks
@@ -467,6 +531,8 @@ impl UnrarArchive {
 
             // Extract current file using full absolute path as the destination filename
             unsafe {
+                // Serialize UnRAR FFI calls (global state is not thread-safe).
+                let _guard = unrar_lock();
                 let result = RARProcessFile(
                     fresh.handle,
                     RAR_EXTRACT,
@@ -515,6 +581,19 @@ impl UnrarArchive {
             match fresh.read_header()? {
                 Some(entry) => {
                     if entry.path == file_path {
+                        // Reject symlinks/hardlinks for security
+                        if entry.entry_type == EntryType::Symlink
+                            || entry.entry_type == EntryType::HardLink
+                        {
+                            return Err(ArchiveError::format(
+                                Some(ArchiveFormat::Rar),
+                                format!(
+                                    "Refusing to extract link entry: {}",
+                                    file_path
+                                ),
+                            ));
+                        }
+
                         // Sanitize path to prevent traversal attacks
                         let safe_path = sanitize_entry_path(&entry.path, &abs_dest)?;
 
@@ -548,6 +627,8 @@ impl UnrarArchive {
 
                         // Extract this file using full absolute path as the destination filename
                         unsafe {
+                            // Serialize UnRAR FFI calls (global state is not thread-safe).
+                            let _guard = unrar_lock();
                             let result = RARProcessFile(
                                 fresh.handle,
                                 RAR_EXTRACT,
@@ -645,7 +726,7 @@ impl UnrarArchive {
         Ok(buffer)
     }
 
-    /// Extract a single file to a stream (Phase 2.4)
+    /// Extract a single file to a stream
     ///
     /// Note: Currently loads the entire file into memory before wrapping in a cursor.
     /// The UnRAR API requires extraction to disk first, so true streaming is not possible
@@ -687,6 +768,8 @@ impl UnrarArchive {
 
             // Test the file using RAR_TEST mode
             unsafe {
+                // Serialize UnRAR FFI calls (global state is not thread-safe).
+                let _guard = unrar_lock();
                 let result = RARProcessFile(
                     fresh.handle,
                     RAR_TEST, // Test mode - verifies CRC32 without extracting
@@ -715,6 +798,8 @@ impl UnrarArchive {
 impl Drop for UnrarArchive {
     fn drop(&mut self) {
         unsafe {
+            // Drop still runs on panic paths — recovering from poison is important.
+            let _guard = unrar_lock();
             RARCloseArchive(self.handle);
         }
     }
@@ -754,8 +839,14 @@ fn parse_header(header: &RARHeaderDataEx) -> Result<ArchiveEntry> {
 
     // Determine entry type
     let is_directory = (header.flags & RHDF_DIRECTORY) != 0;
+    // RAR5 redir_type: FSREDIR_UNIXSYMLINK=1, FSREDIR_WINSYMLINK=2,
+    //   FSREDIR_JUNCTION=3, FSREDIR_HARDLINK=4, FSREDIR_FILECOPY=5
     let entry_type = if is_directory {
         EntryType::Directory
+    } else if header.redir_type == 1 || header.redir_type == 2 || header.redir_type == 3 {
+        EntryType::Symlink
+    } else if header.redir_type == 4 || header.redir_type == 5 {
+        EntryType::HardLink
     } else {
         EntryType::File
     };

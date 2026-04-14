@@ -44,6 +44,7 @@ unsafe extern "C" {
 
     // Format support
     pub fn archive_read_support_format_all(archive: *mut Archive) -> c_int;
+    pub fn archive_read_support_format_raw(archive: *mut Archive) -> c_int;
     pub fn archive_read_support_format_zip(archive: *mut Archive) -> c_int;
     pub fn archive_read_support_format_7zip(archive: *mut Archive) -> c_int;
     pub fn archive_read_support_format_tar(archive: *mut Archive) -> c_int;

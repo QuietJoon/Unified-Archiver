@@ -45,23 +45,22 @@ pub fn detect_sfx<P: AsRef<Path>>(path: P) -> Result<SfxDetectionResult> {
         .map_err(|e| ArchiveError::io("metadata", path, e))?
         .len();
 
-    let mut scan_buffer = Vec::with_capacity(MAX_SCAN_SIZE);
+    let mut scan_buffer = Vec::with_capacity((file_len as usize).min(MAX_SCAN_SIZE));
     let _bytes_read = file
         .take(MAX_SCAN_SIZE as u64)
         .read_to_end(&mut scan_buffer)
         .map_err(|e| ArchiveError::io("read", path, e))?;
 
-    // Stage 1: Executable format validation using first 4KB of buffer
+    // Stage 1: Executable format classification using first 4KB of buffer.
+    //
+    // `StubType::detect()` returns `StubType::Unknown` for unrecognized
+    // executables instead of erroring, so we unconditionally proceed to
+    // Stage 2 signature scanning. This lets us detect SFX archives
+    // embedded in custom / unknown stub executables.
     let header_size = HEADER_SIZE.min(scan_buffer.len());
     let header = &scan_buffer[..header_size];
 
-    let stub_type = match StubType::detect(header) {
-        Ok(stub) => stub,
-        Err(_) => {
-            // Not an executable format - return not_sfx (not an error)
-            return Ok(SfxDetectionResult::not_sfx());
-        }
-    };
+    let stub_type = StubType::detect(header)?;
 
     // Stage 2: Archive signature scanning (using same buffer already read)
 
@@ -76,6 +75,14 @@ pub fn detect_sfx<P: AsRef<Path>>(path: P) -> Result<SfxDetectionResult> {
     for &(offset, format) in &signatures_found {
         // Check against total file length
         if (offset as u64) + 100 > file_len {
+            continue;
+        }
+
+        // Regression guard: if Stage 1 produced StubType::Unknown
+        // (no recognized executable header) AND the archive signature sits at
+        // file offset 0, this is just a plain archive, not an SFX. A real SFX
+        // must have stub bytes before the embedded archive payload.
+        if stub_type == StubType::Unknown && offset == 0 {
             continue;
         }
 
@@ -446,9 +453,44 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_sfx_returns_first_signature() {
+    fn test_detect_sfx_unknown_stub_with_zip_payload() {
+        // A blob that isn't a recognized executable (not PE/ELF/Mach-O
+        // /shebang) but still has a ZIP archive payload should now be detected
+        // as SFX with StubType::Unknown, rather than failing at Stage 1.
         let mut temp = NamedTempFile::new().unwrap();
-        // Multiple signatures - should return first one (smallest offset)
+        // Header bytes that goblin won't parse as any known format.
+        let mut data = vec![0xAB, 0xCD, 0xEF, 0x99];
+        data.extend(vec![0u8; 500]); // Padding so ZIP signature is clearly past the header.
+        data.extend_from_slice(b"PK\x03\x04");
+        data.extend(vec![0u8; 200]); // Enough trailing data to pass Stage 3.
+        temp.write_all(&data).unwrap();
+        temp.flush().unwrap();
+
+        let result = detect_sfx(temp.path()).unwrap();
+        assert!(result.is_sfx, "unknown-stub SFX with ZIP payload should be detected");
+        assert_eq!(result.stub_type, Some(StubType::Unknown));
+        assert_eq!(result.archive_format, Some(ArchiveFormat::Zip));
+        assert!(result.data_offset.unwrap() >= 500);
+    }
+
+    #[test]
+    fn test_detect_sfx_unknown_stub_without_payload_stays_not_sfx() {
+        // Regression guard: unrecognized header + no archive signature
+        // must still be not_sfx (don't false-positive on random binaries).
+        let mut temp = NamedTempFile::new().unwrap();
+        let data = vec![0xAB, 0xCD, 0xEF, 0x99, 0x11, 0x22, 0x33, 0x44];
+        temp.write_all(&data).unwrap();
+        temp.flush().unwrap();
+
+        let result = detect_sfx(temp.path()).unwrap();
+        assert!(!result.is_sfx, "unknown header without archive signature must not be SFX");
+    }
+
+    #[test]
+    fn test_detect_sfx_iterates_candidates() {
+        // Per AD 0015: detection iterates all candidate signatures
+        // and returns the first one that validates (earliest offset).
+        let mut temp = NamedTempFile::new().unwrap();
         let mut data = b"#!/bin/sh\n".to_vec();
         data.extend(vec![0u8; 100]);
         data.extend_from_slice(b"PK\x03\x04"); // ZIP at ~111
@@ -460,6 +502,7 @@ mod tests {
 
         let result = detect_sfx(temp.path()).unwrap();
         assert!(result.is_sfx);
-        assert_eq!(result.archive_format, Some(ArchiveFormat::Zip)); // First signature
+        // ZIP is the earliest candidate that passes validation
+        assert_eq!(result.archive_format, Some(ArchiveFormat::Zip));
     }
 }

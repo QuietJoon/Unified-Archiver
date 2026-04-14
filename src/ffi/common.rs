@@ -2,9 +2,12 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use crate::error::{ArchiveError, Result};
+use crate::format::ArchiveFormat;
+use crate::options::ProgressCallback;
 use crate::security::verify_crc32_value;
 
 /// RAII guard for temporary directories
@@ -91,6 +94,40 @@ pub(crate) fn ymd_hms_to_system_time(
     Some(UNIX_EPOCH + Duration::from_secs(total_seconds))
 }
 
+/// Convert SystemTime to zip::DateTime for ZIP archive entries.
+///
+/// Returns None if the time cannot be represented in ZIP's DOS date format
+/// (valid range: 1980-01-01 through 2107-12-31).
+pub(crate) fn system_time_to_zip_datetime(time: std::time::SystemTime) -> Option<zip::DateTime> {
+    use std::time::UNIX_EPOCH;
+
+    let duration = time.duration_since(UNIX_EPOCH).ok()?;
+    let secs = duration.as_secs();
+
+    // Break epoch seconds into calendar components
+    let days = secs / 86400;
+    let day_secs = secs % 86400;
+    let hour = (day_secs / 3600) as u8;
+    let minute = ((day_secs % 3600) / 60) as u8;
+    let second = (day_secs % 60) as u8;
+
+    // Convert days since epoch to year/month/day
+    // Algorithm: civil_from_days (Howard Hinnant)
+    let z = days as i64 + 719468; // shift epoch from 1970-01-01 to 0000-03-01
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097) as u64; // day of era [0, 146096]
+    let yoe =
+        (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era [0, 399]
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u8;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u8;
+    let year = if month <= 2 { y + 1 } else { y } as u16;
+
+    zip::DateTime::from_date_and_time(year, month, day, hour, minute, second).ok()
+}
+
 /// Compute CRC32 by streaming through a reader (no full buffering)
 pub(crate) fn compute_crc32_reader<R: Read>(reader: &mut R, error_path: &Path) -> Result<u32> {
     let mut hasher = crc32fast::Hasher::new();
@@ -116,6 +153,28 @@ pub(crate) fn ensure_trailing_slash(path: &str) -> String {
     } else {
         format!("{}/", path)
     }
+}
+
+/// Notify a creation progress callback after writing `additional` bytes.
+///
+/// Shared by ZipWriter and LibarchiveArchive creation backends.
+/// Returns an error when the callback signals cancellation via `ControlFlow::Break`.
+pub(crate) fn notify_creation_progress(
+    progress: &mut Option<Box<dyn ProgressCallback>>,
+    bytes_written: &mut u64,
+    additional: u64,
+    format: Option<ArchiveFormat>,
+) -> Result<()> {
+    *bytes_written = bytes_written.saturating_add(additional);
+    if let Some(cb) = progress.as_mut() {
+        if let ControlFlow::Break(()) = cb.on_progress(*bytes_written, None) {
+            return Err(ArchiveError::format(
+                format,
+                "Creation cancelled by user",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Copy data with optional CRC32 verification

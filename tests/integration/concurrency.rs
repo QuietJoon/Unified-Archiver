@@ -249,6 +249,76 @@ fn test_no_data_races_on_repeated_access() {
 }
 
 #[test]
+fn test_concurrent_rar_open_and_list() {
+    // OI-026-004: UnRAR has process-wide global state. Without serialization,
+    // concurrent open/list across different RAR archives corrupts results.
+    // After Phase A.2 (process-wide UNRAR_LOCK), zero CRC mismatches are expected.
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let rar_paths: Vec<_> = ["test.rar", "test_rar5.rar"]
+        .iter()
+        .map(|n| fixtures.join(n))
+        .filter(|p| p.exists())
+        .collect();
+
+    if rar_paths.is_empty() {
+        eprintln!("Skipping test: no RAR fixtures available");
+        return;
+    }
+
+    // Capture expected entry counts sequentially first.
+    let expected: Vec<usize> = rar_paths
+        .iter()
+        .map(|p| {
+            let archive =
+                unified_archive::Archive::open(p).expect("Sequential RAR open should succeed");
+            archive
+                .list_files()
+                .expect("Sequential RAR list should succeed")
+                .len()
+        })
+        .collect();
+
+    // Run 20 iterations of 8 parallel threads each, alternating between fixtures.
+    for iter in 0..20 {
+        let mismatches = Arc::new(AtomicUsize::new(0));
+        let handles: Vec<_> = (0..8)
+            .map(|t| {
+                let idx = t % rar_paths.len();
+                let path = rar_paths[idx].clone();
+                let want = expected[idx];
+                let mismatches = Arc::clone(&mismatches);
+                thread::spawn(move || match unified_archive::Archive::open(&path) {
+                    Ok(archive) => match archive.list_files() {
+                        Ok(entries) => {
+                            if entries.len() != want {
+                                mismatches.fetch_add(1, Ordering::SeqCst);
+                            }
+                        }
+                        Err(_) => {
+                            mismatches.fetch_add(1, Ordering::SeqCst);
+                        }
+                    },
+                    Err(_) => {
+                        mismatches.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        assert_eq!(
+            mismatches.load(Ordering::SeqCst),
+            0,
+            "Iteration {}: concurrent RAR access produced mismatched listings (UNRAR_LOCK regression?)",
+            iter
+        );
+    }
+}
+
+#[test]
 fn test_concurrent_performance_no_excessive_blocking() {
     // Test that concurrent operations don't block excessively
     if !zip_available() {

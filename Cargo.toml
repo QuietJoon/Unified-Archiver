@@ -3,10 +3,10 @@ name = "unified-archive"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-authors = ["7zip-RBinding Contributors"]
-license = "Apache-2.0 OR MIT"
+authors = ["unified-archive Contributors"]
+license = "MIT"
 description = "Unified, format-agnostic Rust bindings for 7zip archive operations across ZIP, 7z, RAR, TAR, and more"
-repository = "https://github.com/yourusername/7zip-rbinding"
+repository = "https://github.com/QuietJoon/unified-archive"
 keywords = ["archive", "7zip", "compression", "extraction", "unified"]
 categories = ["compression", "filesystem"]
 

@@ -76,13 +76,37 @@ impl SevenZArchive {
     /// List all files in 7z archive with CRC32 from metadata
     ///
     /// CRC32 is read from 7z headers when available.
+    /// Encryption status is determined from block coders (not password presence).
     pub fn list_files(&self) -> Result<Vec<ArchiveEntry>> {
         let reader = self.open_reader()?;
         let archive = reader.archive();
+
+        // Pre-compute which blocks use AES encryption
+        let aes_id = sevenz_rust2::EncoderMethod::ID_AES256_SHA256;
+        let encrypted_blocks: Vec<bool> = archive
+            .blocks
+            .iter()
+            .map(|block| {
+                block
+                    .coders
+                    .iter()
+                    .any(|coder| coder.encoder_method_id() == aes_id)
+            })
+            .collect();
+
         let mut entries = Vec::new();
 
         for (index, entry) in archive.files.iter().enumerate() {
-            let mut parsed_entry = self.parse_entry(entry)?;
+            let is_encrypted = archive
+                .stream_map
+                .file_block_index
+                .get(index)
+                .and_then(|opt| opt.as_ref())
+                .map_or(false, |&block_idx| {
+                    encrypted_blocks.get(block_idx).copied().unwrap_or(false)
+                });
+
+            let mut parsed_entry = self.parse_entry(entry, is_encrypted)?;
 
             // CRC32 from 7z metadata (0 is valid — it's the CRC32 of empty content)
             // Note: entry.crc is u64; validate it fits in u32 before casting
@@ -98,13 +122,31 @@ impl SevenZArchive {
     }
 
     /// Parse 7z entry into ArchiveEntry
-    fn parse_entry(&self, entry: &sevenz_rust2::ArchiveEntry) -> Result<ArchiveEntry> {
+    fn parse_entry(
+        &self,
+        entry: &sevenz_rust2::ArchiveEntry,
+        is_encrypted: bool,
+    ) -> Result<ArchiveEntry> {
         // Normalize path separators to forward slashes
         let path = normalize_path(&entry.name);
         let is_dir = entry.is_directory;
 
+        // Detect symlinks via windows_attributes:
+        // - Unix: upper 16 bits contain Unix mode; S_IFLNK = 0xA000
+        // - Windows: FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
+        let is_symlink = if entry.has_windows_attributes {
+            let unix_mode = (entry.windows_attributes >> 16) as u16;
+            let unix_symlink = (unix_mode & 0xF000) == 0xA000;
+            let win_reparse = (entry.windows_attributes & 0x0400) != 0;
+            unix_symlink || win_reparse
+        } else {
+            false
+        };
+
         let entry_type = if is_dir {
             EntryType::Directory
+        } else if is_symlink {
+            EntryType::Symlink
         } else {
             EntryType::File
         };
@@ -135,7 +177,7 @@ impl SevenZArchive {
         entry_parsed.size = size;
         entry_parsed.compressed_size = compressed_size;
         entry_parsed.modified = modified;
-        entry_parsed.is_encrypted = self.password.is_some();
+        entry_parsed.is_encrypted = is_encrypted;
 
         Ok(entry_parsed)
     }
@@ -203,6 +245,16 @@ impl SevenZArchive {
                     extraction_error =
                         Some(ArchiveError::io("create_dir", parent.to_path_buf(), e));
                     return Ok(false);
+                }
+            }
+
+            // Skip symlinks for security (detected via windows_attributes)
+            if entry.has_windows_attributes {
+                let unix_mode = (entry.windows_attributes >> 16) as u16;
+                let is_link = (unix_mode & 0xF000) == 0xA000
+                    || (entry.windows_attributes & 0x0400) != 0;
+                if is_link {
+                    return Ok(true); // skip, continue to next entry
                 }
             }
 
@@ -432,9 +484,8 @@ impl SevenZArchive {
 
     /// Test archive integrity by verifying CRC32 for all files
     ///
-    /// Extracts each file to memory and verifies integrity.
-    /// 7z format includes CRC32 validation during extraction.
-    /// Returns a list of file paths that failed verification.
+    /// Streams each entry through an 8KB buffer; sevenz-rust2 verifies
+    /// CRC32 during decompression. Returns a list of paths that failed.
     pub fn test_integrity(&self) -> Result<Vec<String>> {
         let mut reader = self.open_reader()?;
 

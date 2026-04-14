@@ -8,7 +8,7 @@ use crate::entry::ArchiveEntry;
 use crate::error::ops;
 use crate::error::{ArchiveError, Result};
 use crate::options::ExtractionOptions;
-use crate::security::{check_extraction_safe, validate_entry_path};
+use crate::security::{check_archive_ratio, check_extraction_safe, validate_entry_path};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -111,10 +111,13 @@ impl Archive {
     ///
     /// Extracts all files to the destination directory, preserving directory structure.
     ///
-    /// **Symlinks and Hard Links (FR-022)**: Symbolic links and hard links are **skipped**
-    /// during extraction with warnings. Cross-platform symlink handling is not reliably
-    /// supported across all archive formats and operating systems. Use [`Archive::check_symlinks()`]
-    /// to detect symlinks before extraction.
+    /// **Symlinks and Hard Links (FR-022)**: On libarchive-backed formats (TAR, TAR.GZ,
+    /// TAR.BZ2, TAR.XZ), symbolic links and hard links are **skipped** during extraction
+    /// with warnings. Native backends (ZIP via Piz/ZipReader, 7z via SevenZ, RAR via
+    /// UnRAR) do not yet classify link entries — they report all entries as `File` or
+    /// `Directory`, so links may be extracted as regular files. Use
+    /// [`Archive::check_symlinks()`] to scan for links (reliable on libarchive-backed
+    /// formats only).
     ///
     /// # Multi-Part Archives
     ///
@@ -174,6 +177,7 @@ impl Archive {
         // Use metadata-only listing to avoid decompressing data before limit checks
         let entries = archive.list_files_for_limits()?;
         check_extraction_safe(&entries, &options.limits)?;
+        check_archive_ratio(&entries, &archive.path, &options.limits)?;
         check_overwrite_conflicts(
             &entries,
             &options.destination,
@@ -367,6 +371,7 @@ impl Archive {
         let to_extract_entries: Vec<ArchiveEntry> =
             to_extract.iter().map(|entry| (*entry).clone()).collect();
         check_extraction_safe(&to_extract_entries, &options.limits)?;
+        check_archive_ratio(&to_extract_entries, &self.path, &options.limits)?;
         check_overwrite_conflicts(
             &to_extract_entries,
             &options.destination,
@@ -478,6 +483,7 @@ impl Archive {
             to_extract_entries.push(entry.clone());
         }
         check_extraction_safe(&to_extract_entries, &options.limits)?;
+        check_archive_ratio(&to_extract_entries, &self.path, &options.limits)?;
         check_overwrite_conflicts(
             &to_extract_entries,
             &options.destination,
@@ -606,6 +612,7 @@ impl Archive {
         }
 
         check_extraction_safe(&to_extract_entries, &options.limits)?;
+        check_archive_ratio(&to_extract_entries, &self.path, &options.limits)?;
         check_overwrite_conflicts(
             &to_extract_entries,
             &options.destination,
