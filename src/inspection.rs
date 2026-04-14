@@ -444,9 +444,11 @@ impl Archive {
 
     /// Check for symlinks in archive and return warnings (FR-022)
     ///
-    /// Scans entries for symlink and hard link types. Currently reliable only on
-    /// libarchive-backed formats (TAR variants); native backends (ZIP, 7z, RAR) do
-    /// not yet classify link entries and may return false negatives.
+    /// Scans entries for symlink and hard link types. All backends now classify
+    /// link entries: libarchive reads link types from archive metadata, Piz checks
+    /// `unix_mode` for `S_IFLNK`, ZipReader uses `is_symlink()`, SevenZ inspects
+    /// `windows_attributes` (Unix mode + reparse point), and UnRAR uses `redir_type`
+    /// for symlinks, junctions, and hard links.
     ///
     /// # Examples
     ///

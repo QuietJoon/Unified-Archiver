@@ -111,13 +111,11 @@ impl Archive {
     ///
     /// Extracts all files to the destination directory, preserving directory structure.
     ///
-    /// **Symlinks and Hard Links (FR-022)**: On libarchive-backed formats (TAR, TAR.GZ,
-    /// TAR.BZ2, TAR.XZ), symbolic links and hard links are **skipped** during extraction
-    /// with warnings. Native backends (ZIP via Piz/ZipReader, 7z via SevenZ, RAR via
-    /// UnRAR) do not yet classify link entries — they report all entries as `File` or
-    /// `Directory`, so links may be extracted as regular files. Use
-    /// [`Archive::check_symlinks()`] to scan for links (reliable on libarchive-backed
-    /// formats only).
+    /// **Symlinks and Hard Links (FR-022)**: Symbolic links and hard links are **skipped**
+    /// during extraction with warnings on all backends. Libarchive reads link types from
+    /// archive metadata; Piz checks `unix_mode` for `S_IFLNK`; ZipReader uses
+    /// `is_symlink()`; SevenZ inspects `windows_attributes`; UnRAR uses `redir_type`.
+    /// Use [`Archive::check_symlinks()`] to scan for links before extraction.
     ///
     /// # Multi-Part Archives
     ///

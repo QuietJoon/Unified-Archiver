@@ -142,12 +142,14 @@ impl Archive {
     /// `options` are honored at `commit_changes()` time. When `None` is
     /// desired (i.e. defaults), call `modify(path)` instead.
     ///
-    /// Honored fields as of Phase B.2:
+    /// Honored fields:
     /// - `create_backup` + `backup_suffix`: original archive is copied to
     ///   `<path>.<backup_suffix>` immediately before the temp file is renamed
     ///   into place.
-    /// - `preserve_metadata`: accepted; full metadata fidelity (timestamps,
-    ///   permissions, archive-level settings) lands with Phase C.1/C.2.
+    /// - `preserve_metadata`: when true, `commit_changes()` preserves timestamps
+    ///   and Unix permissions via metadata-aware add helpers on both ZipWriter
+    ///   and libarchive backends.
+    /// - `compression`: overrides compression settings during archive recreation.
     pub fn modify_with_options(
         path: impl AsRef<Path>,
         options: ModificationOptions,
