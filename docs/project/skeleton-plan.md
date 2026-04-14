@@ -53,9 +53,9 @@ Additional local commands:
   - ZIP modification reliability
   - Creation progress callbacks (OI-025-003) — RESOLVED: per-entry progress invoked with `total=None` (AD 0021)
   - Unknown-stub SFX scanning (OI-027-001) — RESOLVED: unknown stubs proceed to signature scanning
-  - `ModificationOptions` (AD 0020) — `create_backup`/`backup_suffix` honored via `modify_with_options()`; `preserve_metadata` no-op pending OI-025-002
+  - `ModificationOptions` (AD 0020) — all fields honored: `create_backup`/`backup_suffix`, `preserve_metadata` (timestamps + permissions), `compression` override
 - **Why DEFERRED (not STUB):** These items are explicitly out of MVP scope. The library is functional without them. Distinction between exposed and internal deferrals:
-  - **Exposed placeholder APIs** (callers can see/invoke but behavior is absent): `open_at_offset` (non-functional on positive SFX matches, no fallback), `ModificationOptions.preserve_metadata` (accepted but no-op).
+  - **Exposed placeholder APIs** (callers can see/invoke but behavior is absent): `open_at_offset` (non-functional on positive SFX matches, no fallback).
   - **Hidden internal deferrals** (no user-visible surface): true streaming for non-libarchive backends, SecStr password migration, split archive creation.
 
 ## Risks and Mitigations
@@ -63,7 +63,7 @@ Additional local commands:
 | Risk | Mitigation |
 |---|---|
 | UnRAR wchar_t mismatch on Linux | Primary target is macOS; Linux testing deferred (IG-020-003) |
-| ZIP modification unreliable via libarchive | Some test scenarios ignore-gated; planned fix: use zip-crate-native pipeline. Additional caveats: `commit_changes()` loses metadata/settings (OI-025-001, OI-025-002); `ModificationOptions` backup settings honored via `modify_with_options()` (AD 0020), `preserve_metadata` no-op pending OI-025-002 |
+| ZIP modification unreliable via libarchive | Some test scenarios ignore-gated; planned fix: use zip-crate-native pipeline. `ModificationOptions` fully honored: backup, metadata preservation (OI-025-001/002 resolved), and compression override all functional via `modify_with_options()` (AD 0020) |
 | extract-to-memory uses temp files for UnRAR | Libarchive reads directly into buffer; UnRAR uses temp files via FFI callbacks |
 | Native backends buffer full entries in memory | Piz, ZipReader, and SevenZ buffer full entries in memory (not temp files) then wrap in Cursor; distinct from UnRAR's temp-file approach |
 | Non-libarchive streaming wraps buffer in Cursor | Libarchive backends truly stream; others (including ZipReader, used as buffered backend for encrypted ZIP) buffer then wrap in Cursor |

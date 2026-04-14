@@ -102,7 +102,7 @@ A Rust developer needs to identify whether a file is a self-extracting archive (
 
 ### Edge Cases
 
-- **[PARTIAL]** Symbolic links and hard links are skipped with warnings during extraction and creation (FR-022). **Note (OI-010-001)**: Link classification on native backends is still an open issue; the current implementation may not distinguish all link types correctly on every backend.
+- **[RESOLVED]** Symbolic links and hard links are skipped with warnings during extraction and creation (FR-022). All backends now classify link entries: Piz (unix_mode), ZipReader (is_symlink), SevenZ (windows_attributes), UnRAR (redir_type), and libarchive (native metadata). OI-010-001 resolved.
 - **[RESOLVED]** When archive requires unavailable codec, library returns ArchiveError::CodecUnavailable with codec name, format, and installation instructions (FR-024)
 - **[RESOLVED]** Extraction fails with clear error when files would overwrite existing files, unless ExtractionOptions.overwrite is true (FR-023)
 - **[PARTIAL]** SFX detection performs a bounded heuristic scan of the first 1MB with confidence-based results for known stub types (PE, ELF, Mach-O, ScriptInterpreter); archives with stubs >1MB return `SfxDetectionResult::not_sfx()` as a performance trade-off. Unknown/custom stubs now proceed to signature scanning (OI-027-001 resolved). All current SFX tests use synthetic stubs; official-tool SFX archives are planned. (FR-025)
@@ -152,7 +152,7 @@ A Rust developer needs to identify whether a file is a self-extracting archive (
 
 #### Metadata & Compatibility Requirements
 
-- **FR-015**: Library MUST preserve file metadata (timestamps, permissions, attributes) during extraction and creation where supported by the archive format. **Partial**: Permission restoration depends on platform and backend; OI-022-002 tracks remaining gaps.
+- **FR-015**: Library MUST preserve file metadata (timestamps, permissions, attributes) during extraction and creation where supported by the archive format. OI-022-002 resolved: `commit_changes()` preserves timestamps and Unix permissions via metadata-aware add helpers.
 - **FR-016**: Library targets matching the core API surface of 7zip-JBinding (open, list, extract, create, modify, close) to facilitate porting existing Java archive code to Rust; see SC-004 for concrete equivalences
 - **FR-017**: Library MUST provide progress callbacks for extraction operations with a uniform callback shape (`ProgressCallback`) across all formats; actual invocation frequency and granularity are backend-dependent. **Note**: Creation progress callbacks are now consumed per-entry by both ZIP and libarchive backends with `total=None` (AD 0021 / OI-025-003 resolved).
 - **FR-022**: Library MUST skip symbolic links and hard links during archive operations with a warning, as cross-platform symlink handling is not reliably supported across all archive formats and operating systems

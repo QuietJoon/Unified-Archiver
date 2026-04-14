@@ -42,15 +42,15 @@ These gaps are explicitly out of MVP scope. They are architecturally present but
 | DEF-002 | `CompressionOptions::split_size` not honored | — | SCN-CRE-* split creation | Open |
 | DEF-003 | Passwords stored in `Option<String>`; no SecStr | — | All password scenarios | Open |
 | DEF-004 | Non-libarchive backends buffer then wrap in `Cursor` | — | SCN-EXT-* streaming | Open |
-| DEF-005 | ZIP `commit_changes()` loses metadata/settings | OI-025-001, OI-025-002 | SCN-MOD-* | Open (Phase C of DCR-001 in-flight) |
+| DEF-005 | ZIP `commit_changes()` edge cases | — | SCN-MOD-* | Open (some ZIP-specific scenarios remain; OI-025-001/OI-025-002 resolved 2026-04-14) |
 | DEF-006 | `CompressionOptions::progress` not consumed | OI-025-003 | SCN-CRE-04 | **Closed 2026-04-13** (DCR-001 Phase B.1, AD 0021) |
 | DEF-007 | `StubType::Unknown` scanning deferred | OI-027-001 | SCN-SFX-08 | **Closed 2026-04-13** (DCR-001 Phase A.1) |
-| DEF-008 | `ModificationOptions` fields not consumed | OI-025-003 | SCN-MOD-* | **Partially Closed 2026-04-13** (DCR-001 Phase B.2, AD 0020): `create_backup`/`backup_suffix` honored; `preserve_metadata` no-op until Phase C.2 |
+| DEF-008 | `ModificationOptions` fields not consumed | OI-025-003 | SCN-MOD-* | **Closed 2026-04-14** (DCR-001 Phases B.2 + C): all fields honored including `preserve_metadata` and `compression` |
 
 Additional acknowledged implementation concerns:
 
 - ~~**Concurrent RAR test flakiness** (OI-026-004): UnRAR global state can cause concurrent test failures.~~ **Resolved 2026-04-13** (DCR-001 Phase A.2, AD 0019): `UNRAR_LOCK` process-wide mutex serializes all UnRAR FFI calls.
-- **Standalone compression formats** (per AD 0018): `ArchiveFormat::Gzip`, `Bzip2`, `Xz` enum variants exist but are only functional as TAR compound formats (`.tar.gz`, `.tar.bz2`, `.tar.xz`). Standalone stream decompression is not supported.
+- **Standalone compression formats** (per AD 0018): `ArchiveFormat::Gzip`, `Bzip2`, `Xz` enum variants exist. Standalone compressed files (.gz/.bz2/.xz) are now supported via libarchive `format_raw` (OI-026-003 resolved); TAR compound formats continue to work natively.
 
 ## Known documentation gaps
 
@@ -81,8 +81,8 @@ These items are tracked independently of the implementation gaps and represent d
 | Complete handoff checklist item "phase-state synchronized to this baseline" once contract drift is reconciled | Documentation maintainer | **Closed 2026-04-13** |
 | Resolve OI-027-001 (unknown-stub SFX scanning) | Implementation slice owner | **Closed 2026-04-13** (DCR-001 Phase A.1) |
 | Resolve OI-026-004 (RAR concurrent-call stabilization) | Implementation slice owner | **Closed 2026-04-13** (DCR-001 Phase A.2, AD 0019) |
-| Resolve OI-025-003 (`CompressionOptions.progress` + `ModificationOptions` dead API) | Implementation slice owner | **Closed 2026-04-13** (DCR-001 Phases B.1 + B.2, ADs 0020 + 0021). `preserve_metadata` no-op flag deferred to Phase C.2. |
-| Revisit DEF-005 / OI-025-001 / OI-025-002 as the highest-value in-flight gap (user-visible metadata loss on modification) | Future slice owner | In-flight (Phase C of DCR-001 remediation plan; expected to file IIR-002 on closure) |
+| Resolve OI-025-003 (`CompressionOptions.progress` + `ModificationOptions` dead API) | Implementation slice owner | **Closed 2026-04-13** (DCR-001 Phases B.1 + B.2, ADs 0020 + 0021) |
+| Resolve OI-025-001 / OI-025-002 (modification metadata/settings preservation) | Implementation slice owner | **Closed 2026-04-14** (DCR-001 Phase C): `commit_changes()` preserves timestamps, permissions, and honors compression overrides |
 | Decide whether to promote any DEF entry into a subsequent MVP scope (requires new design change record if so) | Project lead | Open |
 
 ## Notes

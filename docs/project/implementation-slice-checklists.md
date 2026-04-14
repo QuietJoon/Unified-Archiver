@@ -17,12 +17,12 @@
 - [x] `detect_multipart()` multi-part archive detection
 - [x] `is_solid()` solid compression detection (RAR and 7z)
 - [x] `has_recovery_record()` and `recovery_percentage()` (RAR)
-- [x] Symlink/hardlink warnings during listing (partial — native backends still do not classify link entries; see OI-010-001)
+- [x] Symlink/hardlink detection and warnings during listing (all backends classify links — OI-010-001 resolved)
 - [x] Password-protected metadata access without password (RAR)
 - [x] Pattern-based filtering on entry lists
 - [x] Tests: format_compatibility_test, password_handling_test, crc32_verification_test, integrity_comprehensive_test (multipart detection tested inline in `src/inspection.rs`)
 
-**Status:** Complete with known gap (link classification only works on libarchive backend; native backends do not classify symlink/hardlink entries — OI-010-001)
+**Status:** Complete (link classification works on all backends — OI-010-001 resolved)
 
 ---
 
