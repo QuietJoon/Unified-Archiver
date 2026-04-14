@@ -76,12 +76,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Thread Safety**
   - Parallel extraction with per-thread archive handles
   - Unique timestamp-based temporary directories
-  - No global state or race conditions
+  - No global state or race conditions in callers; UnRAR's internal global state is mediated by an internal `UNRAR_LOCK` mutex so concurrent callers on different RAR archives are safe. Per-archive extraction still runs sequentially due to the SDK's iterator shape.
 
 #### Error Handling
 - **Comprehensive Error Types**
-  - `ArchiveError::NotFound` - Missing files
-  - `ArchiveError::UnsupportedFormat` - Unknown formats
+  - `ArchiveError::Io` - Missing files
+  - `ArchiveError::Unsupported` - Unknown formats
   - `ArchiveError::Password` - Password issues
   - `ArchiveError::Corruption` - CRC32 failures
   - `ArchiveError::Io` - I/O errors with context
@@ -106,7 +106,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Known limitations documented
 
 - **Testing**
-  - 82 tests covering all features
+  - Comprehensive test suite covering all features (400+ tests including unit, integration, contract, and doc tests)
   - Performance benchmarks
   - Property-based tests with proptest
   - Multi-format test fixtures
@@ -143,8 +143,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consistent `Result<T>` return types across all methods
 
 #### Backend Architecture
-- UnRAR for RAR/RAR5 (mandatory for these formats)
-- libarchive for all other formats
+- Piz (ZIP), zip crate (encrypted ZIP), SevenZ (7z), libarchive (TAR family — `.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz` — and ISO; standalone `.gz`/`.bz2`/`.xz` are out of scope, see AD 0018), UnRAR (RAR/RAR5)
 - Automatic backend selection based on format detection
 - Thread-local archive handles for parallel operations
 
@@ -152,7 +151,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **CRC32**: ~300MB/s using SIMD-accelerated hashing
 - **Parallel Extraction**: Linear scaling up to available CPU cores
-- **Memory Usage**: <100MB for multi-GB files with streaming
+- **Memory Usage**: <100MB for multi-GB files with streaming (Note: This bound currently applies to libarchive-backed formats (TAR family). ZIP, 7z, and RAR backends buffer full entries in memory during streaming extraction.)
 - **Format Detection**: O(1) single header read
 
 ### Technical Details
@@ -176,7 +175,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- Password strings auto-zeroed after use (via `secstr`)
+- Passwords are passed as `Option<String>`. Secure zeroing (via secstr) is tracked for future implementation.
 - No password leakage in error messages or logs
 - Secure temporary file creation with unique names
 - Permission preservation for extracted files
@@ -187,12 +186,12 @@ See [Limitations.md](./Limitations.md) for complete details.
 
 **Key Limitations in v0.1.0:**
 - Multi-part archive creation deferred to v0.2.0 (reading supported)
-- Progress callbacks for creation operations deferred to v0.2.0 (extraction callbacks working)
+- Progress callbacks during creation report per-entry events with `total = None` (file count not pre-computed)
 - RAR format is read-only (no creation support due to proprietary format)
 - UnRAR iterator exhaustion requires reopening archive
 - DOS timestamp conversion approximation for old files
 - Temporary file usage for `extract_to_memory()`
-- SFX test coverage at ~40-50%, targeting >90% for v0.2.0
+- SFX detection has substantial unit and integration test coverage including synthetic PE/ELF/Mach-O/script stubs, signature scanning, and false-positive tests
 
 ### Migration Notes
 
@@ -209,19 +208,15 @@ Future breaking changes will follow semantic versioning:
 
 ### Planned for v0.2.0
 - Multi-part archive creation support (T058)
-- Progress callbacks for creation operations (T059)
-- Enhanced SFX test coverage (>90% target, currently ~40-50%)
 - Additional inline documentation examples (T112)
 - Contract tests for API stability (T113-T115)
 - Performance benchmarks for all operations (T116-T120, T127)
 - Improved streaming extraction (true RAR streaming via callbacks)
-- Entry caching to avoid UnRAR iterator exhaustion
 - Windows platform comprehensive testing and fixes
 
 ### Under Consideration
-- ISO format support
+- ISO format creation (currently read-only)
 - Additional archive formats (ARJ, LZH, CAB)
-- Compression level selection
 - Archive comment support
 - Extended attributes preservation
 - Sparse file support

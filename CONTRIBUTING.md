@@ -255,11 +255,7 @@ For significant changes:
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under:
-- Apache License 2.0 OR
-- MIT License
-
-(Dual license, contributor's choice)
+By contributing, you agree that your contributions will be licensed under the MIT License.
 
 ## Questions?
 
