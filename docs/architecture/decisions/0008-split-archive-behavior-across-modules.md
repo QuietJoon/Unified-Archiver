@@ -1,4 +1,6 @@
-# ADR: Split Archive Behavior Across Modules
+# AD: Split Archive Behavior Across Modules
+
+Status: Accepted
 
 ## Context and Problem Statement
 The public API centers on one `Archive` type, but inspection, extraction, creation, and modification have materially different control flow. Placing all logic in a single file would make it unmaintainable, while splitting into separate public types would fragment the API.

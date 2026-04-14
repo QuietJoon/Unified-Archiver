@@ -1,4 +1,6 @@
-# ADR: Entry Metadata Caching
+# AD: Entry Metadata Caching
+
+Status: Accepted
 
 ## Context and Problem Statement
 Repeated listing calls were expensive and some backends required heavy work for CRC metadata. UnRAR iterators are single-pass, making re-listing particularly costly. Preflight safety checks also need entry metadata but do not require full CRC precomputation.

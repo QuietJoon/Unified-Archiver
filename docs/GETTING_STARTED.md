@@ -17,22 +17,28 @@ This guide will walk you through installing and using unified-archive for the fi
 
 **macOS:**
 ```bash
-brew install libarchive
+brew install libarchive pkg-config
 ```
 
 **Linux (Ubuntu/Debian):**
 ```bash
 sudo apt-get update
-sudo apt-get install libarchive-dev
+sudo apt-get install libarchive-dev pkg-config
 ```
 
 **Linux (Fedora/RHEL):**
 ```bash
-sudo dnf install libarchive-devel
+sudo dnf install libarchive-devel pkgconf-pkg-config
 ```
 
+> libarchive is discovered at build time via `pkg-config`. The library is **not** bundled with
+> unified-archive on macOS or Linux -- you must install it through your system package manager.
+>
+> **Additional build prerequisites:** `pkg-config`, `make`, and a C++ compiler (e.g. `g++` or
+> `clang++`) are required for building the UnRAR SDK that ships with the `unrar` crate.
+
 **Windows:**
-libarchive is bundled automatically (no action needed)
+Not yet tested on Windows; macOS is the primary platform, Linux secondary.
 
 ### Add to Your Project
 
@@ -49,9 +55,12 @@ Create a simple test program:
 
 ```rust
 // src/main.rs
-use unified_archive::Archive;
+use unified_archive::ArchiveFormat;
 
 fn main() {
+    // ArchiveFormat::detect() performs magic-byte detection on a file.
+    // Here we just confirm the crate links and the enum is accessible.
+    println!("Example format: {:?}", ArchiveFormat::Zip);
     println!("unified-archive installed successfully!");
 }
 ```
@@ -62,6 +71,16 @@ cargo run
 ```
 
 If you see the success message, you're ready to go!
+
+> **Note:** This only confirms that the crate links. It does not exercise backend integration
+> (libarchive, UnRAR SDK, etc.). To verify that backends are wired up correctly, try opening a
+> real archive:
+>
+> ```rust
+> // Excerpt — wrap in fn main() -> Result<(), Box<dyn std::error::Error>> { … }
+> // to compile as a standalone program.
+> let _archive = Archive::open("some_test.zip").expect("backend integration works");
+> ```
 
 ---
 
@@ -136,6 +155,9 @@ fn main() -> Result<(), ArchiveError> {
 
 Create a test archive (or use an existing one):
 
+> **Prerequisite:** This example requires the `zip` command-line tool
+> (`brew install zip` on macOS, `apt-get install zip` on Debian/Ubuntu).
+
 ```bash
 # Create a simple ZIP for testing
 echo "Hello, World!" > test.txt
@@ -145,7 +167,7 @@ zip test.zip test.txt
 Run your program:
 
 ```bash
-cargo run test.zip
+cargo run -- test.zip
 ```
 
 You should see output like:
@@ -277,7 +299,9 @@ fn extract_large_file(archive_path: &str, file_path: &str, output: &str)
 {
     let archive = Archive::open(archive_path)?;
 
-    // Use streaming to avoid loading entire file into memory
+    // Use streaming to avoid loading entire file into memory.
+    // Note: bounded-memory streaming applies to libarchive-backed formats only;
+    // other backends (Piz, ZipReader, SevenZ, UnRAR) buffer full entries.
     let mut stream = archive.extract_to_stream(file_path)?;
     let mut output_file = File::create(output)?;
 
@@ -311,6 +335,8 @@ use unified_archive::Archive;
 fn verify_archive(archive_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let archive = Archive::open(archive_path)?;
 
+    // Note: Validation mode differs by backend and format. Not all backends
+    // perform CRC32 verification; some use hash-based or decompression-based checks.
     println!("Validating archive integrity...");
     let report = archive.validate_integrity()?;
 
@@ -333,7 +359,8 @@ fn verify_archive(archive_path: &str) -> Result<(), Box<dyn std::error::Error>> 
 ### Use Case 7: Password-Protected Archives
 
 ```rust
-use unified_archive::{Archive, ArchiveError};
+use unified_archive::{Archive, ArchiveError, ExtractionOptions};
+use std::path::PathBuf;
 
 fn extract_encrypted(archive_path: &str, password: &str)
     -> Result<(), Box<dyn std::error::Error>>
@@ -347,15 +374,19 @@ fn extract_encrypted(archive_path: &str, password: &str)
             let entries = archive.list_files()?;
             println!("Files: {}", entries.len());
 
-            // Extract
-            archive.extract_all(Default::default())?;
+            // Extract to an explicit destination
+            let options = ExtractionOptions {
+                destination: PathBuf::from("./output"),
+                ..Default::default()
+            };
+            archive.extract_all(options)?;
             println!("Extraction complete!");
 
             Ok(())
         },
-        Err(ArchiveError::Password { details }) => {
-            eprintln!("Password error: {}", details);
-            Err(Box::new(ArchiveError::Password { details }))
+        Err(ArchiveError::Password { message }) => {
+            eprintln!("Password error: {}", message);
+            Err(Box::new(ArchiveError::Password { message }))
         },
         Err(e) => Err(Box::new(e)),
     }
@@ -374,12 +405,16 @@ struct MyProgress {
 }
 
 impl ProgressCallback for MyProgress {
-    fn on_progress(&mut self, current: u64, total: u64) -> ControlFlow<()> {
-        let percent = (current * 100) / total;
+    fn on_progress(&mut self, processed: u64, total: Option<u64>) -> ControlFlow<()> {
+        if let Some(total) = total {
+            let percent = (processed * 100) / total;
 
-        if percent != self.last_percent {
-            println!("Progress: {}% ({} / {} bytes)", percent, current, total);
-            self.last_percent = percent;
+            if percent != self.last_percent {
+                println!("Progress: {}% ({} / {} bytes)", percent, processed, total);
+                self.last_percent = percent;
+            }
+        } else {
+            println!("Processed: {} bytes", processed);
         }
 
         // Return Continue to keep going, or Break to cancel
@@ -392,12 +427,9 @@ fn extract_with_progress(archive_path: &str)
 {
     let archive = Archive::open(archive_path)?;
 
-    let mut progress = Box::new(MyProgress { last_percent: 0 })
-        as Box<dyn ProgressCallback>;
-
     let options = ExtractionOptions {
         destination: PathBuf::from("./output"),
-        progress_callback: Some(&mut progress),
+        progress: Some(Box::new(MyProgress { last_percent: 0 }) as Box<dyn ProgressCallback>),
         ..Default::default()
     };
 
@@ -413,10 +445,10 @@ fn extract_with_progress(archive_path: &str)
 
 ### Learn More
 
-- **[API Reference](./API_REFERENCE.md)** - Complete API documentation
+- **[API Reference](./API_REFERENCE.md)** - API reference covering inspection, extraction, creation, modification, SFX, and streaming
 - **[README](../README.md)** - Feature overview and examples
 - **[Examples](../examples/)** - Complete working examples
-- **[Limitations](../Limitations.md)** - Known limitations and workarounds
+- **[Project Status](./project/status.md)** - Known limitations, progress, and roadmap
 
 ### Run the Examples
 
@@ -424,18 +456,21 @@ The repository includes several complete examples:
 
 ```bash
 # Inspect an archive
-cargo run --example inspect_archive tests/fixtures/test.zip
+cargo run --example inspect_archive -- tests/fixtures/test.zip
 
 # Extract an archive
-cargo run --example extract_archive tests/fixtures/test.rar ./output
+cargo run --example extract_archive -- tests/fixtures/test.rar ./output
 
 # Streaming extraction
-cargo run --example streaming_extract tests/fixtures/test.7z large_file.bin
+cargo run --example streaming_extract -- tests/fixtures/test.7z large_file.bin
 ```
 
 ### Explore Supported Formats
 
 Try your program with different archive formats:
+
+> **Prerequisite:** The `zip` and `7z` (7-Zip) command-line tools must be installed.
+> On macOS: `brew install zip p7zip`. On Debian/Ubuntu: `apt-get install zip p7zip-full`.
 
 ```bash
 # Create test archives
@@ -444,9 +479,9 @@ tar czf test.tar.gz file.txt
 7z a test.7z file.txt
 
 # List contents
-cargo run test.zip
-cargo run test.tar.gz
-cargo run test.7z
+cargo run -- test.zip
+cargo run -- test.tar.gz
+cargo run -- test.7z
 ```
 
 ### Error Handling
@@ -461,14 +496,14 @@ match Archive::open("file.rar") {
         // Use archive
         println!("Opened successfully!");
     },
-    Err(ArchiveError::NotFound { path }) => {
-        eprintln!("File not found: {}", path);
+    Err(ArchiveError::Io { source, .. }) => {
+        eprintln!("I/O error: {}", source);
     },
-    Err(ArchiveError::UnsupportedFormat { format }) => {
+    Err(ArchiveError::Format { format, .. }) => {
         eprintln!("Unsupported format: {:?}", format);
     },
-    Err(ArchiveError::Password { details }) => {
-        eprintln!("Password required: {}", details);
+    Err(ArchiveError::Password { message }) => {
+        eprintln!("Password required: {}", message);
     },
     Err(e) => {
         eprintln!("Error: {}", e);
@@ -480,7 +515,9 @@ match Archive::open("file.rar") {
 
 1. **Use Streaming for Large Files**
    ```rust
-   // Good for large files
+   // Good for large files (bounded memory for libarchive-backed formats;
+   // other backends such as Piz, ZipReader, SevenZ, and UnRAR still
+   // buffer full entries)
    let stream = archive.extract_to_stream("huge.bin")?;
 
    // Avoid for large files (loads entirely into memory)
@@ -493,22 +530,23 @@ match Archive::open("file.rar") {
    archive.extract_filtered(|e| e.path.ends_with(".jpg"), options)?;
    ```
 
-3. **Cache File Listings**
+3. **Reuse File Listings**
    ```rust
-   // Cache the result if you need it multiple times
+   // list_files() is internally cached, so repeated calls are cheap.
+   // Still, reuse the returned slice if convenient to avoid the call overhead.
    let entries = archive.list_files()?;
 
-   // Use the cached entries
+   // Use the returned entries
    for entry in &entries {
        // ...
    }
    ```
 
-### Join the Community
+### Additional Resources
 
-- Report bugs: [GitHub Issues](https://github.com/yourusername/unified-archive/issues)
-- Ask questions: [GitHub Discussions](https://github.com/yourusername/unified-archive/discussions)
-- Contribute: See [CONTRIBUTING.md](../CONTRIBUTING.md)
+- **[API Reference](./API_REFERENCE.md)** - API reference covering inspection, extraction, creation, modification, SFX, and streaming
+- **[Architecture Overview](./architecture/README.md)** - Design decisions and module map
+- **[Examples](../examples/)** - Complete working examples
 
 ---
 

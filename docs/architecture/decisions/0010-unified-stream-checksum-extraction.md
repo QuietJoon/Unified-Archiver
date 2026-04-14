@@ -1,4 +1,6 @@
-# ADR: Unified Stream Checksum Extraction
+# AD: Unified Stream Checksum Extraction
+
+Status: Accepted
 
 ## Context and Problem Statement
 Consumers need to verify single-file compressed formats (GZIP, BZIP2, XZ) without full decompression or archive-level metadata. Relying on libarchive verification requires reading the entire stream, which defeats the purpose of a fast integrity check.

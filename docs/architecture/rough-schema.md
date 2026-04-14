@@ -8,7 +8,7 @@ In-memory entity structure for unified-archive. This library has no database —
 |---|---|---|
 | backend | `ArchiveBackend` (enum) | UnRAR, Piz, SevenZ, Libarchive, ZipReader variants |
 | entry_cache | `OnceCell<Vec<ArchiveEntry>>` | Lazy cache, populated on first `list_files()` |
-| format | `OnceCell<ArchiveFormat>` | Lazy-detected from magic bytes |
+| format | `ArchiveFormat` | Eagerly detected from magic bytes at open time |
 | path | `PathBuf` | Path to archive file on disk |
 | mode | `ArchiveMode` | Read, Write, or Modify |
 
@@ -17,6 +17,7 @@ In-memory entity structure for unified-archive. This library has no database —
 - **Relationships:** Contains 0..N ArchiveEntry (via entry_cache), has 1 ArchiveFormat
 - **Constraints:** `Send` but not `Sync`; one handle per thread
 - **Retention:** Dropped when handle goes out of scope (RAII)
+- **Derived integrity views:** `calculate_archive_crc()` (wrapping sum), `calculate_manifest_digest()` (sorted-CRC content identity), `calculate_manifest_summary()` (digest + total uncompressed size). All three operate on the cached entry list and are documented in `specs/001-unified-archive/contracts/inspection.md` ("Archive-level integrity").
 
 ## ArchiveEntry
 
@@ -31,15 +32,15 @@ In-memory entity structure for unified-archive. This library has no database —
 | crc32 | `Option<u32>` | None for directories or formats without CRC |
 | is_encrypted | `bool` | Entry-level encryption flag |
 | comment | `Option<String>` | File comment (ZIP, RAR) |
-| entry_type | `EntryType` | File, Directory, Symlink, Other |
+| entry_type | `EntryType` | File, Directory, Symlink, HardLink, Other |
 | permissions | `Option<u32>` | Unix mode bits |
 | attributes | `Option<FileAttributes>` | Platform-specific (Windows flags, Unix xattr) |
-| index | `usize` | (pub(crate)) Position within archive |
+| id | `usize` | (pub) Position within archive |
 
 - **Owned by:** `entry.rs`
 - **Primary identifier:** `path` (unique within an archive)
 - **Relationships:** Belongs to 1 Archive
-- **Constraints:** `compressed_size <= size` when both Some; directories end with `/`
+- **Constraints:** `compressed_size` may be greater or smaller than `size` depending on format/content; directory paths conventionally end with `/` but this is not guaranteed across all backends and formats
 - **Retention:** Lives in entry_cache; dropped with Archive
 
 ## ArchiveFormat
@@ -54,10 +55,17 @@ In-memory entity structure for unified-archive. This library has no database —
 | TarGzip | `\x1f\x8b` | Yes | No | No | No |
 | TarBzip2 | `BZ` | Yes | No | No | No |
 | TarXz | `\xfd7zXZ\x00` | Yes | No | No | No |
-| Gzip | `\x1f\x8b` | Yes | No | No | No |
-| Bzip2 | `BZ` | Yes | No | No | No |
-| Xz | `\xfd7zXZ\x00` | Yes | No | No | No |
 | Iso | `CD001` at offset 32769 | No | No | No | No |
+
+**Enum-only variants (not directly openable via `Archive::open()`):**
+
+| Variant | Magic Bytes | Notes |
+|---|---|---|
+| Gzip | `\x1f\x8b` | Standalone `.gz` not supported (AD 0018); use TarGzip for `.tar.gz` |
+| Bzip2 | `BZ` | Standalone `.bz2` not supported (AD 0018); use TarBzip2 for `.tar.bz2` |
+| Xz | `\xfd7zXZ\x00` | Standalone `.xz` not supported (AD 0018); use TarXz for `.tar.xz` |
+
+These enum variants exist for format detection and capability queries but `Archive::open()` will return an error for standalone compressed streams. Only TAR compound formats (TarGzip, TarBzip2, TarXz) are supported.
 
 - **Owned by:** `format.rs`
 - **Primary identifier:** Enum variant
@@ -73,9 +81,9 @@ In-memory entity structure for unified-archive. This library has no database —
 | preserve_permissions | `bool` | true | Unix mode bits |
 | preserve_times | `bool` | true | Modification timestamps |
 | verify_crc32 | `bool` | true | CRC verification during extraction |
-| filter | `Option<Box<dyn Fn(&ArchiveEntry) -> bool>>` | None | Entry-level filtering |
-| progress | `Option<ProgressCallback>` | None | Progress reporting callback |
-| limits | `Option<ExtractionLimits>` | None | Zip bomb protection |
+| filter | `Option<EntryFilter>` | None | Entry-level filtering (`EntryFilter = Box<dyn Fn(&ArchiveEntry) -> bool + Send + Sync>`) |
+| progress | `Option<Box<dyn ProgressCallback>>` | None | Progress reporting callback |
+| limits | `ExtractionLimits` | `ExtractionLimits::default()` | Zip bomb protection (always present) |
 
 - **Owned by:** `options.rs`
 
@@ -87,9 +95,7 @@ In-memory entity structure for unified-archive. This library has no database —
 | level | `CompressionLevel` | Normal | Store, Fastest, Fast, Normal, Maximum, Ultra |
 | password | `Option<String>` | None | Encryption (ZIP only currently) |
 | split_size | `Option<u64>` | None | DEFERRED: not honored by writers |
-| preserve_permissions | `bool` | true | Unix mode bits |
-| preserve_times | `bool` | true | Modification timestamps |
-| progress | `Option<ProgressCallback>` | None | Progress reporting callback |
+| progress | `Option<Box<dyn ProgressCallback>>` | None | Progress reporting callback |
 
 - **Owned by:** `options.rs`
 
@@ -101,7 +107,9 @@ In-memory entity structure for unified-archive. This library has no database —
 | Format | format, message | Fatal |
 | Corruption | path, details | Fatal |
 | Password | message | Recoverable |
-| Unsupported | operation, format | Fatal |
+| Unsupported | operation, format, details: Option\<String\> | Fatal |
+| CodecUnavailable | codec, format, install_instructions | Fatal |
+| UnsupportedOperation | operation, reason | Fatal |
 | InvalidPath | path, reason | Fatal (security) |
 
 - **Owned by:** `error.rs`
@@ -115,5 +123,6 @@ In-memory entity structure for unified-archive. This library has no database —
 | archive_format | `Option<ArchiveFormat>` | Detected embedded format |
 | data_offset | `Option<u64>` | Byte offset where archive data begins |
 | stub_type | `Option<StubType>` | WindowsPE, LinuxELF, MacOSMachO, ScriptInterpreter, Unknown |
+| confidence | `f32` | Detection confidence: 1.0 = highest confidence (may result from `probable(..., 1.0)` via clamping — does not strictly imply backend validation); <1.0 = probable (0.9 is current detector policy per AD 0015) |
 
-- **Owned by:** `sfx/detection.rs`
+- **Owned by:** `src/sfx/result.rs`

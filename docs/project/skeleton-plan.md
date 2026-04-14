@@ -11,7 +11,7 @@
 - **Packages / workspace members:** `unified-archive` (library crate, no workspace)
 - **Binaries / processes:** None (library only)
 - **Shared package directories:** N/A (single crate)
-- **Contract / codegen output:** `specs/001-unified-archive/contracts/` (7 prose contract files)
+- **Contract / codegen output:** `specs/001-unified-archive/contracts/` (6 prose contract files)
 
 See `docs/implementation/workspace-topology.md` for full directory tree.
 
@@ -19,21 +19,21 @@ See `docs/implementation/workspace-topology.md` for full directory tree.
 
 The actual implementation followed this dependency order:
 
-1. **Domain types:** `entry.rs`, `error.rs`, `format.rs` (ArchiveEntry, ArchiveError, ArchiveFormat)
-2. **Native bindings:** `ffi/unrar.rs`, `ffi/libarchive.rs`, `build.rs`
-3. **Safe wrappers:** `ffi/wrapper.rs`, `ffi/libarchive_wrapper.rs`
-4. **Core facade:** `archive.rs` (Archive, ArchiveBackend, format detection, backend routing)
-5. **Policy objects:** `options.rs`, `security.rs` (ExtractionOptions, CompressionOptions, ExtractionLimits)
-6. **Operations:** `inspection.rs` -> `extraction.rs` -> `creation.rs` -> `modification.rs`
-7. **Additional backends:** `ffi/piz_wrapper.rs`, `ffi/sevenz_wrapper.rs`, `ffi/zip_wrapper.rs`, `ffi/zip_writer.rs`
-8. **SFX pipeline:** `sfx/detection.rs`, `sfx/signatures.rs`, `sfx/stub_types.rs`
-9. **Streaming:** `streaming.rs`, `stream_crc.rs`
+1. **Domain types:** `src/entry.rs`, `src/error.rs`, `src/format.rs` (ArchiveEntry, ArchiveError, ArchiveFormat)
+2. **Native bindings:** `src/ffi/unrar.rs`, `src/ffi/libarchive.rs`, `build.rs`
+3. **Safe wrappers:** `src/ffi/wrapper.rs`, `src/ffi/libarchive_wrapper.rs`
+4. **Core facade:** `src/archive.rs` (Archive, ArchiveBackend, format detection, backend routing)
+5. **Policy objects:** `src/options.rs`, `src/security.rs` (ExtractionOptions, CompressionOptions, ExtractionLimits)
+6. **Operations:** `src/inspection.rs` -> `src/extraction.rs` -> `src/creation.rs` -> `src/modification.rs`
+7. **Additional backends:** `src/ffi/piz_wrapper.rs`, `src/ffi/sevenz_wrapper.rs`, `src/ffi/zip_wrapper.rs`, `src/ffi/zip_writer.rs`
+8. **SFX pipeline:** `src/sfx/detection.rs`, `src/sfx/signatures.rs`, `src/sfx/stub_types.rs`
+9. **Streaming:** `src/streaming.rs`, `src/stream_crc.rs`
 10. **Examples and tests:** `examples/`, `tests/`, `benches/`
 
 ## Local Execution Plan
 
 - **Local run command:** `cargo test`
-- **Smoke path:** Full test suite (82+ tests across 16+ test modules)
+- **Smoke path:** Full test suite (867+ tests across unit, contract, and integration suites)
 - **Backing services needed:** None (library crate; tests use archive fixtures)
 - **Compose / equivalent:** Not needed
 
@@ -44,20 +44,26 @@ Additional local commands:
 
 ## Marker Plan
 
-- **STUB markers:** None. Implementation is complete for all in-scope scenarios.
-- **DEFERRED markers:** 5 items (see `docs/project/stub-manifest.md`):
+- **STUB markers:** None. Implementation complete for in-scope scenarios; SCN-CRE-04 and SCN-SFX-08 are deferred.
+- **DEFERRED markers:** 8 items (see `docs/project/stub-manifest.md`):
   - `open_at_offset` — SFX offset-based opening
   - `split_size` — Multi-part archive creation
   - SecStr password migration
   - True streaming extraction
   - ZIP modification reliability
-- **Why DEFERRED (not STUB):** These items are explicitly out of MVP scope. The library is functional without them, and workarounds exist.
+  - Creation progress callbacks (OI-025-003) — RESOLVED: per-entry progress invoked with `total=None` (AD 0021)
+  - Unknown-stub SFX scanning (OI-027-001) — RESOLVED: unknown stubs proceed to signature scanning
+  - `ModificationOptions` (AD 0020) — `create_backup`/`backup_suffix` honored via `modify_with_options()`; `preserve_metadata` no-op pending OI-025-002
+- **Why DEFERRED (not STUB):** These items are explicitly out of MVP scope. The library is functional without them. Distinction between exposed and internal deferrals:
+  - **Exposed placeholder APIs** (callers can see/invoke but behavior is absent): `open_at_offset` (non-functional on positive SFX matches, no fallback), `ModificationOptions.preserve_metadata` (accepted but no-op).
+  - **Hidden internal deferrals** (no user-visible surface): true streaming for non-libarchive backends, SecStr password migration, split archive creation.
 
 ## Risks and Mitigations
 
 | Risk | Mitigation |
 |---|---|
 | UnRAR wchar_t mismatch on Linux | Primary target is macOS; Linux testing deferred (IG-020-003) |
-| ZIP modification unreliable via libarchive | Some test scenarios ignore-gated; planned fix: use zip-crate-native pipeline |
-| extract-to-memory uses temp files | Functional workaround; true in-memory extraction is a future optimization |
-| Streaming wraps full buffer in Cursor | Provides correct API surface; true streaming is future work |
+| ZIP modification unreliable via libarchive | Some test scenarios ignore-gated; planned fix: use zip-crate-native pipeline. Additional caveats: `commit_changes()` loses metadata/settings (OI-025-001, OI-025-002); `ModificationOptions` backup settings honored via `modify_with_options()` (AD 0020), `preserve_metadata` no-op pending OI-025-002 |
+| extract-to-memory uses temp files for UnRAR | Libarchive reads directly into buffer; UnRAR uses temp files via FFI callbacks |
+| Native backends buffer full entries in memory | Piz, ZipReader, and SevenZ buffer full entries in memory (not temp files) then wrap in Cursor; distinct from UnRAR's temp-file approach |
+| Non-libarchive streaming wraps buffer in Cursor | Libarchive backends truly stream; others (including ZipReader, used as buffered backend for encrypted ZIP) buffer then wrap in Cursor |

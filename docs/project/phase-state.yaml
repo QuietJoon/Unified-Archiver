@@ -7,8 +7,8 @@ project:
   name: unified-archive
   local_run_target: cargo test
   active_scope_label: MVP v0.1.0
-  last_updated: 2026-04-10
-  notes: "Retroactive documentation complete. All design-first-architecture artifacts created."
+  last_updated: 2026-04-13
+  notes: "Retroactive baseline BL-001 with gap remediation complete. DCR-001 closed Phases A.1/A.2/A.3/B.1/B.2 on 2026-04-13. OI-025-001 (compression settings) and OI-025-002 (metadata preservation) resolved 2026-04-14. No Phase C gaps remain."
 
 design:
   current_phase: 5
@@ -16,19 +16,21 @@ design:
   active_baseline_id: BL-001-retroactive
   baseline_status: approved
   open_change_records: []
+  closed_change_records: [DCR-001]
   rewind_required_to_phase: null
-  status: approved
+  status: approved_with_acknowledged_drift
 
 implementation:
   current_phase: 6
-  highest_completed_phase: 5
+  highest_completed_phase: 6
   synced_baseline_id: BL-001-retroactive
   synced_stub_manifest_version: 1
   sync_status: synced
   blocked_slices: []
   allowed_parallel_slices: []
-  active_impact_report: null
-  status: complete
+  active_impact_report: IIR-001
+  status: complete_with_gaps
+  notes: "DCR-001 closed Phases A+B (2026-04-13): SCN-SFX-08 (OI-027-001), RAR concurrency (OI-026-004), SCN-CRE-04 (OI-025-003 creation progress), and ModificationOptions wiring (OI-025-003) all resolved. OI-025-001 and OI-025-002 resolved 2026-04-14. DEF-008 partially closed; DEF-005 still open."
 
 artifacts:
   intake: docs/project/intake.md

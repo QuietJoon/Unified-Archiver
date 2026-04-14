@@ -8,13 +8,13 @@ End-to-end architectural walkthroughs for mandatory scenarios.
 
 **Trigger:** `Archive::open("document.zip")` then `archive.list_files()`
 
-1. `Archive::open` reads first 512 bytes for magic byte detection
+1. `Archive::open` reads first 512 bytes for magic byte detection (ordinary format detection; SFX detection uses a separate two-stage read pattern — see SCN-SFX-01)
 2. `ArchiveFormat::detect` matches `PK\x03\x04` -> `ArchiveFormat::Zip`
 3. Backend selection: ZIP + unencrypted -> `ArchiveBackend::Piz`
 4. `PizArchive` stores path only (stateless reopen per operation)
 5. `list_files()` checks `entry_cache` (OnceCell) — empty on first call
 6. `PizArchive::list_files` mmaps the ZIP file, iterates entries, reads CRC32 from ZIP central directory
-7. Returns `Vec<ArchiveEntry>` with normalized paths (forward slashes), sizes, timestamps, CRC32
+7. Returns `&[ArchiveEntry]` with normalized paths (forward slashes), sizes, timestamps, CRC32
 8. Result cached in `entry_cache` for subsequent calls
 9. Caller iterates entries — same struct fields regardless of format
 
@@ -34,7 +34,7 @@ End-to-end architectural walkthroughs for mandatory scenarios.
 6. **Backend dispatch:** `ArchiveBackend::extract_all_with_options` routes to correct backend
 7. Backend iterates entries, sanitizes each path via `security::sanitize_entry_path`, writes to destination
 8. Progress callbacks fire (rate-limited to ~60 Hz via `RateLimiter`)
-9. CRC32 verification happens during extraction (automatic in UnRAR/libarchive)
+9. CRC32 verification varies by backend: UnRAR uses native test mode; ZIP, 7z, and Piz extract to memory and verify CRC32; libarchive streams entries and checks read errors
 10. Returns `Ok(())` on success
 
 **Ownership transitions:** Caller -> extraction orchestrator (options owned) -> security layer (path validation) -> backend (file writes) -> filesystem
@@ -59,32 +59,39 @@ End-to-end architectural walkthroughs for mandatory scenarios.
 
 **Trigger:** `Archive::modify("archive.zip")` then `modifier.add_entry(...)` then `modifier.commit_changes()`
 
-1. `Archive::modify` opens archive in Read mode, creates `ModificationTracker`
+**Preconditions:** `Archive::modify` rejects encrypted archives (password-aware modification is not yet supported) and formats that do not support modification (e.g., RAR).
+
+1. `Archive::modify` opens archive in Modify mode, creates `ModificationTracker`
 2. `add_entry` / `remove_entry` / `replace_entry` queue operations in `ModificationTracker`
-3. `commit_changes`:
+3. `commit_changes()` (takes `self`, no options parameter):
    a. Creates temporary archive file in same directory as source
    b. Opens source archive for reading (libarchive)
    c. Creates new archive for writing (creation API)
    d. Copies non-removed entries from source to new archive
    e. Adds new/replaced entries from tracker
    f. Closes both archives
-   g. Atomic rename: replaces original with new archive
-4. If backup requested: copies original before rename
+   g. Atomic rename: replaces original with new archive; no backup is created
+
+**Accepted caveats (OI-025-001, OI-025-002):** `commit_changes()` rebuilds the archive from scratch through the creation API, so format-specific metadata (e.g., archive comments) and non-default settings from the original archive may be lost in the resulting file. The rewrite is lossy by design; callers who need to preserve original metadata should keep their own copy.
 
 ### 5. SFX Detection (SCN-SFX-01)
 
 **Trigger:** `Archive::detect_sfx("installer.exe")`
 
-1. **Stage 1 — Stub type detection:** Read file header, parse with `goblin` to identify PE/ELF/Mach-O/Script
-2. **Stage 2 — Signature scan:** Scan first 1MB byte-by-byte for archive magic bytes:
+1. **Stage 1 — Stub type detection:** Read file header; goblin identifies PE/ELF/Mach-O binaries; shebang (`#!`) detection identifies ScriptInterpreter stubs
+2. **Stage 2 — Signature scan (heuristic):** Scan first 1MB iterating all candidates for archive magic bytes:
    - `PK\x03\x04` (ZIP), `Rar!\x1a\x07\x00` (RAR), `Rar!\x1a\x07\x01\x00` (RAR5), `7z\xbc\xaf\x27\x1c` (7z)
-3. **Stage 3 — Validation:** If signature found, attempt lightweight archive header parse at detected offset
-4. Returns `SfxDetectionResult { is_sfx: true, archive_format: Some(Zip), data_offset: Some(offset), stub_type: PE }`
+   - Note: gzip, bzip2, and xz signatures were removed from the active SFX signature set (AD 0015)
+   - This is a heuristic search with known limitations (e.g., signatures embedded in data sections may produce false positives; archives beyond the 1MB window are missed). It is not exhaustive validation.
+3. **Stage 3 — Validation:** If signature found, attempt lightweight archive header parse at detected offset. All current matches produce `probable()` results; the detector currently assigns 0.9 confidence (a policy choice, not a type-level contract). The public result model distinguishes `probable` and `confirmed` semantics, but no code path currently reaches confirmed (1.0) — that would require full backend validation, which is not implemented.
+4. Returns `SfxDetectionResult { is_sfx: true, archive_format: Some(Zip), data_offset: Some(offset), stub_type: WindowsPE, confidence: 0.9 }` (confidence value reflects current detector policy)
 5. If no signature found within 1MB -> `SfxDetectionResult { is_sfx: false, .. }`
 
-**Latency bound:** <100ms for files up to 10MB (1MB scan limit)
+**Design-goal note:** The target latency is <100ms for files up to 10MB (1MB scan limit). No benchmark artifact currently validates this target; treat it as a design goal, not a contractual guarantee.
 
 ## Failure-Path Walkthroughs
+
+> **Note:** The following scenarios illustrate representative backend error paths. Not every backend maps errors identically; the examples below show the most common mapping for each scenario.
 
 ### F1. Encrypted Archive Without Password (SCN-EXT-02, negative)
 
@@ -108,10 +115,12 @@ End-to-end architectural walkthroughs for mandatory scenarios.
 
 1. Archive contains entry with path `../../etc/passwd`
 2. During extraction, `security::sanitize_entry_path` called:
-   a. Joins destination + entry path
-   b. Creates parent directories (required for `canonicalize`)
-   c. `canonicalize` resolves to absolute path
-   d. Checks if resolved path starts with destination prefix
-   e. Path `../../etc/passwd` resolves outside destination -> fail
-3. Returns `ArchiveError::InvalidPath { path: "../../etc/passwd", reason: "path traversal detected" }`
-4. Extraction of this entry skipped; other entries continue
+   a. **Normalize entry path:** strip non-normal components (`.`, `..`, root prefixes) — `../../etc/passwd` becomes `etc/passwd`
+   b. **Join** normalized path to destination — e.g., `/tmp/out/etc/passwd`
+   c. **Create parent directories** if needed (required for canonicalization)
+   d. **Canonicalize parent directory** to resolve symlinks and relative segments
+   e. **Verify** canonicalized parent starts with canonicalized destination prefix
+   f. **Check for symlink escape** on the final path itself
+3. Because traversal components are stripped before joining, `../../etc/passwd` is safely extracted as `<destination>/etc/passwd`, not rejected. The path stays within the destination by construction.
+4. An entry whose path consists *only* of traversal components (e.g., `../../..`) normalizes to an empty path and is rejected with `ArchiveError::InvalidPath { path: "../../..", reason: "Path contains only traversal components" }`. A symlink escape (destination itself contains a symlink that redirects outside) is similarly rejected.
+5. Partial outputs from previously extracted entries may exist on disk

@@ -1,6 +1,6 @@
 # Effort and Risk
 
-Dependency-ordered implementation slices with risk notes. Retrospective — all slices implemented; risk notes reflect actual outcomes.
+Dependency-ordered implementation slices with risk notes. Retrospective — all slices landed with tracked gaps; risk notes reflect actual outcomes.
 
 ## Implementation Slices (Dependency Order)
 
@@ -18,48 +18,52 @@ Dependency-ordered implementation slices with risk notes. Retrospective — all 
 **Scope:** `list_files`, `find_entry`, `validate_integrity`, entry caching, multi-part detection, symlink warnings, solid/recovery detection
 **Status:** Complete
 **Risk notes:**
-- UnRAR sequential iterator exhaustion required entry caching (OnceCell) — DD-004
+- UnRAR sequential iterator exhaustion required entry caching (OnceCell) — AD 0004
 - CRC32 for libarchive-backed formats required on-the-fly computation (no header access)
-- Multi-part RAR handled automatically by UnRAR; ZIP/7z multi-part via libarchive untested
+- Multi-part RAR handled automatically by UnRAR; ZIP read via Piz/ZipReader, 7z read via SevenZ — multi-part detection present but extraction untested for ZIP/7z
 
 ### Slice 3: Extraction (Phase 4)
 **Dependencies:** Slice 2
 **Scope:** `extract_all`, `extract_file`, `extract_to_memory`, `extract_filtered`, `extract_to_stream`, parallel extraction, progress callbacks, password handling, CRC verification
 **Status:** Complete
 **Risk notes:**
-- Per-entry reopen strategy for parallel extraction adds I/O overhead — DD-005
-- `extract_to_memory` uses temp files for UnRAR/libarchive backends (not true in-memory) — IG-011-004
-- Streaming extraction wraps extract-to-memory in Cursor (not true streaming) — IG-004-01
+- Per-entry reopen strategy for parallel extraction adds I/O overhead — AD 0005
+- `extract_to_memory` uses temp files for UnRAR backend; libarchive reads directly into buffer — IG-011-004. ZipReader provides buffered decryption for encrypted ZIP entries.
+- Non-libarchive streaming wraps buffer in Cursor (Piz, ZipReader, SevenZ, UnRAR); libarchive backends truly stream — IG-004-01
 - Rate-limited progress callbacks prevent UI flooding at ~60 Hz
 
 ### Slice 4: Creation (Phase 5)
 **Dependencies:** Slice 1
-**Scope:** `Archive::create`, `add_file_from_path`, `add_file_from_data`, `add_directory_recursive`, `finish`, compression levels, ZIP password encryption, RAR creation via external CLI
-**Status:** Complete
+**Scope:** `Archive::create`, `add_file_from_path`, `add_file_from_data`, `add_directory_recursive`, `finish`, compression levels, ZIP password encryption
+**Status:** Complete with tracked gaps (RAR creation via external CLI deferred)
 **Risk notes:**
 - libarchive write API integration required careful resource management (archive_write_close + free)
-- ZIP writer uses native Rust `zip` crate — separate from libarchive for better control
-- RAR creation requires external `rar.exe` — Windows-only, feature-gated, not pure Rust
+- Creation backends: libarchive for TAR variants and 7z; ZipWriter (Rust `zip` crate) for ZIP
+- RAR creation via external WinRAR CLI deferred — Windows-only, requires licensed WinRAR, behind `external-rar-create` feature flag
 - `split_size` option exists but is not honored by any writer — IG-005-08
+- Creation progress callback is invoked per-entry by both ZIP and libarchive backends with `total=None` (OI-025-003 resolved, AD 0021)
+- Creation encryption is ZIP-only; other formats silently ignore the password field
 
 ### Slice 5: Modification (Phase 6)
 **Dependencies:** Slice 3 + Slice 4
 **Scope:** `Archive::modify`, `add_entry`, `remove_entry`, `replace_entry`, `commit_changes`, copy-on-write rewrite, atomic rename
-**Status:** Partial (API complete, libarchive write integration pending)
+**Status:** Functional with lossy-rewrite caveats (`commit_changes()` is implemented)
 **Risk notes:**
+- `commit_changes()` performs a full copy-on-write rewrite using libarchive read + write, then atomic-renames the result over the original. This is a public `Archive` workflow, not a libarchive-internal detail.
 - Copy-on-write rewrite requires full archive read + write — significant temp disk usage for large archives
 - ZIP modification using libarchive on the read side is unreliable — some test scenarios ignore-gated
 - Platform-specific atomic rename: Unix `rename` vs Windows retry logic
-- Modification options (backup, metadata preservation) not fully applied by commit flow
+- `commit_changes()` loses entry metadata during rewrite (OI-025-001) and does not apply `ModificationOptions` settings (OI-025-002)
+- Backup creation during modification: `create_backup` and `backup_suffix` are honored via `modify_with_options()` (AD 0020); `preserve_metadata` is accepted but no-op pending OI-025-002
 
 ### Slice 6: SFX Detection (Phase 7)
 **Dependencies:** Slice 1
 **Scope:** `detect_sfx`, `open_sfx`, `extract_stub`, stub type detection (PE/ELF/Mach-O/Script), signature scanning, 3-stage pipeline
-**Status:** Complete (detection); `open_at_offset` unimplemented
+**Status:** Partial: detection complete, `open_at_offset` deferred (returns `ArchiveError::Unsupported`)
 **Risk notes:**
-- 1MB scan limit is a design trade-off: covers >99% of SFX stubs but misses custom stubs >1MB
+- 1MB scan limit is a design trade-off: covers known synthetic SFX stubs but misses custom stubs >1MB. Coverage validated against synthetic fixtures only (no real-world corpus); SFX tests are synthetic-suite-only evidence.
 - `open_at_offset` requires all backends to support offset-aware opening — architectural gap — IG-005-01
-- False positive rate controlled by validation stage after signature match
+- False positive rate controlled by validation stage after signature match; zero false positives observed in synthetic test suite only. Real-world false-positive rate unknown pending real-sample corpus.
 
 ## Known Technical Debt (from architecture investigation)
 
@@ -71,5 +75,8 @@ Dependency-ordered implementation slices with risk notes. Retrospective — all 
 | Modify-mode options partially applied | Backup/metadata preservation incomplete | Implement option-aware commit pipeline |
 | ZIP modification partially reliable | Some scenarios ignore-gated | Use ZIP-native read/write pipeline |
 | `ZipReader::list_files_for_limits` lacks optimization | Full CRC32 computed unnecessarily | Add metadata-only listing method |
-| Secure password handling not implemented | Passwords in heap Strings | Replace with SecStr across all fields |
+| Secure password handling not integrated | Passwords stored as `Option<String>` on heap; secstr crate imported but not wired into password fields | Wire SecStr into all password-accepting APIs |
 | `split_size` public but unused | API advertises non-functional feature | Implement or narrow API surface |
+| Creation progress callbacks (OI-025-003 resolved) | Per-entry progress now invoked during creation with `total=None` (AD 0021) | Resolved |
+| `ModificationOptions` partially wired (AD 0020) | `create_backup`/`backup_suffix` honored; `preserve_metadata` no-op pending OI-025-002 | Implement metadata preservation in commit pipeline |
+| `commit_changes()` metadata loss (OI-025-001) | Entry timestamps and permissions dropped during copy-on-write rewrite | Preserve metadata through rewrite cycle |

@@ -5,9 +5,8 @@ Complete documentation for the unified-archive Rust library.
 ## Quick Links
 
 - **[Getting Started](./GETTING_STARTED.md)** - Installation and first program
-- **[API Reference](./API_REFERENCE.md)** - Complete API documentation
+- **[API Reference](./API_REFERENCE.md)** - Current API documentation
 - **[Main README](../README.md)** - Project overview and features
-- **[Limitations](../Limitations.md)** - Known limitations and workarounds
 - **[Changelog](../CHANGELOG.md)** - Version history
 
 ---
@@ -33,7 +32,7 @@ Complete documentation for the unified-archive Rust library.
 3. **[API Reference](./API_REFERENCE.md)**
    - Complete API documentation
    - All public types and methods
-   - Code examples for each function
+   - Code examples for key operations
    - Error handling guide
    - Performance tips
 
@@ -45,13 +44,7 @@ Complete documentation for the unified-archive Rust library.
 
 ### Reference Material
 
-5. **[Limitations](../Limitations.md)**
-   - Known limitations
-   - Workarounds
-   - Future enhancements
-   - Platform-specific notes
-
-6. **[Changelog](../CHANGELOG.md)**
+5. **[Changelog](../CHANGELOG.md)**
    - Version history
    - Release notes
    - Migration guides
@@ -68,9 +61,9 @@ Complete documentation for the unified-archive Rust library.
 
 ### Basic Usage
 
-- [Opening Archives](./API_REFERENCE.md#archiveopen)
-- [Listing Files](./API_REFERENCE.md#archivelist_files)
-- [Extracting Files](./API_REFERENCE.md#archiveextract_all)
+- [Opening Archives](./API_REFERENCE.md#opening-archives)
+- [Listing Files](./API_REFERENCE.md#inspection-methods)
+- [Extracting Files](./API_REFERENCE.md#extraction-methods)
 - [Reading Metadata](./API_REFERENCE.md#archiveentry)
 
 ### Advanced Features
@@ -78,7 +71,7 @@ Complete documentation for the unified-archive Rust library.
 - [Password-Protected Archives](./GETTING_STARTED.md#use-case-7-password-protected-archives)
 - [Streaming Extraction](./GETTING_STARTED.md#use-case-5-process-large-files-efficiently)
 - [Progress Tracking](./GETTING_STARTED.md#use-case-8-progress-tracking)
-- [Parallel Extraction](./API_REFERENCE.md#archiveextract_filtered)
+- [Parallel Extraction](./API_REFERENCE.md#extraction-methods)
 
 ### Error Handling
 
@@ -90,7 +83,7 @@ Complete documentation for the unified-archive Rust library.
 
 - [Memory Efficiency](./API_REFERENCE.md#streamingextractor)
 - [Parallel Processing](./API_REFERENCE.md#performance-tips)
-- [CRC32 Computation](../README.md#performance-characteristics)
+- [CRC32 Computation](../README.md#performance)
 
 ---
 
@@ -136,8 +129,10 @@ let text = String::from_utf8(data)?;
 ### Streaming Large Files
 
 ```rust
+use unified_archive::Archive;
 use std::io::Read;
 
+let archive = Archive::open("data.tar.gz")?;
 let mut stream = archive.extract_to_stream("large.bin")?;
 let mut buffer = [0u8; 8192];
 
@@ -151,18 +146,19 @@ while let Ok(n) = stream.read(&mut buffer) {
 
 ## Supported Formats
 
+> This is a convenience copy; the canonical support matrix is in the [root README](../README.md#supported-formats).
+
 | Format | Read | Extract | CRC32 | Password |
 |--------|------|---------|-------|----------|
 | RAR    | ✅   | ✅      | ✅    | ✅       |
 | RAR5   | ✅   | ✅      | ✅    | ✅       |
-| ZIP    | ✅   | ✅      | ✅    | ⏳       |
-| 7z     | ✅   | ✅      | ✅    | ⏳       |
+| ZIP    | ✅   | ✅      | ✅    | ✅       |
+| 7z     | ✅   | ✅      | ✅    | ✅       |
 | TAR    | ✅   | ✅      | ✅    | ❌       |
 | TAR.GZ | ✅   | ✅      | ✅    | ❌       |
 | TAR.BZ2| ✅   | ✅      | ✅    | ❌       |
 | TAR.XZ | ✅   | ✅      | ✅    | ❌       |
-
-See [Supported Formats](../README.md#supported-formats) for details.
+| ISO    | ✅   | ✅      | ❌    | ❌       |
 
 ---
 
@@ -210,7 +206,7 @@ Run the test suite:
 cargo test
 
 # Specific test
-cargo test test_zip_extraction
+cargo test test_zip_extract_all
 
 # Performance tests
 cargo test --release perf_
@@ -219,18 +215,18 @@ cargo test --release perf_
 cargo test -- --nocapture
 ```
 
-**Test Coverage**: 82 tests across all formats and features
+**Test Coverage**: 867+ tests across all formats and features (verify with `cargo test -- --list 2>/dev/null | grep -c ': test'`)
 
 ---
 
 ## Performance Characteristics
 
-- **Memory Usage**: <100MB for multi-GB files (streaming)
+- **Memory Usage**: <100MB for multi-GB files (libarchive-backed streaming only; native backends such as Piz, ZipReader, SevenZ, and UnRAR buffer entries in memory)
 - **CRC32 Speed**: ~300MB/s (SIMD-accelerated)
 - **Parallel Extraction**: Linear scaling to CPU cores
 - **Format Detection**: O(1) header read
 
-See [Performance](../README.md#performance-characteristics) for details.
+See [Performance](../README.md#performance) for details.
 
 ---
 
@@ -240,10 +236,10 @@ See [Performance](../README.md#performance-characteristics) for details.
 
 ```rust
 match Archive::open("file.rar") {
-    Err(ArchiveError::NotFound { path }) => {
-        eprintln!("File doesn't exist: {}", path);
+    Err(ArchiveError::Io { source, .. }) => {
+        eprintln!("I/O error: {}", source);
     },
-    Err(ArchiveError::UnsupportedFormat { .. }) => {
+    Err(ArchiveError::Format { .. }) => {
         eprintln!("Format not supported");
     },
     Ok(archive) => { /* use it */ },
@@ -261,36 +257,17 @@ if archive.is_encrypted()? {
 }
 ```
 
-### Iterator Exhaustion (RAR)
-
-```rust
-// Don't do this - iterator exhausted after first call
-let entries1 = archive.list_files()?;
-let entries2 = archive.list_files()?; // Empty!
-
-// Do this instead
-let archive1 = Archive::open(path)?;
-let entries1 = archive1.list_files()?;
-
-let archive2 = Archive::open(path)?;
-let entries2 = archive2.list_files()?;
-```
-
-See [Limitations](../Limitations.md) for more details.
-
 ---
 
 ## Platform Notes
 
-### macOS
+### macOS (Primary)
 - Requires: `brew install libarchive`
-- Tested on: Darwin 24.6.0
-- Status: ✅ Fully supported
+- Status: ✅ Fully supported (primary development and CI target)
 
-### Linux
+### Linux (Secondary)
 - Requires: `apt-get install libarchive-dev` or `dnf install libarchive-devel`
-- Tested on: Ubuntu/Debian, Fedora
-- Status: ✅ Fully supported
+- Status: ✅ Supported with caveats (CI-tested; some backend behaviors may differ from macOS)
 
 ### Windows
 - libarchive bundled automatically
@@ -312,21 +289,19 @@ For documentation improvements:
 
 ## Getting Help
 
-- **Issues**: [GitHub Issues](https://github.com/yourusername/unified-archive/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/unified-archive/discussions)
 - **Documentation**: You're reading it!
+- **Issues / Discussions**: See the project repository (not yet publicly hosted)
 
 ---
 
 ## License
 
-Dual licensed under Apache-2.0 OR MIT (your choice).
+Licensed under the [MIT License](../LICENSE-MIT).
 
 **RAR Support**: Uses UnRAR library (free for non-commercial use).
-See [LICENSE](../LICENSE-APACHE) for details.
 
 ---
 
-**Last Updated**: 2025-11-01
+**Last Updated**: 2026-04-13
 **Version**: 0.1.0
 **Rust**: 1.85+ (edition 2024)

@@ -1,4 +1,6 @@
-# ADR: Single Archive Facade with Backend Enum
+# AD: Single Archive Facade with Backend Enum
+
+Status: Accepted
 
 ## Context and Problem Statement
 Consumers need a format-agnostic API instead of per-format call paths. Without a unified entry point, callers must know which backend to use for each archive format, leading to duplicated dispatch logic and tight coupling to implementation details.

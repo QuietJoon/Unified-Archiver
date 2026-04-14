@@ -1,4 +1,6 @@
-# ADR: Dual ZIP Backend Strategy
+# AD: Dual ZIP Backend Strategy
+
+Status: Accepted
 
 ## Context and Problem Statement
 `piz` (mmap-based) provides fast parallel ZIP reading with CRC32 metadata but cannot decrypt. The `zip` crate supports AES and ZipCrypto decryption. A single backend cannot satisfy both the performance requirements for unencrypted archives and the decryption requirements for encrypted ones.

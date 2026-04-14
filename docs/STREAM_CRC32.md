@@ -1,4 +1,4 @@
-# Stream CRC32 and Archive Checksums
+# Stream Checksums and Archive Integrity
 
 Comprehensive guide to understanding checksums in compression and archive formats.
 
@@ -15,18 +15,18 @@ Comprehensive guide to understanding checksums in compression and archive format
 
 ## Overview
 
-There are two types of CRC32 checksums in compressed files:
+There are two categories of checksums in compressed files:
 
 ### 1. Per-File CRC32 (Content CRC32)
 - **What**: Checksum of each individual file's uncompressed content
 - **Purpose**: Verify file integrity after extraction
-- **Available in**: ZIP, 7z, RAR (TAR does not store per-file CRC32)
+- **Available in**: ZIP, 7z, RAR4 (always CRC32), RAR5 (CRC32 or optionally BLAKE2sp-256). TAR does not store per-file CRC32.
 - **unified-archive**: Accessible via `ArchiveEntry.crc32`
 
-### 2. Stream CRC32 (Container CRC32)
-- **What**: Checksum stored in the compression format's metadata
+### 2. Stream Check/Checksum (Container Checksum)
+- **What**: Checksum or integrity check stored in the compression format's metadata
 - **Purpose**: Verify compressed stream integrity
-- **Available in**: Single-file compression (GZIP, BZIP2, XZ)
+- **Available in**: Single-file compression (GZIP, BZIP2, XZ — XZ commonly uses CRC64 or SHA-256, not just CRC32)
 - **unified-archive**: Accessible via `extract_stream_checksum()`
 
 ---
@@ -260,18 +260,19 @@ for entry in archive.list_files()? {
 
 ## Summary Table
 
-| Format | Stream CRC32 | Per-File CRC32 | Archive CRC32 | Notes |
+| Format | Stream Check | Per-File CRC32 | Archive CRC32 | Notes |
 |--------|--------------|----------------|---------------|-------|
-| **GZIP** | ✅ In trailer | N/A (single file) | N/A | Always CRC32 + size |
-| **BZIP2** | ✅ In EOS marker | N/A (single file) | N/A | Combined block CRCs |
-| **XZ** | ✅ Configurable | N/A (single file) | N/A | CRC32/CRC64/SHA-256/None |
+| **GZIP** | ✅ CRC32 in trailer | N/A (single file) | N/A | Always CRC32 + size |
+| **BZIP2** | ✅ CRC32 in EOS marker | N/A (single file) | N/A | Combined block CRCs |
+| **XZ** | ⚠️ Check-type detection only | N/A (single file) | N/A | Detects CRC32/CRC64/SHA-256/None; actual check value not extracted |
 | **ZIP** | ❌ No concept | ✅ In headers | ❌ No | Per-file only |
-| **7z** | ✅ Packed streams | ✅ In Files section | ✅ Header CRC | Multi-level checksums |
+| **7z** | ⚠️ Packed streams (not exposed) | ✅ In Files section | ⚠️ Header CRC (not exposed) | Multi-level checksums; packed-stream and header CRC not yet exposed by API |
 | **RAR4** | ❌ No | ✅ CRC32 always | ❌ No | Optional recovery CRC |
-| **RAR5** | ❌ No | ✅ CRC32/BLAKE2 | ❌ No | Optional recovery CRC |
+| **RAR5** | ❌ No | ✅ CRC32 or BLAKE2sp-256 | ❌ No | Optional recovery CRC |
 
 **Legend**:
-- ✅ Available
+- ✅ Available and exposed by the API
+- ⚠️ Present in format but not yet exposed by the API
 - ❌ Not applicable / not available
 - N/A: Not applicable (single-file format)
 
@@ -281,7 +282,7 @@ for entry in archive.list_files()? {
 
 ### Current unified-archive Support
 
-#### Stream CRC32 (Single-File Compression)
+#### Stream Checksum Retrieval (Single-File Compression)
 
 ```rust
 use unified_archive::stream_crc::extract_stream_checksum;
@@ -298,12 +299,16 @@ let bz = extract_bzip2_stream_crc("file.bz2")?;
 let xz = extract_xz_stream_check("file.xz")?;
 ```
 
-**Supported Formats**:
-- ✅ GZIP - Full CRC32 + size extraction
-- ✅ BZIP2 - Full CRC32 extraction
-- ✅ XZ - Check type detection (CRC32/CRC64/SHA-256/None)
+**Important**: These helpers are stream-checksum utilities that read stored metadata from compression format headers/trailers. They do NOT provide standalone archive-opening support for .gz/.bz2/.xz files, and they do NOT recompute checksums for verification.
 
-#### Per-File CRC32 (All Archives)
+**Supported Formats**:
+- ✅ GZIP - Full CRC32 + size extraction (reads stored metadata from trailer)
+- ✅ BZIP2 - Full CRC32 extraction (reads stored metadata from EOS marker)
+- ✅ XZ - Check type detection only (CRC32/CRC64/SHA-256/None); actual check value is not extracted
+
+#### Stored Per-Entry Checksums (All Archives)
+
+Per-entry CRC32 values are read directly from archive metadata — they are stored by the archiving tool at creation time, not recomputed by unified-archive.
 
 ```rust
 use unified_archive::Archive;
@@ -318,9 +323,9 @@ for entry in archive.list_files()? {
 
 **Supported Formats**:
 - ✅ RAR/RAR5 - Direct from UnRAR SDK
-- ✅ ZIP - Computed during listing
-- ✅ 7z - Computed during listing
-- ✅ TAR - Computed during listing
+- ✅ ZIP - Stored metadata read from Piz native backend
+- ✅ 7z - Stored metadata read from SevenZ native backend
+- ✅ TAR - Read during listing via libarchive
 
 ### Future Enhancements
 
@@ -329,13 +334,12 @@ for entry in archive.list_files()? {
 2. **7z Header CRC**: Verify archive structure integrity
 3. **RAR5 BLAKE2**: Extract BLAKE2sp-256 hash when available
 4. **XZ Full Check**: Parse blocks to extract actual CRC32/CRC64 values
-5. **ZIP Central Directory CRC**: Extract comment field CRC
 
 ---
 
-#### Computed Archive Checksums
+#### Derived Checksums
 
-unified-archive provides two derived checksums computed from per-file CRC32 values. Neither is stored in the archive — both are calculated on-the-fly.
+unified-archive provides two derived checksums computed from per-entry metadata. Neither is stored in the archive — both are calculated on-the-fly.
 
 **Archive CRC** (`calculate_archive_crc`):
 ```rust
@@ -349,7 +353,7 @@ Wrapping sum of all per-file CRC32 values. Matches 7-Zip's "Archive CRC" display
 let digest = archive.calculate_manifest_digest()?;
 println!("Manifest digest: {}", digest); // e.g. "a1b2c3d4"
 ```
-Sorts per-entry CRC32 hex strings, joins with `,`, then CRC32-hashes the result. More collision-resistant than archive CRC because sorting preserves per-entry identity instead of collapsing it into a sum.
+Sorts per-entry identifier strings, joins with `,`, then CRC32-hashes the result. For entries with a CRC32, the hex-formatted CRC is used; for entries without CRC32 (e.g., TAR entries), the function falls back to `path:size` as the identifier. More collision-resistant than archive CRC because sorting preserves per-entry identity instead of collapsing it into a sum.
 
 **Comparison:**
 
@@ -358,29 +362,31 @@ Sorts per-entry CRC32 hex strings, joins with `,`, then CRC32-hashes the result.
 | Algorithm | Wrapping sum | Sort + join + CRC32 hash |
 | Output | `u32` | 8-char hex string |
 | Collision resistance | Low (addition is lossy) | Higher (preserves per-entry identity) |
-| Use case | Quick comparison, 7-Zip compatibility | Content-identity deduplication |
+| Use case | Quick comparison, 7-Zip compatibility | Archive comparison and deduplication |
 | Empty archive | `0` | `""` (empty string) |
 
-Both are order-independent and format-independent: the same file contents produce the same result whether stored in ZIP, 7z, or RAR.
+Both are order-independent and format-independent. When all entries have CRC32 values, the same file contents produce the same result whether stored in ZIP, 7z, or RAR. However, when the `path:size` fallback is used (for entries lacking CRC32), the digest incorporates path and size metadata rather than pure content identity, so results may differ across formats if paths or metadata vary.
 
 ---
 
 ## Use Cases
 
-### When to Use Stream CRC32
+### When to Use Stream Checksums
 
 **Good for**:
-- Verifying GZIP/BZIP2/XZ file integrity without decompression
-- Quick sanity check of compressed files
-- Detecting transmission errors
+- Metadata inspection and checksum retrieval from GZIP/BZIP2/XZ files without decompression
+- Quick sanity check of compressed files (comparing stored checksums against known values)
+- Detecting transmission errors (by comparing stored checksum with a previously recorded value)
 - Comparing compressed file versions
+
+**Warning**: Reading a stored checksum does NOT verify data integrity on its own. True verification requires recomputing the checksum over the actual data and comparing it against the stored value.
 
 **Example**:
 ```rust
-// Quick integrity check without decompression
+// Retrieve stored checksum for comparison (does not recompute)
 let crc = extract_gzip_stream_crc("backup.sql.gz")?;
-println!("File CRC32: {:08X}", crc.crc32.unwrap());
-// Compare with known value
+println!("Stored CRC32: {:08X}", crc.crc32.unwrap());
+// Compare with a previously recorded known value
 assert_eq!(crc.crc32.unwrap(), 0x9A0D2606);
 ```
 
@@ -459,7 +465,7 @@ if d1 == d2 {
 - [BZIP2 Format](http://www.bzip.org/) - BZIP2 Official Documentation
 - [XZ Format](https://tukaani.org/xz/xz-file-format.txt) - XZ File Format 1.2.1
 - [PKWARE APPNOTE.TXT](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT) - ZIP Format Specification
-- [7z Format](https://py7zr.readthedocs.io/en/latest/archive_format.html) - 7-Zip Format Documentation
+- [7z Format](https://www.7-zip.org/7z.html) - Official 7-Zip Archive Format Specification
 - [RAR5 Format](https://www.rarlab.com/technote.htm) - RAR 5.0 Archive Format
 
 ---

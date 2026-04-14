@@ -1,4 +1,6 @@
-# ADR: Staged SFX Detection Pipeline
+# AD: Staged SFX Detection Pipeline
+
+Status: Accepted
 
 ## Context and Problem Statement
 Self-extracting archive (SFX) identification must balance detection speed and false-positive control. Naively scanning every file for archive signatures is expensive, while skipping validation leads to misidentification.

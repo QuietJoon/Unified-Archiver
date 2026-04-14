@@ -1,4 +1,6 @@
-# ADR: Hybrid Backend Selection
+# AD: Hybrid Backend Selection
+
+Status: Accepted
 
 ## Context and Problem Statement
 No single backend met all requirements. UnRAR is needed for RAR/RAR5 support, libarchive provides broad format coverage and read-write capability, and native Rust crates (piz, sevenz-rust2, zip) offer better performance and metadata quality for specific formats.

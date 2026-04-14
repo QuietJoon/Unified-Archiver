@@ -1,4 +1,6 @@
-# ADR: Per-Entry Reopen for Parallel Extraction
+# AD: Per-Entry Reopen for Parallel Extraction
+
+Status: Accepted
 
 ## Context and Problem Statement
 Safe shared mutable access to backend handles is hard across FFI and native libraries. Archive handles are not `Send`/`Sync` and wrapping them in synchronization primitives introduces complexity and deadlock risk, especially for FFI-backed handles.

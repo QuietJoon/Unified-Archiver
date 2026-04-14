@@ -8,7 +8,7 @@ Repo layout, package members, and structural conventions.
 unified-archive/
 ├── src/
 │   ├── lib.rs                      # Public crate surface
-│   ├── archive.rs                  # Core Archive type + backend routing
+│   ├── archive.rs                  # Core Archive type + backend routing + finish()
 │   ├── entry.rs                    # ArchiveEntry, EntryType, FileAttributes
 │   ├── error.rs                    # ArchiveError enum
 │   ├── format.rs                   # ArchiveFormat detection + capabilities
@@ -16,12 +16,12 @@ unified-archive/
 │   ├── security.rs                 # Path sanitization, ExtractionLimits
 │   ├── inspection.rs               # list_files, find_entry, validate, multi-part
 │   ├── extraction.rs               # extract_all, extract_file, parallel, progress
-│   ├── creation.rs                 # Archive::create, add_file, finish
+│   ├── creation.rs                 # Archive::create, add_file_from_data, add_file_from_path, add_file_from_path_as, add_directory, add_directory_recursive
 │   ├── modification.rs             # Archive::modify, commit_changes
 │   ├── streaming.rs                # StreamingExtractor (Read trait wrapper)
 │   ├── stream_crc.rs               # GZIP/BZIP2/XZ checksum parsing
 │   ├── ffi/
-│   │   ├── mod.rs                  # (not used — file-as-module layout)
+│   │   ├── mod.rs                  # FFI module root
 │   │   ├── common.rs               # TempDirGuard, path normalization, CRC helpers
 │   │   ├── unrar.rs                # Raw UnRAR C FFI bindings
 │   │   ├── wrapper.rs              # Safe UnRAR adapter
@@ -31,28 +31,33 @@ unified-archive/
 │   │   ├── sevenz_wrapper.rs       # Native Rust 7z backend
 │   │   ├── zip_wrapper.rs          # Native Rust ZIP backend (encrypted)
 │   │   └── zip_writer.rs           # Native Rust ZIP creation
+│   ├── sfx.rs                     # SFX module root (re-exports submodules)
 │   ├── sfx/
 │   │   ├── detection.rs            # SFX detection pipeline
+│   │   ├── result.rs               # SfxDetectionResult
 │   │   ├── signatures.rs           # Archive signature tables
-│   │   └── stub_types.rs           # PE/ELF/Mach-O/Script detection
+│   │   └── stub_types.rs           # WindowsPE, LinuxELF, MacOSMachO, ScriptInterpreter, Unknown
+│   ├── test_utils.rs               # Shared test utilities (#[cfg(test)] only)
 │   └── external/
+│       ├── mod.rs                  # External tools module root
 │       └── rar.rs                  # Optional WinRAR CLI (feature-gated)
 ├── tests/
 │   ├── integration/                # Integration test modules
 │   │   ├── concurrency.rs
 │   │   ├── creation.rs
-│   │   └── modification.rs
+│   │   ├── modification.rs
+│   │   ├── sfx_detection.rs
+│   │   └── sfx_false_positives.rs
 │   ├── format_compatibility_test.rs
 │   ├── password_handling_test.rs
 │   ├── crc32_verification_test.rs
-│   ├── sfx_detection_test.rs
 │   ├── streaming_test.rs
 │   ├── progress_callback_test.rs
 │   ├── performance_test.rs
 │   ├── integrity_comprehensive_test.rs
 │   ├── property_tests.rs
 │   └── ...
-├── examples/                       # 11 usage examples
+├── examples/                       # 9 usage examples
 │   ├── inspect_archive.rs
 │   ├── extract_archive.rs
 │   ├── create_archive.rs
@@ -61,6 +66,8 @@ unified-archive/
 │   └── ...
 ├── benches/                        # Criterion benchmarks
 │   ├── archive_operations.rs
+│   ├── extraction.rs
+│   ├── inspection.rs
 │   ├── integrity_validation_bench.rs
 │   └── sfx_detection.rs
 ├── specs/001-unified-archive/      # Feature specification
@@ -72,7 +79,6 @@ unified-archive/
 │   │   ├── archive.md
 │   │   ├── inspection.md
 │   │   ├── extraction.md
-│   │   ├── creation.md
 │   │   ├── progress.md
 │   │   ├── streaming.md
 │   │   └── errors.md
@@ -109,7 +115,7 @@ Not applicable (single crate).
 
 | Location | Content |
 |---|---|
-| `specs/001-unified-archive/contracts/` | Canonical API contract documents (7 files) |
+| `specs/001-unified-archive/contracts/` | Canonical API contract documents (6 files) |
 | `src/lib.rs` | Public API re-exports (the actual Rust contract surface) |
 
 ## Build Artifacts

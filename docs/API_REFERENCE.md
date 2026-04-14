@@ -1,17 +1,49 @@
 # API Reference
 
-Complete API reference for unified-archive library.
+API reference for the unified-archive library. Covers inspection, extraction, creation, modification, SFX detection, streaming, and safety utilities.
+
+## Internal types
+
+Per AD 0001 (Single Archive Facade with Backend Enum), the supported public surface
+is the `Archive` facade together with the domain types listed in the table of contents
+below. The following items are `pub` only because their parent module is `pub mod`,
+not because they are part of the supported API:
+
+- `unified_archive::ffi::UnrarArchive`
+- `unified_archive::ffi::LibarchiveArchive`
+- `unified_archive::ffi::ZipArchive`
+- `unified_archive::ffi::PizArchive`
+- `unified_archive::ffi::SevenZArchive`
+- `unified_archive::ffi::ZipWriter`
+- `ResultWithWarnings::add_warning`
+- `security::get_max_mmap_size`
+
+These types are exposed for crate-internal composition and may change without notice.
+Use the `Archive` facade for all archive operations; backend selection is automatic.
 
 ## Table of Contents
 
 - [Archive](#archive)
+  - [Opening Archives](#opening-archives)
+  - [Inspection Methods](#inspection-methods)
+  - [Extraction Methods](#extraction-methods)
+  - [Creation](#creation)
+  - [Modification](#modification)
+  - [SFX (Self-Extracting Archives)](#sfx-self-extracting-archives)
 - [ArchiveEntry](#archiveentry)
 - [ArchiveFormat](#archiveformat)
 - [ExtractionOptions](#extractionoptions)
 - [ProgressCallback](#progresscallback)
 - [ValidationReport](#validationreport)
 - [ArchiveError](#archiveerror)
+- [ArchiveWarning](#archivewarning)
 - [StreamingExtractor](#streamingextractor)
+- [Type Aliases](#type-aliases)
+- [Re-exports](#re-exports)
+- [Feature Flags](#feature-flags)
+- [Platform-Specific Notes](#platform-specific-notes)
+- [Performance Tips](#performance-tips)
+- [Common Patterns](#common-patterns)
 
 ---
 
@@ -38,13 +70,12 @@ let archive = Archive::open("data.zip")?;
 > as part of TAR compound formats. Standalone `.gz`/`.bz2`/`.xz` files are not yet supported.
 
 **Errors:**
-- `ArchiveError::NotFound` - File does not exist
-- `ArchiveError::UnsupportedFormat` - Unknown or unsupported format
-- `ArchiveError::Format` - Format-specific error
+- `ArchiveError::Io` - File does not exist
+- `ArchiveError::Format` - Unknown or unsupported format, or format-specific error
 
 ---
 
-#### `Archive::open_encrypted(path: impl AsRef<Path>, password: &str) -> Result<Archive>`
+#### `Archive::open_encrypted(path: impl AsRef<Path>, password: impl AsRef<str>) -> Result<Archive>`
 
 Open a password-protected archive.
 
@@ -61,7 +92,27 @@ let archive = Archive::open_encrypted("secret.rar", "mypassword")?;
 
 ---
 
+### General Methods
+
+#### `Archive::path(&self) -> &Path`
+
+Get the filesystem path of the archive.
+
+---
+
+#### `Archive::close(self) -> Result<()>`
+
+Consume the archive and release all resources. Called automatically on drop, but explicit close allows error handling.
+
+---
+
 ### Inspection Methods
+
+#### `Archive::entry_count(&self) -> Result<usize>`
+
+Get count of entries in archive. Equivalent to `list_files()?.len()`.
+
+---
 
 #### `Archive::format(&self) -> ArchiveFormat`
 
@@ -94,7 +145,7 @@ for entry in entries {
 
 **Returns:** Borrowed slice of `ArchiveEntry` structs with metadata (cached)
 
-**Performance Note:** For libarchive-backed formats (TAR), CRC32 is computed during listing by reading file data. ZIP and 7z use central directory metadata.
+**Performance Note:** CRC32 population varies by backend. See architecture docs for backend-specific details.
 
 **Errors:**
 - `ArchiveError::Format` - Cannot read archive structure
@@ -138,7 +189,7 @@ if archive.is_encrypted()? {
 
 #### `Archive::validate_integrity(&self) -> Result<ValidationReport>`
 
-Validate CRC32 checksums for all files.
+Validate archive integrity. For formats that provide CRC32 checksums, verification is CRC32-based. For formats or backends that do not expose per-entry CRC32, validation falls back to read-based error detection (e.g., streaming all entries and checking for read errors).
 
 **Example:**
 ```rust
@@ -163,6 +214,8 @@ if !report.failed.is_empty() {
 
 Calculate an archive-level CRC32 by summing all per-file CRC32 values with 32-bit wrapping overflow. This matches the "Archive CRC" shown by 7-Zip.
 
+> **Contract note:** No formal design contract exists yet for this method. Behavior is based on implementation convention and may be refined in a future spec revision.
+
 **Example:**
 ```rust
 let crc = archive.calculate_archive_crc()?;
@@ -181,17 +234,20 @@ println!("Archive CRC: {:08X}", crc);
 
 #### `Archive::calculate_manifest_digest(&self) -> Result<String>`
 
-Calculate a content-identity digest from per-entry CRC32 values. Unlike `calculate_archive_crc` (wrapping sum), this sorts individual CRC32 hex strings and hashes the joined result, making it more collision-resistant.
+Calculate a content-identity digest from per-entry CRC32 values. Unlike `calculate_archive_crc` (wrapping sum), this sorts individual CRC32 hex strings and hashes the joined result, providing better collision resistance.
+
+> **Contract note:** No formal design contract exists yet for this method. Behavior is based on implementation convention and may be refined in a future spec revision.
 
 Designed for deduplication: two archives with identical file contents produce the same digest regardless of archive format, compression method, or entry order.
 
 **Algorithm:**
-1. Collect CRC32 from each file entry (skip directories, entries without CRC32)
-2. Convert each to 8-char hex (big-endian bytes)
-3. Sort lexicographically
-4. Join with `,`
-5. CRC32-hash the joined string
-6. Return as 8-char lowercase hex
+1. For each file entry (directories excluded):
+   - If CRC32 is available: convert to 8-char hex (big-endian bytes)
+   - If CRC32 is absent: fall back to `path:size` string (e.g., `readme.txt:1234`)
+2. Sort all identity strings lexicographically
+3. Join with `,`
+4. CRC32-hash the joined string
+5. Return as 8-char lowercase hex
 
 **Example:**
 ```rust
@@ -201,13 +257,55 @@ if !digest.is_empty() {
 }
 ```
 
-**Returns:** `String` — 8-char hex digest, or empty string if no file entries have CRC32 values
+**Returns:** `String` — 8-char hex digest, or empty string if the archive contains no file entries
 
 **Properties:**
 - Deterministic and order-independent
 - Format-independent: same files in ZIP vs 7z produce the same digest
-- More collision-resistant than `calculate_archive_crc` (sorted + hashed vs wrapping sum)
+- Offers better collision resistance than `calculate_archive_crc` (sorted + hashed vs wrapping sum), though still CRC32-based and not cryptographically strong
 - Used by AdvancedDeduplicator for content-identity matching
+
+---
+
+#### `Archive::detect_multipart(&self) -> Result<(bool, Vec<PathBuf>)>`
+
+Detect if this archive is part of a multi-part archive set. Returns `(is_multipart, part_files)` where `part_files` is the sorted list of all detected parts.
+
+---
+
+#### `Archive::is_solid(&self) -> Result<bool>`
+
+Check if archive uses solid compression (files compressed together as a single stream). Supported for RAR/RAR5 and 7z; returns `false` for ZIP and TAR.
+
+---
+
+#### `Archive::has_recovery_record(&self) -> Result<bool>`
+
+Check if archive has recovery records for repairing corruption. Currently supported for RAR/RAR5 only; returns `false` for other formats.
+
+---
+
+#### `Archive::recovery_percentage(&self) -> Result<Option<u8>>`
+
+Get recovery record percentage. Returns `Some(percentage)` when recovery records are present (RAR/RAR5), `None` otherwise.
+
+---
+
+#### `Archive::list_files_for_limits(&self) -> Result<Vec<ArchiveEntry>>`
+
+List files, returning an owned `Vec` instead of a borrowed slice. Intended for use in safety-limit checks where the caller needs to own the entries for further processing.
+
+---
+
+#### `Archive::calculate_manifest_summary(&self) -> Result<(String, u64)>`
+
+Calculate a manifest summary for the archive. Returns a tuple of `(manifest_digest, total_uncompressed_size)`.
+
+---
+
+#### `Archive::check_symlinks(&self) -> Result<Vec<ArchiveWarning>>`
+
+Scan the archive for symlink and hard-link entries. Returns a list of `ArchiveWarning` values describing any link entries found. Useful for pre-extraction security auditing.
 
 ---
 
@@ -265,7 +363,7 @@ archive.extract_file(
 - `options` - Extraction options including destination directory, password, overwrite, etc.
 
 **Errors:**
-- `ArchiveError::Format` - File not found in archive
+- File not found in archive: the exact error variant is backend-dependent (`ArchiveError::Format` for most backends, `ArchiveError::Io` for some)
 - Other errors same as `extract_all()`
 
 ---
@@ -290,13 +388,29 @@ archive.extract_filtered(
 ```
 
 **Type Parameters:**
-- `F: Fn(&ArchiveEntry) -> bool + Send + Sync`
+- `F: Fn(&ArchiveEntry) -> bool + Sync`
 
 **Parameters:**
 - `predicate` - Function returning `true` for files to extract
 - `options` - Extraction configuration
 
-**Performance:** Automatically uses parallel extraction for 4+ files
+**Performance:** Currently uses parallel extraction (via rayon) when 4 or more files match and the archive is not solid. This threshold is a heuristic and may change.
+
+---
+
+#### `Archive::extract_files(&self, paths: &[&str], options: ExtractionOptions) -> Result<()>`
+
+Extract multiple files by their paths within the archive.
+
+**Performance:** Currently uses parallel extraction (via rayon) when 4 or more files are selected and the archive is not solid. This threshold is a heuristic and may change in future versions.
+
+---
+
+#### `Archive::extract_by_ids(&self, ids: &[usize], options: ExtractionOptions) -> Result<()>`
+
+Extract multiple files by their sequential entry IDs (0-based, as returned by `list_files()`). Useful when entries have already been looked up by ID rather than path.
+
+**Performance:** Same parallel extraction heuristic as `extract_files()`.
 
 ---
 
@@ -316,7 +430,7 @@ println!("Config: {}", text);
 
 **Returns:** File contents as byte vector
 
-**Note:** Returns bytes directly in memory. No temporary file is used.
+**Note:** Most backends extract directly to memory. The UnRAR backend creates a temporary directory, extracts the file to disk, then reads it back into memory.
 
 ---
 
@@ -342,7 +456,259 @@ while let Ok(n) = stream.read(&mut buffer) {
 
 **Returns:** `StreamingExtractor` implementing `std::io::Read`
 
-**Memory Usage:** Processes file in chunks, ~100MB max memory usage
+**Memory Usage:** Memory usage depends on backend: libarchive (TAR family) truly streams with bounded memory. ZIP (Piz), ZIP (ZipReader), 7z (SevenZ), and RAR (UnRAR) backends buffer the full entry in memory before wrapping in a `StreamingExtractor`.
+
+---
+
+### Creation
+
+#### `Archive::create(path: impl AsRef<Path>, options: CompressionOptions) -> Result<Archive>`
+
+Create a new archive for writing. The returned handle is in Write mode. Fails if the output file already exists.
+
+**Supported formats:** ZIP (via zip crate), TAR, TAR.GZ, TAR.BZ2, TAR.XZ, 7z (via libarchive).
+
+**Example:**
+```rust
+use unified_archive::{Archive, ArchiveFormat, CompressionOptions};
+
+let options = CompressionOptions::new(ArchiveFormat::Zip);
+let mut archive = Archive::create("output.zip", options)?;
+archive.add_file_from_data("hello.txt", b"Hello, world!")?;
+archive.finish()?;
+# Ok::<(), unified_archive::ArchiveError>(())
+```
+
+---
+
+#### `Archive::add_file_from_data(&mut self, path: &str, data: &[u8]) -> Result<()>`
+
+Add a file to the archive from in-memory byte data. Only available in Write mode.
+
+---
+
+#### `Archive::add_file_from_path(&mut self, path: impl AsRef<Path>) -> Result<()>`
+
+Add a file from a filesystem path. The file is stored with its original filename.
+
+---
+
+#### `Archive::add_file_from_path_as(&mut self, fs_path: impl AsRef<Path>, archive_path: &str) -> Result<()>`
+
+Add a file from a filesystem path with a custom path within the archive.
+
+---
+
+#### `Archive::add_directory(&mut self, path: &str) -> Result<()>`
+
+Add an empty directory entry to the archive. Only available in Write mode.
+
+---
+
+#### `Archive::add_directory_recursive(&mut self, path: impl AsRef<Path>) -> Result<()>`
+
+Add a directory and all its contents recursively to the archive.
+
+---
+
+#### `Archive::finish(self) -> Result<()>`
+
+Finalize and close the archive. Must be called for Write mode archives to flush pending data. No-op for Read mode.
+
+---
+
+#### `CompressionOptions`
+
+```rust
+pub struct CompressionOptions {
+    pub format: ArchiveFormat,
+    pub level: CompressionLevel,
+    pub password: Option<String>,
+    pub split_size: Option<u64>,
+    pub progress: Option<Box<dyn ProgressCallback>>,
+}
+```
+
+Construct with `CompressionOptions::new(format)` or `CompressionOptions::builder(format)`. Default level is `CompressionLevel::Normal`.
+
+#### `CompressionOptions::builder(format: ArchiveFormat) -> Self`
+
+Alias for `new()`. Creates a `CompressionOptions` with defaults for the given format.
+
+#### `CompressionOptions::format(&self) -> ArchiveFormat`
+
+Get the target archive format.
+
+#### `CompressionLevel`
+
+```rust
+pub enum CompressionLevel {
+    Store, Fastest, Fast, Normal, Maximum, Ultra,
+}
+```
+
+---
+
+### Modification
+
+#### `Archive::modify(path: impl AsRef<Path>) -> Result<Archive>`
+
+Open an existing archive for modification. Changes are tracked in memory and applied when `commit_changes()` is called. Uses a copy-on-write strategy internally.
+
+**Supported formats:** ZIP, 7z. RAR is read-only; TAR is not yet supported.
+
+---
+
+#### `Archive::modify_with_options(path: impl AsRef<Path>, options: ModificationOptions) -> Result<Archive>`
+
+Open an existing archive for modification with explicit options. Same as `modify()` but allows configuring backup behavior and metadata preservation up front.
+
+---
+
+#### `Archive::add_entry(&mut self, path: &str, data: &[u8]) -> Result<()>`
+
+Track a new file entry for addition. Only available in Modify mode (use `add_file_from_data()` in Write mode).
+
+---
+
+#### `Archive::remove_entry(&mut self, path: &str) -> Result<()>`
+
+Mark an entry for removal. Applied when `commit_changes()` is called.
+
+---
+
+#### `Archive::replace_entry(&mut self, path: &str, data: &[u8]) -> Result<()>`
+
+Convenience method: removes the old entry and adds a new one with the same path and new data.
+
+---
+
+#### `Archive::add_directory_entry(&mut self, path: &str) -> Result<()>`
+
+Track a new empty directory entry for addition. Only available in Modify mode.
+
+---
+
+#### `Archive::pending_operations(&self) -> usize`
+
+Get the number of pending modification operations (additions, removals, replacements) that will be applied on `commit_changes()`.
+
+---
+
+#### `Archive::clear_operations(&mut self)`
+
+Discard all pending modification operations without committing them.
+
+---
+
+#### `Archive::clear_entries(&mut self) -> Result<()>`
+
+Mark all existing entries for removal. After `commit_changes()`, the archive will contain only entries added after this call.
+
+---
+
+#### `Archive::commit_changes(self) -> Result<()>`
+
+Apply all tracked modifications (additions, removals, replacements). Creates a new archive, copies non-removed entries, adds new entries, then replaces the original file.
+
+---
+
+#### `ModificationOptions`
+
+```rust
+pub struct ModificationOptions {
+    pub preserve_metadata: bool,
+    pub create_backup: bool,
+    pub backup_suffix: String,
+    pub compression: Option<CompressionOptions>,
+}
+```
+
+#### `ModificationOptions::new() -> Self`
+
+Create default modification options (no backup, metadata preservation enabled, default compression).
+
+#### `ModificationOptions::with_backup(self, suffix: &str) -> Self`
+
+Enable backup creation before committing changes. The original archive is copied to `<path>.<suffix>` before the atomic rename.
+
+#### `ModificationOptions::without_metadata_preservation(self) -> Self`
+
+Disable metadata preservation during the copy phase. When enabled (default), `commit_changes()` preserves timestamps and Unix permissions on retained entries.
+
+#### `compression: Option<CompressionOptions>`
+
+Override compression settings for the recreated archive. When `None` (default), uses format defaults (`CompressionLevel::Normal`, no password). Set this to preserve the original archive's compression level or password across modifications.
+
+---
+
+### SFX (Self-Extracting Archives)
+
+#### `Archive::detect_sfx(path: impl AsRef<Path>) -> Result<SfxDetectionResult>`
+
+Detect if a file is a self-extracting archive. Uses 3-stage detection: executable validation, signature scan, archive validation. Scans first 1MB only.
+
+**Performance:** Typical detection 15-70ms; non-executable files <1ms (early exit).
+
+---
+
+#### `Archive::open_sfx(path: impl AsRef<Path>) -> Result<Archive>`
+
+Convenience method: detect SFX and open the embedded archive in one call. Equivalent to `detect_sfx()` + `open_at_offset()`.
+
+> **Status:** Because `open_at_offset()` is not yet implemented, positive detections will fail with `ArchiveError::Unsupported`. Use `detect_sfx()` for detection-only workflows.
+
+---
+
+#### `Archive::open_at_offset(path: impl AsRef<Path>, offset: u64) -> Result<Archive>`
+
+Open an archive that starts at a specific byte offset within a file. Primarily for SFX archives. **Status:** not yet implemented; returns `ArchiveError::Unsupported`.
+
+---
+
+#### `Archive::extract_stub(path: impl AsRef<Path>, detection: &SfxDetectionResult) -> Result<Vec<u8>>`
+
+Extract the executable stub from an SFX archive for security analysis. Maximum stub size: 50MB.
+
+---
+
+#### `SfxDetectionResult`
+
+```rust
+pub struct SfxDetectionResult {
+    pub is_sfx: bool,
+    pub archive_format: Option<ArchiveFormat>,
+    pub data_offset: Option<u64>,
+    pub stub_type: Option<StubType>,
+    pub confidence: f32, // 0.0-1.0
+}
+```
+
+Helper methods: `not_sfx()`, `detected(stub_type, format, offset)`, `probable(...)`, `is_confirmed()`, `summary()`.
+
+---
+
+#### `StubType`
+
+```rust
+pub enum StubType {
+    WindowsPE,        // Windows PE (.exe)
+    LinuxELF,         // Linux/BSD ELF
+    MacOSMachO,       // macOS Mach-O
+    ScriptInterpreter, // Shebang (#!) scripts
+    Unknown,
+}
+```
+
+##### Methods
+
+**`StubType::detect(bytes: &[u8]) -> Result<StubType>`** -- Classify executable format from the leading bytes of a file. Returns `StubType::Unknown` (not an error) when the bytes don't match any recognized format, allowing callers to proceed with heuristic signature scanning.
+
+**`StubType::description(&self) -> &'static str`** -- Human-readable description (e.g., `"Windows PE executable"`).
+
+**`StubType::is_native(&self) -> bool`** -- `true` if this stub type typically runs on the current platform.
+
+**`StubType::is_known(&self) -> bool`** -- `true` for any variant except `Unknown`.
 
 ---
 
@@ -400,6 +766,10 @@ pub struct ArchiveEntry {
 
 ### Methods
 
+#### `ArchiveEntry::new(path: String, id: usize) -> Self`
+
+Create a new `ArchiveEntry` with the given path and sequential ID. All optional fields default to `None`/`false`.
+
 #### `ArchiveEntry::is_directory(&self) -> bool`
 
 Check if this entry is a directory.
@@ -407,6 +777,14 @@ Check if this entry is a directory.
 #### `ArchiveEntry::is_file(&self) -> bool`
 
 Check if this entry is a regular file.
+
+#### `ArchiveEntry::is_symlink(&self) -> bool`
+
+Check if this entry is a symbolic link.
+
+#### `ArchiveEntry::is_hardlink(&self) -> bool`
+
+Check if this entry is a hard link.
 
 #### `ArchiveEntry::compression_ratio(&self) -> Option<f64>`
 
@@ -435,6 +813,36 @@ pub enum ArchiveFormat {
 }
 ```
 
+### Methods
+
+#### `ArchiveFormat::detect(path: &Path) -> Result<ArchiveFormat>`
+
+Detect the archive format of a file by reading its magic bytes.
+
+#### `ArchiveFormat::detect_from_bytes(magic: &[u8]) -> Result<ArchiveFormat>`
+
+Detect the archive format from a byte slice of magic bytes (header data).
+
+#### `ArchiveFormat::supports_compression(&self) -> bool`
+
+Whether this format supports configurable compression levels.
+
+#### `ArchiveFormat::supports_encryption(&self) -> bool`
+
+Whether this format supports password-based encryption.
+
+#### `ArchiveFormat::supports_multipart(&self) -> bool`
+
+Whether this format supports multi-part (split) archives.
+
+#### `ArchiveFormat::can_modify(&self) -> bool`
+
+Whether this format supports in-place modification (add/remove entries).
+
+#### `ArchiveFormat::extensions(&self) -> &[&str]`
+
+Get common file extensions for this format.
+
 ---
 
 ## ExtractionOptions
@@ -452,13 +860,13 @@ pub struct ExtractionOptions {
     /// Overwrite existing files (default: false, fails with error if files exist)
     pub overwrite: bool,
 
-    /// Preserve file permissions (Unix mode bits) - libarchive only
+    /// Preserve file permissions (Unix mode bits) — where supported by backend
     pub preserve_permissions: bool,
 
-    /// Preserve file timestamps (modified, created, accessed) - libarchive only
+    /// Preserve file timestamps (modified, created, accessed) — where supported by backend
     pub preserve_times: bool,
 
-    /// Verify CRC32 during extraction (Piz and SevenZ backends)
+    /// Verify CRC32 during extraction — supported by backends that expose per-entry CRC32
     pub verify_crc32: bool,
 
     /// Resource limits for extraction (zip bomb protection)
@@ -494,7 +902,7 @@ ExtractionOptions {
 |-------|-------------|
 | `password` | Password for encrypted archives. Used when reopening archive for extraction. |
 | `overwrite` | If `false` (default), extraction fails with an error listing existing files. |
-| `verify_crc32` | Enables CRC32 verification. Supported by Piz (ZIP) and SevenZ backends. RAR has built-in verification. |
+| `verify_crc32` | Enables CRC32 verification where supported by the backend. RAR performs built-in verification regardless of this flag. |
 | `limits` | Zip bomb protection. See `ExtractionLimits` for details. |
 
 ### ExtractionLimits
@@ -503,14 +911,26 @@ ExtractionOptions {
 pub struct ExtractionLimits {
     /// Maximum total uncompressed size (default: 10 GB)
     pub max_total_size: u64,
-    /// Maximum single file size (default: 4 GB)
+    /// Maximum single file size (default: 1 GB = 1,073,741,824 bytes)
     pub max_file_size: u64,
-    /// Maximum compression ratio (default: 100.0)
+    /// Maximum compression ratio (default: 1000.0)
     pub max_compression_ratio: f64,
     /// Maximum number of entries (default: 100,000)
     pub max_entry_count: usize,
+    /// Maximum mmap size. None uses platform default (4 GB on 64-bit, 100 MB on 32-bit).
+    pub max_mmap_size: Option<u64>,
 }
 ```
+
+### Methods
+
+#### `ExtractionLimits::unlimited() -> Self`
+
+Create limits with all thresholds set to their maximum values. Use with caution -- disables all zip-bomb protection.
+
+#### `ExtractionLimits::with_max_mmap_size(self, size: u64) -> Self`
+
+Builder-style method that sets the maximum memory-map size for backends (such as Piz) that memory-map the archive file. Returns `self` for chaining.
 
 ---
 
@@ -525,7 +945,7 @@ pub trait ProgressCallback: Send + Sync {
 ```
 
 > **Note:** `total` is `Option<u64>` because some backends (e.g., libarchive streaming)
-> cannot determine total size in advance.
+> cannot determine total size in advance. See `specs/001-unified-archive/contracts/progress.md` for the full progress reporting contract.
 
 ### Example Implementation
 
@@ -535,16 +955,22 @@ struct MyProgress {
 }
 
 impl ProgressCallback for MyProgress {
-    fn on_progress(&mut self, current: u64, total: u64) -> ControlFlow<()> {
-        let percent = (current * 100) / total;
+    fn on_progress(&mut self, current: u64, total: Option<u64>) -> ControlFlow<()> {
+        if let Some(total) = total {
+            let percent = (current * 100) / total;
 
-        if percent != self.last_percent {
-            println!("Progress: {}%", percent);
-            self.last_percent = percent;
+            if percent != self.last_percent {
+                println!("Progress: {}%", percent);
+                self.last_percent = percent;
+            }
+        } else {
+            // Total unknown (e.g., libarchive streaming) — show bytes only
+            println!("Processed: {} bytes", current);
         }
 
         // Return Continue to keep extracting, or Break to cancel
-        if some_cancel_condition {
+        // Example: cancel after processing 50MB
+        if current > 50 * 1024 * 1024 {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
@@ -564,7 +990,8 @@ pub struct ValidationReport {
     /// Total number of entries checked
     pub total_entries: usize,
 
-    /// Number of entries successfully validated (= total_entries - failed.len())
+    /// Number of entries that passed validation. This is the count of entries
+    /// whose integrity check succeeded (CRC32 match or error-free read).
     pub validated: usize,
 
     /// Paths of entries that failed validation
@@ -598,7 +1025,7 @@ pub enum ArchiveError {
     /// Codec not available (requires installation)
     CodecUnavailable { codec: String, format: ArchiveFormat, install_instructions: String },
 
-    /// Operation not yet implemented (format-agnostic)
+    /// Operation invalid in the current mode or context (format-agnostic)
     UnsupportedOperation { operation: String, reason: String },
 
     /// Invalid path
@@ -623,6 +1050,92 @@ match Archive::open("file.rar") {
     Err(e) => eprintln!("Error: {}", e),
 }
 ```
+
+### Convenience Constructors
+
+Helper methods for constructing `ArchiveError` variants with ergonomic signatures.
+
+#### `ArchiveError::format(format: Option<ArchiveFormat>, message: impl Into<String>) -> Self`
+
+Create a `Format` error.
+
+#### `ArchiveError::io(operation: impl Into<String>, path: impl Into<PathBuf>, source: std::io::Error) -> Self`
+
+Create an `Io` error with structured context.
+
+#### `ArchiveError::corruption(path: impl Into<String>, details: impl Into<String>) -> Self`
+
+Create a `Corruption` error.
+
+#### `ArchiveError::password(message: impl Into<String>) -> Self`
+
+Create a `Password` error.
+
+#### `ArchiveError::invalid_path(path: impl Into<String>, reason: impl Into<String>) -> Self`
+
+Create an `InvalidPath` error.
+
+#### `ArchiveError::unsupported(operation: impl Into<String>, format: ArchiveFormat, details: Option<impl Into<String>>) -> Self`
+
+Create an `Unsupported` error for format-specific unsupported operations.
+
+#### `ArchiveError::codec_unavailable(codec: impl Into<String>, format: ArchiveFormat) -> Self`
+
+Create a `CodecUnavailable` error. Automatically embeds platform-specific installation instructions (macOS/Linux/Windows) for the requested codec.
+
+#### `ArchiveError::write_mode_only(operation: impl Into<String>) -> Self`
+
+Create an `UnsupportedOperation` error for attempts to read from a write-only archive.
+
+#### `ArchiveError::read_only_backend(operation: impl Into<String>) -> Self`
+
+Create an `UnsupportedOperation` error for read-only backends that do not support creation.
+
+---
+
+## ResultWithWarnings\<T\>
+
+Result type that carries both a value and non-fatal warnings emitted during an operation.
+
+```rust
+pub struct ResultWithWarnings<T> {
+    /// Operation result
+    pub value: T,
+    /// Warnings emitted during operation
+    pub warnings: Vec<ArchiveWarning>,
+}
+```
+
+### Methods
+
+#### `ResultWithWarnings::ok(value: T) -> Self`
+
+Create a result with no warnings.
+
+#### `ResultWithWarnings::with_warnings(value: T, warnings: Vec<ArchiveWarning>) -> Self`
+
+Create a result carrying one or more warnings.
+
+#### `ResultWithWarnings::add_warning(&mut self, warning: ArchiveWarning)`
+
+Append a warning to an existing result.
+
+---
+
+## ArchiveWarning
+
+Warning type emitted during archive operations. Indicates non-fatal conditions that may require user attention (e.g., skipped symlinks or hard links).
+
+```rust
+pub enum ArchiveWarning {
+    /// Symbolic link skipped during operation
+    SkippedSymlink { path: String, target: Option<String> },
+    /// Hard link skipped during operation
+    SkippedHardLink { path: String },
+}
+```
+
+Returned by `Archive::check_symlinks()` for pre-extraction security auditing.
 
 ---
 
@@ -665,15 +1178,92 @@ loop {
         Ok(0) => break, // EOF
         Ok(n) => {
             // Process n bytes from buffer
-            println!("Read {} bytes ({:.1}% complete)",
-                stream.bytes_read(),
-                stream.progress().unwrap_or(0.0) * 100.0
-            );
+            if let Some(pct) = stream.progress() {
+                println!("Read {} bytes ({:.1}% complete)",
+                    stream.bytes_read(),
+                    pct * 100.0
+                );
+            } else {
+                println!("Read {} bytes (total size unknown)",
+                    stream.bytes_read()
+                );
+            }
         },
         Err(e) => return Err(e.into()),
     }
 }
 ```
+
+---
+
+## Security Helpers
+
+### `check_extraction_safe(entries: &[ArchiveEntry], limits: &ExtractionLimits) -> Result<()>`
+
+Pre-extraction safety gate. Validates all entries against the provided limits before any I/O occurs. Checks entry count, individual file sizes, total uncompressed size, and compression ratios. Returns an error describing the first exceeded limit.
+
+### `sanitize_entry_path(entry_path: &str, dest: &Path) -> Result<PathBuf>`
+
+Sanitize an archive entry path to prevent path traversal (Zip Slip) attacks. Strips absolute prefixes, `..` components, and `.` components, then joins the result under `dest`. Returns the safe resolved path.
+
+### `validate_entry_path(entry_path: &str, dest: &Path) -> Result<PathBuf>`
+
+Pure validation of an entry path without filesystem side-effects. Like `sanitize_entry_path` but does not create directories. Use for conflict checking before extraction begins.
+
+### `verify_crc32(data: &[u8], expected_crc: Option<u32>, file_path: &str) -> Result<()>`
+
+Verify CRC32 of extracted data against an expected value. When `expected_crc` is `None`, the check succeeds unconditionally (no CRC to verify). Returns a `Corruption` error on mismatch.
+
+### `get_max_mmap_size() -> u64`
+
+Return the maximum memory-map size used by the Piz ZIP backend. Reads `UNIFIED_ARCHIVE_MAX_MMAP_SIZE` from the environment if set, otherwise returns the compile-time default.
+
+---
+
+## Stream Checksum Utilities
+
+### `StreamChecksum`
+
+```rust
+pub struct StreamChecksum {
+    /// CRC32 value from the stream (if available)
+    pub crc32: Option<u32>,
+    /// CRC64 value from the stream (if available, XZ only)
+    pub crc64: Option<u64>,
+    /// Uncompressed size from the stream metadata
+    pub uncompressed_size: Option<u64>,
+    /// Type of checksum found
+    pub check_type: CheckType,
+}
+```
+
+### `CheckType`
+
+```rust
+pub enum CheckType {
+    None,     // No checksum present
+    Crc32,    // CRC32 checksum
+    Crc64,    // CRC64 checksum
+    Sha256,   // SHA-256 checksum
+    Unknown,  // Unknown or unsupported checksum type
+}
+```
+
+### `extract_stream_checksum(path: impl AsRef<Path>) -> Result<StreamChecksum>`
+
+Auto-detect format via magic bytes and extract the stream-level checksum. Supports GZIP, BZIP2, and XZ. Prefers magic-byte detection over file extension to handle mislabeled files.
+
+### `extract_gzip_stream_crc(path: impl AsRef<Path>) -> Result<StreamChecksum>`
+
+Extract CRC32 and uncompressed size from a GZIP file's 8-byte trailer (RFC 1952).
+
+### `extract_bzip2_stream_crc(path: impl AsRef<Path>) -> Result<StreamChecksum>`
+
+Extract the stream CRC32 from a BZIP2 file's end-of-stream marker. Scans the final 1 KB for the EOS magic.
+
+### `extract_xz_stream_check(path: impl AsRef<Path>) -> Result<StreamChecksum>`
+
+Extract the check type from an XZ stream header (bytes 6-7). Reports the check algorithm (None, CRC32, CRC64, SHA-256) without parsing the full check value.
 
 ---
 
@@ -688,15 +1278,46 @@ pub type Result<T> = std::result::Result<T, ArchiveError>;
 
 ## Re-exports
 
-The library re-exports commonly used types:
+The library re-exports commonly used types at the crate root:
 
 ```rust
-pub use crate::archive::{Archive, ArchiveFormat};
-pub use crate::entry::{ArchiveEntry, EntryType};
+// Core types
+pub use crate::archive::Archive;
+pub use crate::format::ArchiveFormat;
+pub use crate::entry::{ArchiveEntry, EntryType, FileAttributes};
 pub use crate::error::{ArchiveError, Result};
-pub use crate::options::{ExtractionOptions, ProgressCallback, ValidationReport};
+
+// Options and callbacks
+pub use crate::options::{
+    CompressionLevel, CompressionOptions, EntryFilter,
+    ExtractionOptions, ProgressCallback,
+};
+pub use crate::modification::ModificationOptions;
+
+// Security and limits
+pub use crate::security::{
+    ExtractionLimits, check_extraction_safe, sanitize_entry_path,
+    validate_entry_path, verify_crc32,
+};
+
+// Inspection and streaming
+pub use crate::inspection::ValidationReport;
 pub use crate::streaming::StreamingExtractor;
+
+// SFX detection
+pub use crate::sfx::{SfxDetectionResult, StubType};
+
+// Stream-level checksum utilities
+pub use crate::stream_crc::{
+    CheckType, StreamChecksum, extract_bzip2_stream_crc,
+    extract_gzip_stream_crc, extract_stream_checksum,
+    extract_xz_stream_check,
+};
 ```
+
+### Backend Modules (Advanced)
+
+The `ffi` module is public and exposes per-backend wrapper types (`UnrarArchive`, `LibarchiveArchive`, `PizArchive`, `SevenZArchive`, `ZipArchive`, `ZipWriter`) along with low-level binding modules (`ffi::unrar`, `ffi::libarchive`). These types are **not** re-exported at the crate root and are considered implementation details. Most consumers should use the high-level `Archive` facade documented above. The backend types are available for advanced use cases that require direct backend access (e.g., accessing backend-specific metadata not exposed through the unified API). Refer to the rustdoc on each backend module for method signatures and usage.
 
 ---
 
@@ -725,18 +1346,18 @@ unified-archive = { version = "0.1.0", default-features = false }
 - UnRAR uses 4-byte wchar_t (UTF-32)
 
 ### Windows
-- libarchive bundled automatically
+- Not yet tested on Windows; macOS is the primary platform, Linux secondary
 - UnRAR uses 2-byte wchar_t (UTF-16)
-- Not yet tested - may require adjustments
+- May require adjustments for libarchive linkage and path handling
 
 ---
 
 ## Performance Tips
 
-1. **Parallel Extraction**: `extract_filtered()` automatically uses parallel extraction for 4+ files
-2. **Streaming**: Use `extract_to_stream()` for large files to minimize memory usage
-3. **CRC32 Overhead**: For ZIP/7z, `list_files()` computes CRC32 by reading data - cache results if calling multiple times
-4. **Iterator Exhaustion**: For RAR, reopen archive between operations to avoid iterator exhaustion
+1. **Parallel Extraction**: `extract_filtered()`, `extract_files()`, and `extract_by_ids()` currently use parallel extraction (rayon) for 4+ non-solid files. This threshold is a heuristic and may change.
+2. **Streaming**: Use `extract_to_stream()` for large files to minimize memory usage (bounded-memory streaming is libarchive-only; other backends buffer the full entry in memory)
+3. **Listing Cache**: `list_files()` results are cached after the first call; subsequent calls return the cached slice at no cost
+4. **RAR Iterator Exhaustion**: The RAR backend may need to reopen the archive when switching between listing and extraction, or when extracting individual files in sequence. This is handled internally; no caller action is needed in most cases
 
 ---
 
@@ -745,6 +1366,10 @@ unified-archive = { version = "0.1.0", default-features = false }
 ### Extract with Progress
 
 ```rust
+use unified_archive::ExtractionOptions;
+use std::path::PathBuf;
+use std::ops::ControlFlow;
+
 let options = ExtractionOptions {
     destination: PathBuf::from("./output"),
     progress: Some(Box::new(|current: u64, total: Option<u64>| {
@@ -784,7 +1409,7 @@ let data = archive.extract_to_memory("readme.txt")?;
 let text = String::from_utf8(data)
     .map_err(|_| ArchiveError::Format {
         format: None,
-        details: "Invalid UTF-8".to_string()
+        message: "Invalid UTF-8".to_string()
     })?;
 
 println!("{}", text);
@@ -792,5 +1417,5 @@ println!("{}", text);
 
 ---
 
-**Last Updated**: 2025-11-01
+**Last Updated**: 2026-04-13
 **Version**: 0.1.0

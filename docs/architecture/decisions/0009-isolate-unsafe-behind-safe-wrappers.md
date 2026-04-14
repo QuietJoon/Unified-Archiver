@@ -1,4 +1,6 @@
-# ADR: Isolate Unsafe Behind Safe Wrappers
+# AD: Isolate Unsafe Behind Safe Wrappers
+
+Status: Accepted
 
 ## Context and Problem Statement
 RAR and libarchive require native FFI with unsafe code, but the crate wants a stable Rust-facing API and auditable safety boundaries. Allowing unsafe to leak across the crate makes auditing difficult and increases the risk of soundness bugs.

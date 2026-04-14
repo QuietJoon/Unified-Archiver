@@ -1,4 +1,6 @@
-# ADR: Safety Gates Before Extraction
+# AD: Safety Gates Before Extraction
+
+Status: Accepted
 
 ## Context and Problem Statement
 Archive extraction is security-sensitive. Path traversal attacks, zip bombs, and overwrite conflicts are real risks that must be mitigated consistently regardless of which backend performs the actual extraction.
