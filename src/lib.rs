@@ -111,7 +111,7 @@
 //! let options = CompressionOptions {
 //!     format: ArchiveFormat::Zip,
 //!     level: CompressionLevel::Normal,
-//!     password: Some("secret".to_string()),
+//!     password: Some("secret".to_string().into()),
 //!     ..Default::default()
 //! };
 //!
@@ -216,7 +216,7 @@ pub mod external;
 pub use archive::Archive;
 pub use entry::{ArchiveEntry, EntryType, FileAttributes};
 pub use error::{ArchiveError, Result};
-pub use format::ArchiveFormat;
+pub use format::{ArchiveFormat, FormatCapabilities, Support};
 pub use inspection::ValidationReport;
 pub use modification::ModificationOptions; // Phase 6: Archive modification
 pub use options::{

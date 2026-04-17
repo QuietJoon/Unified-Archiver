@@ -527,7 +527,7 @@ impl LibarchiveArchive {
                             Ok(s) => Some(s),
                             Err(_) => {
                                 archive_read_free(archive);
-                                return Err(ArchiveError::UnsupportedOperation {
+                                return Err(ArchiveError::OperationBlocked {
                                     operation: "extract_to_memory".to_string(),
                                     reason: format!(
                                         "Entry too large for memory: {} bytes",
@@ -544,7 +544,7 @@ impl LibarchiveArchive {
                     if let Some(size) = size_usize {
                         if buffer.try_reserve(size).is_err() {
                             archive_read_free(archive);
-                            return Err(ArchiveError::UnsupportedOperation {
+                            return Err(ArchiveError::OperationBlocked {
                                 operation: "extract_to_memory".to_string(),
                                 reason: format!("Failed to allocate {} bytes", size),
                             });
@@ -647,7 +647,7 @@ impl LibarchiveArchive {
                 }
                 _ => {
                     archive_write_free(archive);
-                    return Err(ArchiveError::UnsupportedOperation {
+                    return Err(ArchiveError::OperationBlocked {
                         operation: format!("create {:?}", format),
                         reason: "Format not supported for creation".to_string(),
                     });
@@ -722,8 +722,8 @@ impl LibarchiveArchive {
             }
 
             // Set password if provided
-            if let Some(ref password) = options.password {
-                let c_password = CString::new(password.as_str())
+            if let Some(password_str) = crate::options::password_as_str(&options.password) {
+                let c_password = CString::new(password_str)
                     .map_err(|_| ArchiveError::password("Password contains null byte"))?;
                 let pass_result = archive_write_set_passphrase(archive, c_password.as_ptr());
                 if pass_result != ARCHIVE_OK {
@@ -768,10 +768,7 @@ impl LibarchiveArchive {
     pub fn add_file_from_data(&mut self, archive_path: &str, data: &[u8]) -> Result<()> {
         let write_handle = self
             .write_handle
-            .ok_or_else(|| ArchiveError::UnsupportedOperation {
-                operation: "add_file_from_data".to_string(),
-                reason: "Archive not opened in write mode".to_string(),
-            })?;
+            .ok_or_else(|| ArchiveError::write_mode_only("add_file_from_data"))?;
 
         unsafe {
             // Create entry
@@ -866,10 +863,7 @@ impl LibarchiveArchive {
     ) -> Result<()> {
         let write_handle = self
             .write_handle
-            .ok_or_else(|| ArchiveError::UnsupportedOperation {
-                operation: "add_file_from_data_with_metadata".to_string(),
-                reason: "Archive not opened in write mode".to_string(),
-            })?;
+            .ok_or_else(|| ArchiveError::write_mode_only("add_file_from_data_with_metadata"))?;
 
         unsafe {
             let entry = archive_entry_new();
@@ -958,10 +952,7 @@ impl LibarchiveArchive {
     pub fn add_directory_entry(&mut self, archive_path: &str) -> Result<()> {
         let write_handle = self
             .write_handle
-            .ok_or_else(|| ArchiveError::UnsupportedOperation {
-                operation: "add_directory_entry".to_string(),
-                reason: "Archive not opened in write mode".to_string(),
-            })?;
+            .ok_or_else(|| ArchiveError::write_mode_only("add_directory_entry"))?;
 
         unsafe {
             let entry = archive_entry_new();
@@ -1057,10 +1048,7 @@ impl LibarchiveArchive {
 
         let write_handle = self
             .write_handle
-            .ok_or_else(|| ArchiveError::UnsupportedOperation {
-                operation: "add_file_from_path".to_string(),
-                reason: "Archive not opened in write mode".to_string(),
-            })?;
+            .ok_or_else(|| ArchiveError::write_mode_only("add_file_from_path"))?;
 
         unsafe {
             // Create entry

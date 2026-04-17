@@ -45,10 +45,10 @@ pub(crate) fn create_output_file(path: &Path, overwrite: bool) -> Result<File> {
     }
     options.open(path).map_err(|e| {
         if !overwrite && e.kind() == std::io::ErrorKind::AlreadyExists {
-            ArchiveError::UnsupportedOperation {
-                operation: "extract".to_string(),
-                reason: format!("Destination file already exists: {}", path.display()),
-            }
+            ArchiveError::operation_blocked(
+                "extract",
+                format!("Destination file already exists: {}", path.display()),
+            )
         } else {
             ArchiveError::io("create", path.to_path_buf(), e)
         }

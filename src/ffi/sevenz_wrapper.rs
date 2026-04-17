@@ -102,7 +102,7 @@ impl SevenZArchive {
                 .file_block_index
                 .get(index)
                 .and_then(|opt| opt.as_ref())
-                .map_or(false, |&block_idx| {
+                .is_some_and(|&block_idx| {
                     encrypted_blocks.get(block_idx).copied().unwrap_or(false)
                 });
 
@@ -409,7 +409,7 @@ impl SevenZArchive {
             if normalized_path == file_path {
                 let expected_size = entry.size;
                 if expected_size > usize::MAX as u64 {
-                    extraction_error = Some(ArchiveError::UnsupportedOperation {
+                    extraction_error = Some(ArchiveError::OperationBlocked {
                         operation: "extract_to_memory".to_string(),
                         reason: format!(
                             "Entry '{}' is too large to buffer in memory: {} bytes",
@@ -421,7 +421,7 @@ impl SevenZArchive {
 
                 let mut buffer = Vec::new();
                 if buffer.try_reserve(expected_size as usize).is_err() {
-                    extraction_error = Some(ArchiveError::UnsupportedOperation {
+                    extraction_error = Some(ArchiveError::OperationBlocked {
                         operation: "extract_to_memory".to_string(),
                         reason: format!(
                             "Unable to allocate {} bytes for entry '{}'",

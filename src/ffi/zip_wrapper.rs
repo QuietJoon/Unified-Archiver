@@ -25,9 +25,7 @@ fn open_entry_by_index<'a>(
     if let Some(pw) = password {
         zip.by_index_decrypt(index, pw.as_bytes()).map_err(|e| {
             if matches!(e, zip::result::ZipError::InvalidPassword) {
-                ArchiveError::Password {
-                    message: format!("Invalid password for ZIP entry {}", index),
-                }
+                ArchiveError::password(format!("Invalid password for ZIP entry {}", index))
             } else {
                 ArchiveError::format(
                     Some(ArchiveFormat::Zip),
@@ -54,9 +52,7 @@ fn open_entry_by_name<'a>(
     if let Some(pw) = password {
         zip.by_name_decrypt(name, pw.as_bytes()).map_err(|e| {
             if matches!(e, zip::result::ZipError::InvalidPassword) {
-                ArchiveError::Password {
-                    message: format!("Invalid password for ZIP entry '{}'", name),
-                }
+                ArchiveError::password(format!("Invalid password for ZIP entry '{}'", name))
             } else {
                 ArchiveError::format(
                     Some(ArchiveFormat::Zip),
@@ -208,14 +204,14 @@ impl ZipArchive {
         let mut zip_file = open_entry_by_name(&mut zip, file_path, self.password.as_deref())?;
 
         let size = zip_file.size();
-        let size_usize = usize::try_from(size).map_err(|_| ArchiveError::UnsupportedOperation {
+        let size_usize = usize::try_from(size).map_err(|_| ArchiveError::OperationBlocked {
             operation: "extract_to_memory".to_string(),
             reason: format!("Entry too large for memory: {} bytes", size),
         })?;
         let mut buffer = Vec::new();
         buffer
             .try_reserve(size_usize)
-            .map_err(|_| ArchiveError::UnsupportedOperation {
+            .map_err(|_| ArchiveError::OperationBlocked {
                 operation: "extract_to_memory".to_string(),
                 reason: format!("Failed to allocate {} bytes", size),
             })?;

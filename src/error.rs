@@ -38,8 +38,17 @@ pub enum ArchiveError {
         install_instructions: String,
     },
 
-    /// Operation not yet implemented (format-agnostic)
-    UnsupportedOperation { operation: String, reason: String },
+    /// Operation not available in the current archive mode (e.g. extracting from Write-mode)
+    WriteModeOnly { operation: String },
+
+    /// Backend does not support this operation (e.g. creation on read-only backend)
+    ReadOnlyBackend { operation: String },
+
+    /// Feature not yet implemented (deferred to future phase)
+    NotImplemented { operation: String, reason: String },
+
+    /// Operation blocked by resource limits, conflicts, or format constraints
+    OperationBlocked { operation: String, reason: String },
 
     /// Invalid path
     InvalidPath { path: String, reason: String },
@@ -63,7 +72,6 @@ pub(crate) mod ops {
     pub const REMOVE_ENTRY: &str = "remove_entry";
     pub const COMMIT_CHANGES: &str = "commit_changes";
     pub const ADD_DIRECTORY_ENTRY: &str = "add_directory_entry";
-    pub const CLEAR_ENTRIES: &str = "clear_entries";
 }
 
 impl std::error::Error for ArchiveError {
@@ -134,8 +142,33 @@ impl std::fmt::Display for ArchiveError {
                     codec, format, install_instructions
                 )
             }
-            ArchiveError::UnsupportedOperation { operation, reason } => {
-                write!(f, "Operation '{}' not implemented: {}", operation, reason)
+            ArchiveError::WriteModeOnly { operation } => {
+                write!(
+                    f,
+                    "Operation '{}' cannot be performed: archive is in write mode",
+                    operation
+                )
+            }
+            ArchiveError::ReadOnlyBackend { operation } => {
+                write!(
+                    f,
+                    "Operation '{}' cannot be performed: backend is read-only",
+                    operation
+                )
+            }
+            ArchiveError::NotImplemented { operation, reason } => {
+                write!(
+                    f,
+                    "Operation '{}' is not yet implemented: {}",
+                    operation, reason
+                )
+            }
+            ArchiveError::OperationBlocked { operation, reason } => {
+                write!(
+                    f,
+                    "Operation '{}' cannot be performed: {}",
+                    operation, reason
+                )
             }
             ArchiveError::InvalidPath { path, reason } => {
                 write!(f, "Invalid path '{}': {}", path, reason)
@@ -277,17 +310,31 @@ impl ArchiveError {
 
     /// Create error for attempting to read from a write-only archive
     pub fn write_mode_only(operation: impl Into<String>) -> Self {
-        Self::UnsupportedOperation {
+        Self::WriteModeOnly {
             operation: operation.into(),
-            reason: "Cannot extract from an archive in Write mode".to_string(),
         }
     }
 
     /// Create error for read-only backends that don't support creation
     pub fn read_only_backend(operation: impl Into<String>) -> Self {
-        Self::UnsupportedOperation {
+        Self::ReadOnlyBackend {
             operation: operation.into(),
-            reason: "This backend does not support archive creation".to_string(),
+        }
+    }
+
+    /// Create error for features not yet implemented
+    pub fn not_implemented(operation: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::NotImplemented {
+            operation: operation.into(),
+            reason: reason.into(),
+        }
+    }
+
+    /// Create error for operations blocked by resource limits, conflicts, or format constraints
+    pub fn operation_blocked(operation: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::OperationBlocked {
+            operation: operation.into(),
+            reason: reason.into(),
         }
     }
 }
@@ -511,11 +558,10 @@ mod tests {
     fn test_write_mode_only_error() {
         let err = ArchiveError::write_mode_only("extract_all");
         match &err {
-            ArchiveError::UnsupportedOperation { operation, reason } => {
+            ArchiveError::WriteModeOnly { operation } => {
                 assert_eq!(operation, "extract_all");
-                assert!(reason.contains("Write mode"));
             }
-            other => panic!("Expected UnsupportedOperation variant, got {:?}", other),
+            other => panic!("Expected WriteModeOnly variant, got {:?}", other),
         }
     }
 
@@ -523,11 +569,34 @@ mod tests {
     fn test_read_only_backend_error() {
         let err = ArchiveError::read_only_backend("create");
         match &err {
-            ArchiveError::UnsupportedOperation { operation, reason } => {
+            ArchiveError::ReadOnlyBackend { operation } => {
                 assert_eq!(operation, "create");
-                assert!(reason.contains("creation"));
             }
-            other => panic!("Expected UnsupportedOperation variant, got {:?}", other),
+            other => panic!("Expected ReadOnlyBackend variant, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_not_implemented_error() {
+        let err = ArchiveError::not_implemented("open_at_offset", "deferred to future phase");
+        match &err {
+            ArchiveError::NotImplemented { operation, reason } => {
+                assert_eq!(operation, "open_at_offset");
+                assert!(reason.contains("deferred"));
+            }
+            other => panic!("Expected NotImplemented variant, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_operation_blocked_error() {
+        let err = ArchiveError::operation_blocked("extract", "file too large");
+        match &err {
+            ArchiveError::OperationBlocked { operation, reason } => {
+                assert_eq!(operation, "extract");
+                assert!(reason.contains("too large"));
+            }
+            other => panic!("Expected OperationBlocked variant, got {:?}", other),
         }
     }
 
@@ -608,11 +677,39 @@ mod tests {
     }
 
     #[test]
-    fn test_display_unsupported_operation() {
+    fn test_display_write_mode_only() {
         let err = ArchiveError::write_mode_only("list_files");
         let msg = err.to_string();
         assert!(msg.contains("'list_files'"));
-        assert!(msg.contains("not implemented"));
+        assert!(msg.contains("cannot be performed"));
+        assert!(msg.contains("write mode"));
+    }
+
+    #[test]
+    fn test_display_read_only_backend() {
+        let err = ArchiveError::read_only_backend("create");
+        let msg = err.to_string();
+        assert!(msg.contains("'create'"));
+        assert!(msg.contains("cannot be performed"));
+        assert!(msg.contains("read-only"));
+    }
+
+    #[test]
+    fn test_display_not_implemented() {
+        let err = ArchiveError::not_implemented("open_at_offset", "deferred to phase 2");
+        let msg = err.to_string();
+        assert!(msg.contains("'open_at_offset'"));
+        assert!(msg.contains("not yet implemented"));
+        assert!(msg.contains("deferred to phase 2"));
+    }
+
+    #[test]
+    fn test_display_operation_blocked() {
+        let err = ArchiveError::operation_blocked("extract", "file too large");
+        let msg = err.to_string();
+        assert!(msg.contains("'extract'"));
+        assert!(msg.contains("cannot be performed"));
+        assert!(msg.contains("file too large"));
     }
 
     #[test]
@@ -645,6 +742,8 @@ mod tests {
             ArchiveError::unsupported("op", ArchiveFormat::Zip, None::<&str>),
             ArchiveError::write_mode_only("test"),
             ArchiveError::read_only_backend("test"),
+            ArchiveError::not_implemented("op", "reason"),
+            ArchiveError::operation_blocked("op", "reason"),
             ArchiveError::codec_unavailable("LZMA", ArchiveFormat::SevenZip),
         ];
         for err in &variants {
@@ -660,7 +759,7 @@ mod tests {
     #[test]
     fn test_debug_format_all_variants() {
         // Verify Debug is implemented and doesn't panic for all variants
-        let source = io::Error::new(io::ErrorKind::Other, "test");
+        let source = io::Error::other("test");
         let variants: Vec<ArchiveError> = vec![
             ArchiveError::io("op", "/path", source),
             ArchiveError::format(Some(ArchiveFormat::Zip), "msg"),
@@ -671,6 +770,8 @@ mod tests {
             ArchiveError::codec_unavailable("XZ", ArchiveFormat::Xz),
             ArchiveError::write_mode_only("op"),
             ArchiveError::read_only_backend("op"),
+            ArchiveError::not_implemented("op", "reason"),
+            ArchiveError::operation_blocked("op", "reason"),
         ];
         for err in &variants {
             let debug_str = format!("{:?}", err);

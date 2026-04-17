@@ -22,6 +22,7 @@ pub(crate) enum ArchiveMode {
 }
 
 /// Internal archive backend
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ArchiveBackend {
     Unrar(UnrarArchive),
     Piz(PizArchive),

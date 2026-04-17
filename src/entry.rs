@@ -278,9 +278,7 @@ mod tests {
     #[test]
     fn test_entry_type_clone_copy() {
         let t = EntryType::File;
-        let cloned = t.clone();
         let copied = t; // Copy
-        assert_eq!(t, cloned);
         assert_eq!(t, copied);
     }
 

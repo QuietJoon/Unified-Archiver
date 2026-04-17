@@ -49,7 +49,7 @@ impl PizArchive {
             .map_err(|e| ArchiveError::io("stat", self.path.clone(), e))?;
         let max_mmap = get_max_mmap_size();
         if metadata.len() > max_mmap {
-            return Err(ArchiveError::UnsupportedOperation {
+            return Err(ArchiveError::OperationBlocked {
                 operation: operation.to_string(),
                 reason: format!(
                     "ZIP file too large for memory mapping: {} bytes (max {} bytes). \
@@ -341,20 +341,12 @@ impl PizArchive {
             None
         };
 
-        let expected_size = usize::try_from(entry_metadata.size).map_err(|_| {
-            ArchiveError::UnsupportedOperation {
-                operation: "extract_to_memory".to_string(),
-                reason: format!(
-                    "Entry '{}' is too large to buffer in memory: {} bytes",
-                    file_path, entry_metadata.size
-                ),
-            }
-        })?;
+        let expected_size = entry_metadata.size;
 
         let mut buffer = Vec::new();
         buffer
             .try_reserve(expected_size)
-            .map_err(|_| ArchiveError::UnsupportedOperation {
+            .map_err(|_| ArchiveError::OperationBlocked {
                 operation: "extract_to_memory".to_string(),
                 reason: format!(
                     "Unable to allocate {} bytes for entry '{}'",

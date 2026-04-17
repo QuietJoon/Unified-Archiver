@@ -5,6 +5,37 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
+/// Level of support for a format capability
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Support {
+    /// Fully supported and tested
+    Full,
+    /// Partially supported (e.g., read works but write does not)
+    Partial,
+    /// Not supported
+    None,
+}
+
+/// Per-operation capabilities for an archive format
+///
+/// Encodes read vs. write support separately, so callers can distinguish
+/// "this format can decrypt but not encrypt" from "encryption is fully supported."
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FormatCapabilities {
+    /// Encryption support for reading/decryption
+    pub encryption_read: Support,
+    /// Encryption support for writing/creation
+    pub encryption_write: Support,
+    /// Multipart archive reading
+    pub multipart_read: Support,
+    /// Multipart archive creation
+    pub multipart_write: Support,
+    /// Archive modification (add/remove/replace entries)
+    pub modification: Support,
+    /// Compression support
+    pub compression: Support,
+}
+
 /// Supported archive formats
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveFormat {
@@ -156,30 +187,85 @@ impl ArchiveFormat {
         ))
     }
 
+    /// Per-operation capability report for this format
+    pub fn capabilities(&self) -> FormatCapabilities {
+        match self {
+            ArchiveFormat::Zip => FormatCapabilities {
+                encryption_read: Support::Full,
+                encryption_write: Support::Full,
+                multipart_read: Support::Partial, // libarchive; needs first volume
+                multipart_write: Support::None,
+                modification: Support::Full,
+                compression: Support::Full,
+            },
+            ArchiveFormat::SevenZip => FormatCapabilities {
+                encryption_read: Support::Full,
+                encryption_write: Support::None,
+                multipart_read: Support::None,
+                multipart_write: Support::None,
+                modification: Support::Full,
+                compression: Support::Full,
+            },
+            ArchiveFormat::Rar | ArchiveFormat::Rar5 => FormatCapabilities {
+                encryption_read: Support::Full,
+                encryption_write: Support::None,
+                multipart_read: Support::Full,
+                multipart_write: Support::None,
+                modification: Support::None,
+                compression: Support::Full,
+            },
+            ArchiveFormat::Tar => FormatCapabilities {
+                encryption_read: Support::None,
+                encryption_write: Support::None,
+                multipart_read: Support::None,
+                multipart_write: Support::None,
+                modification: Support::None,
+                compression: Support::None,
+            },
+            ArchiveFormat::TarGzip
+            | ArchiveFormat::TarBzip2
+            | ArchiveFormat::TarXz
+            | ArchiveFormat::Gzip
+            | ArchiveFormat::Bzip2
+            | ArchiveFormat::Xz => FormatCapabilities {
+                encryption_read: Support::None,
+                encryption_write: Support::None,
+                multipart_read: Support::None,
+                multipart_write: Support::None,
+                modification: Support::None,
+                compression: Support::Full,
+            },
+            ArchiveFormat::Iso => FormatCapabilities {
+                encryption_read: Support::None,
+                encryption_write: Support::None,
+                multipart_read: Support::None,
+                multipart_write: Support::None,
+                modification: Support::None,
+                compression: Support::None,
+            },
+        }
+    }
+
     /// Check if format supports compression
     pub fn supports_compression(&self) -> bool {
-        !matches!(self, ArchiveFormat::Tar | ArchiveFormat::Iso)
+        self.capabilities().compression != Support::None
     }
 
-    /// Check if format supports encryption
+    /// Check if format supports encryption (read or write)
     pub fn supports_encryption(&self) -> bool {
-        matches!(
-            self,
-            ArchiveFormat::SevenZip | ArchiveFormat::Zip | ArchiveFormat::Rar | ArchiveFormat::Rar5
-        )
+        let caps = self.capabilities();
+        caps.encryption_read != Support::None || caps.encryption_write != Support::None
     }
 
-    /// Check if format supports multi-part archives
+    /// Check if format supports multi-part archives (read or write)
     pub fn supports_multipart(&self) -> bool {
-        matches!(
-            self,
-            ArchiveFormat::SevenZip | ArchiveFormat::Zip | ArchiveFormat::Rar | ArchiveFormat::Rar5
-        )
+        let caps = self.capabilities();
+        caps.multipart_read != Support::None || caps.multipart_write != Support::None
     }
 
     /// Check if format supports modification
     pub fn can_modify(&self) -> bool {
-        matches!(self, ArchiveFormat::SevenZip | ArchiveFormat::Zip)
+        self.capabilities().modification != Support::None
     }
 
     /// Get file extensions for this format
@@ -208,9 +294,7 @@ mod tests {
     use std::io::Write;
 
     /// Helper: write bytes to a temp file and return the path
-    fn temp_file_with_bytes(name: &str, bytes: &[u8]) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join("unified_archive_format_tests");
-        fs::create_dir_all(&dir).unwrap();
+    fn temp_file_with_bytes(dir: &std::path::Path, name: &str, bytes: &[u8]) -> std::path::PathBuf {
         let path = dir.join(name);
         let mut f = fs::File::create(&path).unwrap();
         f.write_all(bytes).unwrap();
@@ -347,87 +431,87 @@ mod tests {
 
     #[test]
     fn test_detect_tar_gz_by_extension() {
+        let tmp = tempfile::tempdir().unwrap();
         let gzip_bytes: &[u8] = &[0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00];
-        let path = temp_file_with_bytes("test_detect.tar.gz", gzip_bytes);
+        let path = temp_file_with_bytes(tmp.path(), "test_detect.tar.gz", gzip_bytes);
         assert_eq!(
             ArchiveFormat::detect(&path).unwrap(),
             ArchiveFormat::TarGzip
         );
-        fs::remove_file(&path).ok();
     }
 
     #[test]
     fn test_detect_tgz_by_extension() {
+        let tmp = tempfile::tempdir().unwrap();
         let gzip_bytes: &[u8] = &[0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00];
-        let path = temp_file_with_bytes("test_detect.tgz", gzip_bytes);
+        let path = temp_file_with_bytes(tmp.path(), "test_detect.tgz", gzip_bytes);
         assert_eq!(
             ArchiveFormat::detect(&path).unwrap(),
             ArchiveFormat::TarGzip
         );
-        fs::remove_file(&path).ok();
     }
 
     #[test]
     fn test_detect_plain_gzip_not_tar() {
+        let tmp = tempfile::tempdir().unwrap();
         let gzip_bytes: &[u8] = &[0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00];
-        let path = temp_file_with_bytes("test_detect.gz", gzip_bytes);
+        let path = temp_file_with_bytes(tmp.path(), "test_detect.gz", gzip_bytes);
         assert_eq!(ArchiveFormat::detect(&path).unwrap(), ArchiveFormat::Gzip);
-        fs::remove_file(&path).ok();
     }
 
     #[test]
     fn test_detect_tar_bz2_by_extension() {
+        let tmp = tempfile::tempdir().unwrap();
         let bz2_bytes = b"BZh91AY&SYextra";
-        let path = temp_file_with_bytes("test_detect.tar.bz2", bz2_bytes);
+        let path = temp_file_with_bytes(tmp.path(), "test_detect.tar.bz2", bz2_bytes);
         assert_eq!(
             ArchiveFormat::detect(&path).unwrap(),
             ArchiveFormat::TarBzip2
         );
-        fs::remove_file(&path).ok();
     }
 
     #[test]
     fn test_detect_tbz2_by_extension() {
+        let tmp = tempfile::tempdir().unwrap();
         let bz2_bytes = b"BZh91AY&SYextra";
-        let path = temp_file_with_bytes("test_detect.tbz2", bz2_bytes);
+        let path = temp_file_with_bytes(tmp.path(), "test_detect.tbz2", bz2_bytes);
         assert_eq!(
             ArchiveFormat::detect(&path).unwrap(),
             ArchiveFormat::TarBzip2
         );
-        fs::remove_file(&path).ok();
     }
 
     #[test]
     fn test_detect_tar_xz_by_extension() {
+        let tmp = tempfile::tempdir().unwrap();
         let xz_bytes: &[u8] = &[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00, 0x00, 0x00];
-        let path = temp_file_with_bytes("test_detect.tar.xz", xz_bytes);
+        let path = temp_file_with_bytes(tmp.path(), "test_detect.tar.xz", xz_bytes);
         assert_eq!(ArchiveFormat::detect(&path).unwrap(), ArchiveFormat::TarXz);
-        fs::remove_file(&path).ok();
     }
 
     #[test]
     fn test_detect_txz_by_extension() {
+        let tmp = tempfile::tempdir().unwrap();
         let xz_bytes: &[u8] = &[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00, 0x00, 0x00];
-        let path = temp_file_with_bytes("test_detect.txz", xz_bytes);
+        let path = temp_file_with_bytes(tmp.path(), "test_detect.txz", xz_bytes);
         assert_eq!(ArchiveFormat::detect(&path).unwrap(), ArchiveFormat::TarXz);
-        fs::remove_file(&path).ok();
     }
 
     // ── detect: extension-only fallback ──
 
     #[test]
     fn test_detect_tar_by_extension_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
         // A TAR file without ustar magic (e.g., old-style TAR or tiny file)
-        let path = temp_file_with_bytes("test_detect.tar", &[0u8; 512]);
+        let path = temp_file_with_bytes(tmp.path(), "test_detect.tar", &[0u8; 512]);
         assert_eq!(ArchiveFormat::detect(&path).unwrap(), ArchiveFormat::Tar);
-        fs::remove_file(&path).ok();
     }
 
     #[test]
     fn test_detect_iso_by_extension_fallback() {
-        let path = temp_file_with_bytes("test_detect.iso", &[0u8; 512]);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = temp_file_with_bytes(tmp.path(), "test_detect.iso", &[0u8; 512]);
         assert_eq!(ArchiveFormat::detect(&path).unwrap(), ArchiveFormat::Iso);
-        fs::remove_file(&path).ok();
     }
 
     // ── detect: error cases ──
@@ -440,18 +524,18 @@ mod tests {
 
     #[test]
     fn test_detect_file_too_small() {
-        let path = temp_file_with_bytes("tiny.zip", &[0x50]); // only 1 byte
+        let tmp = tempfile::tempdir().unwrap();
+        let path = temp_file_with_bytes(tmp.path(), "tiny.zip", &[0x50]); // only 1 byte
         let result = ArchiveFormat::detect(&path);
         assert!(result.is_err());
-        fs::remove_file(&path).ok();
     }
 
     #[test]
     fn test_detect_unknown_format_unknown_extension() {
-        let path = temp_file_with_bytes("test_detect.xyz", &[0u8; 512]);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = temp_file_with_bytes(tmp.path(), "test_detect.xyz", &[0u8; 512]);
         let result = ArchiveFormat::detect(&path);
         assert!(result.is_err());
-        fs::remove_file(&path).ok();
     }
 
     // ── Format capabilities ──
@@ -488,10 +572,11 @@ mod tests {
     #[test]
     fn test_supports_multipart() {
         assert!(ArchiveFormat::Zip.supports_multipart());
-        assert!(ArchiveFormat::SevenZip.supports_multipart());
         assert!(ArchiveFormat::Rar.supports_multipart());
         assert!(ArchiveFormat::Rar5.supports_multipart());
 
+        // 7z multipart reading is not implemented in the sevenz-rust2 backend
+        assert!(!ArchiveFormat::SevenZip.supports_multipart());
         assert!(!ArchiveFormat::Tar.supports_multipart());
         assert!(!ArchiveFormat::TarGzip.supports_multipart());
         assert!(!ArchiveFormat::Iso.supports_multipart());
@@ -546,9 +631,7 @@ mod tests {
     #[test]
     fn test_format_clone_and_copy() {
         let fmt = ArchiveFormat::Zip;
-        let cloned = fmt.clone();
         let copied = fmt; // Copy
-        assert_eq!(fmt, cloned);
         assert_eq!(fmt, copied);
     }
 
@@ -563,5 +646,109 @@ mod tests {
         assert_eq!(ArchiveFormat::Zip, ArchiveFormat::Zip);
         assert_ne!(ArchiveFormat::Zip, ArchiveFormat::Rar);
         assert_ne!(ArchiveFormat::Rar, ArchiveFormat::Rar5);
+    }
+
+    // ── FormatCapabilities ──
+
+    #[test]
+    fn test_zip_capabilities() {
+        let caps = ArchiveFormat::Zip.capabilities();
+        assert_eq!(caps.encryption_read, Support::Full);
+        assert_eq!(caps.encryption_write, Support::Full);
+        assert_eq!(caps.multipart_read, Support::Partial);
+        assert_eq!(caps.multipart_write, Support::None);
+        assert_eq!(caps.modification, Support::Full);
+        assert_eq!(caps.compression, Support::Full);
+    }
+
+    #[test]
+    fn test_sevenz_capabilities() {
+        let caps = ArchiveFormat::SevenZip.capabilities();
+        assert_eq!(caps.encryption_read, Support::Full);
+        assert_eq!(caps.encryption_write, Support::None);
+        assert_eq!(caps.modification, Support::Full);
+    }
+
+    #[test]
+    fn test_rar_read_only_capabilities() {
+        for fmt in [ArchiveFormat::Rar, ArchiveFormat::Rar5] {
+            let caps = fmt.capabilities();
+            assert_eq!(caps.encryption_read, Support::Full);
+            assert_eq!(caps.encryption_write, Support::None);
+            assert_eq!(caps.multipart_read, Support::Full);
+            assert_eq!(caps.modification, Support::None);
+        }
+    }
+
+    #[test]
+    fn test_tar_no_capabilities() {
+        let caps = ArchiveFormat::Tar.capabilities();
+        assert_eq!(caps.encryption_read, Support::None);
+        assert_eq!(caps.compression, Support::None);
+        assert_eq!(caps.modification, Support::None);
+    }
+
+    #[test]
+    fn test_compressed_tar_only_compression() {
+        for fmt in [
+            ArchiveFormat::TarGzip,
+            ArchiveFormat::TarBzip2,
+            ArchiveFormat::TarXz,
+        ] {
+            let caps = fmt.capabilities();
+            assert_eq!(caps.compression, Support::Full);
+            assert_eq!(caps.encryption_read, Support::None);
+            assert_eq!(caps.modification, Support::None);
+        }
+    }
+
+    #[test]
+    fn test_boolean_methods_delegate_to_capabilities() {
+        // Verify boolean methods stay in sync with capabilities()
+        let all_formats = [
+            ArchiveFormat::SevenZip,
+            ArchiveFormat::Zip,
+            ArchiveFormat::Rar,
+            ArchiveFormat::Rar5,
+            ArchiveFormat::Tar,
+            ArchiveFormat::TarGzip,
+            ArchiveFormat::TarBzip2,
+            ArchiveFormat::TarXz,
+            ArchiveFormat::Gzip,
+            ArchiveFormat::Bzip2,
+            ArchiveFormat::Xz,
+            ArchiveFormat::Iso,
+        ];
+        for fmt in &all_formats {
+            let caps = fmt.capabilities();
+            assert_eq!(
+                fmt.supports_compression(),
+                caps.compression != Support::None,
+                "{:?} compression mismatch",
+                fmt
+            );
+            assert_eq!(
+                fmt.supports_encryption(),
+                caps.encryption_read != Support::None
+                    || caps.encryption_write != Support::None,
+                "{:?} encryption mismatch",
+                fmt
+            );
+            assert_eq!(
+                fmt.can_modify(),
+                caps.modification != Support::None,
+                "{:?} modification mismatch",
+                fmt
+            );
+        }
+    }
+
+    #[test]
+    fn test_support_enum_traits() {
+        let s = Support::Full;
+        let copied = s; // Copy
+        assert_eq!(s, copied);
+        assert_ne!(Support::Full, Support::None);
+        assert!(!format!("{:?}", Support::Partial).is_empty());
     }
 }

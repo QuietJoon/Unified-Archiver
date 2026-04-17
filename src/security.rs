@@ -257,7 +257,7 @@ pub fn sanitize_entry_path(entry_path: &str, dest: &Path) -> Result<PathBuf> {
 pub fn check_extraction_safe(entries: &[ArchiveEntry], limits: &ExtractionLimits) -> Result<()> {
     // Check entry count
     if entries.len() > limits.max_entry_count {
-        return Err(ArchiveError::UnsupportedOperation {
+        return Err(ArchiveError::OperationBlocked {
             operation: "extract".to_string(),
             reason: format!(
                 "Too many entries: {} exceeds limit of {}",
@@ -278,7 +278,7 @@ pub fn check_extraction_safe(entries: &[ArchiveEntry], limits: &ExtractionLimits
         // Check individual file size
         if let Some(size) = entry.size {
             if size > limits.max_file_size {
-                return Err(ArchiveError::UnsupportedOperation {
+                return Err(ArchiveError::OperationBlocked {
                     operation: "extract".to_string(),
                     reason: format!(
                         "File '{}' too large: {} bytes exceeds limit of {} bytes",
@@ -295,7 +295,7 @@ pub fn check_extraction_safe(entries: &[ArchiveEntry], limits: &ExtractionLimits
             if compressed > 0 {
                 let ratio = uncompressed as f64 / compressed as f64;
                 if ratio > limits.max_compression_ratio {
-                    return Err(ArchiveError::UnsupportedOperation {
+                    return Err(ArchiveError::OperationBlocked {
                         operation: "extract".to_string(),
                         reason: format!(
                             "File '{}' has suspicious compression ratio: {:.1}:1 exceeds limit of {:.1}:1 (possible zip bomb)",
@@ -309,7 +309,7 @@ pub fn check_extraction_safe(entries: &[ArchiveEntry], limits: &ExtractionLimits
 
     // Check total size
     if total_uncompressed > limits.max_total_size {
-        return Err(ArchiveError::UnsupportedOperation {
+        return Err(ArchiveError::OperationBlocked {
             operation: "extract".to_string(),
             reason: format!(
                 "Total uncompressed size {} bytes exceeds limit of {} bytes",
@@ -356,7 +356,7 @@ pub fn check_archive_ratio(
 
     let ratio = total_uncompressed as f64 / archive_size as f64;
     if ratio > limits.max_compression_ratio {
-        return Err(ArchiveError::UnsupportedOperation {
+        return Err(ArchiveError::OperationBlocked {
             operation: "extract".to_string(),
             reason: format!(
                 "Archive compression ratio {:.1}:1 exceeds limit of {:.1}:1 (possible zip bomb)",

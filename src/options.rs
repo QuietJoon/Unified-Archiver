@@ -3,7 +3,18 @@
 use crate::ArchiveFormat;
 use crate::entry::ArchiveEntry;
 use crate::security::ExtractionLimits;
+use secstr::SecStr;
 use std::path::PathBuf;
+
+/// Extract password as `&str` from `Option<SecStr>`, if present.
+///
+/// Panics if the password bytes are not valid UTF-8 (passwords are always
+/// constructed from `&str` or `String` inputs, so this is safe).
+pub(crate) fn password_as_str(password: &Option<SecStr>) -> Option<&str> {
+    password
+        .as_ref()
+        .map(|s| std::str::from_utf8(s.unsecure()).expect("password is not valid UTF-8"))
+}
 
 /// Entry filter type alias for filtering archive entries
 pub type EntryFilter = Box<dyn Fn(&ArchiveEntry) -> bool + Send + Sync>;
@@ -14,7 +25,7 @@ pub struct ExtractionOptions {
     pub destination: PathBuf,
 
     /// Password for encrypted archives
-    pub password: Option<String>,
+    pub password: Option<SecStr>,
 
     /// Overwrite existing files (default: false, fails with error if files exist)
     pub overwrite: bool,
@@ -76,7 +87,7 @@ pub struct CompressionOptions {
     pub level: CompressionLevel,
 
     /// Password for encryption (if format supports it)
-    pub password: Option<String>,
+    pub password: Option<SecStr>,
 
     /// Split archive into parts (bytes per part)
     pub split_size: Option<u64>,
@@ -237,7 +248,7 @@ mod tests {
     fn test_extraction_options_custom() {
         let opts = ExtractionOptions {
             destination: PathBuf::from("/tmp/extract"),
-            password: Some("secret".into()),
+            password: Some("secret".to_string().into()),
             overwrite: true,
             preserve_permissions: false,
             preserve_times: false,
@@ -247,7 +258,7 @@ mod tests {
             progress: None,
         };
         assert_eq!(opts.destination, PathBuf::from("/tmp/extract"));
-        assert_eq!(opts.password.as_deref(), Some("secret"));
+        assert_eq!(password_as_str(&opts.password), Some("secret"));
         assert!(opts.overwrite);
         assert!(!opts.preserve_permissions);
         assert!(!opts.preserve_times);
@@ -283,7 +294,7 @@ mod tests {
     fn test_compression_options_with_password() {
         let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
         opts.password = Some("pw123".into());
-        assert_eq!(opts.password.as_deref(), Some("pw123"));
+        assert_eq!(password_as_str(&opts.password), Some("pw123"));
     }
 
     #[test]
@@ -308,9 +319,7 @@ mod tests {
     #[test]
     fn test_compression_level_clone_copy() {
         let level = CompressionLevel::Maximum;
-        let cloned = level.clone();
         let copied = level; // Copy
-        assert_eq!(level, cloned);
         assert_eq!(level, copied);
     }
 

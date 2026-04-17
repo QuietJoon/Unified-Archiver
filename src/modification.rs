@@ -93,30 +93,30 @@ impl Archive {
 
         // Check if format supports modification
         if !format.can_modify() {
-            return Err(ArchiveError::UnsupportedOperation {
-                operation: ops::MODIFY.to_string(),
-                reason: format!("{:?} archives do not support modification", format),
-            });
+            return Err(ArchiveError::operation_blocked(
+                ops::MODIFY,
+                format!("{:?} archives do not support modification", format),
+            ));
         }
 
         // Reject encrypted archives — password-aware modification not yet supported
         {
             let check = Archive::open(&path_buf)?;
             if check.is_encrypted()? {
-                return Err(ArchiveError::UnsupportedOperation {
-                    operation: ops::MODIFY.to_string(),
-                    reason: "Encrypted archives cannot be modified (password-aware modification not yet supported)".to_string(),
-                });
+                return Err(ArchiveError::operation_blocked(
+                    ops::MODIFY,
+                    "Encrypted archives cannot be modified (password-aware modification not yet supported)",
+                ));
             }
         }
 
         // Open for reading to validate
         let backend = match format {
             ArchiveFormat::Rar | ArchiveFormat::Rar5 => {
-                return Err(ArchiveError::UnsupportedOperation {
-                    operation: ops::MODIFY.to_string(),
-                    reason: "RAR archives are read-only".to_string(),
-                });
+                return Err(ArchiveError::operation_blocked(
+                    ops::MODIFY,
+                    "RAR archives are read-only",
+                ));
             }
             _ => {
                 use crate::ffi::libarchive_wrapper::LibarchiveArchive;
@@ -165,20 +165,19 @@ impl Archive {
     /// In Write mode, use `add_file_from_data()` instead.
     pub fn add_entry(&mut self, path: &str, data: &[u8]) -> Result<()> {
         if self.mode != ArchiveMode::Modify {
-            return Err(ArchiveError::UnsupportedOperation {
-                operation: ops::ADD_ENTRY.to_string(),
-                reason: "Only available in Modify mode. Use add_file_from_data() for Write mode"
-                    .to_string(),
-            });
+            return Err(ArchiveError::operation_blocked(
+                ops::ADD_ENTRY,
+                "Only available in Modify mode. Use add_file_from_data() for Write mode",
+            ));
         }
 
         let modifications =
             self.modifications
                 .as_mut()
-                .ok_or_else(|| ArchiveError::UnsupportedOperation {
-                    operation: ops::ADD_ENTRY.to_string(),
-                    reason: "Archive not in Modify mode".to_string(),
-                })?;
+                .ok_or_else(|| ArchiveError::operation_blocked(
+                    ops::ADD_ENTRY,
+                    "Archive not in Modify mode",
+                ))?;
 
         modifications.added.push((path.to_string(), data.to_vec()));
         Ok(())
@@ -190,19 +189,19 @@ impl Archive {
     /// when `commit_changes()` is called.
     pub fn add_directory_entry(&mut self, path: &str) -> Result<()> {
         if self.mode != ArchiveMode::Modify {
-            return Err(ArchiveError::UnsupportedOperation {
-                operation: ops::ADD_DIRECTORY_ENTRY.to_string(),
-                reason: "Only available in Modify mode".to_string(),
-            });
+            return Err(ArchiveError::operation_blocked(
+                ops::ADD_DIRECTORY_ENTRY,
+                "Only available in Modify mode",
+            ));
         }
 
         let modifications =
             self.modifications
                 .as_mut()
-                .ok_or_else(|| ArchiveError::UnsupportedOperation {
-                    operation: ops::ADD_DIRECTORY_ENTRY.to_string(),
-                    reason: "Archive not in Modify mode".to_string(),
-                })?;
+                .ok_or_else(|| ArchiveError::operation_blocked(
+                    ops::ADD_DIRECTORY_ENTRY,
+                    "Archive not in Modify mode",
+                ))?;
 
         modifications.added_directories.push(path.to_string());
         Ok(())
@@ -213,19 +212,19 @@ impl Archive {
     /// Marks an entry for removal. Changes are applied when `commit_changes()` is called.
     pub fn remove_entry(&mut self, path: &str) -> Result<()> {
         if self.mode != ArchiveMode::Modify {
-            return Err(ArchiveError::UnsupportedOperation {
-                operation: ops::REMOVE_ENTRY.to_string(),
-                reason: "Only available in Modify mode".to_string(),
-            });
+            return Err(ArchiveError::operation_blocked(
+                ops::REMOVE_ENTRY,
+                "Only available in Modify mode",
+            ));
         }
 
         let modifications =
             self.modifications
                 .as_mut()
-                .ok_or_else(|| ArchiveError::UnsupportedOperation {
-                    operation: ops::REMOVE_ENTRY.to_string(),
-                    reason: "Archive not in Modify mode".to_string(),
-                })?;
+                .ok_or_else(|| ArchiveError::operation_blocked(
+                    ops::REMOVE_ENTRY,
+                    "Archive not in Modify mode",
+                ))?;
 
         modifications.removed.insert(path.to_string());
         Ok(())
@@ -257,14 +256,6 @@ impl Archive {
         }
     }
 
-    /// Clear all entries in archive being created
-    pub fn clear_entries(&mut self) -> Result<()> {
-        Err(ArchiveError::UnsupportedOperation {
-            operation: ops::CLEAR_ENTRIES.to_string(),
-            reason: "Cannot clear already-written entries from an archive".to_string(),
-        })
-    }
-
     /// Commit changes to archive (for Modify mode)
     ///
     /// Applies all tracked modifications (additions, removals, replacements) to the archive.
@@ -280,19 +271,19 @@ impl Archive {
     /// Returns error if not in Modify mode or if I/O operations fail.
     pub fn commit_changes(mut self) -> Result<()> {
         if self.mode != ArchiveMode::Modify {
-            return Err(ArchiveError::UnsupportedOperation {
-                operation: ops::COMMIT_CHANGES.to_string(),
-                reason: "Only available in Modify mode".to_string(),
-            });
+            return Err(ArchiveError::operation_blocked(
+                ops::COMMIT_CHANGES,
+                "Only available in Modify mode",
+            ));
         }
 
         let modifications =
             self.modifications
                 .take()
-                .ok_or_else(|| ArchiveError::UnsupportedOperation {
-                    operation: ops::COMMIT_CHANGES.to_string(),
-                    reason: "No modification tracker".to_string(),
-                })?;
+                .ok_or_else(|| ArchiveError::operation_blocked(
+                    ops::COMMIT_CHANGES,
+                    "No modification tracker",
+                ))?;
 
         // Snapshot modification options (defaults if unset).
         let mod_options = self.mod_options.take().unwrap_or_default();
@@ -333,10 +324,10 @@ impl Archive {
                     // Preserve original entry metadata (timestamps, permissions)
                     match &mut new_archive.backend {
                         ArchiveBackend::ZipWriter(w) => {
-                            w.add_file_from_data_with_metadata(&entry.path, &data, &entry)?;
+                            w.add_file_from_data_with_metadata(&entry.path, &data, entry)?;
                         }
                         ArchiveBackend::Libarchive(b) => {
-                            b.add_file_from_data_with_metadata(&entry.path, &data, &entry)?;
+                            b.add_file_from_data_with_metadata(&entry.path, &data, entry)?;
                         }
                         _ => {
                             new_archive.add_file_from_data(&entry.path, &data)?;
@@ -743,7 +734,7 @@ mod tests {
         assert_eq!(archive.pending_operations(), 0);
     }
 
-    // ── clear_operations() / clear_entries() ──
+    // ── clear_operations() ──
 
     #[test]
     fn test_clear_operations_clears_pending() {
@@ -753,13 +744,6 @@ mod tests {
         assert_eq!(archive.pending_operations(), 2);
         archive.clear_operations();
         assert_eq!(archive.pending_operations(), 0);
-    }
-
-    #[test]
-    fn test_clear_entries_returns_error() {
-        let mut archive = Archive::modify(fixture("test.zip")).unwrap();
-        let result = archive.clear_entries();
-        assert!(result.is_err());
     }
 
     // ── commit_changes() tests ──

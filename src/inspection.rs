@@ -32,10 +32,9 @@ impl Archive {
                 ArchiveBackend::Unrar(unrar) => unrar.list_files(),
                 ArchiveBackend::Piz(piz) => piz.list_files(),
                 ArchiveBackend::SevenZ(sevenz) => sevenz.list_files(),
-                ArchiveBackend::ZipWriter(_) => Err(ArchiveError::UnsupportedOperation {
-                    operation: ops::LIST_FILES.to_string(),
-                    reason: "Cannot list files from an archive in Write mode".to_string(),
-                }),
+                ArchiveBackend::ZipWriter(_) => {
+                    Err(ArchiveError::write_mode_only(ops::LIST_FILES))
+                }
                 ArchiveBackend::ZipReader(zip) => zip.list_files(),
                 // Skip the CRC-walk variant on the public listing path — CRC
                 // verification belongs in `validate_integrity()`, not routine listing.
@@ -56,10 +55,9 @@ impl Archive {
             ArchiveBackend::Unrar(unrar) => unrar.list_files(),
             ArchiveBackend::Piz(piz) => piz.list_files(),
             ArchiveBackend::SevenZ(sevenz) => sevenz.list_files(),
-            ArchiveBackend::ZipWriter(_) => Err(ArchiveError::UnsupportedOperation {
-                operation: ops::LIST_FILES_FOR_LIMITS.to_string(),
-                reason: "Cannot list files from an archive in Write mode".to_string(),
-            }),
+            ArchiveBackend::ZipWriter(_) => {
+                Err(ArchiveError::write_mode_only(ops::LIST_FILES_FOR_LIMITS))
+            }
             ArchiveBackend::ZipReader(zip) => zip.list_files(),
             ArchiveBackend::Libarchive(libarchive) => libarchive.list_files_metadata_only(),
         }
@@ -132,10 +130,7 @@ impl Archive {
             ArchiveBackend::Libarchive(libarchive) => libarchive.test_integrity()?,
             ArchiveBackend::ZipReader(zip) => zip.test_integrity()?,
             ArchiveBackend::ZipWriter(_) => {
-                return Err(ArchiveError::UnsupportedOperation {
-                    operation: ops::VALIDATE_INTEGRITY.to_string(),
-                    reason: "Cannot validate an archive in Write mode".to_string(),
-                });
+                return Err(ArchiveError::write_mode_only(ops::VALIDATE_INTEGRITY));
             }
         };
 

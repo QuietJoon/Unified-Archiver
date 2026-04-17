@@ -7,7 +7,7 @@ use crate::archive::{Archive, ArchiveBackend};
 use crate::entry::ArchiveEntry;
 use crate::error::ops;
 use crate::error::{ArchiveError, Result};
-use crate::options::ExtractionOptions;
+use crate::options::{ExtractionOptions, password_as_str};
 use crate::security::{check_archive_ratio, check_extraction_safe, validate_entry_path};
 use std::collections::HashSet;
 use std::path::Path;
@@ -33,7 +33,7 @@ fn check_overwrite_conflicts(
 
         // Detect in-batch collisions (multiple entries mapping to same output path)
         if !seen_outputs.insert(output_path.clone()) {
-            return Err(ArchiveError::UnsupportedOperation {
+            return Err(ArchiveError::OperationBlocked {
                 operation: operation.to_string(),
                 reason: format!(
                     "Multiple entries map to same output path: '{}' (archive entry: '{}')",
@@ -44,7 +44,7 @@ fn check_overwrite_conflicts(
         }
 
         if !overwrite && output_path.exists() {
-            return Err(ArchiveError::UnsupportedOperation {
+            return Err(ArchiveError::OperationBlocked {
                 operation: operation.to_string(),
                 reason: format!(
                     "Destination file already exists: '{}' (archive entry: '{}')",
@@ -164,7 +164,7 @@ impl Archive {
     pub fn extract_all(&self, mut options: ExtractionOptions) -> Result<()> {
         ensure_destination(&options.destination)?;
 
-        let extraction_archive = if let Some(password) = options.password.as_deref() {
+        let extraction_archive = if let Some(password) = password_as_str(&options.password) {
             Some(open_archive_for_extraction(&self.path, Some(password))?)
         } else {
             None
@@ -225,7 +225,7 @@ impl Archive {
     pub fn extract_file(&self, file_path: &str, options: ExtractionOptions) -> Result<()> {
         ensure_destination(&options.destination)?;
 
-        let extraction_archive = if let Some(password) = options.password.as_deref() {
+        let extraction_archive = if let Some(password) = password_as_str(&options.password) {
             Some(open_archive_for_extraction(&self.path, Some(password))?)
         } else {
             None
@@ -352,7 +352,7 @@ impl Archive {
         ensure_destination(&options.destination)?;
 
         // Get list of files to extract
-        let listing_archive = if let Some(password) = options.password.as_deref() {
+        let listing_archive = if let Some(password) = password_as_str(&options.password) {
             Some(open_archive_for_extraction(&self.path, Some(password))?)
         } else {
             None
@@ -382,7 +382,7 @@ impl Archive {
 
         let archive_path = self.path.clone();
         let extraction_dest = options.destination.clone();
-        let password = options.password.clone();
+        let pw_owned = password_as_str(&options.password).map(str::to_owned);
         let overwrite = options.overwrite;
         let verify_crc32 = options.verify_crc32;
         let preserve_permissions = options.preserve_permissions;
@@ -391,7 +391,7 @@ impl Archive {
         let extract_one = |entry: &&ArchiveEntry| -> Result<()> {
             extract_single_entry(
                 &archive_path,
-                password.as_deref(),
+                pw_owned.as_deref(),
                 &entry.path,
                 &extraction_dest,
                 overwrite,
@@ -459,7 +459,7 @@ impl Archive {
         let mut seen = HashSet::new();
         let paths: Vec<&str> = paths.iter().copied().filter(|p| seen.insert(*p)).collect();
 
-        let listing_archive = if let Some(password) = options.password.as_deref() {
+        let listing_archive = if let Some(password) = password_as_str(&options.password) {
             Some(open_archive_for_extraction(&self.path, Some(password))?)
         } else {
             None
@@ -494,7 +494,7 @@ impl Archive {
 
         let archive_path = self.path.clone();
         let extraction_dest = options.destination.clone();
-        let password = options.password.clone();
+        let pw_owned = password_as_str(&options.password).map(str::to_owned);
         let overwrite = options.overwrite;
         let verify_crc32 = options.verify_crc32;
         let preserve_permissions = options.preserve_permissions;
@@ -503,7 +503,7 @@ impl Archive {
         let extract_one = |path: &&str| -> Result<()> {
             extract_single_entry(
                 &archive_path,
-                password.as_deref(),
+                pw_owned.as_deref(),
                 path,
                 &extraction_dest,
                 overwrite,
@@ -581,7 +581,7 @@ impl Archive {
         let mut seen = HashSet::new();
         let ids: Vec<usize> = ids.iter().copied().filter(|id| seen.insert(*id)).collect();
 
-        let listing_archive = if let Some(password) = options.password.as_deref() {
+        let listing_archive = if let Some(password) = password_as_str(&options.password) {
             Some(open_archive_for_extraction(&self.path, Some(password))?)
         } else {
             None
@@ -596,7 +596,7 @@ impl Archive {
         for &id in &ids {
             let entry = entries
                 .get(id)
-                .ok_or_else(|| ArchiveError::UnsupportedOperation {
+                .ok_or_else(|| ArchiveError::OperationBlocked {
                     operation: ops::EXTRACT_BY_IDS.to_string(),
                     reason: format!(
                         "Invalid ID {}: archive has {} entries (valid IDs: 0-{})",
@@ -623,7 +623,7 @@ impl Archive {
 
         let archive_path = self.path.clone();
         let extraction_dest = options.destination.clone();
-        let password = options.password.clone();
+        let pw_owned = password_as_str(&options.password).map(str::to_owned);
         let overwrite = options.overwrite;
         let verify_crc32 = options.verify_crc32;
         let preserve_permissions = options.preserve_permissions;
@@ -632,7 +632,7 @@ impl Archive {
         let extract_one = |path: &&str| -> Result<()> {
             extract_single_entry(
                 &archive_path,
-                password.as_deref(),
+                pw_owned.as_deref(),
                 path,
                 &extraction_dest,
                 overwrite,

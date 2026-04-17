@@ -517,7 +517,7 @@ impl UnrarArchive {
             }
 
             if !overwrite && entry.is_file() && safe_path.exists() {
-                return Err(ArchiveError::UnsupportedOperation {
+                return Err(ArchiveError::OperationBlocked {
                     operation: "extract_all".to_string(),
                     reason: format!("Destination file already exists: {}", safe_path.display()),
                 });
@@ -606,7 +606,7 @@ impl UnrarArchive {
                         }
 
                         if !overwrite && entry.is_file() && safe_path.exists() {
-                            return Err(ArchiveError::UnsupportedOperation {
+                            return Err(ArchiveError::OperationBlocked {
                                 operation: "extract_file".to_string(),
                                 reason: format!(
                                     "Destination file already exists: {}",
@@ -702,7 +702,7 @@ impl UnrarArchive {
         let len = metadata.len();
 
         if len > usize::MAX as u64 {
-            return Err(ArchiveError::UnsupportedOperation {
+            return Err(ArchiveError::OperationBlocked {
                 operation: "extract_to_memory".to_string(),
                 reason: format!(
                     "File '{}' is too large to buffer in memory: {} bytes",
@@ -714,7 +714,7 @@ impl UnrarArchive {
         let mut buffer = Vec::new();
         buffer
             .try_reserve(len as usize)
-            .map_err(|_| ArchiveError::UnsupportedOperation {
+            .map_err(|_| ArchiveError::OperationBlocked {
                 operation: "extract_to_memory".to_string(),
                 reason: format!("Unable to allocate {} bytes for file '{}'", len, file_path),
             })?;
@@ -1037,7 +1037,7 @@ mod tests {
     #[test]
     fn test_dos_time_conversion() {
         // Test a known DOS timestamp: 2024-01-15 14:30:00
-        let dos_time = (2024 - 1980) << 25 | 1 << 21 | 15 << 16 | 14 << 11 | 30 << 5 | 0;
+        let dos_time = (2024 - 1980) << 25 | 1 << 21 | 15 << 16 | 14 << 11 | 30 << 5;
         let sys_time = dos_time_to_system_time(dos_time);
         assert!(sys_time.is_some());
     }

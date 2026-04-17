@@ -263,8 +263,8 @@ mod tests {
     fn test_stub_type_clone_semantics() {
         // Verify Clone trait works
         let stub = StubType::LinuxELF;
-        let cloned = stub.clone();
-        assert_eq!(stub, cloned);
+        let copied = stub;
+        assert_eq!(stub, copied);
     }
 
     #[test]

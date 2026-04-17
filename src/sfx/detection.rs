@@ -143,7 +143,6 @@ pub fn detect_sfx<P: AsRef<Path>>(path: P) -> Result<SfxDetectionResult> {
 /// # Returns
 /// * `Ok(())` if archive is valid
 /// * `Err(ArchiveError)` if validation fails
-
 #[cfg(test)]
 mod tests {
     use super::*;
