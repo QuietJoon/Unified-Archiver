@@ -52,7 +52,7 @@ fn contract_streaming_basic_read_zip() {
 }
 
 #[test]
-#[ignore = "UnRAR backend has global state; RAR streaming fails with CRC errors when run concurrently with other RAR tests"]
+#[serial_test::file_serial(rar)]
 fn contract_streaming_basic_read_rar() {
     let archive = Archive::open(fixture("test.rar")).unwrap();
     let entries = archive.list_files().unwrap();
@@ -164,7 +164,7 @@ fn contract_streaming_matches_extract_to_memory() {
 // ── Contract 4: Password-protected streaming ──
 
 #[test]
-#[ignore = "UnRAR backend has global state; encrypted RAR streaming fails with CRC errors when run concurrently with other RAR tests"]
+#[serial_test::file_serial(rar)]
 fn contract_streaming_encrypted_rar() {
     // test_encrypted_data.rar has data encryption only, password "test123"
     let archive = Archive::open_encrypted(fixture("test_encrypted_data.rar"), "test123").unwrap();

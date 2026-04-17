@@ -1,3 +1,4 @@
+#![allow(clippy::duplicate_mod)]
 //! Contract test entry point
 //!
 //! Imports all contract test modules to run them via cargo test.

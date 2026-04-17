@@ -12,6 +12,7 @@ fn fixtures_dir() -> PathBuf {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_streaming_extraction_rar() {
     // Test streaming extraction from RAR archive
     let archive = Archive::open(fixtures_dir().join("test.rar")).expect("Failed to open archive");
@@ -87,6 +88,7 @@ fn test_streaming_extraction_7z() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_streaming_progress_tracking() {
     // Test that progress tracking works during streaming
     let archive = Archive::open(fixtures_dir().join("test.rar")).expect("Failed to open archive");
@@ -136,6 +138,7 @@ fn test_streaming_progress_tracking() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_streaming_nonexistent_file() {
     // Test error handling for non-existent file
     let archive = Archive::open(fixtures_dir().join("test.rar")).expect("Failed to open archive");
@@ -146,6 +149,7 @@ fn test_streaming_nonexistent_file() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_streaming_chunked_reading() {
     // Test reading in small chunks
     let archive = Archive::open(fixtures_dir().join("test.rar")).expect("Failed to open archive");
@@ -175,13 +179,14 @@ fn test_streaming_chunked_reading() {
 
     // File size may vary slightly (17-19 bytes due to newline differences)
     assert!(
-        total_read >= 17 && total_read <= 20,
+        (17..=20).contains(&total_read),
         "Should have read complete file (got {} bytes)",
         total_read
     );
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_streaming_memory_efficiency() {
     // This test verifies that streaming doesn't load entire file into memory
     // by reading in chunks and processing incrementally

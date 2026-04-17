@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use unified_archive::{Archive, ExtractionOptions};
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_progress_callback_called() {
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 
@@ -34,7 +35,7 @@ fn test_progress_callback_called() {
 
     // Note: With small test archives (97 bytes), we may get fewer calls due to rate limiting
     // The important thing is that progress callback is invoked and reports completion
-    assert!(calls.len() >= 1, "Should have at least 1 progress update");
+    assert!(!calls.is_empty(), "Should have at least 1 progress update");
 
     // Final call should be 100% (current == total)
     let (last_current, last_total) = calls.last().unwrap();
@@ -49,6 +50,7 @@ fn test_progress_callback_called() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 #[ignore] // Small test archives (97 bytes) complete before cancellation callback is invoked
 fn test_progress_callback_cancellation() {
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
@@ -176,6 +178,7 @@ fn test_progress_callback_7z() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_progress_without_callback() {
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 

@@ -22,7 +22,7 @@ fn test_validation_binary_files() {
     // Create ZIP
     let zip_path = temp_dir.join("binary.zip");
     std::process::Command::new("zip")
-        .args(&[
+        .args([
             "-j",
             zip_path.to_str().unwrap(),
             temp_dir.join("binary.bin").to_str().unwrap(),
@@ -64,7 +64,7 @@ fn test_validation_text_files_various_encodings() {
 
     let zip_path = temp_dir.join("text.zip");
     std::process::Command::new("zip")
-        .args(&[
+        .args([
             "-j",
             zip_path.to_str().unwrap(),
             temp_dir.join("unix.txt").to_str().unwrap(),
@@ -102,7 +102,7 @@ fn test_validation_mixed_file_types() {
 
     let zip_path = temp_dir.join("mixed.zip");
     std::process::Command::new("zip")
-        .args(&[
+        .args([
             "-j",
             zip_path.to_str().unwrap(),
             temp_dir.join("readme.txt").to_str().unwrap(),
@@ -144,7 +144,7 @@ fn test_validation_nested_directories() {
 
     let zip_path = temp_dir.join("nested.zip");
     std::process::Command::new("zip")
-        .args(&[
+        .args([
             "-r",
             zip_path.to_str().unwrap(),
             temp_dir.join("dir1").to_str().unwrap(),
@@ -185,7 +185,7 @@ fn test_validation_long_filename() {
 
     let zip_path = temp_dir.join("longname.zip");
     std::process::Command::new("zip")
-        .args(&[
+        .args([
             "-j",
             zip_path.to_str().unwrap(),
             temp_dir.join(&long_name).to_str().unwrap(),
@@ -309,7 +309,7 @@ fn test_validation_large_file_stress() {
 
     let zip_path = temp_dir.join("large_5mb.zip");
     std::process::Command::new("zip")
-        .args(&[
+        .args([
             "-j",
             zip_path.to_str().unwrap(),
             temp_dir.join("large_5mb.bin").to_str().unwrap(),
@@ -388,7 +388,7 @@ fn test_validation_zip_compression_methods() {
     // Create ZIP with no compression (store)
     let zip_store = temp_dir.join("stored.zip");
     std::process::Command::new("zip")
-        .args(&[
+        .args([
             "-0", // No compression
             "-j",
             zip_store.to_str().unwrap(),
@@ -407,7 +407,7 @@ fn test_validation_zip_compression_methods() {
     // Create ZIP with maximum compression (deflate)
     let zip_deflate = temp_dir.join("deflated.zip");
     std::process::Command::new("zip")
-        .args(&[
+        .args([
             "-9", // Maximum compression
             "-j",
             zip_deflate.to_str().unwrap(),

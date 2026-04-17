@@ -5,6 +5,7 @@
 use unified_archive::ffi::wrapper::UnrarArchive;
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_rar4_crc32_extraction() {
     let archive =
         UnrarArchive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
@@ -20,6 +21,7 @@ fn test_rar4_crc32_extraction() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_rar5_crc32_extraction() {
     let archive =
         UnrarArchive::open("tests/fixtures/test_rar5.rar").expect("Failed to open RAR5 archive");
@@ -35,6 +37,7 @@ fn test_rar5_crc32_extraction() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_rar_vs_rar5_same_crc32() {
     let rar4 = UnrarArchive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
     let rar5 =
@@ -50,6 +53,7 @@ fn test_rar_vs_rar5_same_crc32() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_metadata_completeness() {
     let archive = UnrarArchive::open("tests/fixtures/test.rar").unwrap();
     let entries = archive.list_files().unwrap();

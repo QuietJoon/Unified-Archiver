@@ -21,7 +21,7 @@ fn test_detect_crc_corruption_zip() {
 
             // Corrupted file should be detected
             assert!(
-                report.failed.len() > 0,
+                !report.failed.is_empty(),
                 "CRC-corrupted ZIP should have failed files"
             );
             println!(
@@ -46,7 +46,7 @@ fn test_detect_truncated_archive_zip() {
             // If it opens, validation should fail
             let validation = arc.validate_integrity();
             assert!(
-                validation.is_err() || validation.unwrap().failed.len() > 0,
+                validation.is_err() || !validation.unwrap().failed.is_empty(),
                 "Truncated archive should fail validation"
             );
             println!("✓ Truncated archive detected during validation");
@@ -86,6 +86,7 @@ fn test_valid_archive_baseline_zip() {
 // ============================================================================
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_corruption_detection_consistency_across_formats() {
     // Ensure all formats detect corruption consistently
 
@@ -169,7 +170,7 @@ fn test_validation_empty_file_in_archive() {
     // Create ZIP with empty file
     let zip_path = temp_dir.join("empty_file.zip");
     std::process::Command::new("zip")
-        .args(&[
+        .args([
             "-j",
             zip_path.to_str().unwrap(),
             temp_dir.join("empty.txt").to_str().unwrap(),
@@ -209,7 +210,7 @@ fn test_validation_large_file() {
     // Create ZIP with large file
     let zip_path = temp_dir.join("large_file.zip");
     std::process::Command::new("zip")
-        .args(&[
+        .args([
             "-j",
             zip_path.to_str().unwrap(),
             temp_dir.join("large.bin").to_str().unwrap(),
@@ -302,10 +303,10 @@ fn test_concurrent_validation_same_archive() {
             let path = archive_path.to_string();
             thread::spawn(move || {
                 let archive =
-                    Archive::open(&path).expect(&format!("Thread {} should open archive", i));
+                    Archive::open(&path).unwrap_or_else(|_| panic!("Thread {} should open archive", i));
                 let report = archive
                     .validate_integrity()
-                    .expect(&format!("Thread {} validation should succeed", i));
+                    .unwrap_or_else(|_| panic!("Thread {} validation should succeed", i));
                 (i, report.validated, report.failed.len())
             })
         })
@@ -340,6 +341,7 @@ fn test_concurrent_validation_same_archive() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_concurrent_validation_different_archives() {
     // Test validating multiple different archives concurrently
     let archives = vec![
@@ -440,6 +442,7 @@ fn test_validation_not_an_archive() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_validation_encrypted_without_password() {
     // Test validation of encrypted archives without password
     let archive = Archive::open("tests/fixtures/test_encrypted.rar");
@@ -458,7 +461,7 @@ fn test_validation_encrypted_without_password() {
                     );
                     // Encrypted files without password should fail
                     assert!(
-                        report.failed.len() > 0 || report.validated == 0,
+                        !report.failed.is_empty() || report.validated == 0,
                         "Encrypted files should fail without password"
                     );
                 }
@@ -514,7 +517,7 @@ fn test_validation_repeated_calls() {
     for i in 0..5 {
         let report = archive
             .validate_integrity()
-            .expect(&format!("Validation {} should succeed", i));
+            .unwrap_or_else(|_| panic!("Validation {} should succeed", i));
         results.push((report.validated, report.failed.len()));
     }
 

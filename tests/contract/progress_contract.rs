@@ -22,7 +22,7 @@ use unified_archive::{Archive, ExtractionOptions};
 // ── Contract 1: Progress callback is called ──
 
 #[test]
-#[ignore = "UnRAR backend has global state; RAR extraction fails with CRC errors when run concurrently with other RAR tests"]
+#[serial_test::file_serial(rar)]
 fn contract_progress_callback_is_invoked_for_rar() {
     let archive = Archive::open(fixture("test.rar")).unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -76,7 +76,7 @@ fn contract_progress_callback_accepted_for_zip() {
 // ── Contract 2: Progress values are monotonic ──
 
 #[test]
-#[ignore = "UnRAR backend has global state; RAR extraction fails with CRC errors when run concurrently with other RAR tests"]
+#[serial_test::file_serial(rar)]
 fn contract_progress_monotonic_for_rar() {
     let archive = Archive::open(fixture("test.rar")).unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -116,7 +116,7 @@ fn contract_progress_monotonic_for_rar() {
 // ── Contract 3: Cancellation via ControlFlow::Break ──
 
 #[test]
-#[ignore = "UnRAR backend has global state; RAR extraction fails with CRC errors when run concurrently with other RAR tests"]
+#[serial_test::file_serial(rar)]
 fn contract_progress_cancellation() {
     let archive = Archive::open(fixture("test.rar")).unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -177,7 +177,7 @@ fn contract_progress_callback_with_no_op() {
 // ── Extra: Progress with encrypted RAR ──
 
 #[test]
-#[ignore = "UnRAR backend has global state; encrypted RAR extraction fails with CRC errors when run concurrently with other RAR tests"]
+#[serial_test::file_serial(rar)]
 fn contract_progress_encrypted_rar() {
     // test_encrypted_data.rar has data encryption only, password "test123"
     let archive = Archive::open_encrypted(fixture("test_encrypted_data.rar"), "test123").unwrap();
@@ -188,7 +188,7 @@ fn contract_progress_encrypted_rar() {
 
     let options = ExtractionOptions {
         destination: temp.path().to_path_buf(),
-        password: Some("test123".to_string()),
+        password: Some("test123".to_string().into()),
         progress: Some(Box::new(move |_: u64, _: Option<u64>| {
             cc.fetch_add(1, Ordering::SeqCst);
             std::ops::ControlFlow::Continue(())

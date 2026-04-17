@@ -5,6 +5,7 @@
 use unified_archive::{Archive, ArchiveFormat, EntryType, ValidationReport};
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_rar5_format_detection() {
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 
@@ -12,6 +13,7 @@ fn test_rar5_format_detection() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_rar5_list_files() {
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 
@@ -23,6 +25,7 @@ fn test_rar5_list_files() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_rar5_entry_count() {
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 
@@ -32,6 +35,7 @@ fn test_rar5_entry_count() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_rar5_find_entry() {
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 
@@ -54,6 +58,7 @@ fn test_rar5_find_entry() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_rar5_validate_integrity() {
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 
@@ -67,6 +72,7 @@ fn test_rar5_validate_integrity() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_rar5_metadata_consistency() {
     let archive =
         Archive::open("tests/fixtures/test_rar5.rar").expect("Failed to open RAR5 archive");
@@ -120,6 +126,7 @@ fn test_validation_report_structure() {
 
 /// Test that the same API works for both RAR and RAR5
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_api_consistency_rar_and_rar5() {
     // Note: Due to UnRAR's sequential iteration, we need to reopen archives
     // between operations for reliable results

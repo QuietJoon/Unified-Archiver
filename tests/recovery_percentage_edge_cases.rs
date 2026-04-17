@@ -15,6 +15,7 @@ use unified_archive::Archive;
 // ============================================================================
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_consistency_rar_recovery_methods() {
     // Both methods should be consistent: if has_recovery is true, percentage should be Some
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR");
@@ -43,6 +44,7 @@ fn test_consistency_rar_recovery_methods() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_consistency_rar5_recovery_methods() {
     // Both methods should be consistent for RAR5
     let archive = Archive::open("tests/fixtures/test_rar5.rar").expect("Failed to open RAR5");
@@ -77,7 +79,7 @@ fn test_consistency_no_recovery_formats() {
     ];
 
     for (path, format) in test_cases {
-        let archive = Archive::open(path).expect(&format!("Failed to open {}", format));
+        let archive = Archive::open(path).unwrap_or_else(|_| panic!("Failed to open {}", format));
 
         let has_recovery = archive
             .has_recovery_record()
@@ -159,6 +161,7 @@ fn test_recovery_percentage_empty_file() {
 // ============================================================================
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_recovery_percentage_range_validation() {
     // If percentage is returned, it should be in valid range (1-100%)
     let test_files = vec!["tests/fixtures/test.rar", "tests/fixtures/test_rar5.rar"];
@@ -168,7 +171,7 @@ fn test_recovery_percentage_range_validation() {
 
         if let Ok(Some(pct)) = archive.recovery_percentage() {
             assert!(
-                pct >= 1 && pct <= 100,
+                (1..=100).contains(&pct),
                 "Recovery percentage must be 1-100%, got {} for {}",
                 pct,
                 path
@@ -179,6 +182,7 @@ fn test_recovery_percentage_range_validation() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_recovery_percentage_multiple_calls() {
     // Multiple calls should return consistent results
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR");
@@ -196,6 +200,7 @@ fn test_recovery_percentage_multiple_calls() {
 // ============================================================================
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_recovery_percentage_rar4_vs_rar5() {
     // Test that both RAR4 and RAR5 formats are handled correctly
     let rar4 = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR4");
@@ -214,14 +219,15 @@ fn test_recovery_percentage_rar4_vs_rar5() {
 
     // If either has recovery, percentage should be valid
     if let Some(p) = pct4 {
-        assert!(p >= 1 && p <= 100, "RAR4 percentage out of range: {}", p);
+        assert!((1..=100).contains(&p), "RAR4 percentage out of range: {}", p);
     }
     if let Some(p) = pct5 {
-        assert!(p >= 1 && p <= 100, "RAR5 percentage out of range: {}", p);
+        assert!((1..=100).contains(&p), "RAR5 percentage out of range: {}", p);
     }
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_recovery_percentage_all_supported_formats() {
     // Test all supported archive formats
     let test_cases = vec![
@@ -232,7 +238,7 @@ fn test_recovery_percentage_all_supported_formats() {
     ];
 
     for (path, format, supports_recovery) in test_cases {
-        let archive = Archive::open(path).expect(&format!("Failed to open {} archive", format));
+        let archive = Archive::open(path).unwrap_or_else(|_| panic!("Failed to open {} archive", format));
 
         let result = archive.recovery_percentage();
         assert!(
@@ -259,6 +265,7 @@ fn test_recovery_percentage_all_supported_formats() {
 // ============================================================================
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_recovery_percentage_encrypted_archive() {
     // Test recovery percentage on encrypted archive (if available)
     // Note: This test may be skipped if no encrypted test fixture with recovery exists
@@ -271,6 +278,7 @@ fn test_recovery_percentage_encrypted_archive() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_recovery_percentage_solid_archive() {
     // Test recovery percentage on solid archive
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR");
@@ -291,6 +299,7 @@ fn test_recovery_percentage_solid_archive() {
 // ============================================================================
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_recovery_percentage_does_not_extract() {
     // Verify that recovery_percentage doesn't extract the entire archive
     // This is a sanity check - it should only read headers, not extract data
@@ -313,6 +322,7 @@ fn test_recovery_percentage_does_not_extract() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_recovery_percentage_read_only_operation() {
     // Verify that calling recovery_percentage doesn't modify the archive file
     let path = "tests/fixtures/test.rar";
@@ -345,6 +355,7 @@ fn test_recovery_percentage_read_only_operation() {
 // ============================================================================
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_recovery_percentage_after_list_files() {
     // Verify recovery_percentage works correctly after list_files()
     // This is a regression test for ensuring the two operations don't interfere
@@ -389,6 +400,7 @@ fn test_recovery_percentage_after_list_files() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_recovery_percentage_independent_of_format_detection() {
     // Verify recovery_percentage works correctly with format detection
     let path = "tests/fixtures/test.rar";

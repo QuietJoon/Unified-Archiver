@@ -49,7 +49,7 @@ fn contract_extract_all_7z() {
 }
 
 #[test]
-#[ignore = "test.rar is RAR5 format; UnRAR backend has concurrency issues causing error 21 when run in parallel"]
+#[serial_test::file_serial(rar)]
 fn contract_extract_all_rar() {
     let archive = Archive::open(fixture("test.rar")).unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -206,14 +206,14 @@ fn contract_extract_multiple_files_match() {
 // ── Contract 3: Test password-protected extraction ──
 
 #[test]
-#[ignore = "UnRAR backend has global state; encrypted RAR extraction fails with CRC errors when run concurrently with other RAR tests"]
+#[serial_test::file_serial(rar)]
 fn contract_extract_encrypted_rar_with_password() {
     // test_encrypted_data.rar has data encryption only (headers readable), password "test123"
     let archive = Archive::open_encrypted(fixture("test_encrypted_data.rar"), "test123").unwrap();
     let temp = tempfile::tempdir().unwrap();
     let options = ExtractionOptions {
         destination: temp.path().to_path_buf(),
-        password: Some("test123".to_string()),
+        password: Some("test123".to_string().into()),
         ..ExtractionOptions::default()
     };
     let result = archive.extract_all(options);

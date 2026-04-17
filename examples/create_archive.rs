@@ -91,7 +91,7 @@ fn example_create_encrypted() -> Result<()> {
     let options = CompressionOptions {
         format: ArchiveFormat::Zip,
         level: CompressionLevel::Normal,
-        password: Some("secret123".to_string()),
+        password: Some("secret123".to_string().into()),
         split_size: None,
         progress: None,
     };

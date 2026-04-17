@@ -22,12 +22,13 @@ fn fixtures_dir() -> PathBuf {
 /// Target: <100ms for our small test archives (1 file)
 /// Scales to ~1s for 10k files based on linear extrapolation.
 #[test]
+#[serial_test::file_serial(rar)]
 fn perf_entry_listing_cached() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
 
     for filename in test_files {
         let path = fixtures_dir().join(filename);
-        let archive = Archive::open(&path).expect(&format!("Failed to open {}", filename));
+        let archive = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
 
         // First call populates cache
         let _ = archive.list_files().expect("First list failed");
@@ -57,6 +58,7 @@ fn perf_entry_listing_cached() {
 ///
 /// Target: <1ms for magic byte detection
 #[test]
+#[serial_test::file_serial(rar)]
 fn perf_format_detection() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
 
@@ -87,6 +89,7 @@ fn perf_format_detection() {
 ///
 /// Target: <10ms to open small archive
 #[test]
+#[serial_test::file_serial(rar)]
 fn perf_archive_open() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
 
@@ -117,6 +120,7 @@ fn perf_archive_open() {
 ///
 /// Target: <50ms to extract small file (< 1KB)
 #[test]
+#[serial_test::file_serial(rar)]
 fn perf_small_file_extraction() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
     let file_to_extract = "test_file.txt";
@@ -154,6 +158,7 @@ fn perf_small_file_extraction() {
 ///
 /// Target: Streaming should be within 2x of memory extraction time
 #[test]
+#[serial_test::file_serial(rar)]
 #[ignore = "ZIP streaming has known issues with test fixtures - test.zip extraction fails"]
 fn perf_streaming_overhead() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
@@ -209,6 +214,7 @@ fn perf_streaming_overhead() {
 ///
 /// Target: find_entry() should be O(n) but fast for small archives
 #[test]
+#[serial_test::file_serial(rar)]
 fn perf_entry_lookup() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
     let search_path = "test_file.txt";
@@ -244,6 +250,7 @@ fn perf_entry_lookup() {
 ///
 /// Target: <100ms for small archives
 #[test]
+#[serial_test::file_serial(rar)]
 fn perf_validation() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
 
@@ -279,6 +286,7 @@ fn perf_validation() {
 /// This test verifies that streaming doesn't accumulate data (SC-009).
 /// For our small test file, we verify the concept works correctly.
 #[test]
+#[serial_test::file_serial(rar)]
 fn perf_streaming_memory_bounded() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
     let file_to_extract = "test_file.txt";
@@ -336,6 +344,7 @@ fn perf_streaming_memory_bounded() {
 /// This test establishes baseline timing for future comparison.
 /// Fails if operations are suspiciously slow (>10x expected).
 #[test]
+#[serial_test::file_serial(rar)]
 fn perf_regression_check() {
     let path = fixtures_dir().join("test.rar");
     let file_to_extract = "test_file.txt";

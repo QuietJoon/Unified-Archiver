@@ -5,15 +5,12 @@
 mod common;
 
 use std::fs;
-use std::sync::Mutex;
 use unified_archive::{Archive, ExtractionOptions};
 
-// Mutex to serialize tests and prevent working directory conflicts
-static TEST_LOCK: Mutex<()> = Mutex::new(());
-
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_extract_all_rar5() {
-    let _lock = TEST_LOCK.lock().unwrap();
+
     let temp = common::temp_test_dir();
 
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
@@ -39,8 +36,9 @@ fn test_extract_all_rar5() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_extract_single_file_rar5() {
-    let _lock = TEST_LOCK.lock().unwrap();
+
     let temp = common::temp_test_dir();
 
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
@@ -66,8 +64,9 @@ fn test_extract_single_file_rar5() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_extract_nonexistent_file() {
-    let _lock = TEST_LOCK.lock().unwrap();
+
     let temp = common::temp_test_dir();
 
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
@@ -88,8 +87,9 @@ fn test_extract_nonexistent_file() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_extract_to_nonexistent_directory() {
-    let _lock = TEST_LOCK.lock().unwrap();
+
     let temp = common::temp_test_dir().join("nested/path/that/does/not/exist");
 
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
@@ -116,8 +116,9 @@ fn test_extract_to_nonexistent_directory() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_extract_rar5_alternate() {
-    let _lock = TEST_LOCK.lock().unwrap();
+
     let temp = common::temp_test_dir();
 
     let archive =
@@ -143,8 +144,9 @@ fn test_extract_rar5_alternate() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_extract_to_memory() {
-    let _lock = TEST_LOCK.lock().unwrap();
+
 
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 
@@ -158,8 +160,9 @@ fn test_extract_to_memory() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_extract_to_memory_nonexistent() {
-    let _lock = TEST_LOCK.lock().unwrap();
+
 
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 
@@ -172,8 +175,9 @@ fn test_extract_to_memory_nonexistent() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_extract_filtered_txt_files() {
-    let _lock = TEST_LOCK.lock().unwrap();
+
     let temp = common::temp_test_dir();
 
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
@@ -196,8 +200,9 @@ fn test_extract_filtered_txt_files() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_extract_filtered_no_matches() {
-    let _lock = TEST_LOCK.lock().unwrap();
+
     let temp = common::temp_test_dir();
 
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");

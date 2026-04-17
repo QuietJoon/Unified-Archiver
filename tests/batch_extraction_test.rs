@@ -53,6 +53,7 @@ fn test_extract_files_by_path_array_zip() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_extract_files_by_path_array_rar() {
     let temp_dir = setup_temp_dir("extract_files_rar");
 
@@ -172,6 +173,7 @@ fn test_extract_by_ids_zip() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_extract_by_ids_rar() {
     let temp_dir = setup_temp_dir("extract_by_ids_rar");
 
@@ -319,9 +321,9 @@ fn test_extract_by_ids_multiple_files() {
             .expect("Failed to extract multiple files by ID");
 
         // Verify all extracted files exist
-        for i in 0..3 {
-            if entries[i].is_file() {
-                let path = temp_dir.join(&entries[i].path);
+        for (i, entry) in entries.iter().enumerate().take(3) {
+            if entry.is_file() {
+                let path = temp_dir.join(&entry.path);
                 assert!(path.exists(), "File with ID {} should be extracted", i);
             }
         }
@@ -371,6 +373,7 @@ fn test_extract_files_parallel_extraction() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_id_consistency_across_formats() {
     // Test that IDs are consistent (0-based sequential) across all formats
 

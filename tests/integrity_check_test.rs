@@ -21,6 +21,7 @@ fn test_integrity_check_valid_zip() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_integrity_check_valid_rar() {
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open test RAR");
 
@@ -39,6 +40,7 @@ fn test_integrity_check_valid_rar() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_integrity_check_valid_rar5() {
     let archive = Archive::open("tests/fixtures/test_rar5.rar").expect("Failed to open test RAR5");
 
@@ -107,6 +109,7 @@ fn count_directories(archive: &Archive) -> usize {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_integrity_check_across_formats() {
     // Test that integrity checking works consistently across all formats
 
@@ -121,7 +124,7 @@ fn test_integrity_check_across_formats() {
         if let Ok(archive) = Archive::open(path) {
             let report = archive
                 .validate_integrity()
-                .expect(&format!("Failed to validate {} archive", format));
+                .unwrap_or_else(|_| panic!("Failed to validate {} archive", format));
 
             assert!(
                 report.failed.is_empty(),
@@ -177,6 +180,7 @@ fn test_integrity_check_empty_archive() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_integrity_check_encrypted_archive() {
     // Test that encrypted archives require password for integrity checking
 

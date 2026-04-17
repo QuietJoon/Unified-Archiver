@@ -10,6 +10,7 @@ use unified_archive::{Archive, ArchiveFormat, ExtractionOptions};
 mod common;
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_extract_all_rar5() {
     let temp = common::temp_test_dir();
     let archive_path = common::fixture("test.rar");
@@ -88,6 +89,7 @@ fn test_extract_all_7z() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_extract_single_file_multiple_formats() {
     let formats = vec![
         ("test.rar", ArchiveFormat::Rar5),
@@ -104,7 +106,7 @@ fn test_extract_single_file_multiple_formats() {
             continue;
         }
 
-        let archive = Archive::open(&archive_path).expect(&format!("Failed to open {}", filename));
+        let archive = Archive::open(&archive_path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
 
         assert_eq!(archive.format(), expected_format);
 
@@ -119,7 +121,7 @@ fn test_extract_single_file_multiple_formats() {
 
         // Reopen archive for extraction (UnRAR requires this after list_files)
         let archive_extract =
-            Archive::open(&archive_path).expect(&format!("Failed to reopen {}", filename));
+            Archive::open(&archive_path).unwrap_or_else(|_| panic!("Failed to reopen {}", filename));
 
         let options = ExtractionOptions {
             destination: temp.clone(),
@@ -128,7 +130,7 @@ fn test_extract_single_file_multiple_formats() {
 
         archive_extract
             .extract_file(&first_file, options)
-            .expect(&format!("Failed to extract file from {}", filename));
+            .unwrap_or_else(|_| panic!("Failed to extract file from {}", filename));
 
         // Verify file was extracted
         let extracted = temp.join(&first_file);
@@ -144,6 +146,7 @@ fn test_extract_single_file_multiple_formats() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_extract_to_memory_multiple_formats() {
     let formats = vec![("test.rar", "test_file.txt"), ("test.zip", "test_file.txt")];
 
@@ -156,9 +159,9 @@ fn test_extract_to_memory_multiple_formats() {
         }
 
         let archive =
-            Archive::open(&archive_path).expect(&format!("Failed to open {}", archive_name));
+            Archive::open(&archive_path).unwrap_or_else(|_| panic!("Failed to open {}", archive_name));
 
-        let content = archive.extract_to_memory(file_name).expect(&format!(
+        let content = archive.extract_to_memory(file_name).unwrap_or_else(|_| panic!(
             "Failed to extract {} to memory from {}",
             file_name, archive_name
         ));
@@ -170,7 +173,7 @@ fn test_extract_to_memory_multiple_formats() {
         );
 
         // Verify it's valid UTF-8 text
-        let text = String::from_utf8(content).expect(&format!(
+        let text = String::from_utf8(content).unwrap_or_else(|_| panic!(
             "Content from {} should be valid UTF-8",
             archive_name
         ));
@@ -182,6 +185,7 @@ fn test_extract_to_memory_multiple_formats() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_extract_filtered_multiple_formats() {
     let formats = vec!["test.rar", "test.zip", "test.7z"];
 
@@ -195,7 +199,7 @@ fn test_extract_filtered_multiple_formats() {
         }
 
         let archive =
-            Archive::open(&archive_path).expect(&format!("Failed to open {}", archive_name));
+            Archive::open(&archive_path).unwrap_or_else(|_| panic!("Failed to open {}", archive_name));
 
         let options = ExtractionOptions {
             destination: temp.clone(),
@@ -205,7 +209,7 @@ fn test_extract_filtered_multiple_formats() {
         // Extract only .txt files
         archive
             .extract_filtered(|entry| entry.path.ends_with(".txt"), options)
-            .expect(&format!("Failed to extract filtered from {}", archive_name));
+            .unwrap_or_else(|_| panic!("Failed to extract filtered from {}", archive_name));
 
         // Verify at least one txt file was extracted
         let entries: Vec<_> = fs::read_dir(&temp)
@@ -217,7 +221,7 @@ fn test_extract_filtered_multiple_formats() {
             let path = entry.path();
             if path.is_file() {
                 assert!(
-                    path.extension().map_or(false, |ext| ext == "txt"),
+                    path.extension().is_some_and(|ext| ext == "txt"),
                     "Only .txt files should be extracted from {}",
                     archive_name
                 );
@@ -229,6 +233,7 @@ fn test_extract_filtered_multiple_formats() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_extract_to_nested_directory() {
     let formats = vec!["test.rar", "test.zip"];
 
@@ -244,7 +249,7 @@ fn test_extract_to_nested_directory() {
         }
 
         let archive =
-            Archive::open(&archive_path).expect(&format!("Failed to open {}", archive_name));
+            Archive::open(&archive_path).unwrap_or_else(|_| panic!("Failed to open {}", archive_name));
 
         let options = ExtractionOptions {
             destination: nested.clone(),
@@ -252,7 +257,7 @@ fn test_extract_to_nested_directory() {
         };
 
         // Should create nested directories automatically
-        archive.extract_all(options).expect(&format!(
+        archive.extract_all(options).unwrap_or_else(|_| panic!(
             "Failed to extract {} to nested directory",
             archive_name
         ));
@@ -272,6 +277,7 @@ fn test_extract_to_nested_directory() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_extract_overwrite_handling() {
     let temp = common::temp_test_dir();
     let archive_path = common::fixture("test.rar");
@@ -320,6 +326,7 @@ fn test_extract_overwrite_handling() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_extract_preserves_file_content() {
     // Verify that extraction doesn't corrupt file content across formats
     let formats = vec!["test.rar", "test.zip"];
@@ -334,7 +341,7 @@ fn test_extract_preserves_file_content() {
         }
 
         let archive =
-            Archive::open(&archive_path).expect(&format!("Failed to open {}", archive_name));
+            Archive::open(&archive_path).unwrap_or_else(|_| panic!("Failed to open {}", archive_name));
 
         let options = ExtractionOptions {
             destination: temp.clone(),
@@ -343,12 +350,12 @@ fn test_extract_preserves_file_content() {
 
         archive
             .extract_all(options)
-            .expect(&format!("Failed to extract {}", archive_name));
+            .unwrap_or_else(|_| panic!("Failed to extract {}", archive_name));
 
         // Read extracted file and verify content integrity
         let extracted = temp.join("test_file.txt");
         if extracted.exists() {
-            let content = fs::read_to_string(&extracted).expect(&format!(
+            let content = fs::read_to_string(&extracted).unwrap_or_else(|_| panic!(
                 "Failed to read extracted file from {}",
                 archive_name
             ));
@@ -367,6 +374,7 @@ fn test_extract_preserves_file_content() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_unified_extraction_api_consistency() {
     // Comprehensive test demonstrating unified API across all formats
     let test_archives = vec![
@@ -387,7 +395,7 @@ fn test_unified_extraction_api_consistency() {
 
         // 1. Open archive
         let archive =
-            Archive::open(&archive_path).expect(&format!("Failed to open {}", archive_name));
+            Archive::open(&archive_path).unwrap_or_else(|_| panic!("Failed to open {}", archive_name));
 
         // 2. Verify format
         assert_eq!(archive.format(), expected_format);
@@ -398,7 +406,7 @@ fn test_unified_extraction_api_consistency() {
 
         // 4. Reopen for extraction (UnRAR requires this after list_files)
         let archive_extract =
-            Archive::open(&archive_path).expect(&format!("Failed to reopen {}", archive_name));
+            Archive::open(&archive_path).unwrap_or_else(|_| panic!("Failed to reopen {}", archive_name));
 
         // 5. Extract all
         let options = ExtractionOptions {
@@ -412,7 +420,7 @@ fn test_unified_extraction_api_consistency() {
 
         archive_extract
             .extract_all(options)
-            .expect(&format!("Failed to extract all from {}", archive_name));
+            .unwrap_or_else(|_| panic!("Failed to extract all from {}", archive_name));
 
         // 6. Verify extraction
         let extracted_files: Vec<_> = fs::read_dir(&temp)

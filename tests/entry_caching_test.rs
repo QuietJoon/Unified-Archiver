@@ -6,6 +6,7 @@
 use unified_archive::Archive;
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_entry_caching_same_pointer() {
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 
@@ -58,6 +59,7 @@ fn test_entry_caching_7z() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_dependent_methods_use_cache() {
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 
@@ -79,6 +81,7 @@ fn test_dependent_methods_use_cache() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_caching_resolves_unrar_limitation() {
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 

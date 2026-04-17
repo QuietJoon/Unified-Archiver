@@ -22,6 +22,7 @@ fn fixture_path(name: &str) -> PathBuf {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_open_multiple_formats() {
     // Test that Archive::open() works for all formats
     // Note: test.rar is actually RAR5 format (both test.rar and test_rar5.rar are v5)
@@ -59,6 +60,7 @@ fn test_open_multiple_formats() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_list_files_consistency() {
     // Test that list_files() provides consistent entry structure across formats
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
@@ -70,10 +72,10 @@ fn test_list_files_consistency() {
             continue;
         }
 
-        let archive = Archive::open(&path).expect(&format!("Failed to open {}", filename));
+        let archive = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
         let entries = archive
             .list_files()
-            .expect(&format!("Failed to list files in {}", filename));
+            .unwrap_or_else(|_| panic!("Failed to list files in {}", filename));
 
         // All archives should have entries
         assert!(!entries.is_empty(), "{} should contain entries", filename);
@@ -108,6 +110,7 @@ fn test_list_files_consistency() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_entry_count_consistency() {
     // Test that entry_count() returns consistent values
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
@@ -119,14 +122,14 @@ fn test_entry_count_consistency() {
             continue;
         }
 
-        let archive = Archive::open(&path).expect(&format!("Failed to open {}", filename));
+        let archive = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
 
         let entry_count = archive
             .entry_count()
-            .expect(&format!("Failed to get entry count for {}", filename));
+            .unwrap_or_else(|_| panic!("Failed to get entry count for {}", filename));
         let list_count = archive
             .list_files()
-            .expect(&format!("Failed to list files in {}", filename))
+            .unwrap_or_else(|_| panic!("Failed to list files in {}", filename))
             .len();
 
         assert_eq!(
@@ -138,6 +141,7 @@ fn test_entry_count_consistency() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_find_entry_consistency() {
     // Test that find_entry() works consistently across formats
     //
@@ -152,12 +156,12 @@ fn test_find_entry_consistency() {
             continue;
         }
 
-        let archive = Archive::open(&path).expect(&format!("Failed to open {}", filename));
+        let archive = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
 
         // Get first entry from list_files for testing
         let entries = archive
             .list_files()
-            .expect(&format!("Failed to list files in {}", filename));
+            .unwrap_or_else(|_| panic!("Failed to list files in {}", filename));
 
         if entries.is_empty() {
             continue;
@@ -168,7 +172,7 @@ fn test_find_entry_consistency() {
         // Try to find the entry
         let found = archive
             .find_entry(first_entry_path)
-            .expect(&format!("Failed to find entry in {}", filename));
+            .unwrap_or_else(|_| panic!("Failed to find entry in {}", filename));
 
         assert!(
             found.is_some(),
@@ -186,6 +190,7 @@ fn test_find_entry_consistency() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_find_entry_not_found() {
     // Test that find_entry() returns None for non-existent entries
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
@@ -197,11 +202,11 @@ fn test_find_entry_not_found() {
             continue;
         }
 
-        let archive = Archive::open(&path).expect(&format!("Failed to open {}", filename));
+        let archive = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
 
         let found = archive
             .find_entry("nonexistent_file_12345.txt")
-            .expect(&format!("Failed to search for entry in {}", filename));
+            .unwrap_or_else(|_| panic!("Failed to search for entry in {}", filename));
 
         assert!(
             found.is_none(),
@@ -212,6 +217,7 @@ fn test_find_entry_not_found() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_validate_integrity_consistency() {
     // Test that validate_integrity() provides consistent reporting across formats
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
@@ -223,16 +229,16 @@ fn test_validate_integrity_consistency() {
             continue;
         }
 
-        let archive = Archive::open(&path).expect(&format!("Failed to open {}", filename));
+        let archive = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
 
         let report = archive
             .validate_integrity()
-            .expect(&format!("Failed to validate integrity of {}", filename));
+            .unwrap_or_else(|_| panic!("Failed to validate integrity of {}", filename));
 
         // Report should have sensible values
         let entry_count = archive
             .entry_count()
-            .expect(&format!("Failed to get entry count for {}", filename));
+            .unwrap_or_else(|_| panic!("Failed to get entry count for {}", filename));
 
         assert_eq!(
             report.total_entries, entry_count,
@@ -250,6 +256,7 @@ fn test_validate_integrity_consistency() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_path_getter_consistency() {
     // Test that path() returns the correct path for all formats
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
@@ -261,7 +268,7 @@ fn test_path_getter_consistency() {
             continue;
         }
 
-        let archive = Archive::open(&path).expect(&format!("Failed to open {}", filename));
+        let archive = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
 
         assert_eq!(
             archive.path(),
@@ -273,6 +280,7 @@ fn test_path_getter_consistency() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_is_encrypted_consistency() {
     // Test that is_encrypted() works consistently across formats
     let unencrypted_files = vec!["test.rar", "test.zip", "test.7z"];
@@ -284,11 +292,11 @@ fn test_is_encrypted_consistency() {
             continue;
         }
 
-        let archive = Archive::open(&path).expect(&format!("Failed to open {}", filename));
+        let archive = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
 
         let is_encrypted = archive
             .is_encrypted()
-            .expect(&format!("Failed to check encryption for {}", filename));
+            .unwrap_or_else(|_| panic!("Failed to check encryption for {}", filename));
 
         // These test archives should not be encrypted
         assert!(!is_encrypted, "{} should not be encrypted", filename);
@@ -317,8 +325,7 @@ fn test_is_encrypted_consistency() {
             // Some formats allow opening without password for inspection
             let is_encrypted_result = archive.is_encrypted();
 
-            if is_encrypted_result.is_ok() {
-                let is_encrypted = is_encrypted_result.unwrap();
+            if let Ok(is_encrypted) = is_encrypted_result {
                 assert_eq!(
                     is_encrypted, should_be_encrypted,
                     "{} encryption detection mismatch",
@@ -327,11 +334,11 @@ fn test_is_encrypted_consistency() {
             } else {
                 // Password required - try with password
                 let archive_with_pass = Archive::open_encrypted(&path, password)
-                    .expect(&format!("Failed to open {} with password", filename));
+                    .unwrap_or_else(|_| panic!("Failed to open {} with password", filename));
 
                 let is_encrypted = archive_with_pass
                     .is_encrypted()
-                    .expect(&format!("Failed to check encryption for {}", filename));
+                    .unwrap_or_else(|_| panic!("Failed to check encryption for {}", filename));
 
                 assert_eq!(
                     is_encrypted, should_be_encrypted,
@@ -344,6 +351,7 @@ fn test_is_encrypted_consistency() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_calculate_archive_crc_consistency() {
     // Test that calculate_archive_crc() works consistently
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
@@ -355,16 +363,16 @@ fn test_calculate_archive_crc_consistency() {
             continue;
         }
 
-        let archive = Archive::open(&path).expect(&format!("Failed to open {}", filename));
+        let archive = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
 
         let archive_crc = archive
             .calculate_archive_crc()
-            .expect(&format!("Failed to calculate archive CRC for {}", filename));
+            .unwrap_or_else(|_| panic!("Failed to calculate archive CRC for {}", filename));
 
         // Archive CRC should be deterministic
         // Calculate again and verify consistency
-        let archive2 = Archive::open(&path).expect(&format!("Failed to reopen {}", filename));
-        let archive_crc2 = archive2.calculate_archive_crc().expect(&format!(
+        let archive2 = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to reopen {}", filename));
+        let archive_crc2 = archive2.calculate_archive_crc().unwrap_or_else(|_| panic!(
             "Failed to recalculate archive CRC for {}",
             filename
         ));
@@ -378,6 +386,7 @@ fn test_calculate_archive_crc_consistency() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_unified_api_cross_format() {
     // Comprehensive test demonstrating the unified API working across formats
     // Note: test.rar is actually RAR5 format
@@ -395,7 +404,7 @@ fn test_unified_api_cross_format() {
         }
 
         // 1. Open archive
-        let archive = Archive::open(&path).expect(&format!("Failed to open {}", filename));
+        let archive = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
 
         // 2. Verify format detection
         assert_eq!(archive.format(), expected_format);
@@ -406,13 +415,13 @@ fn test_unified_api_cross_format() {
         // 4. List files
         let entries = archive
             .list_files()
-            .expect(&format!("Failed to list files in {}", filename));
+            .unwrap_or_else(|_| panic!("Failed to list files in {}", filename));
         assert!(!entries.is_empty());
 
         // 5. Get entry count
         let count = archive
             .entry_count()
-            .expect(&format!("Failed to get entry count for {}", filename));
+            .unwrap_or_else(|_| panic!("Failed to get entry count for {}", filename));
         assert_eq!(count, entries.len());
 
         // 6. Find entry
@@ -420,25 +429,25 @@ fn test_unified_api_cross_format() {
             let first_path = &entries[0].path;
             let found = archive
                 .find_entry(first_path)
-                .expect(&format!("Failed to find entry in {}", filename));
+                .unwrap_or_else(|_| panic!("Failed to find entry in {}", filename));
             assert!(found.is_some());
         }
 
         // 7. Check encryption
         let _ = archive
             .is_encrypted()
-            .expect(&format!("Failed to check encryption for {}", filename));
+            .unwrap_or_else(|_| panic!("Failed to check encryption for {}", filename));
 
         // 8. Validate integrity
         let report = archive
             .validate_integrity()
-            .expect(&format!("Failed to validate integrity of {}", filename));
+            .unwrap_or_else(|_| panic!("Failed to validate integrity of {}", filename));
         assert_eq!(report.total_entries, count);
 
         // 9. Calculate archive CRC
         let _ = archive
             .calculate_archive_crc()
-            .expect(&format!("Failed to calculate CRC for {}", filename));
+            .unwrap_or_else(|_| panic!("Failed to calculate CRC for {}", filename));
 
         println!(" {} - All unified API operations successful", filename);
     }

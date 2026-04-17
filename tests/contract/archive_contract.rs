@@ -31,6 +31,7 @@ fn contract_open_valid_7z() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn contract_open_valid_rar() {
     let archive = Archive::open(fixture("test.rar")).expect("Should open valid RAR");
     // test.rar is actually RAR5 format (created by RAR 7.12+)
@@ -42,6 +43,7 @@ fn contract_open_valid_rar() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn contract_open_valid_rar5() {
     let archive = Archive::open(fixture("test_rar5.rar")).expect("Should open valid RAR5");
     assert_eq!(archive.format(), ArchiveFormat::Rar5);
@@ -186,6 +188,7 @@ fn contract_create_tar_xz_archive() {
 // ── Contract 5: Modify unsupported format ──
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn contract_modify_rar_returns_unsupported() {
     let result = Archive::modify(fixture("test.rar"));
     assert!(result.is_err(), "Modifying RAR should fail");

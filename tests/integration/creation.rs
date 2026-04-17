@@ -38,8 +38,8 @@ fn test_unsupported_format_rejected() {
 
     if let Err(e) = result {
         assert!(
-            matches!(e, ArchiveError::Unsupported { .. } | ArchiveError::UnsupportedOperation { .. }),
-            "Expected Unsupported or UnsupportedOperation, got {:?}", e
+            matches!(e, ArchiveError::Unsupported { .. } | ArchiveError::OperationBlocked { .. } | ArchiveError::ReadOnlyBackend { .. }),
+            "Expected Unsupported or OperationBlocked/ReadOnlyBackend, got {:?}", e
         );
     }
 }

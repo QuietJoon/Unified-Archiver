@@ -27,8 +27,7 @@ fn create_test_zip(path: &Path, content: &str) -> std::io::Result<()> {
         .output()?;
 
     if !output.status.success() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        return Err(std::io::Error::other(
             "Failed to create ZIP",
         ));
     }
@@ -249,6 +248,7 @@ fn test_no_data_races_on_repeated_access() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_concurrent_rar_open_and_list() {
     // OI-026-004: UnRAR has process-wide global state. Without serialization,
     // concurrent open/list across different RAR archives corrupts results.

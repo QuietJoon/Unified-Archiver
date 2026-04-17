@@ -55,8 +55,7 @@ fn create_performance_test_archive(
         .output()?;
 
     if !output.status.success() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        return Err(std::io::Error::other(
             format!("zip failed: {}", String::from_utf8_lossy(&output.stderr)),
         ));
     }
@@ -211,13 +210,13 @@ fn test_performance_baseline_documentation() {
     println!("=== SC-010 Performance Requirement ===");
     println!("Target: Extraction within 20% of native 7zip performance");
     println!("Measurement: Extraction throughput (MB/s) on identical hardware");
-    println!("");
+    println!();
     println!("Factors affecting performance:");
     println!("- Archive format (ZIP, 7z, RAR have different backends)");
     println!("- Compression level (higher compression = more CPU)");
     println!("- I/O subsystem (SSD vs HDD)");
     println!("- File sizes (many small files vs few large files)");
-    println!("");
+    println!();
     println!("Note: Full benchmark suite available in benches/extraction.rs");
     println!("Run with: cargo bench --bench extraction");
 }

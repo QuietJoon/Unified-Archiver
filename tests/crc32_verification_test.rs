@@ -36,7 +36,6 @@ fn test_crc32_error_mapping_unrar() {
     // Real-world CRC32 failures will be caught by UnRAR and properly reported.
 
     // Test passes if the mapping code compiles and is accessible
-    assert!(true, "CRC32 error mapping for UnRAR is configured");
 }
 
 #[test]
@@ -48,10 +47,10 @@ fn test_crc32_error_mapping_libarchive() {
     // in libarchive error messages and maps them to ArchiveError::Corruption.
 
     // Test passes if the mapping code compiles and is accessible
-    assert!(true, "CRC32 error mapping for libarchive is configured");
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_crc32_verification_disabled() {
     // Note: Both UnRAR and libarchive perform CRC32 verification automatically
     // and don't provide a way to disable it. The verify_crc32 flag is for
@@ -81,6 +80,7 @@ fn test_crc32_verification_disabled() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_metadata_crc32_present() {
     // Verify that CRC32 values are present in metadata for formats that support it
     let archive =

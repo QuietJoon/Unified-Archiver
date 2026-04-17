@@ -34,6 +34,7 @@ fn contract_list_files_7z() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn contract_list_files_rar() {
     let archive = Archive::open(fixture("test.rar")).unwrap();
     let entries = archive.list_files().unwrap();
@@ -41,6 +42,7 @@ fn contract_list_files_rar() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn contract_list_files_rar5() {
     let archive = Archive::open(fixture("test_rar5.rar")).unwrap();
     let entries = archive.list_files().unwrap();

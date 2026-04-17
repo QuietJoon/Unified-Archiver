@@ -5,6 +5,7 @@
 use unified_archive::Archive;
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_is_solid_rar() {
     // Test RAR archive (may or may not be solid, just verify method works)
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
@@ -13,6 +14,7 @@ fn test_is_solid_rar() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_is_solid_rar5() {
     // Test RAR5 archive
     let archive =
@@ -47,6 +49,7 @@ fn test_is_solid_7z() {
 
 // Recovery record tests
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_has_recovery_rar() {
     // Test RAR archive (may or may not have recovery, just verify method works)
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
@@ -58,6 +61,7 @@ fn test_has_recovery_rar() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_has_recovery_rar5() {
     // Test RAR5 archive
     let archive =
@@ -97,6 +101,7 @@ fn test_has_recovery_7z() {
 
 // Recovery percentage tests
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_recovery_percentage_rar() {
     // Test RAR archive - may or may not have recovery records
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
@@ -109,7 +114,7 @@ fn test_recovery_percentage_rar() {
     // If recovery exists, percentage should be 1-100%
     if let Ok(Some(pct)) = result {
         assert!(
-            pct >= 1 && pct <= 100,
+            (1..=100).contains(&pct),
             "Recovery percentage should be 1-100%, got {}",
             pct
         );
@@ -118,6 +123,7 @@ fn test_recovery_percentage_rar() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_recovery_percentage_rar5() {
     // Test RAR5 archive - may or may not have recovery records
     let archive =
@@ -131,7 +137,7 @@ fn test_recovery_percentage_rar5() {
     // If recovery exists, percentage should be 1-100%
     if let Ok(Some(pct)) = result {
         assert!(
-            pct >= 1 && pct <= 100,
+            (1..=100).contains(&pct),
             "Recovery percentage should be 1-100%, got {}",
             pct
         );

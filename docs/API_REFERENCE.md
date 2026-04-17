@@ -601,12 +601,6 @@ Discard all pending modification operations without committing them.
 
 ---
 
-#### `Archive::clear_entries(&mut self) -> Result<()>`
-
-Mark all existing entries for removal. After `commit_changes()`, the archive will contain only entries added after this call.
-
----
-
 #### `Archive::commit_changes(self) -> Result<()>`
 
 Apply all tracked modifications (additions, removals, replacements). Creates a new archive, copies non-removed entries, adds new entries, then replaces the original file.

@@ -5,6 +5,7 @@
 use unified_archive::{Archive, ArchiveFormat, EntryType};
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_unified_api_open_rar4() {
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 
@@ -17,6 +18,7 @@ fn test_unified_api_open_rar4() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_unified_api_open_rar5() {
     let archive =
         Archive::open("tests/fixtures/test_rar5.rar").expect("Failed to open RAR5 archive");
@@ -26,6 +28,7 @@ fn test_unified_api_open_rar5() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_unified_api_list_files_rar4() {
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 
@@ -41,6 +44,7 @@ fn test_unified_api_list_files_rar4() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_unified_api_list_files_rar5() {
     let archive =
         Archive::open("tests/fixtures/test_rar5.rar").expect("Failed to open RAR5 archive");
@@ -57,6 +61,7 @@ fn test_unified_api_list_files_rar5() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_unified_api_entry_count() {
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 

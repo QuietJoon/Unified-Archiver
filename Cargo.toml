@@ -26,6 +26,7 @@ zip = { version = "2.2", default-features = false, features = ["deflate", "aes-c
 criterion = "0.5"
 tempfile = "3.0"
 proptest = "1.4"
+serial_test = { version = "3", features = ["file_locks"] }
 
 [build-dependencies]
 pkg-config = "0.3"

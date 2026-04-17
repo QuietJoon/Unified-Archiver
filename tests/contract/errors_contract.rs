@@ -38,6 +38,7 @@ fn contract_format_error_for_invalid_file() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn contract_password_error_for_encrypted_without_password() {
     let archive = Archive::open(fixture("test_encrypted.rar")).unwrap();
     let result = archive.extract_to_memory("test_file.txt");
@@ -49,15 +50,20 @@ fn contract_password_error_for_encrypted_without_password() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn contract_unsupported_operation_for_rar_modify() {
     let result = Archive::modify(fixture("test.rar"));
     let err = result.err().expect("Should return error");
     assert!(
         matches!(
             err,
-            ArchiveError::UnsupportedOperation { .. } | ArchiveError::Unsupported { .. }
+            ArchiveError::OperationBlocked { .. }
+                | ArchiveError::NotImplemented { .. }
+                | ArchiveError::WriteModeOnly { .. }
+                | ArchiveError::ReadOnlyBackend { .. }
+                | ArchiveError::Unsupported { .. }
         ),
-        "Expected Unsupported or UnsupportedOperation variant, got: {:?}",
+        "Expected an operation-blocked/unsupported variant, got: {:?}",
         err
     );
 }
@@ -116,6 +122,7 @@ fn contract_format_error_is_descriptive() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn contract_unsupported_error_explains_why() {
     let result = Archive::modify(fixture("test.rar"));
     let err = result.err().unwrap();
@@ -191,6 +198,7 @@ fn contract_display_format_error() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn contract_display_unsupported_error() {
     let result = Archive::modify(fixture("test.rar"));
     let err = result.err().unwrap();

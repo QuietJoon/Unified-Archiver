@@ -33,7 +33,7 @@ fn progress_callback_invoked_once_per_entry_zip() {
     let mut archive = Archive::create(&path, options).unwrap();
     for i in 0..10 {
         archive
-            .add_file_from_data(&format!("file{i}.bin"), &vec![0xAB; 64])
+            .add_file_from_data(&format!("file{i}.bin"), &[0xAB; 64])
             .unwrap();
     }
     archive.finish().unwrap();
@@ -57,7 +57,7 @@ fn progress_callback_invoked_once_per_entry_tar() {
     let mut archive = Archive::create(&path, options).unwrap();
     for i in 0..5 {
         archive
-            .add_file_from_data(&format!("file{i}.bin"), &vec![0xCD; 32])
+            .add_file_from_data(&format!("file{i}.bin"), &[0xCD; 32])
             .unwrap();
     }
     archive.finish().unwrap();

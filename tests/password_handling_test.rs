@@ -13,6 +13,7 @@ fn fixtures_dir() -> PathBuf {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_detect_encrypted_rar_archive() {
     // Test that is_encrypted() correctly detects encrypted RAR archives
     // Note: Using test_encrypted_data.rar (data encrypted, headers not encrypted)
@@ -27,6 +28,7 @@ fn test_detect_encrypted_rar_archive() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 #[ignore = "Test fixture test_encrypted_data.rar appears to be corrupted (CRC32 checksum verification failed)"]
 fn test_open_encrypted_rar_with_correct_password() {
     // Test opening and extracting encrypted RAR with correct password
@@ -63,6 +65,7 @@ fn test_open_encrypted_rar_with_correct_password() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_open_encrypted_rar_with_wrong_password() {
     // Test that wrong password is properly detected
     let archive_result = Archive::open_encrypted(
@@ -107,6 +110,7 @@ fn test_open_encrypted_rar_with_wrong_password() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_open_encrypted_rar_without_password() {
     // Test that opening encrypted archive without password fails appropriately
     let archive = Archive::open(fixtures_dir().join("test_encrypted_data.rar"));
@@ -148,6 +152,7 @@ fn test_open_encrypted_rar_without_password() {
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_password_does_not_leak_in_errors() {
     // Verify that passwords are not exposed in error messages
     let result = Archive::open_encrypted(
@@ -184,10 +189,10 @@ fn test_password_does_not_leak_in_errors() {
     }
 
     // Test passes if password is not in any error messages
-    assert!(true, "Password security check complete");
 }
 
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_encrypted_metadata_available_without_password() {
     // Test that file list and metadata can be accessed without password
     // (This is format-dependent: RAR with non-encrypted headers allows listing)

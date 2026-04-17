@@ -31,6 +31,7 @@ fn fixture_name_strategy() -> impl Strategy<Value = &'static str> {
 proptest! {
     /// Property: Format detection is deterministic across random iteration counts
     #[test]
+    #[serial_test::file_serial(rar)]
     fn prop_format_detection_deterministic(
         (filename, expected_format) in fixture_file_strategy(),
         iterations in 1u32..20,
@@ -52,6 +53,7 @@ proptest! {
 
     /// Property: Entry count is consistent regardless of how many times list_files is called
     #[test]
+    #[serial_test::file_serial(rar)]
     fn prop_entry_count_consistent(
         filename in fixture_name_strategy(),
         iterations in 2u32..30,
@@ -79,6 +81,7 @@ proptest! {
 
     /// Property: Entry paths are always unique within any archive
     #[test]
+    #[serial_test::file_serial(rar)]
     fn prop_entry_paths_unique(filename in fixture_name_strategy()) {
         let path = fixtures_dir().join(filename);
         let archive = Archive::open(&path)
@@ -97,6 +100,7 @@ proptest! {
 
     /// Property: All file entries in RAR archives have CRC32 checksums
     #[test]
+    #[serial_test::file_serial(rar)]
     fn prop_rar_file_entries_have_crc32(_dummy in 0u8..1) {
         let path = fixtures_dir().join("test.rar");
         let archive = Archive::open(&path)
@@ -118,6 +122,7 @@ proptest! {
 
     /// Property: Extracted data size matches the entry's reported size
     #[test]
+    #[serial_test::file_serial(rar)]
     fn prop_extracted_size_matches_entry(filename in fixture_name_strategy()) {
         let path = fixtures_dir().join(filename);
         let file_to_extract = "test_file.txt";
@@ -145,6 +150,7 @@ proptest! {
 
     /// Property: Streaming extraction produces identical data to memory extraction
     #[test]
+    #[serial_test::file_serial(rar)]
     fn prop_streaming_equals_memory_extraction(filename in fixture_name_strategy()) {
         use std::io::Read;
 
@@ -173,6 +179,7 @@ proptest! {
 
     /// Property: Archive opening is idempotent (N random opens all succeed)
     #[test]
+    #[serial_test::file_serial(rar)]
     fn prop_archive_open_idempotent(
         filename in fixture_name_strategy(),
         iterations in 1u32..50,
@@ -191,6 +198,7 @@ proptest! {
 
     /// Property: Validation reports are consistent across multiple runs
     #[test]
+    #[serial_test::file_serial(rar)]
     fn prop_validation_consistent(
         filename in fixture_name_strategy(),
         iterations in 2u32..15,
@@ -223,6 +231,7 @@ proptest! {
 
     /// Property: find_entry is equivalent to filtering list_files
     #[test]
+    #[serial_test::file_serial(rar)]
     fn prop_find_entry_equivalent_to_filter(filename in fixture_name_strategy()) {
         let path = fixtures_dir().join(filename);
         let archive = Archive::open(&path)
@@ -256,6 +265,7 @@ proptest! {
 
     /// Property: Entry IDs are sequential starting from 0
     #[test]
+    #[serial_test::file_serial(rar)]
     fn prop_entry_ids_sequential(filename in fixture_name_strategy()) {
         let path = fixtures_dir().join(filename);
         let archive = Archive::open(&path)
@@ -275,6 +285,7 @@ proptest! {
 
     /// Property: File entries have non-negative sizes
     #[test]
+    #[serial_test::file_serial(rar)]
     fn prop_file_entries_have_sizes(filename in fixture_name_strategy()) {
         let path = fixtures_dir().join(filename);
         let archive = Archive::open(&path)
@@ -296,6 +307,7 @@ proptest! {
 
     /// Property: Compression ratio, when present, is non-negative
     #[test]
+    #[serial_test::file_serial(rar)]
     fn prop_compression_ratio_non_negative(filename in fixture_name_strategy()) {
         let path = fixtures_dir().join(filename);
         let archive = Archive::open(&path)

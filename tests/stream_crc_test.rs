@@ -94,7 +94,6 @@ fn test_auto_detect_gzip() {
             // Skip if file doesn't exist
             if !std::path::Path::new("/Volumes/Temp/claude/test_stream_crc.txt.gz").exists() {
                 eprintln!("Test file doesn't exist, skipping");
-                return;
             }
         }
     }
@@ -116,7 +115,6 @@ fn test_auto_detect_bzip2() {
             // Skip if file doesn't exist
             if !std::path::Path::new("/Volumes/Temp/claude/test_stream_crc.txt.bz2").exists() {
                 eprintln!("Test file doesn't exist, skipping");
-                return;
             }
         }
     }

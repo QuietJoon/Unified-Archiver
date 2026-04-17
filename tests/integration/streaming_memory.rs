@@ -25,7 +25,7 @@ fn create_test_archive(archive_path: &Path, total_size_bytes: usize) -> std::io:
 
     // Create files totaling approximately total_size_bytes
     let file_size = 1024 * 1024; // 1MB per file
-    let num_files = (total_size_bytes + file_size - 1) / file_size;
+    let num_files = total_size_bytes.div_ceil(file_size);
 
     for i in 0..num_files {
         let file_path = source_dir.join(format!("file_{:04}.bin", i));
@@ -186,10 +186,7 @@ fn test_memory_efficiency_claim() {
 
     // This test serves as documentation - actual memory profiling
     // requires external tools like valgrind/heaptrack.
-    assert!(
-        true,
-        "Memory efficiency is verified by design (streaming APIs)"
-    );
+    // Memory efficiency is verified by design (streaming APIs)
 }
 
 #[test]
