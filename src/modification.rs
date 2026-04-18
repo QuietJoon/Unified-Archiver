@@ -172,6 +172,8 @@ impl Archive {
             ));
         }
 
+        crate::security::validate_archive_internal_path(path)?;
+
         let modifications = self.modifications.as_mut().ok_or_else(|| {
             ArchiveError::operation_blocked(ops::ADD_ENTRY, "Archive not in Modify mode")
         })?;
@@ -192,6 +194,8 @@ impl Archive {
             ));
         }
 
+        crate::security::validate_archive_internal_path(path)?;
+
         let modifications = self.modifications.as_mut().ok_or_else(|| {
             ArchiveError::operation_blocked(ops::ADD_DIRECTORY_ENTRY, "Archive not in Modify mode")
         })?;
@@ -210,6 +214,8 @@ impl Archive {
                 "Only available in Modify mode",
             ));
         }
+
+        crate::security::validate_archive_internal_path(path)?;
 
         let modifications = self.modifications.as_mut().ok_or_else(|| {
             ArchiveError::operation_blocked(ops::REMOVE_ENTRY, "Archive not in Modify mode")

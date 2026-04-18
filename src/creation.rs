@@ -75,6 +75,7 @@ impl Archive {
     /// * `Ok(())` - File added successfully
     /// * `Err` - If archive not in Write mode or add fails
     pub fn add_file_from_data(&mut self, path: &str, data: &[u8]) -> Result<()> {
+        crate::security::validate_archive_internal_path(path)?;
         match &mut self.backend {
             ArchiveBackend::ZipWriter(writer) => writer.add_file_from_data(path, data),
             ArchiveBackend::Libarchive(backend) => backend.add_file_from_data(path, data),
@@ -110,6 +111,7 @@ impl Archive {
         fs_path: impl AsRef<Path>,
         archive_path: &str,
     ) -> Result<()> {
+        crate::security::validate_archive_internal_path(archive_path)?;
         match &mut self.backend {
             ArchiveBackend::ZipWriter(writer) => writer.add_file_from_path(fs_path, archive_path),
             ArchiveBackend::Libarchive(backend) => {
@@ -127,6 +129,7 @@ impl Archive {
 
     /// Add a directory entry to archive (without contents)
     pub fn add_directory(&mut self, path: &str) -> Result<()> {
+        crate::security::validate_archive_internal_path(path)?;
         match &mut self.backend {
             ArchiveBackend::ZipWriter(writer) => writer.add_directory_entry(path),
             ArchiveBackend::Libarchive(backend) => backend.add_directory_entry(path),
