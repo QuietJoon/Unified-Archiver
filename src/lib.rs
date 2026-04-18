@@ -12,10 +12,10 @@
 //! - 🔍 **Automatic Format Detection** - Magic byte and extension-based detection
 //! - 🚀 **High Performance** - SIMD CRC32, streaming architecture
 //! - 💾 **Memory Efficient** - <100MB memory for multi-GB archives (for libarchive-backed formats; native ZIP/7z/RAR backends buffer entries during streaming)
-//! - 🔐 **Password Support** - Encrypted archives (RAR, RAR5, ZIP, 7z)
+//! - 🔐 **Encrypted Read Support** - Encrypted archives (RAR, RAR5, ZIP, 7z)
 //! - ✅ **Integrity Validation** - CRC32 verification
 //! - 📊 **Rich Metadata** - Sizes, timestamps, CRC32, permissions
-//! - 🛡️ **SFX Detection** - Identify self-extracting archives across platforms
+//! - 🛡️ **SFX Detection and Opening** - Identify and open self-extracting archives across platforms
 //! - 🏗️ **Archive Creation** - Create ZIP, 7z, TAR archives with compression
 //!
 //! ## Quick Examples
@@ -138,29 +138,29 @@
 //!
 //! ## Supported Formats
 //!
-//! | Format    | Read | Extract | Create | CRC32 | Encryption | SFX Detection |
-//! |-----------|------|---------|--------|-------|------------|---------------|
-//! | **RAR**   | ✅   | ✅      | 🪟*    | ✅    | ✅         | ✅            |
-//! | **RAR5**  | ✅   | ✅      | 🪟*    | ✅    | ✅         | ✅            |
-//! | **ZIP**   | ✅   | ✅      | ✅     | ✅    | 📖§        | ✅            |
-//! | **7z**    | ✅   | ✅      | ✅     | ✅    | ✅†        | ✅            |
-//! | **TAR**   | ✅   | ✅      | ✅     | ✅    | ❌         | ❌            |
-//! | **TAR.GZ**| ✅   | ✅      | ✅     | ✅    | ❌         | ❌            |
-//! | **TAR.BZ2**| ✅  | ✅      | ✅     | ✅    | ❌         | ❌            |
-//! | **TAR.XZ**| ✅   | ✅      | ✅     | ✅    | ❌         | ❌            |
-//! | **GZIP**  | ✅   | ✅      | ❌     | ✅    | ❌         | ❌            |
-//! | **BZIP2** | ✅   | ✅      | ❌     | ✅    | ❌         | ❌            |
-//! | **XZ**    | ✅   | ✅      | ❌     | ✅    | ❌         | ❌            |
-//! | **ISO**   | ✅   | ✅      | ❌     | ⏳    | ❌         | ❌            |
+//! | Format    | Open | Extract | Create via `Archive::create` | Encrypted Read | SFX Detection |
+//! |-----------|------|---------|------------------------------|----------------|---------------|
+//! | **RAR**   | ✅   | ✅      | ❌                           | ✅             | ✅            |
+//! | **RAR5**  | ✅   | ✅      | ❌                           | ✅             | ✅            |
+//! | **ZIP**   | ✅   | ✅      | ✅                           | ✅             | ✅            |
+//! | **7z**    | ✅   | ✅      | ✅                           | ✅†            | ✅            |
+//! | **TAR**   | ✅   | ✅      | ✅                           | ❌             | ❌            |
+//! | **TAR.GZ**| ✅   | ✅      | ✅                           | ❌             | ❌            |
+//! | **TAR.BZ2**| ✅  | ✅      | ✅                           | ❌             | ❌            |
+//! | **TAR.XZ**| ✅   | ✅      | ✅                           | ❌             | ❌            |
+//! | **GZIP**  | ✅   | ✅      | ❌                           | ❌             | ❌            |
+//! | **BZIP2** | ✅   | ✅      | ❌                           | ❌             | ❌            |
+//! | **XZ**    | ✅   | ✅      | ❌                           | ❌             | ❌            |
+//! | **ISO**   | ✅   | ✅      | ❌                           | ❌             | ❌            |
 //!
-//! *🪟 RAR creation requires `external-rar-create` feature + Windows host + licensed WinRAR (`rar.exe`)*
-//! *† 7z encryption: read-only via `open_encrypted()`*
+//! *Optional Windows-only RAR creation exists via `external::RarCreator` behind the `external-rar-create` feature.*
+//! *† 7z encryption: read-only via `open_encrypted()`; encrypted creation is not supported by `Archive::create()`.*
 //! Standalone `.gz`/`.bz2`/`.xz` files are supported for read/extract via libarchive's
 //! raw-format binding (AD 0019). Creation of standalone compressed files is out of scope
 //! per AD 0018; use the TAR compound variants to produce compressed archives.
-//! *§ ZIP encryption is read-only (AD 0027): `open_encrypted()` reads AES/ZipCrypto
-//! archives, but this library deliberately does not produce encrypted archives. Supplying
-//! a password to `Archive::create` for ZIP returns `OperationBlocked`.*
+//! ZIP encryption is read-only in `v0.1.0` (AD 0027): `open_encrypted()` reads
+//! AES/ZipCrypto archives, but `Archive::create()` deliberately rejects password-based
+//! ZIP creation with `OperationBlocked`.
 //!
 //! ## Performance
 //!

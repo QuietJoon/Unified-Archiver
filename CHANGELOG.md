@@ -13,8 +13,14 @@ Four targeted gaps closed before tagging v0.1.0:
 
 - **`Archive::open_at_offset(path, offset)`** is now fully implemented for every backend (ZIP via an `OffsetReader` adapter; 7z / TAR / ISO / RAR via a tempfile slice). Closes DEF-001 and unblocks `Archive::open_sfx` end-to-end.
 - **Options-aware memory/stream extraction**: `Archive::extract_to_memory_with_options` and `Archive::extract_to_stream_with_options` let callers pass `ExtractionLimits` through to non-libarchive backends (Piz, ZipReader, SevenZ, UnRAR). Closes OI-0057-005.
-- **ZIP modification metadata preservation**: `commit_changes` now preserves the archive-level EOCD comment and each entry's compression method (Stored vs Deflated) when rewriting a ZIP source. Closes DEF-005 (quick-wins scope); remaining ZIP-specific caveats (ZIP64 >4 GiB, encrypted re-encryption, crash-recovery journaling) are documented in `Limitations.md §4`.
+- **ZIP modification metadata preservation**: `commit_changes` now preserves the archive-level EOCD comment and each entry's compression method (Stored vs Deflated) when rewriting a ZIP source. Closes DEF-005 (quick-wins scope); remaining ZIP-specific caveats (ZIP64 >4 GiB, encrypted re-encryption, crash-recovery journaling) are documented in `Limitations.md`.
 - **SevenZ source-side streaming**: investigated and deferred — sevenz-rust2 0.19.4 exposes no owned entry-level `Read`, so the buffered `extract_to_stream` adapter stays. Recorded as AD 0035; OI-0057-007 closes as partial with the SevenZ row deferred to DEF-004 pending upstream support.
+
+### Documentation polish (2026-04-18)
+
+- Added a public [user manual](./docs/USER_MANUAL.md) for `v0.1.0`
+- Aligned `README.md`, `docs/README.md`, `docs/API_REFERENCE.md`, `docs/GETTING_STARTED.md`, and `Limitations.md` around the same capability story
+- Corrected outdated claims around encrypted creation, standalone `.gz/.bz2/.xz` support, SFX opening, and split-volume support
 
 ### Added
 
@@ -26,9 +32,10 @@ Four targeted gaps closed before tagging v0.1.0:
   - `Archive::find_entry()` - Find specific files by path
   - `Archive::is_encrypted()` - Check for password protection
   - `Archive::validate_integrity()` - Validate CRC32 checksums
-  - **NEW** `Archive::create()` - Create archives in ZIP, 7z, TAR variants with compression and encryption
+  - **NEW** `Archive::create()` - Create archives in ZIP, 7z, and TAR variants with configurable compression
   - **NEW** `Archive::modify()` - Modify existing archives (add/remove/replace files)
   - **NEW** `Archive::detect_sfx()` - Detect self-extracting archives across platforms
+  - **NEW** `Archive::open_sfx()` / `Archive::open_at_offset()` - Open embedded archive payloads discovered inside self-extracting binaries
 
 #### Extraction Features
 - **Multiple Extraction Methods**
@@ -56,11 +63,20 @@ Four targeted gaps closed before tagging v0.1.0:
   - Direct CRC32 access from metadata
   - Encrypted header detection
 
-- **ZIP, 7z, TAR** (via libarchive)
+- **ZIP**
   - Full read/extract support
-  - All TAR compression variants (GZ, BZ2, XZ)
-  - Computed CRC32 checksums
-  - Automatic format detection
+  - Native ZIP creation
+  - Encrypted reads via the `zip` crate backend
+
+- **7z**
+  - Full read/extract support
+  - Native 7z inspection/extraction
+  - 7z creation through the libarchive-backed creation path
+
+- **TAR family / ISO / raw compressed formats**
+  - TAR, TAR.GZ, TAR.BZ2, TAR.XZ, and ISO support via libarchive
+  - Standalone `.gz`, `.bz2`, and `.xz` read/extract support via libarchive `format_raw`
+  - TAR-family creation through libarchive
 
 #### Metadata Access
 - **Rich Entry Metadata**
@@ -76,7 +92,7 @@ Four targeted gaps closed before tagging v0.1.0:
 - **Memory Efficiency**
   - Streaming extraction <100MB memory for GB+ files
   - Chunk-based reading with configurable buffer sizes
-  - No full-file loads unless explicitly requested
+  - Avoids full-file loads on libarchive-backed streaming paths; some native backends still buffer entries
 
 - **SIMD Acceleration**
   - CRC32 computation using `crc32fast` (~300MB/s)
@@ -107,6 +123,7 @@ Four targeted gaps closed before tagging v0.1.0:
   - `extract_archive.rs` - Extraction with progress
   - `streaming_extract.rs` - Memory-efficient extraction
   - `test_extract.rs` - Simple extraction example
+  - `detect_sfx.rs` - SFX detection and embedded payload opening
 
 - **Documentation**
   - Comprehensive README with usage examples
@@ -115,7 +132,7 @@ Four targeted gaps closed before tagging v0.1.0:
   - Known limitations documented
 
 - **Testing**
-  - Comprehensive test suite covering all features (400+ tests including unit, integration, contract, and doc tests)
+  - Comprehensive test suite covering unit, integration, contract, and doc tests
   - Performance benchmarks
   - Property-based tests with proptest
   - Multi-format test fixtures
@@ -138,6 +155,7 @@ Four targeted gaps closed before tagging v0.1.0:
 - Corrected format support table
 - Added missing error handling examples
 - Documented all limitations and workarounds
+- Added a consolidated public user manual
 
 ### Changed
 
@@ -152,7 +170,7 @@ Four targeted gaps closed before tagging v0.1.0:
 - Consistent `Result<T>` return types across all methods
 
 #### Backend Architecture
-- Piz (ZIP), zip crate (encrypted ZIP), SevenZ (7z), libarchive (TAR family — `.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz` — and ISO; standalone `.gz`/`.bz2`/`.xz` are out of scope, see AD 0018), UnRAR (RAR/RAR5)
+- Piz (ZIP read), zip crate (encrypted ZIP read + ZIP creation), SevenZ (7z read), libarchive (TAR family creation/read, ISO, standalone `.gz`/`.bz2`/`.xz` read), UnRAR (RAR/RAR5)
 - Automatic backend selection based on format detection
 - Thread-local archive handles for parallel operations
 
@@ -194,12 +212,12 @@ Four targeted gaps closed before tagging v0.1.0:
 See [Limitations.md](./Limitations.md) for complete details.
 
 **Key Limitations in v0.1.0:**
-- Multi-part archive creation deferred to v0.2.0 (reading supported)
+- `Archive::create()` rejects password-based encrypted creation for every format
+- Split-volume support is limited to RAR / RAR5
 - Progress callbacks during creation report per-entry events with `total = None` (file count not pre-computed)
-- RAR format is read-only (no creation support due to proprietary format)
-- UnRAR iterator exhaustion requires reopening archive
-- DOS timestamp conversion approximation for old files
-- Temporary file usage for `extract_to_memory()`
+- RAR format is read-only through the main `Archive` facade
+- Windows support is not release-verified yet
+- Some workflows intentionally use temporary files (`open_at_offset`, UnRAR `extract_to_memory`)
 - SFX detection has substantial unit and integration test coverage including synthetic PE/ELF/Mach-O/script stubs, signature scanning, and false-positive tests
 
 ### Migration Notes

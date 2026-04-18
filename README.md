@@ -6,16 +6,16 @@ A cross-platform Rust library providing a unified interface for archive inspecti
 
 ## Features
 
-✨ **Unified Interface** - Same API works identically for ZIP, 7z, RAR, RAR5, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, and ISO
+✨ **Unified Interface** - Same API works identically for ZIP, 7z, RAR, RAR5, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, GZIP, BZIP2, XZ, and ISO
 🔍 **Automatic Format Detection** - Magic byte detection, no need to specify format explicitly
 🚀 **High Performance** - SIMD-accelerated CRC32, streaming architecture, <100MB memory for 10GB+ archives (for libarchive-backed formats; ZIP, 7z, and RAR backends currently buffer entries during streaming extraction)
-🔐 **Password Support** - Unified encryption handling for RAR, RAR5, ZIP, 7z
+🔐 **Encrypted Read Support** - Open encrypted RAR, RAR5, ZIP, and 7z archives through one API
 ✅ **Integrity Validation** - Built-in CRC32 checksum validation and recovery record detection
-🛡️ **SFX Detection** - Detect and analyze self-extracting archives (Windows PE, Linux ELF, macOS Mach-O, Script interpreters); extraction via offset opening is deferred
+🛡️ **SFX Detection and Opening** - Detect self-extracting archives and open embedded payloads via `open_sfx()` / `open_at_offset()`
 📊 **Archive Metadata** - Detect solid compression, recovery records, and extract recovery percentages
 🧵 **Thread-Safe** - Concurrent operations on different archives from multiple threads
-🌍 **Cross-Platform** - macOS and Linux support; Windows not yet tested
-🦀 **Pure Rust API** - Zero JVM dependency, idiomatic Rust interface
+🌍 **Cross-Platform** - macOS and Linux tested; Windows support is present but not release-verified
+🦀 **Idiomatic Rust API** - One Rust-facing API over multiple native and Rust backends
 
 ## Quick Start
 
@@ -46,6 +46,14 @@ brew install libarchive pkg-config
 
 **Windows:**
 Dependencies bundled automatically
+
+## Documentation
+
+- [User Manual](./docs/USER_MANUAL.md) - End-user guide for installation, workflows, and caveats
+- [Getting Started](./docs/GETTING_STARTED.md) - First project and common tasks
+- [API Reference](./docs/API_REFERENCE.md) - Public API surface and behavior notes
+- [Limitations](./Limitations.md) - Current v0.1.0 caveats and unsupported cases
+- [Changelog](./CHANGELOG.md) - Release history and release notes
 
 ## Usage
 
@@ -112,25 +120,31 @@ if result.is_sfx {
         result.data_offset.unwrap());
     println!("Stub type: {:?}", result.stub_type);
     println!("{}", result.summary());
-
-    // Note: open_at_offset() is not yet implemented (returns NotImplemented).
-    // Use detect_sfx() to identify the archive format and offset,
-    // then extract the embedded archive data manually.
 }
+
+// Open the embedded archive directly
+let sfx_archive = Archive::open_sfx("installer.exe")?;
+println!("Embedded entries: {}", sfx_archive.entry_count()?);
 ```
 
 ### Multi-part Archives
 
 ```rust
-use unified_archive::Archive;
+use std::path::PathBuf;
+use unified_archive::{Archive, ExtractionOptions};
 
-// Automatically detects and handles multi-part archives
-let archive = Archive::open("backup.part1.rar")?; // or .z01, .001, etc.
+// RAR/RAR5 split archives are supported end-to-end in v0.1.0
+let archive = Archive::open("backup.part1.rar")?;
 let (is_multipart, parts) = archive.detect_multipart()?;
 if is_multipart {
     println!("Multi-part archive with {} parts", parts.len());
 }
-archive.extract_all(options)?; // Seamlessly extracts from all parts
+
+let options = ExtractionOptions {
+    destination: PathBuf::from("./output"),
+    ..Default::default()
+};
+archive.extract_all(options)?; // Uses all RAR parts automatically
 ```
 
 ### Archive Metadata Inspection
@@ -161,90 +175,70 @@ if archive.is_encrypted()? {
 }
 ```
 
-See [quickstart guide](./specs/001-unified-archive/quickstart.md) for more examples.
+See the [User Manual](./docs/USER_MANUAL.md) and [Getting Started guide](./docs/GETTING_STARTED.md) for more examples.
 
 ## Supported Formats
 
-| Format    | Read | Extract | Create* | CRC32 | Encryption | Multi-part | SFX Detection | Solid | Recovery |
-|-----------|------|---------|---------|-------|------------|------------|---------------|-------|----------|
-| **RAR**   | ✅   | ✅      | ❌      | ✅    | ✅         | ✅         | ✅            | ✅    | ✅       |
-| **RAR5**  | ✅   | ✅      | ❌      | ✅    | ✅         | ✅         | ✅            | ✅    | ✅       |
-| **ZIP**   | ✅   | ✅      | ✅       | ✅    | ✅         | ✅         | ✅            | ❌    | ❌       |
-| **7z**    | ✅   | ✅      | ✅       | ✅    | ✅†        | ✅         | ✅            | ✅    | ❌       |
-| **TAR**   | ✅   | ✅      | ✅       | ✅    | ❌         | ❌         | ❌            | ❌    | ❌       |
-| **TAR.GZ**| ✅   | ✅      | ✅       | ✅    | ❌         | ❌         | ❌            | ❌    | ❌       |
-| **TAR.BZ2**| ✅  | ✅      | ✅       | ✅    | ❌         | ❌         | ❌            | ❌    | ❌       |
-| **TAR.XZ**| ✅   | ✅      | ✅       | ✅    | ❌         | ❌         | ❌            | ❌    | ❌       |
-| **GZIP**‡ | ✅   | ✅      | ❌      | ✅    | ❌         | ❌         | ❌            | ❌    | ❌       |
-| **BZIP2**‡| ✅   | ✅      | ❌      | ✅    | ❌         | ❌         | ❌            | ❌    | ❌       |
-| **XZ**‡   | ✅   | ✅      | ❌      | ✅    | ❌         | ❌         | ❌            | ❌    | ❌       |
-| **ISO**   | ✅   | ✅      | ❌      | ⏳    | ❌         | ❌         | ❌            | ❌    | ❌       |
+| Format | Open / Inspect | Extract | Create via `Archive::create` | Modify | Encrypted Read | Notes |
+|--------|----------------|---------|------------------------------|--------|----------------|-------|
+| **RAR** | ✅ | ✅ | ❌ | ❌ | ✅ | RAR creation is not part of `Archive::create`; an optional Windows-only `external::RarCreator` exists behind `external-rar-create` |
+| **RAR5** | ✅ | ✅ | ❌ | ❌ | ✅ | Same caveats as RAR |
+| **ZIP** | ✅ | ✅ | ✅ | ✅ | ✅ | Encrypted ZIP creation is deliberately rejected in v0.1.0 |
+| **7z** | ✅ | ✅ | ✅ | ✅ | ✅ | Encrypted 7z creation is not supported |
+| **TAR** | ✅ | ✅ | ✅ | ❌ | ❌ | |
+| **TAR.GZ** | ✅ | ✅ | ✅ | ❌ | ❌ | |
+| **TAR.BZ2** | ✅ | ✅ | ✅ | ❌ | ❌ | |
+| **TAR.XZ** | ✅ | ✅ | ✅ | ❌ | ❌ | |
+| **GZIP** | ✅ | ✅ | ❌ | ❌ | ❌ | Standalone `.gz` is read/extract only |
+| **BZIP2** | ✅ | ✅ | ❌ | ❌ | ❌ | Standalone `.bz2` is read/extract only |
+| **XZ** | ✅ | ✅ | ❌ | ❌ | ❌ | Standalone `.xz` is read/extract only |
+| **ISO** | ✅ | ✅ | ❌ | ❌ | ❌ | Read/extract only |
 
-*Legend:*
-- ✅ = Fully supported
-- 🚧 = Partially implemented (basic functionality complete, advanced features pending)
-- ⏳ = Planned for future release
-- ❌ = Not supported by format specification
+Additional notes:
 
-†7z encryption: read-only via `open_encrypted()`
+- **Multi-part extraction:** RAR/RAR5 split archives are supported end-to-end. ZIP and 7z split volumes are not supported in v0.1.0.
+- **SFX workflows:** `detect_sfx()`, `open_sfx()`, `open_at_offset()`, and `extract_stub()` are available for embedded archive inspection.
+- **Streaming memory bounds:** Bounded-memory streaming currently applies to libarchive-backed formats (TAR family and ISO). ZIP, 7z, and RAR backends expose the same `Read` API but buffer entries first.
 
-‡GZIP, BZIP2, and XZ: TAR compound variants (`.tar.gz`, `.tar.bz2`, `.tar.xz`) are fully supported. Standalone `.gz`/`.bz2`/`.xz` files are supported for read/extract via libarchive's `format_raw` binding (AD 0019); creation of standalone compressed files remains out of scope per AD 0018 — use the TAR compound variants for compressed-archive creation.
+## Release Status
 
-**Metadata Features:**
-- **Solid**: Solid compression detection (all files compressed as single stream)
-- **Recovery**: Recovery record detection and percentage extraction (parity data for archive repair)
+**Version 0.1.0 - Initial public release**
 
-## Project Status
+Current release highlights:
 
-**Version 0.1.0 - Beta**
-
-Implementation progress:
-
-- ✅ Phase 1: Setup - Complete
-- ✅ Phase 2: Foundation - Complete (format detection, error handling, FFI bindings)
-- ✅ Phase 3: Archive Inspection - Complete (list files, metadata, validation, multi-part detection)
-- ✅ Phase 4: Archive Extraction - Complete (all formats, progress tracking, streaming, multi-part support)
-- 🚧 Phase 5: Archive Creation - Implemented with tracked gaps (split-archive creation, optional external RAR creation)
-- 🚧 Phase 6: Archive Modification - Implemented with tracked gaps (ZIP-modify edge cases; metadata/settings preservation resolved 2026-04-14)
-- 🚧 Phase 7: SFX Detection - Detection and stub extraction working; offset-based opening deferred (Windows PE, Linux ELF, macOS Mach-O, Script interpreters)
-- ✅ Phase 8: Polish - Complete; documentation reconciliation in progress (architecture docs and contracts being aligned with implementation state)
-
-**Current capabilities:**
-- ✅ Full read/inspect support for all formats
-- ✅ Full extraction support for all formats
-- ✅ Thread-safe concurrent operations
-- ✅ Multi-part archive handling (.z01, .001, .part1.rar)
-- ✅ SFX detection and stub extraction (direct embedded-archive opening via `open_at_offset()` is deferred)
-- ✅ Password-protected archives (RAR, RAR5, ZIP, 7z)
-- ✅ CRC32 integrity validation
-- ✅ Archive metadata inspection (solid compression, recovery records with percentage)
-- ✅ Symlink detection and warnings
-- ✅ Streaming extraction (<100MB memory for 10GB+ archives for libarchive-backed formats (TAR family); ZIP, 7z, and RAR backends currently buffer entries during streaming extraction)
+- ✅ Unified inspection and extraction across all supported formats
+- ✅ Archive creation through `Archive::create` for ZIP, 7z, and TAR variants
+- ✅ Rewrite-based modification for ZIP and 7z through `Archive::modify` / `Archive::modify_with_options`
+- ✅ SFX detection, stub extraction, and embedded archive opening
+- ✅ Encrypted archive reading for RAR, RAR5, ZIP, and 7z
+- ✅ Integrity validation, CRC32 exposure where available, and safety checks for extraction
+- ⚠️ See [Limitations](./Limitations.md) for split-volume, encrypted-creation, streaming, and platform caveats
 
 ## Limitations
 
 See [Limitations.md](./Limitations.md) for the full catalog. Key caveats in v0.1.0:
 
-- **Modification is ZIP/7z only and lossy.** `commit_changes()` rewrites the archive from scratch; original timestamps, permissions, and per-entry compression settings are not preserved (archive comment and method are). RAR and TAR are read-only.
-- **Streaming bounded-memory is libarchive-only.** `extract_to_stream()` reads TAR/ISO in chunks; ZIP, 7z, and RAR backends present the `Read` surface but buffer the entry in memory first.
-- **Split archives: RAR only.** ZIP and 7z split volumes are not supported.
-- **Creation-time encryption is ZIP-only.** 7z and TAR creation does not encrypt. RAR creation requires an external licensed `rar` CLI and is feature-gated behind `external-rar-create`.
+- **Modification is rewrite-based and limited to ZIP/7z.** `commit_changes()` recreates the archive instead of editing in place. `modify_with_options()` can preserve timestamps and Unix permissions on retained entries, and ZIP rewrites preserve the archive comment plus stored/deflated method, but encrypted ZIP re-encryption and ZIP64 edge coverage remain caveats.
+- **Streaming bounded-memory is libarchive-only.** `extract_to_stream()` reads TAR/ISO in chunks; ZIP, 7z, and RAR backends present the same `Read` API but buffer the entry in memory first.
+- **Split archives: RAR/RAR5 only.** ZIP and 7z split volumes are not supported end-to-end in v0.1.0.
+- **Encrypted creation is rejected by the main facade.** `Archive::create()` returns `OperationBlocked` when `CompressionOptions.password` is set. Optional Windows-only RAR creation lives in `external::RarCreator`, not the `Archive` facade.
 - **Standalone `.gz` / `.bz2` / `.xz` are read-only.** Use the `.tar.*` compound variants for compressed-archive creation.
 - **Encrypted-header RAR** (`-hp`) cannot be listed without the password — other formats surface entry names without one.
-- **Platform coverage:** macOS and Linux tested; Windows builds are untested.
+- **Platform coverage:** macOS and Linux are tested; Windows support exists but is not release-verified yet.
 
 ## Architecture
 
 **Backend Engines:**
-- **Piz** - ZIP (read/extract)
-- **zip crate** - Encrypted ZIP + creation
-- **SevenZ** - 7z
-- **libarchive** - TAR-family compounds (tar.gz, tar.bz2, tar.xz) and ISO
+- **Piz** - ZIP read/extract
+- **zip crate** - Encrypted ZIP read + ZIP creation
+- **SevenZ** - 7z read/extract
+- **libarchive** - TAR-family formats, standalone `.gz`/`.bz2`/`.xz`, ISO, and non-ZIP creation
 - **UnRAR** - RAR/RAR5
 - **goblin** - Binary parsing for SFX detection (PE/ELF/Mach-O)
+- **Optional `external::RarCreator`** - Windows-only WinRAR CLI bridge for out-of-process RAR creation
 
 **Key Design Decisions:**
-- Zero JVM/external tool dependencies
+- Zero JVM dependency; core read/extract/create flows are in-process
 - Streaming architecture for memory efficiency
 - Automatic format detection via magic bytes
 - Unified error handling across all formats
@@ -263,16 +257,14 @@ Contributions welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
 
 Inspired by [7zip-JBinding](https://github.com/borisbrodski/sevenzipjbinding) - bringing the unified interface approach to Rust.
 
-## Documentation
+## Further Reading
 
-- [Quickstart Guide](./specs/001-unified-archive/quickstart.md)
-- [Specification](./specs/001-unified-archive/spec.md)
-- [Technical Plan](./specs/001-unified-archive/plan.md)
-- [API Contracts](./specs/001-unified-archive/contracts/)
-- [Task Breakdown](./specs/001-unified-archive/tasks.md)
+- [User Manual](./docs/USER_MANUAL.md)
+- [Getting Started](./docs/GETTING_STARTED.md)
+- [API Reference](./docs/API_REFERENCE.md)
 - [SFX Coverage Report](./docs/sfx_coverage_report.md)
-- Examples: See `examples/` directory
-- API Documentation: Run `cargo doc --open`
+- [Quickstart Guide](./specs/001-unified-archive/quickstart.md)
+- API documentation: `cargo doc --open`
 
 ## Performance
 

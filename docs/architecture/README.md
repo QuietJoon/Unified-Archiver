@@ -1,13 +1,17 @@
 # Architecture: unified-archive
 
+> Maintainer note: this directory is design and implementation material, not the release-facing contract.
+> Some documents capture intermediate investigations or decisions made before `v0.1.0` shipped.
+> For current public behavior, start with `README.md`, `docs/USER_MANUAL.md`, `docs/API_REFERENCE.md`, and `Limitations.md`.
+
 ## System Purpose
 
-Unified, format-agnostic Rust library for archive operations (inspection, extraction, creation, modification, SFX detection) across ZIP, 7z, RAR, RAR5, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, and ISO. Standalone GZIP, BZIP2, and XZ streams are not directly openable; they are supported only as TAR compound formats per AD 0018. Inspired by 7zip-JBinding's design philosophy — shared API surface across all supported formats, with backend-specific caveats documented per operation.
+Unified, format-agnostic Rust library for archive operations (inspection, extraction, creation, modification, SFX detection) across ZIP, 7z, RAR, RAR5, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, standalone GZIP/BZIP2/XZ read-extract flows, and ISO. Inspired by 7zip-JBinding's design philosophy: shared API surface across supported formats, with backend-specific caveats documented per operation.
 
 ## Local Run Target
 
 ```bash
-cargo test                          # Full test suite (867+ tests across unit, contract, and integration suites)
+cargo test                          # Full test suite
 cargo run --example inspect_archive # Inspect any archive file
 cargo run --example extract_archive # Extract any archive
 cargo run --example create_archive  # Create archives
@@ -17,7 +21,7 @@ cargo run --example create_archive  # Create archives
 
 **Layered modular monolith** with a backend strategy/facade architecture.
 
-Single library crate (`unified-archive`). No binaries, no processes, no services. Consumers add the crate as a Cargo dependency and call the Rust API directly.
+Single library crate (`unified-archive`). No bundled CLI or service. Consumers add the crate as a Cargo dependency and call the Rust API directly. An optional Windows-only `external-rar-create` feature can shell out to `rar.exe`, but the core library workflows are in-process.
 
 ## Binary / Process Inventory
 
@@ -59,7 +63,7 @@ Single library crate (`unified-archive`). No binaries, no processes, no services
 
 - **Input:** Caller-provided archive files (read-only access)
 - **Output:** Extracted files to caller-specified destinations; newly created archive files
-- **Temp files:** Created during extract-to-memory and modification (RAII cleanup via `TempDirGuard` / `Drop`)
+- **Temp files:** Created during SFX offset opening, some extract-to-memory paths, and modification (RAII cleanup via `TempDirGuard` / `Drop`)
 - **Streaming:** Native backends (Piz, ZipReader, SevenZ, UnRAR) buffer full entries into memory for `extract_to_stream()`; only libarchive-backed formats provide true streaming reads
 - **Modification:** Copy-on-write rewrite with atomic rename
 

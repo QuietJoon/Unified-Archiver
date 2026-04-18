@@ -2,6 +2,10 @@
 
 This directory contains architecture decision records for unified-archive.
 
+These records preserve design history. Some entries intentionally describe earlier states or intermediate constraints that were later superseded before `v0.1.0`.
+
+Use them for rationale and historical traceability. For the current release contract, prefer `README.md`, `docs/USER_MANUAL.md`, `docs/API_REFERENCE.md`, and `Limitations.md`.
+
 Records 0001-0010 are **durable architecture decisions** captured during the
 initial design investigation. They document foundational choices about API
 shape, backend strategy, safety boundaries, and concurrency model.

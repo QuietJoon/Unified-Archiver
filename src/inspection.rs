@@ -268,10 +268,11 @@ impl Archive {
 
     /// Detect if this archive is part of a multi-part archive set (FR-019)
     ///
-    /// Multi-part archives split data across multiple files with patterns like:
-    /// - ZIP: `archive.zip`, `archive.z01`, `archive.z02`, ...
-    /// - RAR: `archive.part1.rar`, `archive.part2.rar`, ...
-    /// - 7z: `archive.001`, `archive.002`, ...
+    /// Multi-part archives split data across multiple files. In `v0.1.0`,
+    /// end-to-end split-volume support is intended for RAR/RAR5 archives.
+    /// ZIP split-volume names may be discovered heuristically, but ZIP split
+    /// extraction is not supported end-to-end. 7z numeric split volumes are
+    /// not supported.
     ///
     /// Returns `(is_multipart, part_files)` where:
     /// - `is_multipart`: true if this archive is part of a multi-part set
@@ -282,7 +283,7 @@ impl Archive {
     /// ```no_run
     /// use unified_archive::Archive;
     ///
-    /// let archive = Archive::open("data.z01")?;
+    /// let archive = Archive::open("backup.part1.rar")?;
     /// let (is_multipart, parts) = archive.detect_multipart()?;
     /// if is_multipart {
     ///     println!("Found {} parts: {:?}", parts.len(), parts);

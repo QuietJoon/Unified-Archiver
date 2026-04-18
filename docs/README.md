@@ -1,307 +1,45 @@
 # unified-archive Documentation
 
-Complete documentation for the unified-archive Rust library.
+Public documentation for `unified-archive` `v0.1.0`.
 
-## Quick Links
+If you are evaluating or using the library, start here:
 
-- **[Getting Started](./GETTING_STARTED.md)** - Installation and first program
-- **[API Reference](./API_REFERENCE.md)** - Current API documentation
-- **[Main README](../README.md)** - Project overview and features
-- **[Changelog](../CHANGELOG.md)** - Version history
+- [User Manual](./USER_MANUAL.md) - End-user guide covering installation, common workflows, supported formats, and caveats
+- [Getting Started](./GETTING_STARTED.md) - Fast path from `Cargo.toml` to a working program
+- [API Reference](./API_REFERENCE.md) - Public API surface and behavior notes
+- [Limitations](../Limitations.md) - Current unsupported or partially supported cases
+- [Changelog](../CHANGELOG.md) - Release history and release notes
 
----
+## Recommended Reading Order
 
-## Documentation Structure
+1. [README](../README.md) for the project overview and release snapshot
+2. [User Manual](./USER_MANUAL.md) for practical usage and format-specific expectations
+3. [Getting Started](./GETTING_STARTED.md) for the first program and quick recipes
+4. [API Reference](./API_REFERENCE.md) when you need exact method-level behavior
 
-### For New Users
+## Examples
 
-1. **[Getting Started Guide](./GETTING_STARTED.md)**
-   - Installation instructions
-   - Your first program
-   - Common use cases with examples
-   - Next steps
+The repository ships runnable examples in [`examples/`](../examples/):
 
-2. **[Main README](../README.md)**
-   - Feature overview
-   - Quick examples
-   - Supported formats
-   - Installation guide
+- `inspect_archive.rs` - list entries and metadata
+- `extract_archive.rs` - extract to disk with options
+- `streaming_extract.rs` - incremental reads for large entries
+- `create_archive.rs` - create ZIP / 7z / TAR-family archives
+- `modify_archive.rs` - queue and commit ZIP / 7z modifications
+- `detect_sfx.rs` - detect and open self-extracting archives
+- `archive_crc.rs` - archive-level checksum helpers
+- `stream_checksum.rs` - raw stream checksum extraction helpers
 
-### For Developers
+## Public Scope
 
-3. **[API Reference](./API_REFERENCE.md)**
-   - Complete API documentation
-   - All public types and methods
-   - Code examples for key operations
-   - Error handling guide
-   - Performance tips
+The files above are the release-facing docs for library users.
 
-4. **[Examples Directory](../examples/)**
-   - `inspect_archive.rs` - List archive contents
-   - `extract_archive.rs` - Extract with progress tracking
-   - `streaming_extract.rs` - Memory-efficient extraction
-   - `test_extract.rs` - Simple extraction example
+The following directories are primarily maintainer / design material and are not the best entry point for new users:
 
-### Reference Material
+- [`docs/architecture/`](./architecture/)
+- [`docs/decisions/`](./decisions/)
+- [`docs/project/`](./project/)
+- [`docs/implementation/`](./implementation/)
+- [`specs/`](../specs/)
 
-5. **[Changelog](../CHANGELOG.md)**
-   - Version history
-   - Release notes
-   - Migration guides
-
----
-
-## Topics
-
-### Installation
-
-- [System Requirements](./GETTING_STARTED.md#prerequisites)
-- [Adding to Your Project](./GETTING_STARTED.md#add-to-your-project)
-- [Verification](./GETTING_STARTED.md#verify-installation)
-
-### Basic Usage
-
-- [Opening Archives](./API_REFERENCE.md#opening-archives)
-- [Listing Files](./API_REFERENCE.md#inspection-methods)
-- [Extracting Files](./API_REFERENCE.md#extraction-methods)
-- [Reading Metadata](./API_REFERENCE.md#archiveentry)
-
-### Advanced Features
-
-- [Password-Protected Archives](./GETTING_STARTED.md#use-case-7-password-protected-archives)
-- [Streaming Extraction](./GETTING_STARTED.md#use-case-5-process-large-files-efficiently)
-- [Progress Tracking](./GETTING_STARTED.md#use-case-8-progress-tracking)
-- [Parallel Extraction](./API_REFERENCE.md#extraction-methods)
-
-### Error Handling
-
-- [Error Types](./API_REFERENCE.md#archiveerror)
-- [Error Handling Examples](./GETTING_STARTED.md#error-handling)
-- [Common Errors](./API_REFERENCE.md#example-error-handling)
-
-### Performance
-
-- [Memory Efficiency](./API_REFERENCE.md#streamingextractor)
-- [Parallel Processing](./API_REFERENCE.md#performance-tips)
-- [CRC32 Computation](../README.md#performance)
-
----
-
-## Code Examples
-
-### Quick Start
-
-```rust
-use unified_archive::Archive;
-
-// Open any archive format
-let archive = Archive::open("file.zip")?;
-
-// List contents
-for entry in archive.list_files()? {
-    println!("{}: {} bytes", entry.path, entry.size.unwrap_or(0));
-}
-```
-
-### Extract All Files
-
-```rust
-use unified_archive::{Archive, ExtractionOptions};
-use std::path::PathBuf;
-
-let options = ExtractionOptions {
-    destination: PathBuf::from("./output"),
-    preserve_permissions: true,
-    ..Default::default()
-};
-
-Archive::open("backup.7z")?.extract_all(options)?;
-```
-
-### Extract to Memory
-
-```rust
-let archive = Archive::open("data.rar")?;
-let data = archive.extract_to_memory("config.json")?;
-let text = String::from_utf8(data)?;
-```
-
-### Streaming Large Files
-
-```rust
-use unified_archive::Archive;
-use std::io::Read;
-
-let archive = Archive::open("data.tar.gz")?;
-let mut stream = archive.extract_to_stream("large.bin")?;
-let mut buffer = [0u8; 8192];
-
-while let Ok(n) = stream.read(&mut buffer) {
-    if n == 0 { break; }
-    // Process chunk
-}
-```
-
----
-
-## Supported Formats
-
-> This is a convenience copy; the canonical support matrix is in the [root README](../README.md#supported-formats).
-
-| Format | Read | Extract | CRC32 | Password |
-|--------|------|---------|-------|----------|
-| RAR    | ✅   | ✅      | ✅    | ✅       |
-| RAR5   | ✅   | ✅      | ✅    | ✅       |
-| ZIP    | ✅   | ✅      | ✅    | ✅       |
-| 7z     | ✅   | ✅      | ✅    | ✅       |
-| TAR    | ✅   | ✅      | ✅    | ❌       |
-| TAR.GZ | ✅   | ✅      | ✅    | ❌       |
-| TAR.BZ2| ✅   | ✅      | ✅    | ❌       |
-| TAR.XZ | ✅   | ✅      | ✅    | ❌       |
-| ISO    | ✅   | ✅      | ❌    | ❌       |
-
----
-
-## API Overview
-
-### Core Types
-
-- **[Archive](./API_REFERENCE.md#archive)** - Main archive handle
-- **[ArchiveEntry](./API_REFERENCE.md#archiveentry)** - File metadata
-- **[ArchiveFormat](./API_REFERENCE.md#archiveformat)** - Format enumeration
-- **[ExtractionOptions](./API_REFERENCE.md#extractionoptions)** - Extraction config
-- **[ProgressCallback](./API_REFERENCE.md#progresscallback)** - Progress monitoring
-- **[StreamingExtractor](./API_REFERENCE.md#streamingextractor)** - Stream interface
-
-### Main Operations
-
-```rust
-// Opening
-Archive::open(path)
-Archive::open_encrypted(path, password)
-
-// Inspection
-archive.format()
-archive.list_files()
-archive.find_entry(path)
-archive.is_encrypted()
-archive.validate_integrity()
-
-// Extraction
-archive.extract_all(options)
-archive.extract_file(path, options)
-archive.extract_filtered(predicate, options)
-archive.extract_to_memory(path)
-archive.extract_to_stream(path)
-```
-
----
-
-## Testing
-
-Run the test suite:
-
-```bash
-# All tests
-cargo test
-
-# Specific test
-cargo test test_zip_extract_all
-
-# Performance tests
-cargo test --release perf_
-
-# With output
-cargo test -- --nocapture
-```
-
-**Test Coverage**: 867+ tests across all formats and features (verify with `cargo test -- --list 2>/dev/null | grep -c ': test'`)
-
----
-
-## Performance Characteristics
-
-- **Memory Usage**: <100MB for multi-GB files (libarchive-backed streaming only; native backends such as Piz, ZipReader, SevenZ, and UnRAR buffer entries in memory)
-- **CRC32 Speed**: ~300MB/s (SIMD-accelerated)
-- **Parallel Extraction**: Linear scaling to CPU cores
-- **Format Detection**: O(1) header read
-
-See [Performance](../README.md#performance) for details.
-
----
-
-## Common Issues
-
-### Archive Opening Fails
-
-```rust
-match Archive::open("file.rar") {
-    Err(ArchiveError::Io { source, .. }) => {
-        eprintln!("I/O error: {}", source);
-    },
-    Err(ArchiveError::Format { .. }) => {
-        eprintln!("Format not supported");
-    },
-    Ok(archive) => { /* use it */ },
-    Err(e) => eprintln!("Error: {}", e),
-}
-```
-
-### Password Required
-
-```rust
-// Check first
-if archive.is_encrypted()? {
-    // Use open_encrypted instead
-    let archive = Archive::open_encrypted(path, password)?;
-}
-```
-
----
-
-## Platform Notes
-
-### macOS (Primary)
-- Requires: `brew install libarchive`
-- Status: ✅ Fully supported (primary development and CI target)
-
-### Linux (Secondary)
-- Requires: `apt-get install libarchive-dev` or `dnf install libarchive-devel`
-- Status: ✅ Supported with caveats (CI-tested; some backend behaviors may differ from macOS)
-
-### Windows
-- libarchive bundled automatically
-- Status: ⏳ Not yet tested
-
----
-
-## Contributing
-
-See the main README for contribution guidelines.
-
-For documentation improvements:
-1. Update relevant .md files
-2. Test examples compile: `cargo test --doc`
-3. Build docs: `cargo doc --no-deps`
-4. Submit PR with clear description
-
----
-
-## Getting Help
-
-- **Documentation**: You're reading it!
-- **Issues / Discussions**: See the project repository (not yet publicly hosted)
-
----
-
-## License
-
-Licensed under the [MIT License](../LICENSE-MIT).
-
-**RAR Support**: Uses UnRAR library (free for non-commercial use).
-
----
-
-**Last Updated**: 2026-04-13
-**Version**: 0.1.0
-**Rust**: 1.85+ (edition 2024)
+They are useful when you need design rationale, verification details, or implementation notes, but they intentionally contain more internal context than the user-facing guides.

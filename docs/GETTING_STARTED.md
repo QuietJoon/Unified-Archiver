@@ -2,6 +2,8 @@
 
 This guide will walk you through installing and using unified-archive for the first time.
 
+If you want the full user-facing guide for `v0.1.0`, start with the [User Manual](./USER_MANUAL.md) and come back here for the fastest path to a working program.
+
 ## Table of Contents
 
 1. [Installation](#installation)
@@ -299,9 +301,9 @@ fn extract_large_file(archive_path: &str, file_path: &str, output: &str)
 {
     let archive = Archive::open(archive_path)?;
 
-    // Use streaming to avoid loading entire file into memory.
+    // Read incrementally through the streaming API.
     // Note: bounded-memory streaming applies to libarchive-backed formats only;
-    // other backends (Piz, ZipReader, SevenZ, UnRAR) buffer full entries.
+    // other backends (Piz, ZipReader, SevenZ, UnRAR) buffer full entries first.
     let mut stream = archive.extract_to_stream(file_path)?;
     let mut output_file = File::create(output)?;
 
@@ -445,10 +447,11 @@ fn extract_with_progress(archive_path: &str)
 
 ### Learn More
 
+- **[User Manual](./USER_MANUAL.md)** - Installation, workflows, supported formats, and caveats in one place
 - **[API Reference](./API_REFERENCE.md)** - API reference covering inspection, extraction, creation, modification, SFX, and streaming
-- **[README](../README.md)** - Feature overview and examples
+- **[README](../README.md)** - Feature overview and release snapshot
 - **[Examples](../examples/)** - Complete working examples
-- **[Project Status](./project/status.md)** - Known limitations, progress, and roadmap
+- **[Limitations](../Limitations.md)** - Current unsupported and partially supported cases
 
 ### Run the Examples
 
@@ -544,10 +547,9 @@ match Archive::open("file.rar") {
 
 ### Additional Resources
 
+- **[User Manual](./USER_MANUAL.md)** - Complete release-facing guide for v0.1.0
 - **[API Reference](./API_REFERENCE.md)** - API reference covering inspection, extraction, creation, modification, SFX, and streaming
-- **[Architecture Overview](./architecture/README.md)** - Design decisions and module map
+- **[Limitations](../Limitations.md)** - Current unsupported and partially supported cases
 - **[Examples](../examples/)** - Complete working examples
 
 ---
-
-**Happy Archiving!** 🦀
