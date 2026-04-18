@@ -1,6 +1,8 @@
 // SFX detection implementation
 //
-// Three-stage pipeline: exe validation → signature scan → archive validation
+// Three-stage pipeline: exe validation → signature scan → heuristic screening
+// of the candidate offset (stage 3 does NOT fully validate the embedded
+// archive; it only rejects obviously-implausible candidates).
 
 use super::result::SfxDetectionResult;
 use super::signatures;
@@ -22,9 +24,12 @@ const HEADER_SIZE: usize = 4096;
 /// Detect if a file is a self-extracting archive
 ///
 /// Implements 3-stage detection pipeline:
-/// 1. Stage 1: Validate executable format (PE/ELF/Mach-O/Script)
+/// 1. Stage 1: Classify executable format (PE/ELF/Mach-O/Script)
 /// 2. Stage 2: Scan for archive signatures in first 1MB
-/// 3. Stage 3: Validate archive structure at detected offset
+/// 3. Stage 3: Heuristic screening of the candidate offset (cheap
+///    plausibility check; full archive validation happens later when the
+///    caller opens the payload via [`Archive::open_sfx`] or
+///    [`Archive::open_at_offset`]).
 ///
 /// # Arguments
 /// * `path` - Path to the file to check

@@ -268,8 +268,7 @@ fn test_open_sfx_with_real_zip_payload() {
     temp.write_all(&zip_bytes).unwrap();
     temp.flush().unwrap();
 
-    let archive = Archive::open_sfx(temp.path())
-        .expect("open_sfx should succeed once open_at_offset is wired");
+    let archive = Archive::open_sfx(temp.path()).expect("open_sfx should succeed");
     let entries = archive.list_files().expect("list_files");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path, "test_file.txt");
