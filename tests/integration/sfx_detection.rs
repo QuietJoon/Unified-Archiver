@@ -211,6 +211,70 @@ fn test_extract_stub() {
     assert_eq!(&stub_data[0..2], b"#!");
 }
 
+#[test]
+fn test_open_at_offset_with_real_zip() {
+    // Build a real SFX-style file: shell-script stub + contents of test.zip.
+    // After concatenation, open_at_offset should hand back a working Archive.
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test.zip");
+    let zip_bytes = std::fs::read(&fixture).expect("read test.zip");
+
+    let mut temp = NamedTempFile::new().unwrap();
+    let stub = b"#!/bin/sh\necho 'stub'\n";
+    temp.write_all(stub).unwrap();
+    let padding = vec![0u8; 500];
+    temp.write_all(&padding).unwrap();
+    let offset = (stub.len() + padding.len()) as u64;
+    temp.write_all(&zip_bytes).unwrap();
+    temp.flush().unwrap();
+
+    let archive = Archive::open_at_offset(temp.path(), offset)
+        .expect("open_at_offset should succeed for real SFX payload");
+    let entries = archive.list_files().expect("list_files");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].path, "test_file.txt");
+}
+
+#[test]
+fn test_open_at_offset_zero_matches_plain_open() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test.zip");
+
+    let archive = Archive::open_at_offset(&fixture, 0).expect("open_at_offset(0)");
+    let entries = archive.list_files().expect("list_files");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].path, "test_file.txt");
+}
+
+#[test]
+fn test_open_at_offset_past_eof_errors() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test.zip");
+    let len = std::fs::metadata(&fixture).unwrap().len();
+
+    let result = Archive::open_at_offset(&fixture, len);
+    assert!(result.is_err(), "should reject offset==len");
+}
+
+#[test]
+fn test_open_sfx_with_real_zip_payload() {
+    // End-to-end: detect_sfx → open_sfx returns a working archive.
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test.zip");
+    let zip_bytes = std::fs::read(&fixture).expect("read test.zip");
+
+    let mut temp = NamedTempFile::new().unwrap();
+    temp.write_all(b"#!/bin/sh\necho 'sfx stub'\n# payload follows\n")
+        .unwrap();
+    // Pad so the detector sees a realistic stub size
+    let padding = vec![0u8; 500];
+    temp.write_all(&padding).unwrap();
+    temp.write_all(&zip_bytes).unwrap();
+    temp.flush().unwrap();
+
+    let archive = Archive::open_sfx(temp.path())
+        .expect("open_sfx should succeed once open_at_offset is wired");
+    let entries = archive.list_files().expect("list_files");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].path, "test_file.txt");
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn test_elf_binary_detection() {

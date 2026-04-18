@@ -2,11 +2,12 @@
 //!
 //! Verifies that hard links are silently skipped during extraction for security.
 
+use super::common;
+
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
-use unified_archive::ExtractionOptions;
 
 /// Check if a required command is available
 fn command_exists(cmd: &str) -> bool {
@@ -98,10 +99,7 @@ fn test_hardlink_skip_during_extraction() {
     assert!(!entries.is_empty(), "Archive should contain entries");
 
     // Extract - hard links should be silently skipped
-    let options = ExtractionOptions {
-        destination: extract_dir.clone(),
-        ..Default::default()
-    };
+    let options = common::default_extraction_options(extract_dir.clone());
     let extract_result = archive.extract_all(options);
 
     // Extraction should succeed (hard links are skipped, not an error)

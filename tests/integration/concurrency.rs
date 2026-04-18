@@ -4,13 +4,14 @@
 //! - FR-020: Thread-safe APIs for concurrent archive operations on different files
 //! - FR-021: Multiple archive handles used concurrently without blocking
 
+use super::common;
+
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
-use unified_archive::ExtractionOptions;
 
 /// Create a minimal valid ZIP file for testing
 fn create_test_zip(path: &Path, content: &str) -> std::io::Result<()> {
@@ -183,10 +184,7 @@ fn test_concurrent_extraction_different_archives() {
             thread::spawn(move || {
                 let archive =
                     unified_archive::Archive::open(&archive_path).expect("Should open archive");
-                let options = ExtractionOptions {
-                    destination: extract_path.clone(),
-                    ..Default::default()
-                };
+                let options = common::default_extraction_options(extract_path.clone());
                 if archive.extract_all(options).is_ok() {
                     counter.fetch_add(1, Ordering::SeqCst);
                 }

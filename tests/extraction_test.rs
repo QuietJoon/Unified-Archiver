@@ -5,35 +5,7 @@
 mod common;
 
 use std::fs;
-use unified_archive::{Archive, ExtractionOptions};
-
-#[cfg(feature = "rar-support")]
-#[test]
-#[serial_test::file_serial(rar)]
-fn test_extract_all_rar5() {
-    let temp = common::temp_test_dir();
-
-    let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
-
-    let options = ExtractionOptions {
-        destination: temp.clone(),
-        ..Default::default()
-    };
-
-    archive
-        .extract_all(options)
-        .expect("Failed to extract archive");
-
-    // Verify extracted file exists
-    let extracted_file = temp.join("test_file.txt");
-    assert!(extracted_file.exists(), "Extracted file should exist");
-
-    // Verify file content
-    let content = fs::read_to_string(&extracted_file).expect("Failed to read extracted file");
-    assert_eq!(content, "Hello, RAR World!\n");
-
-    common::cleanup(&temp);
-}
+use unified_archive::Archive;
 
 #[cfg(feature = "rar-support")]
 #[test]
@@ -43,10 +15,7 @@ fn test_extract_single_file_rar5() {
 
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 
-    let options = ExtractionOptions {
-        destination: temp.clone(),
-        ..Default::default()
-    };
+    let options = common::default_extraction_options(temp.clone());
 
     archive
         .extract_file("test_file.txt", options)
@@ -71,10 +40,7 @@ fn test_extract_nonexistent_file() {
 
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 
-    let options = ExtractionOptions {
-        destination: temp.clone(),
-        ..Default::default()
-    };
+    let options = common::default_extraction_options(temp.clone());
 
     let result = archive.extract_file("nonexistent.txt", options);
 
@@ -90,14 +56,12 @@ fn test_extract_nonexistent_file() {
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_extract_to_nonexistent_directory() {
-    let temp = common::temp_test_dir().join("nested/path/that/does/not/exist");
+    let temp_root = common::temp_test_dir();
+    let temp = temp_root.join("nested/path/that/does/not/exist");
 
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 
-    let options = ExtractionOptions {
-        destination: temp.clone(),
-        ..Default::default()
-    };
+    let options = common::default_extraction_options(temp.clone());
 
     // Should create directory and extract
     archive
@@ -111,8 +75,7 @@ fn test_extract_to_nonexistent_directory() {
         "Extracted file should exist in nested path"
     );
 
-    // Cleanup parent temp directory
-    common::cleanup(&common::temp_test_dir());
+    common::cleanup(&temp_root);
 }
 
 #[cfg(feature = "rar-support")]
@@ -124,10 +87,7 @@ fn test_extract_rar5_alternate() {
     let archive =
         Archive::open("tests/fixtures/test_rar5.rar").expect("Failed to open RAR5 archive");
 
-    let options = ExtractionOptions {
-        destination: temp.clone(),
-        ..Default::default()
-    };
+    let options = common::default_extraction_options(temp.clone());
 
     archive
         .extract_all(options)
@@ -141,21 +101,6 @@ fn test_extract_rar5_alternate() {
     assert_eq!(content, "Hello, RAR World!\n");
 
     common::cleanup(&temp);
-}
-
-#[cfg(feature = "rar-support")]
-#[test]
-#[serial_test::file_serial(rar)]
-fn test_extract_to_memory() {
-    let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
-
-    let content = archive
-        .extract_to_memory("test_file.txt")
-        .expect("Failed to extract to memory");
-
-    // Verify content
-    let content_str = String::from_utf8(content).expect("Failed to convert to UTF-8");
-    assert_eq!(content_str, "Hello, RAR World!\n");
 }
 
 #[cfg(feature = "rar-support")]
@@ -180,10 +125,7 @@ fn test_extract_filtered_txt_files() {
 
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 
-    let options = ExtractionOptions {
-        destination: temp.clone(),
-        ..Default::default()
-    };
+    let options = common::default_extraction_options(temp.clone());
 
     // Extract only .txt files
     archive
@@ -205,10 +147,7 @@ fn test_extract_filtered_no_matches() {
 
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 
-    let options = ExtractionOptions {
-        destination: temp.clone(),
-        ..Default::default()
-    };
+    let options = common::default_extraction_options(temp.clone());
 
     // Try to extract .pdf files (none exist)
     archive

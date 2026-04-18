@@ -3,9 +3,7 @@
 //! These tests create archives and then extract them to verify correctness.
 
 use std::fs;
-use unified_archive::{
-    Archive, ArchiveFormat, CompressionLevel, CompressionOptions, ExtractionOptions,
-};
+use unified_archive::{Archive, ArchiveFormat, CompressionLevel, CompressionOptions};
 
 #[path = "common/mod.rs"]
 mod common;
@@ -36,11 +34,9 @@ fn test_create_and_extract_zip() {
     // Extract archive
     let extract_dir = temp.join("extracted");
     let archive = Archive::open(&archive_path).unwrap();
-    let options = ExtractionOptions {
-        destination: extract_dir.clone(),
-        ..Default::default()
-    };
-    archive.extract_all(options).unwrap();
+    archive
+        .extract_all(common::default_extraction_options(extract_dir.clone()))
+        .unwrap();
 
     // Verify extracted files
     assert!(extract_dir.join("file1.txt").exists());
@@ -71,11 +67,9 @@ fn test_create_and_extract_targz() {
     // Extract archive
     let extract_dir = temp.join("extracted");
     let archive = Archive::open(&archive_path).unwrap();
-    let options = ExtractionOptions {
-        destination: extract_dir.clone(),
-        ..Default::default()
-    };
-    archive.extract_all(options).unwrap();
+    archive
+        .extract_all(common::default_extraction_options(extract_dir.clone()))
+        .unwrap();
 
     // Verify files
     assert!(extract_dir.join("readme.md").exists());
@@ -91,7 +85,7 @@ fn test_create_and_extract_7z() {
 
     // Create 7z archive
     let archive_path = temp.join("test.7z");
-    let options = CompressionOptions::new(ArchiveFormat::SevenZip);
+    let options = common::default_compression_options(ArchiveFormat::SevenZip);
 
     let mut creator = Archive::create(&archive_path, options).unwrap();
     creator
@@ -102,11 +96,9 @@ fn test_create_and_extract_7z() {
     // Extract archive
     let extract_dir = temp.join("extracted");
     let archive = Archive::open(&archive_path).unwrap();
-    let options = ExtractionOptions {
-        destination: extract_dir.clone(),
-        ..Default::default()
-    };
-    archive.extract_all(options).unwrap();
+    archive
+        .extract_all(common::default_extraction_options(extract_dir.clone()))
+        .unwrap();
 
     // Verify files
     assert!(extract_dir.join("test.txt").exists());

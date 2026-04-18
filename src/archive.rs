@@ -97,6 +97,11 @@ pub struct Archive {
     pub(crate) modifications: Option<crate::modification::ModificationTracker>,
     /// Modification options (Modify mode only). `None` means defaults are used.
     pub(crate) mod_options: Option<crate::modification::ModificationOptions>,
+    /// Backing temp file for archives opened at a non-zero offset
+    /// (see [`Archive::open_at_offset`]). The [`tempfile::TempPath`] is dropped
+    /// with the `Archive`, removing the temp copy of the embedded payload.
+    /// `None` for archives opened from a real on-disk file.
+    pub(crate) _backing_tempfile: Option<tempfile::TempPath>,
 }
 
 // SAFETY: Archive can be moved between threads (Send) but not shared (&Archive from multiple threads).
@@ -135,6 +140,7 @@ impl Archive {
             entry_cache: OnceCell::new(),
             modifications: None,
             mod_options: None,
+            _backing_tempfile: None,
         }
     }
 
@@ -309,13 +315,15 @@ impl Archive {
         Self::open_at_offset(path_ref, offset)
     }
 
-    /// Open an archive from a specific byte offset
+    /// Open an archive from a specific byte offset.
     ///
-    /// Phase 7: Opens an archive that doesn't start at byte 0 of the file.
-    /// This is primarily used for SFX archives where the archive data is embedded
-    /// after an executable stub.
+    /// Opens an archive that doesn't start at byte 0 of the file — primarily
+    /// SFX payloads, where the archive data is embedded after an executable
+    /// stub. The payload is materialized into a temporary file that is removed
+    /// when the returned [`Archive`] is dropped.
     ///
-    /// **Current Status**: Not yet implemented. Backend support required.
+    /// `offset == 0` is equivalent to [`Archive::open`] and avoids the copy.
+    /// Offsets greater than or equal to the file's length return an error.
     ///
     /// # Arguments
     /// * `path` - Path to the file containing the archive
@@ -331,11 +339,58 @@ impl Archive {
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
     pub fn open_at_offset(path: impl AsRef<Path>, offset: u64) -> Result<Self> {
-        let _ = (path, offset);
-        Err(ArchiveError::not_implemented(
-            "open_at_offset",
-            "Offset-based archive opening is deferred (DEF-001). Use extract_stub() to materialize the embedded archive as a temporary file.",
-        ))
+        let path_ref = path.as_ref();
+
+        if offset == 0 {
+            return Self::open(path_ref);
+        }
+
+        use std::fs::File;
+        use std::io::{Seek, SeekFrom};
+
+        let mut source = File::open(path_ref).map_err(|e| ArchiveError::io("open", path_ref, e))?;
+        let file_len = source
+            .metadata()
+            .map_err(|e| ArchiveError::io("stat", path_ref, e))?
+            .len();
+
+        if offset >= file_len {
+            return Err(ArchiveError::format(
+                None,
+                format!(
+                    "open_at_offset: offset {} is at or beyond end of file ({} bytes)",
+                    offset, file_len
+                ),
+            ));
+        }
+
+        source
+            .seek(SeekFrom::Start(offset))
+            .map_err(|e| ArchiveError::io("seek", path_ref, e))?;
+
+        let temp_parent = Path::new("/Volumes/Temp/claude");
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("unified-archive-sfx-").suffix(".bin");
+        let mut temp = if temp_parent.is_dir() {
+            builder.tempfile_in(temp_parent)
+        } else {
+            builder.tempfile()
+        }
+        .map_err(|e| ArchiveError::io("create_tempfile", path_ref, e))?;
+
+        {
+            use std::io::Write;
+            let sink = temp.as_file_mut();
+            std::io::copy(&mut source, sink).map_err(|e| ArchiveError::io("copy", path_ref, e))?;
+            sink.flush()
+                .map_err(|e| ArchiveError::io("flush", path_ref, e))?;
+        }
+
+        let temp_path = temp.into_temp_path();
+
+        let mut archive = Self::open(&temp_path)?;
+        archive._backing_tempfile = Some(temp_path);
+        Ok(archive)
     }
 
     /// Extract the executable stub from an SFX archive
@@ -822,14 +877,17 @@ mod tests {
     // ── Archive::open_at_offset tests ──
 
     #[test]
-    fn test_open_at_offset_returns_not_implemented() {
-        let result = Archive::open_at_offset(fixture("test.zip"), 0);
-        assert!(result.is_err());
-        let err = result.err().unwrap();
-        assert!(matches!(
-            err,
-            crate::error::ArchiveError::NotImplemented { .. }
-        ));
+    fn test_open_at_offset_zero_is_plain_open() {
+        let archive = Archive::open_at_offset(fixture("test.zip"), 0)
+            .expect("offset=0 should be equivalent to Archive::open");
+        assert_eq!(archive.format(), ArchiveFormat::Zip);
+    }
+
+    #[test]
+    fn test_open_at_offset_past_eof_rejected() {
+        let len = std::fs::metadata(fixture("test.zip")).unwrap().len();
+        let result = Archive::open_at_offset(fixture("test.zip"), len);
+        assert!(result.is_err(), "offset == file_len must error");
     }
 
     // ── Archive::open_sfx tests ──

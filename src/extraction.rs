@@ -301,25 +301,39 @@ impl Archive {
     /// # Limits and DOS surface
     ///
     /// This function applies [`ExtractionLimits::default`] before dispatching
-    /// to the backend — it does *not* accept a caller-supplied
-    /// [`ExtractionOptions`]. The default limits are the same ones
-    /// [`Archive::extract_all`] uses when the caller passes
-    /// `ExtractionOptions::default()`. Tighter caps cannot be threaded through
-    /// this entry point today; if you need them, either:
-    ///
-    /// * pre-validate with [`Archive::find_entry`] and reject entries whose
-    ///   `size` exceeds your own budget before calling `extract_to_memory`, or
-    /// * use [`Archive::extract_to_stream`] with [`Read::take`] to bound the
-    ///   number of bytes read.
+    /// to the backend. For caller-supplied limits, use
+    /// [`Archive::extract_to_memory_with_options`].
     ///
     /// The compression-ratio guard is applied **per entry**, so an archive with
     /// many moderately-bloating entries can still exhaust caller memory if the
     /// entries are fetched serially without a running total on the caller side.
-    /// An `ExtractionOptions`-aware overload is tracked in OI-0057-005.
     pub fn extract_to_memory(&self, file_path: &str) -> Result<Vec<u8>> {
         if !matches!(self.backend, ArchiveBackend::ZipWriter(_)) {
             let entries = self.list_files()?;
             check_single_entry_safe(entries, file_path, &ExtractionLimits::default())?;
+        }
+        self.extract_to_memory_unchecked(file_path)
+    }
+
+    /// Extract a single file to memory with caller-supplied options.
+    ///
+    /// Same as [`Archive::extract_to_memory`] but honors the
+    /// [`ExtractionLimits`] supplied via `options.limits`. Fields of `options`
+    /// other than `limits` (e.g. `destination`, `password`, `filter`,
+    /// `progress`) are ignored by this entry point — only the resource caps
+    /// participate.
+    ///
+    /// Use this when you need tighter caps than
+    /// [`ExtractionLimits::default`], for example when extracting into a
+    /// memory-constrained caller or when serving untrusted archives.
+    pub fn extract_to_memory_with_options(
+        &self,
+        file_path: &str,
+        options: &ExtractionOptions,
+    ) -> Result<Vec<u8>> {
+        if !matches!(self.backend, ArchiveBackend::ZipWriter(_)) {
+            let entries = self.list_files()?;
+            check_single_entry_safe(entries, file_path, &options.limits)?;
         }
         self.extract_to_memory_unchecked(file_path)
     }
@@ -361,22 +375,23 @@ impl Archive {
     /// with [`Read::take(max)`](std::io::Read::take) sized to the entry's
     /// declared size (or to a caller-chosen budget).
     ///
-    /// Like [`Archive::extract_to_memory`], this entry point does *not* accept
-    /// an [`ExtractionOptions`] and only uses default limits. Threading custom
-    /// limits through is tracked in OI-0057-005.
+    /// For caller-supplied limits, use
+    /// [`Archive::extract_to_stream_with_options`].
     ///
     /// # Example
     /// ```no_run
     /// use unified_archive::Archive;
     /// use std::io::Read;
     ///
-    /// let archive = Archive::open("large.rar")?;
-    /// let mut stream = archive.extract_to_stream("large_file.bin")?;
+    /// let archive = Archive::open("big.tar")?;
+    /// let mut stream = archive.extract_to_stream("big_file.bin")?;
     ///
     /// let mut buffer = [0u8; 8192];
     /// while let Ok(n) = stream.read(&mut buffer) {
     ///     if n == 0 { break; }
-    ///     // Process chunk without loading entire file
+    ///     // Chunked read. NOTE: only libarchive-backed formats
+    ///     // (TAR, ISO, …) stream without first buffering the entry;
+    ///     // ZIP/7z/RAR materialize the entry before this loop starts.
     /// }
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
@@ -387,6 +402,28 @@ impl Archive {
         if !matches!(self.backend, ArchiveBackend::ZipWriter(_)) {
             let entries = self.list_files()?;
             check_single_entry_safe(entries, file_path, &ExtractionLimits::default())?;
+        }
+        self.extract_to_stream_unchecked(file_path)
+    }
+
+    /// Extract a single file to a stream with caller-supplied options.
+    ///
+    /// Same as [`Archive::extract_to_stream`] but honors the
+    /// [`ExtractionLimits`] supplied via `options.limits`. Fields of `options`
+    /// other than `limits` are ignored. As with the default-limits variant,
+    /// the stream itself is not truncated — callers in a security-sensitive
+    /// context should still wrap the returned reader with
+    /// [`Read::take(max)`](std::io::Read::take) sized to the declared entry
+    /// size (or their own budget), since a malicious archive can emit more
+    /// bytes than its header promised.
+    pub fn extract_to_stream_with_options(
+        &self,
+        file_path: &str,
+        options: &ExtractionOptions,
+    ) -> Result<crate::streaming::StreamingExtractor> {
+        if !matches!(self.backend, ArchiveBackend::ZipWriter(_)) {
+            let entries = self.list_files()?;
+            check_single_entry_safe(entries, file_path, &options.limits)?;
         }
         self.extract_to_stream_unchecked(file_path)
     }

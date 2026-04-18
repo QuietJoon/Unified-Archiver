@@ -3,11 +3,12 @@
 //! Verifies that extraction uses bounded memory even for moderately large archives.
 //! Target: <20MB memory delta for extracting a 10MB archive.
 
+use super::common;
+
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::process::Command;
-use unified_archive::ExtractionOptions;
 
 /// Check if a required command is available
 fn command_exists(cmd: &str) -> bool {
@@ -96,10 +97,7 @@ fn test_streaming_memory_bounded() {
     // Extract all files
     // Note: We can't directly measure memory here without external tools,
     // but we verify the operation completes successfully using streaming.
-    let options = ExtractionOptions {
-        destination: extract_dir.clone(),
-        ..Default::default()
-    };
+    let options = common::default_extraction_options(extract_dir.clone());
     let result = archive.extract_all(options);
     assert!(result.is_ok(), "Extraction should succeed: {:?}", result);
 
@@ -158,10 +156,7 @@ fn test_streaming_extraction_single_file() {
     };
 
     // Extract using streaming
-    let options = ExtractionOptions {
-        destination: extract_dir.clone(),
-        ..Default::default()
-    };
+    let options = common::default_extraction_options(extract_dir.clone());
     let result = archive.extract_all(options);
     assert!(result.is_ok(), "Streaming extraction should succeed");
 }

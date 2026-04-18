@@ -61,6 +61,7 @@ impl Archive {
             entry_cache: OnceCell::new(),
             modifications: None,
             mod_options: None,
+            _backing_tempfile: None,
         })
     }
 

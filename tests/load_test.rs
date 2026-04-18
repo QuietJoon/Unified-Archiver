@@ -4,10 +4,11 @@
 //! regular public API with enough entries to catch batching, caching, and
 //! extraction-path issues that do not show up on tiny fixtures.
 
+#[path = "common/mod.rs"]
+mod common;
+
 use std::fs;
-use unified_archive::{
-    Archive, ArchiveFormat, CompressionLevel, CompressionOptions, ExtractionOptions,
-};
+use unified_archive::{Archive, ArchiveFormat, CompressionLevel, CompressionOptions};
 use walkdir::WalkDir;
 
 const ENTRY_COUNT: usize = 512;
@@ -80,10 +81,7 @@ fn load_extraction_paths_handle_many_entries() {
 
     let extract_all_dir = temp.path().join("extract_all");
     archive
-        .extract_all(ExtractionOptions {
-            destination: extract_all_dir.clone(),
-            ..Default::default()
-        })
+        .extract_all(common::default_extraction_options(extract_all_dir.clone()))
         .unwrap();
     assert_eq!(count_extracted_files(&extract_all_dir), ENTRY_COUNT);
 
@@ -95,10 +93,7 @@ fn load_extraction_paths_handle_many_entries() {
     archive
         .extract_files(
             &subset_refs,
-            ExtractionOptions {
-                destination: extract_files_dir.clone(),
-                ..Default::default()
-            },
+            common::default_extraction_options(extract_files_dir.clone()),
         )
         .unwrap();
     for &idx in &subset_indices {
@@ -110,10 +105,7 @@ fn load_extraction_paths_handle_many_entries() {
     archive
         .extract_by_ids(
             &subset_indices,
-            ExtractionOptions {
-                destination: extract_ids_dir.clone(),
-                ..Default::default()
-            },
+            common::default_extraction_options(extract_ids_dir.clone()),
         )
         .unwrap();
     for &idx in &subset_indices {
@@ -125,10 +117,7 @@ fn load_extraction_paths_handle_many_entries() {
     archive
         .extract_filtered(
             |entry| entry.path.starts_with("group_00/"),
-            ExtractionOptions {
-                destination: extract_filtered_dir.clone(),
-                ..Default::default()
-            },
+            common::default_extraction_options(extract_filtered_dir.clone()),
         )
         .unwrap();
 

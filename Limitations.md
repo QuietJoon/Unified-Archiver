@@ -112,6 +112,11 @@ archive.commit_changes()?;
 - RAR modification is correctly rejected (read-only format).
 - TAR modification is rejected (`can_modify()` returns false for TAR).
 
+**ZIP-specific modify caveats** (deferred for v0.1, tracked in stub-manifest DEF-005):
+- **ZIP64 > 4 GiB boundaries**: entries or archives that cross the 32-bit ZIP64 boundary during modification are not covered by dedicated tests. The underlying `zip` crate handles ZIP64, but unified-archive has no fixture large enough to exercise it on CI.
+- **Encrypted ZIP re-encryption**: modifying an AES-encrypted ZIP is rejected at `commit_changes` time rather than transparently re-encrypting the rewritten archive with the original password. Callers must recreate encrypted ZIPs from scratch.
+- **Crash-recovery journaling**: `commit_changes` writes a temp archive and performs an atomic rename; a crash mid-rewrite leaves the original intact but no WAL/journal exists to resume partial work. Treating the rewrite as all-or-nothing is intentional for v0.1.
+
 **Archive Creation**: Implemented with gaps
 
 The creation API is functional via `Archive::create()` with libarchive and ZipWriter backends:

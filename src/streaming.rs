@@ -7,9 +7,13 @@ use std::io::{self, Read};
 
 /// Streaming extractor that implements Read trait
 ///
-/// Allows extracting archive entries directly to a stream without loading
-/// entire files into memory. Suitable for processing large archives with
-/// limited memory.
+/// Exposes an archive entry as a `Read` without the caller having to
+/// `Vec<u8>`-buffer it first. Note the bounded-memory guarantee: the
+/// libarchive-backed formats (TAR, ISO, …) stream the decompressor
+/// directly, whereas ZIP/7z/RAR materialize the entry to a temporary
+/// buffer or file before returning the reader. For truly multi-GiB
+/// inputs prefer libarchive-backed formats or apply your own
+/// `Read::take`/rate limiting.
 ///
 /// # Example
 /// ```no_run

@@ -1,8 +1,11 @@
 // Test batch extraction features: extract_files() and extract_by_ids()
 
+#[path = "common/mod.rs"]
+mod common;
+
 use std::fs;
 use std::path::PathBuf;
-use unified_archive::{Archive, ExtractionOptions};
+use unified_archive::Archive;
 
 const TEST_TEMP_DIR: &str = "/Volumes/Temp/claude/7zip/batch_extraction";
 
@@ -32,10 +35,7 @@ fn test_extract_files_by_path_array_zip() {
     archive
         .extract_files(
             &["file1.txt", "subdir/nested.txt"],
-            ExtractionOptions {
-                destination: temp_dir.clone(),
-                ..Default::default()
-            },
+            common::default_extraction_options(temp_dir.clone()),
         )
         .expect("Failed to extract files");
 
@@ -73,10 +73,7 @@ fn test_extract_files_by_path_array_rar() {
     archive
         .extract_files(
             &[file_path.as_str()],
-            ExtractionOptions {
-                destination: temp_dir.clone(),
-                ..Default::default()
-            },
+            common::default_extraction_options(temp_dir.clone()),
         )
         .expect("Failed to extract files");
 
@@ -98,13 +95,7 @@ fn test_extract_files_empty_array() {
 
     // Extract with empty array should succeed without error
     archive
-        .extract_files(
-            &[],
-            ExtractionOptions {
-                destination: temp_dir.clone(),
-                ..Default::default()
-            },
-        )
+        .extract_files(&[], common::default_extraction_options(temp_dir.clone()))
         .expect("Empty array extraction should succeed");
 
     cleanup_temp_dir(&temp_dir);
@@ -119,10 +110,7 @@ fn test_extract_files_nonexistent_path() {
     // Try to extract a nonexistent file
     let result = archive.extract_files(
         &["nonexistent.txt"],
-        ExtractionOptions {
-            destination: temp_dir.clone(),
-            ..Default::default()
-        },
+        common::default_extraction_options(temp_dir.clone()),
     );
 
     // Should return an error
@@ -150,10 +138,7 @@ fn test_extract_by_ids_zip() {
     archive
         .extract_by_ids(
             &[0, 1],
-            ExtractionOptions {
-                destination: temp_dir.clone(),
-                ..Default::default()
-            },
+            common::default_extraction_options(temp_dir.clone()),
         )
         .expect("Failed to extract by IDs");
 
@@ -192,13 +177,7 @@ fn test_extract_by_ids_rar() {
     // Extract by ID 0
     if !entries.is_empty() {
         archive
-            .extract_by_ids(
-                &[0],
-                ExtractionOptions {
-                    destination: temp_dir.clone(),
-                    ..Default::default()
-                },
-            )
+            .extract_by_ids(&[0], common::default_extraction_options(temp_dir.clone()))
             .expect("Failed to extract by ID");
 
         // Verify extracted file exists
@@ -228,13 +207,7 @@ fn test_extract_by_ids_7z() {
     // Extract first file by ID
     if !entries.is_empty() {
         archive
-            .extract_by_ids(
-                &[0],
-                ExtractionOptions {
-                    destination: temp_dir.clone(),
-                    ..Default::default()
-                },
-            )
+            .extract_by_ids(&[0], common::default_extraction_options(temp_dir.clone()))
             .expect("Failed to extract by ID");
 
         // Verify extracted file exists
@@ -255,13 +228,7 @@ fn test_extract_by_ids_empty_array() {
 
     // Extract with empty ID array should succeed
     archive
-        .extract_by_ids(
-            &[],
-            ExtractionOptions {
-                destination: temp_dir.clone(),
-                ..Default::default()
-            },
-        )
+        .extract_by_ids(&[], common::default_extraction_options(temp_dir.clone()))
         .expect("Empty ID array extraction should succeed");
 
     cleanup_temp_dir(&temp_dir);
@@ -279,10 +246,7 @@ fn test_extract_by_ids_invalid_id() {
     // Try to extract with invalid ID
     let result = archive.extract_by_ids(
         &[invalid_id],
-        ExtractionOptions {
-            destination: temp_dir.clone(),
-            ..Default::default()
-        },
+        common::default_extraction_options(temp_dir.clone()),
     );
 
     // Should return an error
@@ -315,10 +279,7 @@ fn test_extract_by_ids_multiple_files() {
         archive
             .extract_by_ids(
                 &[0, 1, 2],
-                ExtractionOptions {
-                    destination: temp_dir.clone(),
-                    ..Default::default()
-                },
+                common::default_extraction_options(temp_dir.clone()),
             )
             .expect("Failed to extract multiple files by ID");
 
@@ -354,13 +315,7 @@ fn test_extract_files_parallel_extraction() {
 
         if paths.len() >= 4 {
             archive
-                .extract_files(
-                    &paths,
-                    ExtractionOptions {
-                        destination: temp_dir.clone(),
-                        ..Default::default()
-                    },
-                )
+                .extract_files(&paths, common::default_extraction_options(temp_dir.clone()))
                 .expect("Failed to extract files in parallel");
 
             // Verify all extracted files exist

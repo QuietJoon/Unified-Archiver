@@ -17,6 +17,9 @@
 //! The `verify_crc32` flag in ExtractionOptions documents this behavior but cannot
 //! disable it, as both backend libraries provide no option to skip CRC32 verification.
 
+#[path = "common/mod.rs"]
+mod common;
+
 use std::fs;
 use std::path::PathBuf;
 use unified_archive::{Archive, ExtractionOptions};
@@ -64,9 +67,8 @@ fn test_crc32_verification_disabled() {
     fs::create_dir_all(&temp_dest).ok();
 
     let options = ExtractionOptions {
-        destination: temp_dest.clone(),
         verify_crc32: false, // Disabled, but backends will still verify
-        ..Default::default()
+        ..common::default_extraction_options(temp_dest.clone())
     };
 
     let result = archive.extract_all(options);

@@ -1,12 +1,18 @@
 //! Common test utilities and helpers
 //!
-//! Provides shared infrastructure for integration and unit tests
+//! Provides shared infrastructure for integration and unit tests. The
+//! `default_compression_options` and `default_extraction_options` helpers
+//! exist so individual tests do not have to hand-roll the full
+//! `CompressionOptions`/`ExtractionOptions` literal every time — override
+//! only the fields that differ from the library's own defaults.
 
 pub mod config;
 
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use unified_archive::{ArchiveFormat, CompressionOptions, ExtractionOptions};
 
 /// Create unique temporary directory for testing
 ///
@@ -36,6 +42,24 @@ pub fn temp_test_dir() -> PathBuf {
 /// Silently ignores errors (directory may already be removed)
 pub fn cleanup(path: &PathBuf) {
     fs::remove_dir_all(path).ok();
+}
+
+/// Default `CompressionOptions` for tests — Normal level, no encryption, no
+/// splitting, no progress callback. Equivalent to `CompressionOptions::new`.
+#[allow(dead_code)] // Not every test binary that includes common/mod.rs uses this.
+pub fn default_compression_options(format: ArchiveFormat) -> CompressionOptions {
+    CompressionOptions::new(format)
+}
+
+/// Default `ExtractionOptions` for tests — library defaults with the given
+/// destination. Override additional fields with the struct-update syntax:
+/// `ExtractionOptions { overwrite: true, ..default_extraction_options(dest) }`.
+#[allow(dead_code)] // Not every test binary that includes common/mod.rs uses this.
+pub fn default_extraction_options(dest: impl Into<PathBuf>) -> ExtractionOptions {
+    ExtractionOptions {
+        destination: dest.into(),
+        ..Default::default()
+    }
 }
 
 /// Get fixture path for test files

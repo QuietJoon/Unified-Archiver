@@ -20,10 +20,7 @@ use unified_archive::{Archive, ArchiveFormat, CompressionOptions, ExtractionOpti
 fn contract_extract_all_zip() {
     let archive = Archive::open(fixture("test.zip")).unwrap();
     let temp = tempfile::tempdir().unwrap();
-    let options = ExtractionOptions {
-        destination: temp.path().to_path_buf(),
-        ..ExtractionOptions::default()
-    };
+    let options = common::default_extraction_options(temp.path().to_path_buf());
     let result = archive.extract_all(options);
     assert!(
         result.is_ok(),
@@ -36,10 +33,7 @@ fn contract_extract_all_zip() {
 fn contract_extract_all_7z() {
     let archive = Archive::open(fixture("test.7z")).unwrap();
     let temp = tempfile::tempdir().unwrap();
-    let options = ExtractionOptions {
-        destination: temp.path().to_path_buf(),
-        ..ExtractionOptions::default()
-    };
+    let options = common::default_extraction_options(temp.path().to_path_buf());
     let result = archive.extract_all(options);
     assert!(
         result.is_ok(),
@@ -54,10 +48,7 @@ fn contract_extract_all_7z() {
 fn contract_extract_all_rar() {
     let archive = Archive::open(fixture("test.rar")).unwrap();
     let temp = tempfile::tempdir().unwrap();
-    let options = ExtractionOptions {
-        destination: temp.path().to_path_buf(),
-        ..ExtractionOptions::default()
-    };
+    let options = common::default_extraction_options(temp.path().to_path_buf());
     let result = archive.extract_all(options);
     assert!(
         result.is_ok(),
@@ -70,10 +61,7 @@ fn contract_extract_all_rar() {
 fn contract_extract_all_tar() {
     let archive = Archive::open(fixture("test.tar")).unwrap();
     let temp = tempfile::tempdir().unwrap();
-    let options = ExtractionOptions {
-        destination: temp.path().to_path_buf(),
-        ..ExtractionOptions::default()
-    };
+    let options = common::default_extraction_options(temp.path().to_path_buf());
     let result = archive.extract_all(options);
     assert!(
         result.is_ok(),
@@ -86,10 +74,7 @@ fn contract_extract_all_tar() {
 fn contract_extract_all_tar_gz() {
     let archive = Archive::open(fixture("test.tar.gz")).unwrap();
     let temp = tempfile::tempdir().unwrap();
-    let options = ExtractionOptions {
-        destination: temp.path().to_path_buf(),
-        ..ExtractionOptions::default()
-    };
+    let options = common::default_extraction_options(temp.path().to_path_buf());
     let result = archive.extract_all(options);
     assert!(
         result.is_ok(),
@@ -102,10 +87,7 @@ fn contract_extract_all_tar_gz() {
 fn contract_extract_all_tar_bz2() {
     let archive = Archive::open(fixture("test.tar.bz2")).unwrap();
     let temp = tempfile::tempdir().unwrap();
-    let options = ExtractionOptions {
-        destination: temp.path().to_path_buf(),
-        ..ExtractionOptions::default()
-    };
+    let options = common::default_extraction_options(temp.path().to_path_buf());
     let result = archive.extract_all(options);
     assert!(
         result.is_ok(),
@@ -118,10 +100,7 @@ fn contract_extract_all_tar_bz2() {
 fn contract_extract_all_tar_xz() {
     let archive = Archive::open(fixture("test.tar.xz")).unwrap();
     let temp = tempfile::tempdir().unwrap();
-    let options = ExtractionOptions {
-        destination: temp.path().to_path_buf(),
-        ..ExtractionOptions::default()
-    };
+    let options = common::default_extraction_options(temp.path().to_path_buf());
     let result = archive.extract_all(options);
     assert!(
         result.is_ok(),
@@ -169,11 +148,12 @@ fn contract_extract_file_matches_original() {
 
     let archive = Archive::open(&archive_path).unwrap();
     let extract_dir = temp.path().join("extracted");
-    let extract_options = ExtractionOptions {
-        destination: extract_dir.clone(),
-        ..ExtractionOptions::default()
-    };
-    archive.extract_file("verify.txt", extract_options).unwrap();
+    archive
+        .extract_file(
+            "verify.txt",
+            common::default_extraction_options(extract_dir.clone()),
+        )
+        .unwrap();
 
     let extracted = std::fs::read(extract_dir.join("verify.txt")).unwrap();
     assert_eq!(extracted, original, "Extracted file must match original");
@@ -214,9 +194,8 @@ fn contract_extract_encrypted_rar_with_password() {
     let archive = Archive::open_encrypted(fixture("test_encrypted_data.rar"), "test123").unwrap();
     let temp = tempfile::tempdir().unwrap();
     let options = ExtractionOptions {
-        destination: temp.path().to_path_buf(),
         password: Some("test123".to_string().into()),
-        ..ExtractionOptions::default()
+        ..common::default_extraction_options(temp.path().to_path_buf())
     };
     let result = archive.extract_all(options);
     assert!(
@@ -228,6 +207,7 @@ fn contract_extract_encrypted_rar_with_password() {
 
 #[cfg(feature = "rar-support")]
 #[test]
+#[serial_test::file_serial(rar)]
 fn contract_extract_encrypted_without_password_fails() {
     let archive = Archive::open(fixture("test_encrypted.rar")).unwrap();
     let result = archive.extract_to_memory("test_file.txt");
@@ -249,7 +229,6 @@ fn contract_extraction_options_accept_progress_callback() {
     let count_clone = call_count.clone();
 
     let options = ExtractionOptions {
-        destination: temp.path().to_path_buf(),
         progress: Some(Box::new(move |current: u64, total: Option<u64>| {
             count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some(t) = total {
@@ -257,15 +236,17 @@ fn contract_extraction_options_accept_progress_callback() {
             }
             std::ops::ControlFlow::Continue(())
         })),
-        ..ExtractionOptions::default()
+        ..common::default_extraction_options(temp.path().to_path_buf())
     };
     let result = archive.extract_all(options);
-    // Progress callbacks may or may not be invoked depending on format/backend
-    // The contract is that providing a callback doesn't cause errors
     assert!(
         result.is_ok(),
         "Extraction with progress callback should succeed: {:?}",
         result.err()
+    );
+    assert!(
+        call_count.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "ZIP backend must invoke progress callback at least once"
     );
 }
 
@@ -299,10 +280,7 @@ fn contract_extraction_completes_in_reasonable_time() {
     let temp = tempfile::tempdir().unwrap();
 
     let start = Instant::now();
-    let options = ExtractionOptions {
-        destination: temp.path().to_path_buf(),
-        ..ExtractionOptions::default()
-    };
+    let options = common::default_extraction_options(temp.path().to_path_buf());
     archive.extract_all(options).unwrap();
     let elapsed = start.elapsed();
 
@@ -332,12 +310,11 @@ fn contract_extract_filtered_only_matching() {
 
     let archive = Archive::open(&archive_path).unwrap();
     let extract_dir = temp.path().join("filtered_out");
-    let options = ExtractionOptions {
-        destination: extract_dir.clone(),
-        ..ExtractionOptions::default()
-    };
     archive
-        .extract_filtered(|e| e.path.ends_with(".txt"), options)
+        .extract_filtered(
+            |e| e.path.ends_with(".txt"),
+            common::default_extraction_options(extract_dir.clone()),
+        )
         .unwrap();
 
     assert!(extract_dir.join("include.txt").exists());

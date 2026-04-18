@@ -1,4 +1,8 @@
 //! Integration tests for unified-archive
+
+#[path = "../common/mod.rs"]
+pub mod common;
+
 pub mod concurrency;
 pub mod creation;
 pub mod extraction;

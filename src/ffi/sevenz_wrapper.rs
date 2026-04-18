@@ -477,15 +477,17 @@ impl SevenZArchive {
     ///
     /// Note: Currently loads the entire file into memory before wrapping in a cursor.
     /// The sevenz-rust2 API uses a callback-based extraction model that doesn't
-    /// support streaming reads.
+    /// support streaming reads — see AD 0035 for the investigation and deferral
+    /// of true entry-level streaming.
     pub fn extract_to_stream(
         &self,
         file_path: &str,
     ) -> Result<crate::streaming::StreamingExtractor> {
         use std::io::Cursor;
 
-        // For now, use extract_to_memory and wrap in cursor
-        // TODO: Implement true streaming with SeqReader
+        // Buffered adapter: sevenz-rust2 0.19.4 exposes no owned entry-level Read
+        // (all public APIs are either callback-scoped &mut dyn Read or return Vec<u8>).
+        // Deferred per AD 0035 until upstream exposes an owned reader.
         let data = self.extract_to_memory(file_path)?;
         let size = data.len() as u64;
         let reader = Box::new(Cursor::new(data));

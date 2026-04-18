@@ -2,6 +2,9 @@
 //!
 //! Verifies progress reporting and cancellation support
 
+#[path = "common/mod.rs"]
+mod common;
+
 use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex};
 use unified_archive::{Archive, ExtractionOptions};
@@ -18,12 +21,11 @@ fn test_progress_callback_called() {
     let dest = std::env::temp_dir().join("unified_archive_test_progress");
 
     let options = ExtractionOptions {
-        destination: dest.clone(),
         progress: Some(Box::new(move |current, total| {
             progress_calls_clone.lock().unwrap().push((current, total));
             ControlFlow::Continue(())
         })),
-        ..Default::default()
+        ..common::default_extraction_options(dest.clone())
     };
 
     // Clean up before test
@@ -50,49 +52,59 @@ fn test_progress_callback_called() {
     let _ = std::fs::remove_dir_all(&dest);
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
-#[ignore] // Small test archives (97 bytes) complete before cancellation callback is invoked
 fn test_progress_callback_cancellation() {
-    let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
+    // Multi-entry fixture: `ControlFlow::Break` is a no-op on a single-entry
+    // archive (nothing left to visit after the first callback).
+    let archive =
+        Archive::open("tests/fixtures/test_multi.rar").expect("Failed to open multi-entry RAR");
+    let total_entries = archive.list_files().unwrap().len();
+    assert!(
+        total_entries >= 3,
+        "cancellation test requires a multi-entry fixture (found {})",
+        total_entries
+    );
 
-    let cancel_immediately = Arc::new(Mutex::new(false));
-    let cancel_immediately_clone = Arc::clone(&cancel_immediately);
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_clone = Arc::clone(&calls);
 
-    let dest = std::env::temp_dir().join("unified_archive_test_cancel");
+    let dest = std::env::temp_dir().join(format!(
+        "unified_archive_test_cancel_{}",
+        std::process::id()
+    ));
 
     let options = ExtractionOptions {
-        destination: dest.clone(),
         progress: Some(Box::new(move |_current, _total| {
-            // Cancel immediately on first progress callback
-            *cancel_immediately_clone.lock().unwrap() = true;
-            ControlFlow::Break(())
+            let mut n = calls_clone.lock().unwrap();
+            *n += 1;
+            if *n >= 2 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
         })),
-        ..Default::default()
+        ..common::default_extraction_options(dest.clone())
     };
 
-    // Clean up before test
     let _ = std::fs::remove_dir_all(&dest);
 
     let result = archive.extract_all(options);
 
-    // Extraction should fail due to cancellation
-    assert!(result.is_err(), "Extraction should be cancelled");
-
-    let error_msg = result.unwrap_err().to_string();
+    let observed = *calls.lock().unwrap();
+    // Contract: on Break the backend must either surface an error OR stop
+    // invoking the callback before reaching every entry. A backend that
+    // silently finishes all entries must fail this assertion.
     assert!(
-        error_msg.contains("cancelled") || error_msg.contains("Cancelled"),
-        "Error should mention cancellation: {}",
-        error_msg
+        result.is_err() || observed < total_entries,
+        "ControlFlow::Break must short-circuit extraction; \
+         got {} callbacks for {} entries, result={:?}",
+        observed,
+        total_entries,
+        result
     );
 
-    // Verify cancellation callback was triggered
-    assert!(
-        *cancel_immediately.lock().unwrap(),
-        "Cancellation callback should have been called"
-    );
-
-    // Clean up after test
     let _ = std::fs::remove_dir_all(&dest);
 }
 
@@ -106,12 +118,11 @@ fn test_progress_callback_zip() {
     let dest = std::env::temp_dir().join("unified_archive_test_zip");
 
     let options = ExtractionOptions {
-        destination: dest.clone(),
         progress: Some(Box::new(move |current, total| {
             progress_calls_clone.lock().unwrap().push((current, total));
             ControlFlow::Continue(())
         })),
-        ..Default::default()
+        ..common::default_extraction_options(dest.clone())
     };
 
     // Clean up before test
@@ -147,12 +158,11 @@ fn test_progress_callback_7z() {
     let dest = std::env::temp_dir().join("unified_archive_test_7z");
 
     let options = ExtractionOptions {
-        destination: dest.clone(),
         progress: Some(Box::new(move |current, total| {
             progress_calls_clone.lock().unwrap().push((current, total));
             ControlFlow::Continue(())
         })),
-        ..Default::default()
+        ..common::default_extraction_options(dest.clone())
     };
 
     // Clean up before test
@@ -187,9 +197,8 @@ fn test_progress_without_callback() {
     let dest = std::env::temp_dir().join("unified_archive_test_no_callback");
 
     let options = ExtractionOptions {
-        destination: dest.clone(),
         progress: None, // No callback
-        ..Default::default()
+        ..common::default_extraction_options(dest.clone())
     };
 
     // Clean up before test

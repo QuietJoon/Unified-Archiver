@@ -3,12 +3,13 @@
 //! Compares unified-archive extraction throughput vs native 7z CLI.
 //! Target: Within 20% of native 7zip performance (SC-010).
 
+use super::common;
+
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
-use unified_archive::ExtractionOptions;
 
 /// Check if a command is available
 fn command_exists(cmd: &str) -> bool {
@@ -118,10 +119,7 @@ fn measure_unified_archive_extraction(archive_path: &Path, output_dir: &Path) ->
     let archive = unified_archive::Archive::open(archive_path).ok()?;
 
     let start = Instant::now();
-    let options = ExtractionOptions {
-        destination: output_dir.to_path_buf(),
-        ..Default::default()
-    };
+    let options = common::default_extraction_options(output_dir.to_path_buf());
     let result = archive.extract_all(options);
 
     if result.is_ok() {

@@ -190,6 +190,7 @@ fn contract_streaming_encrypted_rar() {
 
 #[cfg(feature = "rar-support")]
 #[test]
+#[serial_test::file_serial(rar)]
 fn contract_streaming_without_password_fails() {
     // test_encrypted_data.rar has data encryption (headers readable without password)
     let archive = Archive::open(fixture("test_encrypted_data.rar")).unwrap();

@@ -7,9 +7,9 @@
 //! 4. Panic in callback treated as cancellation
 //!
 //! Note: The current API uses ExtractionOptions.progress (a boxed ProgressCallback trait)
-//! rather than a separate extract_all_with_progress method. ZIP (Piz) and 7z (SevenZ)
-//! now support progress callbacks. RAR contract tests remain disabled due to UnRAR
-//! global state issues.
+//! rather than a separate extract_all_with_progress method. All production backends
+//! (RAR, ZIP/Piz, 7z/SevenZ, libarchive) invoke the callback and honour
+//! ControlFlow::Break; the tests below exercise each backend.
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -32,12 +32,11 @@ fn contract_progress_callback_is_invoked_for_rar() {
     let count_clone = call_count.clone();
 
     let options = ExtractionOptions {
-        destination: temp.path().to_path_buf(),
         progress: Some(Box::new(move |_current: u64, _total: Option<u64>| {
             count_clone.fetch_add(1, Ordering::SeqCst);
             std::ops::ControlFlow::Continue(())
         })),
-        ..ExtractionOptions::default()
+        ..common::default_extraction_options(temp.path().to_path_buf())
     };
 
     archive.extract_all(options).unwrap();
@@ -53,17 +52,19 @@ fn contract_progress_callback_is_invoked_for_rar() {
 
 #[test]
 fn contract_progress_callback_accepted_for_zip() {
-    // ZIP progress callbacks may not fire (known limitation), but providing
-    // a callback should not cause errors
+    // ZIP (Piz) invokes the progress callback during extraction.
     let archive = Archive::open(fixture("test.zip")).unwrap();
     let temp = tempfile::tempdir().unwrap();
 
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let cc = call_count.clone();
+
     let options = ExtractionOptions {
-        destination: temp.path().to_path_buf(),
-        progress: Some(Box::new(|_current: u64, _total: Option<u64>| {
+        progress: Some(Box::new(move |_current: u64, _total: Option<u64>| {
+            cc.fetch_add(1, Ordering::SeqCst);
             std::ops::ControlFlow::Continue(())
         })),
-        ..ExtractionOptions::default()
+        ..common::default_extraction_options(temp.path().to_path_buf())
     };
 
     let result = archive.extract_all(options);
@@ -71,6 +72,10 @@ fn contract_progress_callback_accepted_for_zip() {
         result.is_ok(),
         "Extraction with progress callback should not fail: {:?}",
         result.err()
+    );
+    assert!(
+        call_count.load(Ordering::SeqCst) > 0,
+        "ZIP progress callback should fire at least once"
     );
 }
 
@@ -89,7 +94,6 @@ fn contract_progress_monotonic_for_rar() {
     let mv = monotonic_violation.clone();
 
     let options = ExtractionOptions {
-        destination: temp.path().to_path_buf(),
         progress: Some(Box::new(move |current: u64, total: Option<u64>| {
             let prev = lc.swap(current, Ordering::SeqCst);
             if current < prev {
@@ -103,7 +107,7 @@ fn contract_progress_monotonic_for_rar() {
             }
             std::ops::ControlFlow::Continue(())
         })),
-        ..ExtractionOptions::default()
+        ..common::default_extraction_options(temp.path().to_path_buf())
     };
 
     archive.extract_all(options).unwrap();
@@ -121,35 +125,46 @@ fn contract_progress_monotonic_for_rar() {
 #[test]
 #[serial_test::file_serial(rar)]
 fn contract_progress_cancellation() {
-    let archive = Archive::open(fixture("test.rar")).unwrap();
+    // Use the multi-entry fixture so cancellation is observable: with a single
+    // entry there is nothing left to short-circuit after the first callback.
+    let archive = Archive::open(fixture("test_multi.rar")).unwrap();
+    let total_entries = archive.list_files().unwrap().len() as u64;
+    assert!(
+        total_entries >= 3,
+        "cancellation contract requires a multi-entry fixture"
+    );
     let temp = tempfile::tempdir().unwrap();
 
     let call_count = Arc::new(AtomicUsize::new(0));
     let cc = call_count.clone();
 
     let options = ExtractionOptions {
-        destination: temp.path().to_path_buf(),
         progress: Some(Box::new(move |_current: u64, _total: Option<u64>| {
             let count = cc.fetch_add(1, Ordering::SeqCst);
             if count >= 1 {
-                // Cancel after first callback
                 std::ops::ControlFlow::Break(())
             } else {
                 std::ops::ControlFlow::Continue(())
             }
         })),
-        ..ExtractionOptions::default()
+        ..common::default_extraction_options(temp.path().to_path_buf())
     };
 
-    let _result = archive.extract_all(options);
-    // Cancellation should result in an error or early termination
-    // The exact behavior depends on the backend
-    let calls = call_count.load(Ordering::SeqCst);
-    // If callbacks were invoked, cancellation should have taken effect
-    if calls > 1 {
-        // We requested cancellation, so extraction may or may not succeed
-        // depending on timing — the key contract is that it doesn't hang or panic
-    }
+    let result = archive.extract_all(options);
+    let calls = call_count.load(Ordering::SeqCst) as u64;
+
+    // Contract: a backend that honours ControlFlow::Break either short-circuits
+    // before visiting every entry, or surfaces an error. A backend that silently
+    // ignores the cancellation signal (callback count reaches total_entries AND
+    // extraction reports success) must fail this assertion.
+    assert!(
+        calls < total_entries || result.is_err(),
+        "ControlFlow::Break must short-circuit extraction or return an error; \
+         got {} callbacks for {} entries with result {:?}",
+        calls,
+        total_entries,
+        result.err()
+    );
 }
 
 // ── Contract 4: Callback does not cause crashes ──
@@ -161,12 +176,11 @@ fn contract_progress_callback_with_no_op() {
     let temp = tempfile::tempdir().unwrap();
 
     let options = ExtractionOptions {
-        destination: temp.path().to_path_buf(),
         progress: Some(Box::new(|_: u64, _: Option<u64>| {
             // No-op callback
             std::ops::ControlFlow::Continue(())
         })),
-        ..ExtractionOptions::default()
+        ..common::default_extraction_options(temp.path().to_path_buf())
     };
 
     let result = archive.extract_all(options);
@@ -191,13 +205,12 @@ fn contract_progress_encrypted_rar() {
     let cc = call_count.clone();
 
     let options = ExtractionOptions {
-        destination: temp.path().to_path_buf(),
         password: Some("test123".to_string().into()),
         progress: Some(Box::new(move |_: u64, _: Option<u64>| {
             cc.fetch_add(1, Ordering::SeqCst);
             std::ops::ControlFlow::Continue(())
         })),
-        ..ExtractionOptions::default()
+        ..common::default_extraction_options(temp.path().to_path_buf())
     };
 
     let result = archive.extract_all(options);

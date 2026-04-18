@@ -2,10 +2,10 @@
 //!
 //! Tests the modification API for adding, removing, and replacing files in archives.
 
+use super::common;
+
 use std::path::PathBuf;
-use unified_archive::{
-    Archive, ArchiveFormat, CompressionLevel, CompressionOptions, ExtractionOptions,
-};
+use unified_archive::{Archive, ArchiveFormat};
 
 #[test]
 fn test_add_files_to_archive() {
@@ -13,13 +13,7 @@ fn test_add_files_to_archive() {
     let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_add.zip");
 
     // Create initial archive
-    let options = CompressionOptions {
-        format: ArchiveFormat::Zip,
-        level: CompressionLevel::Normal,
-        password: None,
-        split_size: None,
-        progress: None,
-    };
+    let options = common::default_compression_options(ArchiveFormat::Zip);
 
     std::fs::remove_file(&test_path).ok();
     let mut archive = Archive::create(&test_path, options).unwrap();
@@ -47,13 +41,7 @@ fn test_remove_files_from_archive() {
     // Create a test archive first
     let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_remove.zip");
 
-    let options = CompressionOptions {
-        format: ArchiveFormat::Zip,
-        level: CompressionLevel::Normal,
-        password: None,
-        split_size: None,
-        progress: None,
-    };
+    let options = common::default_compression_options(ArchiveFormat::Zip);
 
     std::fs::remove_file(&test_path).ok();
     let mut archive = Archive::create(&test_path, options).unwrap();
@@ -88,13 +76,7 @@ fn test_replace_files_in_archive() {
     // Create a test archive first
     let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_replace.zip");
 
-    let options = CompressionOptions {
-        format: ArchiveFormat::Zip,
-        level: CompressionLevel::Normal,
-        password: None,
-        split_size: None,
-        progress: None,
-    };
+    let options = common::default_compression_options(ArchiveFormat::Zip);
 
     std::fs::remove_file(&test_path).ok();
     let mut archive = Archive::create(&test_path, options).unwrap();
@@ -122,13 +104,7 @@ fn test_combined_operations() {
     // Create a test archive first
     let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_combined.zip");
 
-    let options = CompressionOptions {
-        format: ArchiveFormat::Zip,
-        level: CompressionLevel::Normal,
-        password: None,
-        split_size: None,
-        progress: None,
-    };
+    let options = common::default_compression_options(ArchiveFormat::Zip);
 
     std::fs::remove_file(&test_path).ok();
     let mut archive = Archive::create(&test_path, options).unwrap();
@@ -179,13 +155,7 @@ fn test_open_nonexistent_archive() {
 fn test_modify_preserves_unchanged_content_bytes() {
     let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_preserve_bytes.zip");
 
-    let options = CompressionOptions {
-        format: ArchiveFormat::Zip,
-        level: CompressionLevel::Normal,
-        password: None,
-        split_size: None,
-        progress: None,
-    };
+    let options = common::default_compression_options(ArchiveFormat::Zip);
 
     std::fs::remove_file(&test_path).ok();
     let mut archive = Archive::create(&test_path, options).unwrap();
@@ -213,13 +183,7 @@ fn test_modify_preserves_unchanged_content_bytes() {
 fn test_modify_empty_archive_add_then_commit() {
     let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_empty_base.zip");
 
-    let options = CompressionOptions {
-        format: ArchiveFormat::Zip,
-        level: CompressionLevel::Normal,
-        password: None,
-        split_size: None,
-        progress: None,
-    };
+    let options = common::default_compression_options(ArchiveFormat::Zip);
 
     std::fs::remove_file(&test_path).ok();
     let mut archive = Archive::create(&test_path, options).unwrap();
@@ -247,13 +211,7 @@ fn test_modify_empty_archive_add_then_commit() {
 fn test_modify_replace_grows_and_shrinks_payload() {
     let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_grow_shrink.zip");
 
-    let options = CompressionOptions {
-        format: ArchiveFormat::Zip,
-        level: CompressionLevel::Normal,
-        password: None,
-        split_size: None,
-        progress: None,
-    };
+    let options = common::default_compression_options(ArchiveFormat::Zip);
 
     std::fs::remove_file(&test_path).ok();
     let mut archive = Archive::create(&test_path, options).unwrap();
@@ -288,13 +246,7 @@ fn test_modify_replace_grows_and_shrinks_payload() {
 fn test_modify_remove_nonexistent_entry_errors_on_commit() {
     let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_remove_missing.zip");
 
-    let options = CompressionOptions {
-        format: ArchiveFormat::Zip,
-        level: CompressionLevel::Normal,
-        password: None,
-        split_size: None,
-        progress: None,
-    };
+    let options = common::default_compression_options(ArchiveFormat::Zip);
 
     std::fs::remove_file(&test_path).ok();
     let mut archive = Archive::create(&test_path, options).unwrap();
@@ -321,13 +273,7 @@ fn test_modify_add_and_remove_queues_are_independent() {
     // of the same name produces the added entry (the remove is a no-op).
     let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_add_remove_same.zip");
 
-    let options = CompressionOptions {
-        format: ArchiveFormat::Zip,
-        level: CompressionLevel::Normal,
-        password: None,
-        split_size: None,
-        progress: None,
-    };
+    let options = common::default_compression_options(ArchiveFormat::Zip);
 
     std::fs::remove_file(&test_path).ok();
     let mut archive = Archive::create(&test_path, options).unwrap();
@@ -353,13 +299,7 @@ fn test_modify_add_and_remove_queues_are_independent() {
 fn test_modify_many_entries_preserves_ordering_and_content() {
     let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_many_entries.zip");
 
-    let options = CompressionOptions {
-        format: ArchiveFormat::Zip,
-        level: CompressionLevel::Normal,
-        password: None,
-        split_size: None,
-        progress: None,
-    };
+    let options = common::default_compression_options(ArchiveFormat::Zip);
 
     std::fs::remove_file(&test_path).ok();
     let mut archive = Archive::create(&test_path, options).unwrap();
@@ -388,10 +328,7 @@ fn test_modify_many_entries_preserves_ordering_and_content() {
     let _ = std::fs::remove_dir_all(&extract_dir);
     std::fs::create_dir_all(&extract_dir).unwrap();
     archive
-        .extract_all(ExtractionOptions {
-            destination: extract_dir.clone(),
-            ..Default::default()
-        })
+        .extract_all(common::default_extraction_options(extract_dir.clone()))
         .unwrap();
 
     let twenty = std::fs::read(extract_dir.join("entry_20.txt")).unwrap();

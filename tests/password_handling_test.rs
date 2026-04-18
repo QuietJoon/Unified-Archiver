@@ -3,9 +3,12 @@
 //! Verifies password detection, correct password extraction, and error handling
 //! for encrypted archives across different formats.
 
+#[path = "common/mod.rs"]
+mod common;
+
 use std::fs;
 use std::path::PathBuf;
-use unified_archive::{Archive, ArchiveError, ExtractionOptions};
+use unified_archive::{Archive, ArchiveError};
 
 /// Helper to get test fixtures directory
 fn fixtures_dir() -> PathBuf {
@@ -50,10 +53,7 @@ fn test_open_encrypted_rar_with_correct_password() {
     let temp_dest = std::env::temp_dir().join("encrypted_rar_test");
     fs::create_dir_all(&temp_dest).ok();
 
-    let options = ExtractionOptions {
-        destination: temp_dest.clone(),
-        ..Default::default()
-    };
+    let options = common::default_extraction_options(temp_dest.clone());
 
     let result = archive.extract_all(options);
     fs::remove_dir_all(&temp_dest).ok();
@@ -80,10 +80,7 @@ fn test_open_encrypted_rar_with_wrong_password() {
         let temp_dest = std::env::temp_dir().join("wrong_password_test");
         fs::create_dir_all(&temp_dest).ok();
 
-        let options = ExtractionOptions {
-            destination: temp_dest.clone(),
-            ..Default::default()
-        };
+        let options = common::default_extraction_options(temp_dest.clone());
 
         let result = archive.extract_all(options);
         fs::remove_dir_all(&temp_dest).ok();
@@ -121,10 +118,7 @@ fn test_open_encrypted_rar_without_password() {
         let temp_dest = std::env::temp_dir().join("no_password_test");
         fs::create_dir_all(&temp_dest).ok();
 
-        let options = ExtractionOptions {
-            destination: temp_dest.clone(),
-            ..Default::default()
-        };
+        let options = common::default_extraction_options(temp_dest.clone());
 
         let result = arch.extract_all(options);
         fs::remove_dir_all(&temp_dest).ok();
@@ -167,10 +161,7 @@ fn test_password_does_not_leak_in_errors() {
         let temp_dest = std::env::temp_dir().join("password_leak_test");
         fs::create_dir_all(&temp_dest).ok();
 
-        let options = ExtractionOptions {
-            destination: temp_dest.clone(),
-            ..Default::default()
-        };
+        let options = common::default_extraction_options(temp_dest.clone());
 
         match archive.extract_file("nonexistent.txt", options) {
             Err(e) => {

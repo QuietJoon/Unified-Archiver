@@ -3,6 +3,9 @@
 //! Tests the platform-specific rename functionality for archive modification.
 //! On Windows, `std::fs::rename()` fails if destination exists, so we use `MoveFileExW`.
 
+#[path = "common/mod.rs"]
+mod common;
+
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
@@ -78,7 +81,7 @@ fn test_rename_with_overwrite() {
 /// On Windows, this would fail before the MoveFileExW fix.
 #[test]
 fn test_archive_modification_commit() {
-    use unified_archive::{Archive, ArchiveFormat, CompressionOptions};
+    use unified_archive::{Archive, ArchiveFormat};
 
     let dir = test_dir();
     fs::create_dir_all(&dir).expect("create test dir");
@@ -93,10 +96,7 @@ fn test_archive_modification_commit() {
 
     // Create initial archive with one file
     {
-        let options = CompressionOptions {
-            format: ArchiveFormat::Zip,
-            ..Default::default()
-        };
+        let options = common::default_compression_options(ArchiveFormat::Zip);
         let mut archive = Archive::create(&archive_path, options).expect("create archive");
         archive
             .add_file_from_data("original.txt", b"original content")

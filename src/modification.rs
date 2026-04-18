@@ -133,6 +133,7 @@ impl Archive {
             entry_cache: once_cell::sync::OnceCell::new(),
             modifications: Some(ModificationTracker::default()),
             mod_options: None,
+            _backing_tempfile: None,
         })
     }
 
@@ -309,6 +310,19 @@ impl Archive {
 
             let preserve = mod_options.preserve_metadata;
 
+            // For ZIP sources, load the archive comment and per-entry
+            // compression method directly via the `zip` crate. The modify path
+            // routes source reads through libarchive, which does not surface
+            // this metadata — a side-car lookup is the cheapest way to keep
+            // round-trips faithful without switching backends.
+            let zip_extras = if self.format == ArchiveFormat::Zip
+                && matches!(new_archive.backend, ArchiveBackend::ZipWriter(_))
+            {
+                Some(load_zip_source_extras(&self.path)?)
+            } else {
+                None
+            };
+
             // Copy all entries from original except removed ones. Stream large
             // entries via `_unchecked` extraction to avoid the per-entry
             // list_files() rebuild + safety pre-check that the public methods
@@ -321,12 +335,20 @@ impl Archive {
                 }
 
                 let streamable_size = entry.size;
+                let compression_override = zip_extras
+                    .as_ref()
+                    .and_then(|extras| extras.per_entry_compression.get(&entry.path).copied());
 
                 if preserve {
                     match &mut new_archive.backend {
                         ArchiveBackend::ZipWriter(w) => {
                             let mut stream = self.extract_to_stream_unchecked(&entry.path)?;
-                            w.add_file_from_reader_with_metadata(&entry.path, &mut stream, entry)?;
+                            w.add_file_from_reader_with_metadata(
+                                &entry.path,
+                                &mut stream,
+                                entry,
+                                compression_override,
+                            )?;
                         }
                         ArchiveBackend::Libarchive(b) => match streamable_size {
                             Some(size) => {
@@ -382,6 +404,15 @@ impl Archive {
                 new_archive.add_file_from_data(&path, &data)?;
             }
 
+            // Propagate ZIP archive-level comment (if any) before finalizing.
+            if let (Some(extras), ArchiveBackend::ZipWriter(w)) =
+                (zip_extras.as_ref(), &mut new_archive.backend)
+            {
+                if !extras.archive_comment.is_empty() {
+                    w.set_archive_comment(&extras.archive_comment)?;
+                }
+            }
+
             // Finalize new archive
             new_archive.finish()?;
 
@@ -407,6 +438,50 @@ impl Archive {
 
         result
     }
+}
+
+/// Side-car ZIP metadata read directly from the source file via the `zip`
+/// crate during `commit_changes`. Used to preserve archive-level comments and
+/// per-entry compression methods that the libarchive-backed source reader
+/// does not surface.
+struct ZipSourceExtras {
+    archive_comment: Vec<u8>,
+    per_entry_compression: std::collections::HashMap<String, zip::CompressionMethod>,
+}
+
+// PERF(DEF-005): this reopens the ZIP and walks its central directory a second
+// time (libarchive already did the first walk for list_files). Tolerable for
+// thousand-entry archives but the real fix is to switch the ZIP modify source
+// from libarchive to the zip crate so both walks collapse into one.
+fn load_zip_source_extras(path: &Path) -> Result<ZipSourceExtras> {
+    let file =
+        std::fs::File::open(path).map_err(|e| ArchiveError::io("open", path.to_path_buf(), e))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| {
+        ArchiveError::format(
+            Some(ArchiveFormat::Zip),
+            format!("Read ZIP metadata: {}", e),
+        )
+    })?;
+
+    let archive_comment = zip.comment().to_vec();
+
+    let mut per_entry_compression = std::collections::HashMap::with_capacity(zip.len());
+    for i in 0..zip.len() {
+        let entry = zip.by_index_raw(i).map_err(|e| {
+            ArchiveError::format(
+                Some(ArchiveFormat::Zip),
+                format!("Read ZIP entry {}: {}", i, e),
+            )
+        })?;
+        // Normalize to forward slashes to match the listing paths.
+        let name = entry.name().replace('\\', "/");
+        per_entry_compression.insert(name, entry.compression());
+    }
+
+    Ok(ZipSourceExtras {
+        archive_comment,
+        per_entry_compression,
+    })
 }
 
 /// Compose the backup path for a given archive path and suffix.

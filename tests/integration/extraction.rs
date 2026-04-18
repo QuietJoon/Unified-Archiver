@@ -5,9 +5,7 @@
 use std::fs;
 use unified_archive::{Archive, ArchiveFormat, ExtractionOptions};
 
-// Use common test helpers from parent module
-#[path = "../common/mod.rs"]
-mod common;
+use super::common;
 
 #[cfg(feature = "rar-support")]
 #[test]
@@ -19,10 +17,7 @@ fn test_extract_all_rar5() {
     let archive = Archive::open(&archive_path).expect("Failed to open RAR5 archive");
     assert_eq!(archive.format(), ArchiveFormat::Rar5);
 
-    let options = ExtractionOptions {
-        destination: temp.clone(),
-        ..Default::default()
-    };
+    let options = common::default_extraction_options(temp.clone());
 
     archive
         .extract_all(options)
@@ -46,10 +41,7 @@ fn test_extract_all_zip() {
     let archive = Archive::open(&archive_path).expect("Failed to open ZIP archive");
     assert_eq!(archive.format(), ArchiveFormat::Zip);
 
-    let options = ExtractionOptions {
-        destination: temp.clone(),
-        ..Default::default()
-    };
+    let options = common::default_extraction_options(temp.clone());
 
     archive
         .extract_all(options)
@@ -73,10 +65,7 @@ fn test_extract_all_7z() {
     let archive = Archive::open(&archive_path).expect("Failed to open 7z archive");
     assert_eq!(archive.format(), ArchiveFormat::SevenZip);
 
-    let options = ExtractionOptions {
-        destination: temp.clone(),
-        ..Default::default()
-    };
+    let options = common::default_extraction_options(temp.clone());
 
     archive
         .extract_all(options)
@@ -126,10 +115,7 @@ fn test_extract_single_file_multiple_formats() {
         let archive_extract = Archive::open(&archive_path)
             .unwrap_or_else(|_| panic!("Failed to reopen {}", filename));
 
-        let options = ExtractionOptions {
-            destination: temp.clone(),
-            ..Default::default()
-        };
+        let options = common::default_extraction_options(temp.clone());
 
         archive_extract
             .extract_file(&first_file, options)
@@ -206,10 +192,7 @@ fn test_extract_filtered_multiple_formats() {
         let archive = Archive::open(&archive_path)
             .unwrap_or_else(|_| panic!("Failed to open {}", archive_name));
 
-        let options = ExtractionOptions {
-            destination: temp.clone(),
-            ..Default::default()
-        };
+        let options = common::default_extraction_options(temp.clone());
 
         // Extract only .txt files
         archive
@@ -257,10 +240,7 @@ fn test_extract_to_nested_directory() {
         let archive = Archive::open(&archive_path)
             .unwrap_or_else(|_| panic!("Failed to open {}", archive_name));
 
-        let options = ExtractionOptions {
-            destination: nested.clone(),
-            ..Default::default()
-        };
+        let options = common::default_extraction_options(nested.clone());
 
         // Should create nested directories automatically
         archive
@@ -292,9 +272,8 @@ fn test_extract_overwrite_handling() {
 
     // First extraction
     let options = ExtractionOptions {
-        destination: temp.clone(),
         overwrite: false,
-        ..Default::default()
+        ..common::default_extraction_options(temp.clone())
     };
 
     archive
@@ -307,21 +286,25 @@ fn test_extract_overwrite_handling() {
     // Second extraction without overwrite should fail
     let archive2 = Archive::open(&archive_path).expect("Failed to reopen archive");
     let options_no_overwrite = ExtractionOptions {
-        destination: temp.clone(),
         overwrite: false,
-        ..Default::default()
+        ..common::default_extraction_options(temp.clone())
     };
 
-    let _result = archive2.extract_all(options_no_overwrite);
-    // Note: Current implementation may or may not fail - this is format-dependent
-    // Just verify the API accepts the parameter
+    let result_no_overwrite = archive2.extract_all(options_no_overwrite);
+    // Contract: with overwrite=false and an existing destination file,
+    // extraction must error (check_overwrite_conflicts rejects pre-existing
+    // paths uniformly for all backends).
+    assert!(
+        result_no_overwrite.is_err(),
+        "extract_all with overwrite=false must fail when destination exists: {:?}",
+        result_no_overwrite
+    );
 
     // Third extraction with overwrite should succeed
     let archive3 = Archive::open(&archive_path).expect("Failed to reopen archive");
     let options_overwrite = ExtractionOptions {
-        destination: temp.clone(),
         overwrite: true,
-        ..Default::default()
+        ..common::default_extraction_options(temp.clone())
     };
 
     archive3
@@ -350,10 +333,7 @@ fn test_extract_preserves_file_content() {
         let archive = Archive::open(&archive_path)
             .unwrap_or_else(|_| panic!("Failed to open {}", archive_name));
 
-        let options = ExtractionOptions {
-            destination: temp.clone(),
-            ..Default::default()
-        };
+        let options = common::default_extraction_options(temp.clone());
 
         archive
             .extract_all(options)
@@ -416,12 +396,11 @@ fn test_unified_extraction_api_consistency() {
 
         // 5. Extract all
         let options = ExtractionOptions {
-            destination: temp.clone(),
             preserve_times: true,
             preserve_permissions: true,
             overwrite: true,
             verify_crc32: true,
-            ..Default::default()
+            ..common::default_extraction_options(temp.clone())
         };
 
         archive_extract

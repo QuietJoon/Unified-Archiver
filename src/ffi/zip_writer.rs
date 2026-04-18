@@ -177,15 +177,15 @@ impl ZipWriter {
         self.notify_progress(copied)
     }
 
-    /// Stream a file's contents from a reader, preserving metadata.
-    ///
-    /// Used by `commit_changes()` to round-trip retained entries without
-    /// buffering them fully in memory.
+    /// Stream a file's contents from a reader, preserving metadata. An explicit
+    /// `compression_override` pins the central-directory compression method so
+    /// mixed Stored/Deflated archives round-trip unchanged.
     pub fn add_file_from_reader_with_metadata<R: Read>(
         &mut self,
         archive_path: &str,
         reader: &mut R,
         metadata: &crate::entry::ArchiveEntry,
+        compression_override: Option<CompressionMethod>,
     ) -> Result<()> {
         let mut file_options = self.options;
 
@@ -198,6 +198,13 @@ impl ZipWriter {
         #[cfg(unix)]
         if let Some(perm) = metadata.permissions {
             file_options = file_options.unix_permissions(perm);
+        }
+
+        if let Some(method) = compression_override {
+            file_options = file_options.compression_method(method);
+            if method == CompressionMethod::Stored {
+                file_options = file_options.compression_level(None);
+            }
         }
 
         let writer = self.writer.as_mut().ok_or_else(|| {
@@ -213,6 +220,15 @@ impl ZipWriter {
 
         self.entries_written += 1;
         self.notify_progress(copied)
+    }
+
+    /// Set the archive-level (EOCD) comment. Pass an empty slice to clear.
+    pub fn set_archive_comment(&mut self, comment: &[u8]) -> Result<()> {
+        let writer = self.writer.as_mut().ok_or_else(|| {
+            ArchiveError::format(Some(ArchiveFormat::Zip), "Archive already closed")
+        })?;
+        writer.set_raw_comment(comment.to_vec().into_boxed_slice());
+        Ok(())
     }
 
     /// Add a file from filesystem path with custom archive path

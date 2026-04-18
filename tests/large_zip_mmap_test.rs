@@ -2,6 +2,9 @@
 //!
 //! This test validates the consistency of size guards across piz operations.
 
+#[path = "common/mod.rs"]
+mod common;
+
 use std::path::{Path, PathBuf};
 use unified_archive::Archive;
 
@@ -57,9 +60,8 @@ fn test_large_zip_behavior() {
     // Re-open to avoid cache
     let archive2 = Archive::open(zip_path).expect("Should open archive");
     let options = unified_archive::ExtractionOptions {
-        destination: PathBuf::from(EXTRACT_PATH),
         overwrite: true,
-        ..Default::default()
+        ..common::default_extraction_options(PathBuf::from(EXTRACT_PATH))
     };
 
     let extract_result = archive2.extract_all(options);
