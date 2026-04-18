@@ -8,6 +8,7 @@
 //! - Encrypted-archive creation is NOT supported (see AD 0027) —
 //!   use the demo below to see how the API rejects such requests.
 
+use std::path::Path;
 use unified_archive::{
     Archive, ArchiveError, ArchiveFormat, CompressionLevel, CompressionOptions, Result,
 };
@@ -16,24 +17,29 @@ fn main() -> Result<()> {
     println!("unified-archive creation examples");
     println!("==================================\n");
 
+    let temp_dir =
+        tempfile::tempdir().map_err(|e| ArchiveError::io("create_tempdir", Path::new(""), e))?;
+    let base = temp_dir.path();
+    println!("Using scratch dir: {}\n", base.display());
+
     // Example 1: Create a simple ZIP archive
-    example_create_zip()?;
+    example_create_zip(base)?;
 
     // Example 2: Create a TAR.GZ archive
-    example_create_tar_gz()?;
+    example_create_tar_gz(base)?;
 
     // Example 3: Demonstrate that encrypted creation is rejected
-    example_encrypted_creation_rejected()?;
+    example_encrypted_creation_rejected(base)?;
 
     // Example 4: Create archive with maximum compression
-    example_create_maximum_compression()?;
+    example_create_maximum_compression(base)?;
 
     println!("\nAll examples completed successfully!");
     Ok(())
 }
 
 /// Create a simple ZIP archive with files from data
-fn example_create_zip() -> Result<()> {
+fn example_create_zip(base: &Path) -> Result<()> {
     println!("1. Creating simple ZIP archive...");
 
     let options = CompressionOptions {
@@ -44,7 +50,8 @@ fn example_create_zip() -> Result<()> {
         progress: None,
     };
 
-    let mut archive = Archive::create("/Volumes/Temp/claude/example.zip", options)?;
+    let path = base.join("example.zip");
+    let mut archive = Archive::create(&path, options)?;
 
     // Add files from in-memory data
     archive.add_file_from_data("readme.txt", b"Hello from unified-archive!\n")?;
@@ -57,12 +64,12 @@ fn example_create_zip() -> Result<()> {
     // Finalize the archive
     archive.finish()?;
 
-    println!("   ✓ Created /Volumes/Temp/claude/example.zip with 3 files\n");
+    println!("   ✓ Created {} with 3 files\n", path.display());
     Ok(())
 }
 
 /// Create a TAR.GZ archive (compressed tarball)
-fn example_create_tar_gz() -> Result<()> {
+fn example_create_tar_gz(base: &Path) -> Result<()> {
     println!("2. Creating TAR.GZ archive...");
 
     let options = CompressionOptions {
@@ -73,7 +80,8 @@ fn example_create_tar_gz() -> Result<()> {
         progress: None,
     };
 
-    let mut archive = Archive::create("/Volumes/Temp/claude/example.tar.gz", options)?;
+    let path = base.join("example.tar.gz");
+    let mut archive = Archive::create(&path, options)?;
 
     archive.add_file_from_data(
         "document.md",
@@ -83,7 +91,7 @@ fn example_create_tar_gz() -> Result<()> {
 
     archive.finish()?;
 
-    println!("   ✓ Created /Volumes/Temp/claude/example.tar.gz with 2 files\n");
+    println!("   ✓ Created {} with 2 files\n", path.display());
     Ok(())
 }
 
@@ -92,7 +100,7 @@ fn example_create_tar_gz() -> Result<()> {
 /// `Archive::create` with a password set returns `ArchiveError::OperationBlocked`
 /// for every supported format. Encrypted reads are still fully supported via
 /// `Archive::open_encrypted`.
-fn example_encrypted_creation_rejected() -> Result<()> {
+fn example_encrypted_creation_rejected(base: &Path) -> Result<()> {
     println!("3. Encrypted-archive creation is rejected (AD 0027)...");
 
     let options = CompressionOptions {
@@ -103,7 +111,8 @@ fn example_encrypted_creation_rejected() -> Result<()> {
         progress: None,
     };
 
-    match Archive::create("/Volumes/Temp/claude/encrypted.zip", options) {
+    let path = base.join("encrypted.zip");
+    match Archive::create(&path, options) {
         Ok(_) => {
             println!("   ✗ Unexpected: creation succeeded (should have been blocked)\n");
         }
@@ -122,7 +131,7 @@ fn example_encrypted_creation_rejected() -> Result<()> {
 }
 
 /// Create archive with maximum compression
-fn example_create_maximum_compression() -> Result<()> {
+fn example_create_maximum_compression(base: &Path) -> Result<()> {
     println!("4. Creating archive with maximum compression...");
 
     let options = CompressionOptions {
@@ -133,7 +142,8 @@ fn example_create_maximum_compression() -> Result<()> {
         progress: None,
     };
 
-    let mut archive = Archive::create("/Volumes/Temp/claude/compressed.7z", options)?;
+    let path = base.join("compressed.7z");
+    let mut archive = Archive::create(&path, options)?;
 
     // Add some repetitive data that compresses well
     let repetitive_data = "This is repetitive data. ".repeat(100);
@@ -146,6 +156,6 @@ fn example_create_maximum_compression() -> Result<()> {
 
     archive.finish()?;
 
-    println!("   ✓ Created /Volumes/Temp/claude/compressed.7z with ultra compression\n");
+    println!("   ✓ Created {} with ultra compression\n", path.display());
     Ok(())
 }

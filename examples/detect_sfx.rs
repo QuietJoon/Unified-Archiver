@@ -95,7 +95,6 @@ fn detect_sfx_example(file_path: &str) -> Result<(), ArchiveError> {
         },
         Err(e) => {
             println!("   ⚠️  Could not open embedded archive: {}", e);
-            println!("   (This is expected - offset-based opening not yet implemented)");
         }
     }
 
