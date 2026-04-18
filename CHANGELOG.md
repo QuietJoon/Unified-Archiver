@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-04-19
+
+Post-release hardening pass. No public API break; every change is either a
+tightened internal invariant, a docs-alignment fix, or a reviewer-driven
+safety gate.
+
+### Added
+
+- **Archive-internal path validation at the write-side facade.** `Archive::add_file_from_data`, `add_file_from_path_as`, `add_directory`, `add_entry`, `add_directory_entry`, and `remove_entry` now reject empty, NUL-containing, traversal (`..`), and absolute names up front with `ArchiveError::InvalidPath` instead of forwarding them to the backend and letting the extractor silently rewrite them on read-back (AD 0044, closes R0063-0001..0006).
+- **Non-UTF-8 password rejection at the FFI boundary.** `CompressionOptions::password_as_str` now returns `Result<&str, ArchiveError::InvalidArgument>`; password-capable backends propagate the error instead of silently dropping or corrupting non-UTF-8 bytes (AD 0042).
+- **SFX payload size ceiling.** `Archive::open_sfx` now caps embedded payload extraction at 16 GiB (AD 0040) to bound tempfile growth on hostile or malformed SFX binaries.
+
+### Changed
+
+- **Hermetic UnRAR build.** `build.rs` now stages UnRAR sources into `OUT_DIR` rather than compiling from the source tree, eliminating cross-crate-build working-tree contamination (AD 0039).
+- **Dropped hardcoded `/Volumes/Temp/claude` preference from the library.** Tempfile selection now uses the system defaults exclusively; scratch-path preference is a test-harness concern, not a library concern (AD 0041).
+- **Inspection contract asserts semantic stability, not pointer identity.** `contract_list_files_caching_same_pointer` → `contract_list_files_caching_stable`: repeated `list_files()` calls must return the same entries (same path / size / crc32), not necessarily the same backing slice.
+- **SFX stage-3 rustdoc narrowed** and the misleading "CD signature" test-assertion message refreshed (Review 0062 closure).
+- **Examples migrated to `tempfile::tempdir()`** and dropped stale SFX prose (Review 0062).
+- **Doc alignment** across `Limitations.md`, `README.md`, `docs/GETTING_STARTED.md`, `docs/README.md`, `src/lib.rs`, and `src/inspection.rs` to match the shipped v0.1.0 capability surface (split-volume is RAR-only end-to-end, encrypted ZIP is read-only, `Archive::create()` rejects passwords, standalone `.gz/.bz2/.xz` are read-only).
+
+### Fixed
+
+- **DEF-001 closure recorded in the impact report.** The tempfile-backed `open_at_offset()` / `open_sfx()` implementation that shipped in v0.1.0 is now reflected in `docs/project/implementation-impact-report.md` so future readers don't re-open the gap.
+
+### Decision records
+
+- AD 0039 — Hermetic UnRAR build + staged artifact purge
+- AD 0040 — SFX payload size ceiling (16 GiB)
+- AD 0041 — Remove hardcoded temp path from library
+- AD 0042 — `password_as_str` returns `Result` on non-UTF-8
+- AD 0043 — Reject R0062-0007 (tempdir-security concern already resolved)
+- AD 0044 — Validate archive-internal paths at the creation/modification facade boundary
+- AD 0045 — Reject R0063 low-cluster doc-drift sweep; already covered by OI-0057-009 + post-v0.1.0 banners
+
 ## [0.1.0] - 2026-04-18
 
 ### Pre-release gap closure (2026-04-18)

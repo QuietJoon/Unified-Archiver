@@ -1,9 +1,9 @@
 [package]
 name = "unified-archive"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
-authors = ["unified-archive Contributors"]
+authors = ["YongJoon Joe <developer@yongjoon.net>"]
 license = "MIT"
 description = "Unified archive library for Rust — read, extract, create, and modify ZIP, 7z, RAR, TAR (gz/bz2/xz), and ISO archives through a single multi-backend API"
 repository = "https://github.com/QuietJoon/unified-archive"
