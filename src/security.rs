@@ -163,37 +163,27 @@ pub fn validate_entry_path(entry_path: &str, dest: &Path) -> Result<PathBuf> {
 /// cleanly through `sanitize_entry_path`; this helper fails fast instead of
 /// silently writing an entry whose name the extractor would later rewrite.
 pub(crate) fn validate_archive_internal_path(archive_path: &str) -> Result<()> {
-    if archive_path.is_empty() {
-        return Err(ArchiveError::invalid_path(
-            "",
-            "archive-internal path must not be empty",
-        ));
-    }
-    if archive_path.contains('\0') {
-        return Err(ArchiveError::invalid_path(
+    let reason = if archive_path.is_empty() {
+        Some("must not be empty")
+    } else if archive_path.contains('\0') {
+        Some("must not contain NUL")
+    } else {
+        Path::new(archive_path)
+            .components()
+            .find_map(|component| match component {
+                Component::Normal(_) | Component::CurDir => None,
+                Component::ParentDir => Some("must not contain '..' segments"),
+                Component::RootDir | Component::Prefix(_) => Some("must be relative"),
+            })
+    };
+
+    match reason {
+        None => Ok(()),
+        Some(r) => Err(ArchiveError::invalid_path(
             archive_path,
-            "archive-internal path must not contain NUL",
-        ));
+            format!("archive-internal path {r}"),
+        )),
     }
-    for component in Path::new(archive_path).components() {
-        match component {
-            Component::Normal(_) => {}
-            Component::CurDir => {}
-            Component::ParentDir => {
-                return Err(ArchiveError::invalid_path(
-                    archive_path,
-                    "archive-internal path must not contain '..' segments",
-                ));
-            }
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(ArchiveError::invalid_path(
-                    archive_path,
-                    "archive-internal path must be relative",
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Sanitize an archive entry path to prevent path traversal attacks
@@ -650,26 +640,39 @@ mod tests {
         validate_archive_internal_path("./file.txt").unwrap();
     }
 
+    fn assert_invalid_path_with_reason(input: &str, reason_substring: &str) {
+        let err = validate_archive_internal_path(input).unwrap_err();
+        match err {
+            ArchiveError::InvalidPath { reason, .. } => {
+                assert!(
+                    reason.contains(reason_substring),
+                    "reason {reason:?} missing substring {reason_substring:?}",
+                );
+            }
+            other => panic!("expected InvalidPath, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_validate_archive_internal_path_rejects_empty() {
-        assert!(validate_archive_internal_path("").is_err());
+        assert_invalid_path_with_reason("", "must not be empty");
     }
 
     #[test]
     fn test_validate_archive_internal_path_rejects_nul() {
-        assert!(validate_archive_internal_path("a\0b").is_err());
+        assert_invalid_path_with_reason("a\0b", "must not contain NUL");
     }
 
     #[test]
     fn test_validate_archive_internal_path_rejects_traversal() {
-        assert!(validate_archive_internal_path("../secret").is_err());
-        assert!(validate_archive_internal_path("a/../secret").is_err());
-        assert!(validate_archive_internal_path("a/b/..").is_err());
+        assert_invalid_path_with_reason("../secret", "'..'");
+        assert_invalid_path_with_reason("a/../secret", "'..'");
+        assert_invalid_path_with_reason("a/b/..", "'..'");
     }
 
     #[test]
     fn test_validate_archive_internal_path_rejects_absolute() {
-        assert!(validate_archive_internal_path("/etc/passwd").is_err());
+        assert_invalid_path_with_reason("/etc/passwd", "must be relative");
     }
 
     #[test]
