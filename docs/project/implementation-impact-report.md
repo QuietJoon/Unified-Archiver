@@ -38,7 +38,7 @@ These gaps are explicitly out of MVP scope. They are architecturally present but
 
 | DEF ID | Gap | Open Issue | Scenario | Status |
 |---|---|---|---|---|
-| DEF-001 | `Archive::open_at_offset` returns `NotImplemented` | — | SCN-SFX-* open flow | Open |
+| DEF-001 | `Archive::open_at_offset` returns `NotImplemented` | — | SCN-SFX-* open flow | **Closed 2026-04-18** (tempfile-backed implementation shipped; 16 GiB ceiling per AD 0040; `open_sfx()` delegates here) |
 | DEF-002 | `CompressionOptions::split_size` not honored | — | SCN-CRE-* split creation | Open |
 | DEF-003 | Passwords stored in `Option<String>`; no SecStr | OI-0057-003 | All password scenarios | **Closed 2026-04-17** (password fields migrated to `Option<SecStr>`) |
 | DEF-004 | Non-libarchive backends buffer then wrap in `Cursor` | — | SCN-EXT-* streaming | Open |
