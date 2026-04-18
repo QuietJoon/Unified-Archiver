@@ -7,7 +7,7 @@ use crate::error::{ArchiveError, Result};
 use crate::format::ArchiveFormat;
 use crate::options::{CompressionOptions, ProgressCallback};
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter as RawZipWriter};
@@ -33,8 +33,18 @@ impl ZipWriter {
     ) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
 
-        let file =
-            File::create(&path_buf).map_err(|e| ArchiveError::io("create", path_buf.clone(), e))?;
+        // This library does not produce encrypted archives (AD 0007 amended by AD 0027).
+        // Reject passwords loudly instead of silently writing a plaintext archive.
+        if compression_options.password.is_some() {
+            return Err(ArchiveError::operation_blocked(
+                crate::error::ops::CREATE,
+                "Encrypted ZIP creation is not supported by this library. \
+                 Use open_encrypted() to read existing encrypted archives.",
+            ));
+        }
+
+        let file = File::create(&path_buf)
+            .map_err(|e| ArchiveError::io(crate::error::ops::CREATE, path_buf.clone(), e))?;
 
         let writer = RawZipWriter::new(file);
 
@@ -128,11 +138,9 @@ impl ZipWriter {
             ArchiveError::format(Some(ArchiveFormat::Zip), "Archive already closed")
         })?;
 
-        writer
-            .start_file(archive_path, file_options)
-            .map_err(|e| {
-                ArchiveError::format(Some(ArchiveFormat::Zip), format!("Start file: {}", e))
-            })?;
+        writer.start_file(archive_path, file_options).map_err(|e| {
+            ArchiveError::format(Some(ArchiveFormat::Zip), format!("Start file: {}", e))
+        })?;
 
         writer
             .write_all(data)
@@ -140,6 +148,71 @@ impl ZipWriter {
 
         self.entries_written += 1;
         self.notify_progress(data.len() as u64)
+    }
+
+    /// Stream a file's contents from a reader without preserving source metadata.
+    ///
+    /// Used by `commit_changes()` on the non-preserving path to round-trip
+    /// retained entries without buffering them fully in memory. Applies only
+    /// the writer's default `FileOptions`.
+    pub fn add_file_from_reader<R: Read>(
+        &mut self,
+        archive_path: &str,
+        reader: &mut R,
+    ) -> Result<()> {
+        let file_options = self.options;
+
+        let writer = self.writer.as_mut().ok_or_else(|| {
+            ArchiveError::format(Some(ArchiveFormat::Zip), "Archive already closed")
+        })?;
+
+        writer.start_file(archive_path, file_options).map_err(|e| {
+            ArchiveError::format(Some(ArchiveFormat::Zip), format!("Start file: {}", e))
+        })?;
+
+        let copied = std::io::copy(reader, writer)
+            .map_err(|e| ArchiveError::io("write", self.path.clone(), e))?;
+
+        self.entries_written += 1;
+        self.notify_progress(copied)
+    }
+
+    /// Stream a file's contents from a reader, preserving metadata.
+    ///
+    /// Used by `commit_changes()` to round-trip retained entries without
+    /// buffering them fully in memory.
+    pub fn add_file_from_reader_with_metadata<R: Read>(
+        &mut self,
+        archive_path: &str,
+        reader: &mut R,
+        metadata: &crate::entry::ArchiveEntry,
+    ) -> Result<()> {
+        let mut file_options = self.options;
+
+        if let Some(mtime) = metadata.modified {
+            if let Some(dt) = super::common::system_time_to_zip_datetime(mtime) {
+                file_options = file_options.last_modified_time(dt);
+            }
+        }
+
+        #[cfg(unix)]
+        if let Some(perm) = metadata.permissions {
+            file_options = file_options.unix_permissions(perm);
+        }
+
+        let writer = self.writer.as_mut().ok_or_else(|| {
+            ArchiveError::format(Some(ArchiveFormat::Zip), "Archive already closed")
+        })?;
+
+        writer.start_file(archive_path, file_options).map_err(|e| {
+            ArchiveError::format(Some(ArchiveFormat::Zip), format!("Start file: {}", e))
+        })?;
+
+        let copied = std::io::copy(reader, writer)
+            .map_err(|e| ArchiveError::io("write", self.path.clone(), e))?;
+
+        self.entries_written += 1;
+        self.notify_progress(copied)
     }
 
     /// Add a file from filesystem path with custom archive path
@@ -179,11 +252,9 @@ impl ZipWriter {
             ArchiveError::format(Some(ArchiveFormat::Zip), "Archive already closed")
         })?;
 
-        writer
-            .start_file(archive_path, file_options)
-            .map_err(|e| {
-                ArchiveError::format(Some(ArchiveFormat::Zip), format!("Start file: {}", e))
-            })?;
+        writer.start_file(archive_path, file_options).map_err(|e| {
+            ArchiveError::format(Some(ArchiveFormat::Zip), format!("Start file: {}", e))
+        })?;
 
         let copied = std::io::copy(&mut file, writer)
             .map_err(|e| ArchiveError::io("write", self.path.clone(), e))?;
@@ -205,7 +276,8 @@ impl ZipWriter {
         })?;
 
         self.entries_written += 1;
-        Ok(())
+        // Emit a zero-byte progress event so per-entry semantics match file additions.
+        self.notify_progress(0)
     }
 
     /// Add a directory recursively
@@ -248,10 +320,27 @@ impl ZipWriter {
             let archive_path = super::common::normalize_path(&relative_path.to_string_lossy());
 
             if entry.file_type().is_file() {
-                // Add file
                 self.add_file_from_path(entry_path, &archive_path)?;
             } else if entry.file_type().is_dir() {
                 self.add_directory_entry(&archive_path)?;
+            } else if entry.file_type().is_symlink() {
+                // AD 0021: symlinks are rejected at creation time to avoid silent data loss
+                // and to keep creation-side link policy aligned with extraction rejection.
+                return Err(ArchiveError::operation_blocked(
+                    "add_directory_recursive",
+                    format!(
+                        "Refusing to archive symlink '{}': symlinks are not supported for ZIP creation",
+                        entry_path.display()
+                    ),
+                ));
+            } else {
+                return Err(ArchiveError::operation_blocked(
+                    "add_directory_recursive",
+                    format!(
+                        "Refusing to archive '{}': unsupported file type",
+                        entry_path.display()
+                    ),
+                ));
             }
         }
 
@@ -281,16 +370,10 @@ mod tests {
     use super::*;
     use crate::options::{CompressionLevel, CompressionOptions};
 
-    fn temp_zip_path(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join("unified_archive_zip_writer_tests");
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.join(name)
-    }
-
     #[test]
     fn test_zip_writer_create_and_finish() {
-        let path = temp_zip_path("test_create.zip");
-        let _ = std::fs::remove_file(&path);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test_create.zip");
 
         let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
         let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
@@ -299,18 +382,15 @@ mod tests {
             .unwrap();
         writer.finish().unwrap();
 
-        // Verify file was created
         assert!(path.exists());
         let metadata = std::fs::metadata(&path).unwrap();
         assert!(metadata.len() > 0);
-
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn test_zip_writer_multiple_files() {
-        let path = temp_zip_path("test_multi.zip");
-        let _ = std::fs::remove_file(&path);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test_multi.zip");
 
         let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
         let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
@@ -329,14 +409,12 @@ mod tests {
         let file = File::open(&path).unwrap();
         let zip = zip::ZipArchive::new(file).unwrap();
         assert_eq!(zip.len(), 3);
-
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn test_zip_writer_store_compression() {
-        let path = temp_zip_path("test_store.zip");
-        let _ = std::fs::remove_file(&path);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test_store.zip");
 
         let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
         opts.level = CompressionLevel::Store;
@@ -347,13 +425,12 @@ mod tests {
         writer.finish().unwrap();
 
         assert!(path.exists());
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn test_zip_writer_empty_file() {
-        let path = temp_zip_path("test_empty_file.zip");
-        let _ = std::fs::remove_file(&path);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test_empty_file.zip");
 
         let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
         let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
@@ -361,13 +438,12 @@ mod tests {
         writer.finish().unwrap();
 
         assert!(path.exists());
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn test_zip_writer_add_directory() {
-        let path = temp_zip_path("test_dir.zip");
-        let _ = std::fs::remove_file(&path);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test_dir.zip");
 
         let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
         let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
@@ -378,13 +454,12 @@ mod tests {
         writer.finish().unwrap();
 
         assert!(path.exists());
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn test_zip_writer_drop_finishes() {
-        let path = temp_zip_path("test_drop.zip");
-        let _ = std::fs::remove_file(&path);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test_drop.zip");
 
         {
             let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
@@ -396,13 +471,12 @@ mod tests {
         }
 
         assert!(path.exists());
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn test_zip_writer_roundtrip() {
-        let path = temp_zip_path("test_roundtrip.zip");
-        let _ = std::fs::remove_file(&path);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test_roundtrip.zip");
 
         let test_content = b"Hello from roundtrip test!";
 
@@ -422,6 +496,5 @@ mod tests {
         std::io::Read::read_to_end(&mut entry, &mut buf).unwrap();
 
         assert_eq!(buf, test_content);
-        std::fs::remove_file(&path).ok();
     }
 }

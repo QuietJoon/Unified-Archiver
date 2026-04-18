@@ -171,13 +171,9 @@ impl Archive {
             ));
         }
 
-        let modifications =
-            self.modifications
-                .as_mut()
-                .ok_or_else(|| ArchiveError::operation_blocked(
-                    ops::ADD_ENTRY,
-                    "Archive not in Modify mode",
-                ))?;
+        let modifications = self.modifications.as_mut().ok_or_else(|| {
+            ArchiveError::operation_blocked(ops::ADD_ENTRY, "Archive not in Modify mode")
+        })?;
 
         modifications.added.push((path.to_string(), data.to_vec()));
         Ok(())
@@ -195,13 +191,9 @@ impl Archive {
             ));
         }
 
-        let modifications =
-            self.modifications
-                .as_mut()
-                .ok_or_else(|| ArchiveError::operation_blocked(
-                    ops::ADD_DIRECTORY_ENTRY,
-                    "Archive not in Modify mode",
-                ))?;
+        let modifications = self.modifications.as_mut().ok_or_else(|| {
+            ArchiveError::operation_blocked(ops::ADD_DIRECTORY_ENTRY, "Archive not in Modify mode")
+        })?;
 
         modifications.added_directories.push(path.to_string());
         Ok(())
@@ -218,13 +210,9 @@ impl Archive {
             ));
         }
 
-        let modifications =
-            self.modifications
-                .as_mut()
-                .ok_or_else(|| ArchiveError::operation_blocked(
-                    ops::REMOVE_ENTRY,
-                    "Archive not in Modify mode",
-                ))?;
+        let modifications = self.modifications.as_mut().ok_or_else(|| {
+            ArchiveError::operation_blocked(ops::REMOVE_ENTRY, "Archive not in Modify mode")
+        })?;
 
         modifications.removed.insert(path.to_string());
         Ok(())
@@ -277,13 +265,9 @@ impl Archive {
             ));
         }
 
-        let modifications =
-            self.modifications
-                .take()
-                .ok_or_else(|| ArchiveError::operation_blocked(
-                    ops::COMMIT_CHANGES,
-                    "No modification tracker",
-                ))?;
+        let modifications = self.modifications.take().ok_or_else(|| {
+            ArchiveError::operation_blocked(ops::COMMIT_CHANGES, "No modification tracker")
+        })?;
 
         // Snapshot modification options (defaults if unset).
         let mod_options = self.mod_options.take().unwrap_or_default();
@@ -297,8 +281,22 @@ impl Archive {
             return Ok(());
         }
 
-        // Create unique temporary file path (PID suffix avoids races with concurrent modifications)
-        let temp_path = self.path.with_extension(format!("tmp.{}", std::process::id()));
+        // Unique temp path beside the original. nanos+pid handles cross-process
+        // collisions; the AtomicU64 counter guarantees uniqueness for parallel
+        // commits within the same process (test harnesses, async runtimes).
+        let temp_path = {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            use std::time::{SystemTime, UNIX_EPOCH};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let pid = std::process::id();
+            let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+            self.path
+                .with_extension(format!("tmp.{pid}.{nanos}.{counter}"))
+        };
 
         // Use a closure so that temp file is cleaned up on any failure
         let result = (|| -> Result<()> {
@@ -311,30 +309,66 @@ impl Archive {
 
             let preserve = mod_options.preserve_metadata;
 
-            // Copy all entries from original except removed ones
+            // Copy all entries from original except removed ones. Stream large
+            // entries via `_unchecked` extraction to avoid the per-entry
+            // list_files() rebuild + safety pre-check that the public methods
+            // perform — we already have the listing in hand and trust paths
+            // sourced from the archive itself.
             let entries = self.list_files()?;
             for entry in entries {
                 if modifications.removed.contains(&entry.path) {
-                    continue; // Skip removed entries
+                    continue;
                 }
 
-                let data = self.extract_to_memory(&entry.path)?;
+                let streamable_size = entry.size;
 
                 if preserve {
-                    // Preserve original entry metadata (timestamps, permissions)
                     match &mut new_archive.backend {
                         ArchiveBackend::ZipWriter(w) => {
-                            w.add_file_from_data_with_metadata(&entry.path, &data, entry)?;
+                            let mut stream = self.extract_to_stream_unchecked(&entry.path)?;
+                            w.add_file_from_reader_with_metadata(&entry.path, &mut stream, entry)?;
                         }
-                        ArchiveBackend::Libarchive(b) => {
-                            b.add_file_from_data_with_metadata(&entry.path, &data, entry)?;
-                        }
+                        ArchiveBackend::Libarchive(b) => match streamable_size {
+                            Some(size) => {
+                                let mut stream = self.extract_to_stream_unchecked(&entry.path)?;
+                                b.add_file_from_reader_with_metadata(
+                                    &entry.path,
+                                    &mut stream,
+                                    size,
+                                    entry,
+                                )?;
+                            }
+                            None => {
+                                let data = self.extract_to_memory_unchecked(&entry.path)?;
+                                b.add_file_from_data_with_metadata(&entry.path, &data, entry)?;
+                            }
+                        },
                         _ => {
+                            let data = self.extract_to_memory_unchecked(&entry.path)?;
                             new_archive.add_file_from_data(&entry.path, &data)?;
                         }
                     }
                 } else {
-                    new_archive.add_file_from_data(&entry.path, &data)?;
+                    match &mut new_archive.backend {
+                        ArchiveBackend::ZipWriter(w) => {
+                            let mut stream = self.extract_to_stream_unchecked(&entry.path)?;
+                            w.add_file_from_reader(&entry.path, &mut stream)?;
+                        }
+                        ArchiveBackend::Libarchive(b) => match streamable_size {
+                            Some(size) => {
+                                let mut stream = self.extract_to_stream_unchecked(&entry.path)?;
+                                b.add_file_from_reader(&entry.path, &mut stream, size)?;
+                            }
+                            None => {
+                                let data = self.extract_to_memory_unchecked(&entry.path)?;
+                                b.add_file_from_data(&entry.path, &data)?;
+                            }
+                        },
+                        _ => {
+                            let data = self.extract_to_memory_unchecked(&entry.path)?;
+                            new_archive.add_file_from_data(&entry.path, &data)?;
+                        }
+                    }
                 }
             }
 
@@ -777,7 +811,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "ZIP modification via libarchive has known issues"]
     fn test_commit_changes_add_entry_roundtrip() {
         let temp = tempfile::tempdir().unwrap();
         let test_path = temp.path().join("test_commit_add.zip");
@@ -799,7 +832,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "ZIP modification via libarchive has known issues"]
     fn test_commit_changes_remove_entry_roundtrip() {
         let temp = tempfile::tempdir().unwrap();
         let test_path = temp.path().join("test_commit_remove.zip");

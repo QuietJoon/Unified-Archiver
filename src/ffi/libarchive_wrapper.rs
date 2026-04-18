@@ -2,7 +2,7 @@
 
 use super::libarchive::*;
 use crate::entry::{ArchiveEntry, EntryType};
-use crate::error::{ArchiveError, Result};
+use crate::error::{ArchiveError, ArchiveWarning, Result};
 use crate::options::{ProgressCallback, RateLimiter};
 use crate::security::sanitize_entry_path;
 use std::ffi::{CStr, CString, c_void};
@@ -18,6 +18,58 @@ pub struct LibarchiveArchive {
     progress: Option<Box<dyn crate::options::ProgressCallback>>,
     bytes_written: u64,
     entries_written: usize,
+    /// Reusable scratch buffer for streaming writes; allocated lazily on first
+    /// streaming `add_file_*` call to avoid per-entry allocation in `commit_changes`.
+    stream_buffer: Vec<u8>,
+}
+
+/// Data source for `write_entry`: either a fully buffered slice or a streamed reader.
+enum EntryDataSource<'a> {
+    Bytes(&'a [u8]),
+    Stream {
+        reader: &'a mut dyn std::io::Read,
+        expected_size: u64,
+    },
+}
+
+/// RAII guard for a libarchive entry pointer; frees on drop so error paths
+/// can use `?` without leaking.
+struct EntryGuard {
+    entry: *mut LibarchiveEntry,
+}
+
+impl EntryGuard {
+    /// Allocate a new libarchive entry. Caller is responsible for the unsafety
+    /// of subsequent libarchive calls using the pointer.
+    fn new() -> Result<Self> {
+        let entry = unsafe { archive_entry_new() };
+        if entry.is_null() {
+            Err(ArchiveError::format(None, "Failed to create entry"))
+        } else {
+            Ok(Self { entry })
+        }
+    }
+}
+
+impl Drop for EntryGuard {
+    fn drop(&mut self) {
+        if !self.entry.is_null() {
+            unsafe { archive_entry_free(self.entry) };
+        }
+    }
+}
+
+/// Resolve the raw-format pseudo-name `"data"` to the archive's file stem so
+/// standalone `.gz/.bz2/.xz` entries surface a meaningful path.
+fn raw_format_name<'a>(name: &'a str, archive_path: &str) -> std::borrow::Cow<'a, str> {
+    if name == "data" {
+        Path::new(archive_path)
+            .file_stem()
+            .map(|s| std::borrow::Cow::Owned(s.to_string_lossy().into_owned()))
+            .unwrap_or(std::borrow::Cow::Borrowed(name))
+    } else {
+        std::borrow::Cow::Borrowed(name)
+    }
 }
 
 impl LibarchiveArchive {
@@ -83,6 +135,7 @@ impl LibarchiveArchive {
             progress: None,
             bytes_written: 0,
             entries_written: 0,
+            stream_buffer: Vec::new(),
         })
     }
 
@@ -128,10 +181,9 @@ impl LibarchiveArchive {
                     // Raw format (standalone .gz/.bz2/.xz) returns "data" as the
                     // entry name. Replace with the archive filename sans compression
                     // extension for a meaningful path.
-                    if entry.path == "data" {
-                        if let Some(stem) = Path::new(&self.path).file_stem() {
-                            entry.path = stem.to_string_lossy().to_string();
-                        }
+                    let resolved = raw_format_name(&entry.path, &self.path);
+                    if let std::borrow::Cow::Owned(s) = resolved {
+                        entry.path = s;
                     }
 
                     // Compute CRC32 by reading file data (for files only) if requested
@@ -141,6 +193,7 @@ impl LibarchiveArchive {
                         let mut size: usize = 0;
                         let mut offset: c_longlong = 0;
 
+                        let mut crc_valid = true;
                         loop {
                             let r = archive_read_data_block(
                                 archive,
@@ -163,7 +216,8 @@ impl LibarchiveArchive {
                                         ),
                                     ));
                                 }
-                                // For other errors, skip CRC32 computation
+                                // Non-CRC read failure: partial data is not a reliable CRC source.
+                                crc_valid = false;
                                 break;
                             }
 
@@ -174,7 +228,9 @@ impl LibarchiveArchive {
                             }
                         }
 
-                        entry.crc32 = Some(hasher.finalize());
+                        if crc_valid {
+                            entry.crc32 = Some(hasher.finalize());
+                        }
                     } else {
                         // Skip file data for directories, other entry types, or metadata-only mode
                         archive_read_data_skip(archive);
@@ -199,7 +255,7 @@ impl LibarchiveArchive {
         &self,
         dest_path: &Path,
         progress: Option<&mut Box<dyn ProgressCallback>>,
-    ) -> Result<()> {
+    ) -> Result<Vec<ArchiveWarning>> {
         self.extract_all_with_options(dest_path, progress, true, true, true)
     }
 
@@ -210,7 +266,8 @@ impl LibarchiveArchive {
         overwrite: bool,
         preserve_permissions: bool,
         preserve_times: bool,
-    ) -> Result<()> {
+    ) -> Result<Vec<ArchiveWarning>> {
+        let mut warnings: Vec<ArchiveWarning> = Vec::new();
         // Calculate total size for progress tracking
         let (total_bytes, _entries) = if progress.is_some() {
             let entries = self.list_files_metadata_only()?;
@@ -272,12 +329,22 @@ impl LibarchiveArchive {
                 if !entry_ptr.is_null() {
                     let filetype = archive_entry_filetype(entry_ptr);
                     if (filetype & AE_IFMT) == AE_IFLNK {
+                        let path = entry_pathname_string(entry_ptr);
+                        let symlink_ptr = archive_entry_symlink(entry_ptr);
+                        let target = if symlink_ptr.is_null() {
+                            None
+                        } else {
+                            Some(CStr::from_ptr(symlink_ptr).to_string_lossy().into_owned())
+                        };
+                        warnings.push(ArchiveWarning::SkippedSymlink { path, target });
                         archive_read_data_skip(archive);
                         continue;
                     }
                     // Hard links are detected by archive_entry_hardlink() returning non-NULL
                     let hardlink_ptr = archive_entry_hardlink(entry_ptr);
                     if !hardlink_ptr.is_null() {
+                        let path = entry_pathname_string(entry_ptr);
+                        warnings.push(ArchiveWarning::SkippedHardLink { path });
                         archive_read_data_skip(archive);
                         continue;
                     }
@@ -296,16 +363,7 @@ impl LibarchiveArchive {
                     let pathname_ptr = archive_entry_pathname(entry_ptr);
                     if !pathname_ptr.is_null() {
                         let raw_name = CStr::from_ptr(pathname_ptr).to_string_lossy();
-                        // Raw format (standalone .gz/.bz2/.xz) returns "data";
-                        // replace with archive filename sans compression extension.
-                        let pathname = if raw_name == "data" {
-                            Path::new(&self.path)
-                                .file_stem()
-                                .map(|s| std::borrow::Cow::Owned(s.to_string_lossy().to_string()))
-                                .unwrap_or(raw_name)
-                        } else {
-                            raw_name
-                        };
+                        let pathname = raw_format_name(&raw_name, &self.path);
                         let full_path = match sanitize_entry_path(pathname.as_ref(), dest_path) {
                             Ok(path) => path,
                             Err(err) => {
@@ -365,7 +423,7 @@ impl LibarchiveArchive {
 
             archive_write_free(ext);
             archive_read_free(archive);
-            Ok(())
+            Ok(warnings)
         }
     }
 
@@ -405,7 +463,8 @@ impl LibarchiveArchive {
                 if !entry_ptr.is_null() {
                     let pathname_ptr = archive_entry_pathname(entry_ptr);
                     if !pathname_ptr.is_null() {
-                        let pathname = CStr::from_ptr(pathname_ptr).to_string_lossy();
+                        let pathname_raw = CStr::from_ptr(pathname_ptr).to_string_lossy();
+                        let pathname = raw_format_name(&pathname_raw, &self.path);
 
                         if pathname == file_path {
                             found = true;
@@ -518,7 +577,8 @@ impl LibarchiveArchive {
                     continue;
                 }
 
-                let entry_name = CStr::from_ptr(pathname).to_string_lossy();
+                let entry_name_raw = CStr::from_ptr(pathname).to_string_lossy();
+                let entry_name = raw_format_name(&entry_name_raw, &self.path);
                 if entry_name.as_ref() == file_path {
                     // Read data blocks directly into memory
                     let size_hint = archive_entry_size(entry);
@@ -528,7 +588,7 @@ impl LibarchiveArchive {
                             Err(_) => {
                                 archive_read_free(archive);
                                 return Err(ArchiveError::OperationBlocked {
-                                    operation: "extract_to_memory".to_string(),
+                                    operation: crate::error::ops::EXTRACT_TO_MEMORY.to_string(),
                                     reason: format!(
                                         "Entry too large for memory: {} bytes",
                                         size_hint
@@ -545,7 +605,7 @@ impl LibarchiveArchive {
                         if buffer.try_reserve(size).is_err() {
                             archive_read_free(archive);
                             return Err(ArchiveError::OperationBlocked {
-                                operation: "extract_to_memory".to_string(),
+                                operation: crate::error::ops::EXTRACT_TO_MEMORY.to_string(),
                                 reason: format!("Failed to allocate {} bytes", size),
                             });
                         }
@@ -721,16 +781,17 @@ impl LibarchiveArchive {
                 }
             }
 
-            // Set password if provided
-            if let Some(password_str) = crate::options::password_as_str(&options.password) {
-                let c_password = CString::new(password_str)
-                    .map_err(|_| ArchiveError::password("Password contains null byte"))?;
-                let pass_result = archive_write_set_passphrase(archive, c_password.as_ptr());
-                if pass_result != ARCHIVE_OK {
-                    let error_msg = get_archive_error(archive);
-                    archive_write_free(archive);
-                    return Err(ArchiveError::password(error_msg));
-                }
+            // Encrypted archive creation is not supported in any format (AD 0027).
+            // Reject before libarchive silently produces a non-encrypted archive.
+            if options.password.is_some() {
+                archive_write_free(archive);
+                return Err(ArchiveError::operation_blocked(
+                    crate::error::ops::CREATE,
+                    format!(
+                        "Encrypted archive creation is not supported by this library (format={:?}). Use open_encrypted() to read existing encrypted archives.",
+                        format
+                    ),
+                ));
             }
 
             // Open output file
@@ -751,6 +812,7 @@ impl LibarchiveArchive {
                 progress: options.progress.take(),
                 bytes_written: 0,
                 entries_written: 0,
+                stream_buffer: Vec::new(),
             })
         }
     }
@@ -766,89 +828,14 @@ impl LibarchiveArchive {
 
     /// Add a file to the archive from byte data
     pub fn add_file_from_data(&mut self, archive_path: &str, data: &[u8]) -> Result<()> {
-        let write_handle = self
-            .write_handle
-            .ok_or_else(|| ArchiveError::write_mode_only("add_file_from_data"))?;
-
-        unsafe {
-            // Create entry
-            let entry = archive_entry_new();
-            if entry.is_null() {
-                return Err(ArchiveError::format(None, "Failed to create entry"));
-            }
-
-            // Set pathname
-            let c_path = match CString::new(archive_path) {
-                Ok(c) => c,
-                Err(_) => {
-                    archive_entry_free(entry);
-                    return Err(ArchiveError::invalid_path(
-                        archive_path,
-                        "Contains null byte",
-                    ));
-                }
-            };
-            archive_entry_set_pathname(entry, c_path.as_ptr());
-
-            // Set file type and size
-            archive_entry_set_filetype(entry, AE_IFREG);
-            archive_entry_set_size(entry, data.len() as c_longlong);
-            archive_entry_set_perm(entry, 0o644);
-
-            // Set modification time to now
-            let now = std::time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default();
-            archive_entry_set_mtime(entry, now.as_secs() as i64, now.subsec_nanos() as c_longlong);
-
-            // Write header
-            let header_result = archive_write_header(write_handle, entry);
-            if header_result != ARCHIVE_OK {
-                let error_msg = get_archive_error(write_handle);
-                archive_entry_free(entry);
-                return Err(ArchiveError::format(None, error_msg));
-            }
-
-            // Write data
-            if !data.is_empty() {
-                let bytes_written =
-                    archive_write_data(write_handle, data.as_ptr() as *const c_void, data.len());
-                if bytes_written < 0 {
-                    let error_msg = get_archive_error(write_handle);
-                    archive_entry_free(entry);
-                    return Err(ArchiveError::io(
-                        "write_data",
-                        archive_path,
-                        std::io::Error::other(error_msg),
-                    ));
-                }
-
-                if bytes_written as usize != data.len() {
-                    archive_entry_free(entry);
-                    return Err(ArchiveError::io(
-                        "write_data",
-                        archive_path,
-                        std::io::Error::other(format!(
-                            "Short write: requested {} bytes, wrote {} bytes",
-                            data.len(),
-                            bytes_written
-                        )),
-                    ));
-                }
-            }
-
-            // Finish entry
-            let finish_result = archive_write_finish_entry(write_handle);
-            if finish_result != ARCHIVE_OK {
-                let error_msg = get_archive_error(write_handle);
-                archive_entry_free(entry);
-                return Err(ArchiveError::format(None, error_msg));
-            }
-            archive_entry_free(entry);
-        }
-
-        self.entries_written += 1;
-        self.notify_progress(data.len() as u64)
+        let size = data.len() as u64;
+        self.write_entry(
+            archive_path,
+            size,
+            0o644,
+            None,
+            EntryDataSource::Bytes(data),
+        )
     }
 
     /// Add a file from byte data, preserving metadata from an existing `ArchiveEntry`.
@@ -861,91 +848,64 @@ impl LibarchiveArchive {
         data: &[u8],
         metadata: &crate::entry::ArchiveEntry,
     ) -> Result<()> {
-        let write_handle = self
-            .write_handle
-            .ok_or_else(|| ArchiveError::write_mode_only("add_file_from_data_with_metadata"))?;
+        let size = data.len() as u64;
+        let perm = metadata.permissions.unwrap_or(0o644);
+        self.write_entry(
+            archive_path,
+            size,
+            perm,
+            metadata.modified,
+            EntryDataSource::Bytes(data),
+        )
+    }
 
-        unsafe {
-            let entry = archive_entry_new();
-            if entry.is_null() {
-                return Err(ArchiveError::format(None, "Failed to create entry"));
-            }
+    /// Stream a file's contents into the archive without preserving source
+    /// metadata.
+    ///
+    /// libarchive requires the entry size up front. Used by `commit_changes()`
+    /// on the non-preserving path.
+    pub fn add_file_from_reader<R: std::io::Read>(
+        &mut self,
+        archive_path: &str,
+        reader: &mut R,
+        size: u64,
+    ) -> Result<()> {
+        self.write_entry(
+            archive_path,
+            size,
+            0o644,
+            None,
+            EntryDataSource::Stream {
+                reader,
+                expected_size: size,
+            },
+        )
+    }
 
-            let c_path = match CString::new(archive_path) {
-                Ok(c) => c,
-                Err(_) => {
-                    archive_entry_free(entry);
-                    return Err(ArchiveError::invalid_path(archive_path, "Contains null byte"));
-                }
-            };
-            archive_entry_set_pathname(entry, c_path.as_ptr());
-
-            archive_entry_set_filetype(entry, AE_IFREG);
-            archive_entry_set_size(entry, data.len() as c_longlong);
-
-            // Restore permissions from original entry, default to 0o644
-            let perm = metadata.permissions.unwrap_or(0o644);
-            archive_entry_set_perm(entry, perm as i32);
-
-            // Restore modification time from original entry, fall back to now
-            let duration = metadata
-                .modified
-                .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
-                .unwrap_or_else(|| {
-                    std::time::SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                });
-            archive_entry_set_mtime(
-                entry,
-                duration.as_secs() as i64,
-                duration.subsec_nanos() as c_longlong,
-            );
-
-            let header_result = archive_write_header(write_handle, entry);
-            if header_result != ARCHIVE_OK {
-                let error_msg = get_archive_error(write_handle);
-                archive_entry_free(entry);
-                return Err(ArchiveError::format(None, error_msg));
-            }
-
-            if !data.is_empty() {
-                let bytes_written =
-                    archive_write_data(write_handle, data.as_ptr() as *const c_void, data.len());
-                if bytes_written < 0 {
-                    let error_msg = get_archive_error(write_handle);
-                    archive_entry_free(entry);
-                    return Err(ArchiveError::io(
-                        "write_data",
-                        archive_path,
-                        std::io::Error::other(error_msg),
-                    ));
-                }
-                if bytes_written as usize != data.len() {
-                    archive_entry_free(entry);
-                    return Err(ArchiveError::io(
-                        "write_data",
-                        archive_path,
-                        std::io::Error::other(format!(
-                            "Short write: requested {} bytes, wrote {} bytes",
-                            data.len(),
-                            bytes_written
-                        )),
-                    ));
-                }
-            }
-
-            let finish_result = archive_write_finish_entry(write_handle);
-            if finish_result != ARCHIVE_OK {
-                let error_msg = get_archive_error(write_handle);
-                archive_entry_free(entry);
-                return Err(ArchiveError::format(None, error_msg));
-            }
-            archive_entry_free(entry);
-        }
-
-        self.entries_written += 1;
-        self.notify_progress(data.len() as u64)
+    /// Stream a file's contents into the archive while preserving metadata.
+    ///
+    /// libarchive requires the entry size up front, so callers must supply
+    /// the known uncompressed length (available from the source entry).
+    /// Used by `commit_changes()` to round-trip retained entries without
+    /// buffering them fully in memory.
+    pub fn add_file_from_reader_with_metadata<R: std::io::Read>(
+        &mut self,
+        archive_path: &str,
+        reader: &mut R,
+        size: u64,
+        metadata: &crate::entry::ArchiveEntry,
+    ) -> Result<()> {
+        let perm = metadata.permissions.unwrap_or(0o644);
+        self.write_entry(
+            archive_path,
+            size,
+            perm,
+            metadata.modified,
+            EntryDataSource::Stream {
+                reader,
+                expected_size: size,
+            },
+        )
     }
 
     /// Add a directory entry to the archive (without contents)
@@ -982,7 +942,11 @@ impl LibarchiveArchive {
             let now = std::time::SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default();
-            archive_entry_set_mtime(entry, now.as_secs() as i64, now.subsec_nanos() as c_longlong);
+            archive_entry_set_mtime(
+                entry,
+                now.as_secs() as i64,
+                now.subsec_nanos() as c_longlong,
+            );
 
             let header_result = archive_write_header(write_handle, entry);
             if header_result != ARCHIVE_OK {
@@ -1035,124 +999,202 @@ impl LibarchiveArchive {
         archive_path: &str,
     ) -> Result<()> {
         use std::fs;
-        use std::io::Read;
 
-        // Read file from filesystem
         let mut file = fs::File::open(fs_path.as_ref())
             .map_err(|e| ArchiveError::io("open", fs_path.as_ref(), e))?;
 
-        // Get metadata
         let metadata = file
             .metadata()
             .map_err(|e| ArchiveError::io("metadata", fs_path.as_ref(), e))?;
 
+        let size = metadata.len();
+        let mtime = metadata.modified().ok();
+
+        #[cfg(unix)]
+        let perm = {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.permissions().mode()
+        };
+        #[cfg(not(unix))]
+        let perm = 0o644u32;
+
+        self.write_entry(
+            archive_path,
+            size,
+            perm,
+            mtime,
+            EntryDataSource::Stream {
+                reader: &mut file,
+                expected_size: size,
+            },
+        )
+    }
+
+    /// Shared backend for the four `add_file_*` methods.
+    ///
+    /// Sets up a regular-file entry with the given size/perm/mtime, writes the
+    /// header, streams the data from `source`, and finalizes the entry. The
+    /// entry pointer is freed via RAII so any `?`-propagated error is leak-safe.
+    fn write_entry(
+        &mut self,
+        archive_path: &str,
+        size: u64,
+        perm: u32,
+        mtime: Option<std::time::SystemTime>,
+        source: EntryDataSource<'_>,
+    ) -> Result<()> {
         let write_handle = self
             .write_handle
-            .ok_or_else(|| ArchiveError::write_mode_only("add_file_from_path"))?;
+            .ok_or_else(|| ArchiveError::write_mode_only("write_entry"))?;
 
+        // Lazily allocate the streaming scratch buffer the first time we need it.
+        if matches!(source, EntryDataSource::Stream { .. }) && self.stream_buffer.is_empty() {
+            self.stream_buffer.resize(64 * 1024, 0);
+        }
+
+        let written = unsafe {
+            Self::write_entry_inner(
+                write_handle,
+                &mut self.stream_buffer,
+                archive_path,
+                size,
+                perm,
+                mtime,
+                source,
+            )?
+        };
+
+        self.entries_written += 1;
+        self.notify_progress(written)
+    }
+
+    /// FFI-only inner half of `write_entry`. All libarchive calls live here so
+    /// the borrow of `self` stays narrow and the public wrapper can update
+    /// progress fields after we drop the entry.
+    unsafe fn write_entry_inner(
+        write_handle: *mut Archive,
+        stream_buffer: &mut [u8],
+        archive_path: &str,
+        size: u64,
+        perm: u32,
+        mtime: Option<std::time::SystemTime>,
+        source: EntryDataSource<'_>,
+    ) -> Result<u64> {
+        let guard = EntryGuard::new()?;
+        let entry = guard.entry;
+
+        let c_path = CString::new(archive_path)
+            .map_err(|_| ArchiveError::invalid_path(archive_path, "Contains null byte"))?;
         unsafe {
-            // Create entry
-            let entry = archive_entry_new();
-            if entry.is_null() {
-                return Err(ArchiveError::format(None, "Failed to create entry"));
-            }
-
-            // Set pathname
-            let c_path = match CString::new(archive_path) {
-                Ok(c) => c,
-                Err(_) => {
-                    archive_entry_free(entry);
-                    return Err(ArchiveError::invalid_path(
-                        archive_path,
-                        "Contains null byte",
-                    ));
-                }
-            };
             archive_entry_set_pathname(entry, c_path.as_ptr());
-
-            // Set file type and size
             archive_entry_set_filetype(entry, AE_IFREG);
-            archive_entry_set_size(entry, metadata.len() as c_longlong);
+            archive_entry_set_size(entry, size as c_longlong);
+            archive_entry_set_perm(entry, perm as i32);
 
-            // Set permissions from filesystem
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mode = metadata.permissions().mode();
-                archive_entry_set_perm(entry, mode as i32);
-            }
-            #[cfg(not(unix))]
-            {
-                archive_entry_set_perm(entry, 0o644);
-            }
+            let duration = mtime
+                .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+                .unwrap_or_else(|| {
+                    std::time::SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                });
+            archive_entry_set_mtime(
+                entry,
+                duration.as_secs() as i64,
+                duration.subsec_nanos() as c_longlong,
+            );
 
-            // Set modification time from filesystem
-            if let Ok(mtime) = metadata.modified() {
-                if let Ok(duration) = mtime.duration_since(UNIX_EPOCH) {
-                    archive_entry_set_mtime(
-                        entry,
-                        duration.as_secs() as i64,
-                        duration.subsec_nanos() as c_longlong,
-                    );
+            if archive_write_header(write_handle, entry) != ARCHIVE_OK {
+                return Err(ArchiveError::format(None, get_archive_error(write_handle)));
+            }
+        }
+
+        let written = match source {
+            EntryDataSource::Bytes(data) => {
+                if !data.is_empty() {
+                    let n = unsafe {
+                        archive_write_data(write_handle, data.as_ptr() as *const c_void, data.len())
+                    };
+                    if n < 0 {
+                        let msg = unsafe { get_archive_error(write_handle) };
+                        return Err(ArchiveError::io(
+                            "write_data",
+                            archive_path,
+                            std::io::Error::other(msg),
+                        ));
+                    }
+                    if n as usize != data.len() {
+                        return Err(ArchiveError::io(
+                            "write_data",
+                            archive_path,
+                            std::io::Error::other(format!(
+                                "Short write: requested {} bytes, wrote {} bytes",
+                                data.len(),
+                                n
+                            )),
+                        ));
+                    }
                 }
+                size
             }
-
-            // Write header
-            let header_result = archive_write_header(write_handle, entry);
-            if header_result != ARCHIVE_OK {
-                let error_msg = get_archive_error(write_handle);
-                archive_entry_free(entry);
-                return Err(ArchiveError::format(None, error_msg));
-            }
-
-            // Write data using streaming buffer
-            let mut buffer = [0u8; 8192];
-            loop {
-                let bytes_read = file
-                    .read(&mut buffer)
-                    .map_err(|e| ArchiveError::io("read", fs_path.as_ref(), e))?;
-
-                if bytes_read == 0 {
-                    break;
+            EntryDataSource::Stream {
+                reader,
+                expected_size,
+            } => {
+                let mut total: u64 = 0;
+                loop {
+                    let n = match reader.read(stream_buffer) {
+                        Ok(0) => break,
+                        Ok(n) => n,
+                        Err(e) => {
+                            return Err(ArchiveError::io("read_stream", archive_path, e));
+                        }
+                    };
+                    let written = unsafe {
+                        archive_write_data(write_handle, stream_buffer.as_ptr() as *const c_void, n)
+                    };
+                    if written < 0 {
+                        let msg = unsafe { get_archive_error(write_handle) };
+                        return Err(ArchiveError::io(
+                            "write_data",
+                            archive_path,
+                            std::io::Error::other(msg),
+                        ));
+                    }
+                    if written as usize != n {
+                        return Err(ArchiveError::io(
+                            "write_data",
+                            archive_path,
+                            std::io::Error::other(format!(
+                                "Short write: requested {} bytes, wrote {} bytes",
+                                n, written
+                            )),
+                        ));
+                    }
+                    total += n as u64;
                 }
-
-                let bytes_written =
-                    archive_write_data(write_handle, buffer.as_ptr() as *const c_void, bytes_read);
-                if bytes_written < 0 {
-                    let error_msg = get_archive_error(write_handle);
-                    archive_entry_free(entry);
-                    return Err(ArchiveError::io(
-                        "write_data",
-                        archive_path,
-                        std::io::Error::other(error_msg),
-                    ));
-                }
-
-                if bytes_written as usize != bytes_read {
-                    archive_entry_free(entry);
+                if total != expected_size {
                     return Err(ArchiveError::io(
                         "write_data",
                         archive_path,
                         std::io::Error::other(format!(
-                            "Short write: requested {} bytes, wrote {} bytes",
-                            bytes_read, bytes_written
+                            "Stream length mismatch: declared {} bytes, read {} bytes",
+                            expected_size, total
                         )),
                     ));
                 }
+                total
             }
+        };
 
-            // Finish entry
-            let finish_result = archive_write_finish_entry(write_handle);
-            if finish_result != ARCHIVE_OK {
-                let error_msg = get_archive_error(write_handle);
-                archive_entry_free(entry);
-                return Err(ArchiveError::format(None, error_msg));
-            }
-            archive_entry_free(entry);
+        if unsafe { archive_write_finish_entry(write_handle) } != ARCHIVE_OK {
+            return Err(ArchiveError::format(None, unsafe {
+                get_archive_error(write_handle)
+            }));
         }
 
-        self.entries_written += 1;
-        self.notify_progress(metadata.len())
+        drop(guard);
+        Ok(written)
     }
 
     /// Add directory recursively to archive
@@ -1266,6 +1308,22 @@ impl LibarchiveArchive {
         }
 
         Ok(failed_files)
+    }
+}
+
+/// Read an entry's pathname as an owned `String`, returning empty on NULL.
+///
+/// SAFETY: caller must hold a valid entry pointer whose lifetime spans the
+/// call. The returned `String` copies the bytes, so the underlying C buffer
+/// may be invalidated by the next libarchive call.
+unsafe fn entry_pathname_string(entry: *mut LibarchiveEntry) -> String {
+    let ptr = unsafe { archive_entry_pathname(entry) };
+    if ptr.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
@@ -1470,7 +1528,8 @@ impl LibarchiveStreamReader {
                     continue;
                 }
 
-                let name = CStr::from_ptr(pathname).to_string_lossy();
+                let name_raw = CStr::from_ptr(pathname).to_string_lossy();
+                let name = raw_format_name(&name_raw, archive_path);
                 if name.as_ref() == target_entry {
                     let raw_size = archive_entry_size(entry);
                     let entry_size = if raw_size > 0 {
