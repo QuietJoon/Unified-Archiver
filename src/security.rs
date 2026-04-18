@@ -155,6 +155,47 @@ pub fn validate_entry_path(entry_path: &str, dest: &Path) -> Result<PathBuf> {
     Ok(dest.join(normalized))
 }
 
+/// Validate an archive-internal name at the creation/modification boundary.
+///
+/// Reject names the extraction side would refuse to honour verbatim — traversal
+/// segments (`..`), absolute prefixes (`/`, `C:\\`), NUL bytes, and empty
+/// strings. Callers on the write path are expected to pass names that round-trip
+/// cleanly through `sanitize_entry_path`; this helper fails fast instead of
+/// silently writing an entry whose name the extractor would later rewrite.
+pub(crate) fn validate_archive_internal_path(archive_path: &str) -> Result<()> {
+    if archive_path.is_empty() {
+        return Err(ArchiveError::invalid_path(
+            "",
+            "archive-internal path must not be empty",
+        ));
+    }
+    if archive_path.contains('\0') {
+        return Err(ArchiveError::invalid_path(
+            archive_path,
+            "archive-internal path must not contain NUL",
+        ));
+    }
+    for component in Path::new(archive_path).components() {
+        match component {
+            Component::Normal(_) => {}
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(ArchiveError::invalid_path(
+                    archive_path,
+                    "archive-internal path must not contain '..' segments",
+                ));
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(ArchiveError::invalid_path(
+                    archive_path,
+                    "archive-internal path must be relative",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Sanitize an archive entry path to prevent path traversal attacks
 ///
 /// This function removes:
@@ -599,6 +640,36 @@ mod tests {
 
         let result = check_extraction_safe(&entries, &limits);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_archive_internal_path_accepts_normal_names() {
+        validate_archive_internal_path("file.txt").unwrap();
+        validate_archive_internal_path("dir/file.txt").unwrap();
+        validate_archive_internal_path("a/b/c/d.ext").unwrap();
+        validate_archive_internal_path("./file.txt").unwrap();
+    }
+
+    #[test]
+    fn test_validate_archive_internal_path_rejects_empty() {
+        assert!(validate_archive_internal_path("").is_err());
+    }
+
+    #[test]
+    fn test_validate_archive_internal_path_rejects_nul() {
+        assert!(validate_archive_internal_path("a\0b").is_err());
+    }
+
+    #[test]
+    fn test_validate_archive_internal_path_rejects_traversal() {
+        assert!(validate_archive_internal_path("../secret").is_err());
+        assert!(validate_archive_internal_path("a/../secret").is_err());
+        assert!(validate_archive_internal_path("a/b/..").is_err());
+    }
+
+    #[test]
+    fn test_validate_archive_internal_path_rejects_absolute() {
+        assert!(validate_archive_internal_path("/etc/passwd").is_err());
     }
 
     #[test]
