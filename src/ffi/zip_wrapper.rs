@@ -201,7 +201,7 @@ impl ZipArchive {
     /// Extract a single file to memory
     pub fn extract_to_memory(&self, file_path: &str) -> Result<Vec<u8>> {
         let mut zip = open_zip(&self.path)?;
-        let password = crate::options::password_as_str(&self.password);
+        let password = crate::options::password_as_str(&self.password)?;
 
         let mut zip_file = open_entry_by_name(&mut zip, file_path, password)?;
 
@@ -267,7 +267,7 @@ impl ZipArchive {
         let mut bytes_processed = 0u64;
         let mut progress = progress;
         let num_entries = zip.len();
-        let password = crate::options::password_as_str(&self.password);
+        let password = crate::options::password_as_str(&self.password)?;
 
         for i in 0..num_entries {
             if let Some(callback) = progress.as_mut() {
@@ -342,7 +342,7 @@ impl ZipArchive {
             .map_err(|e| ArchiveError::io("create_dir", dest_path.to_path_buf(), e))?;
 
         let mut zip = open_zip(&self.path)?;
-        let password = crate::options::password_as_str(&self.password);
+        let password = crate::options::password_as_str(&self.password)?;
 
         let mut zip_file = open_entry_by_name(&mut zip, file_path, password)?;
 
@@ -380,7 +380,7 @@ impl ZipArchive {
     pub fn test_integrity(&self) -> Result<Vec<String>> {
         let mut zip = open_zip(&self.path)?;
         let mut failed = Vec::new();
-        let password = crate::options::password_as_str(&self.password);
+        let password = crate::options::password_as_str(&self.password)?;
 
         for i in 0..zip.len() {
             let mut zip_file = open_entry_by_index(&mut zip, i, password)?;

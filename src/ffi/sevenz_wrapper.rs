@@ -47,7 +47,7 @@ impl SevenZArchive {
 
     /// Open a 7z ArchiveReader with the stored path and password
     fn open_reader(&self) -> Result<ArchiveReader<std::fs::File>> {
-        let password = crate::options::password_as_str(&self.password)
+        let password = crate::options::password_as_str(&self.password)?
             .map_or_else(Password::empty, Password::from);
         ArchiveReader::open(&self.path, password).map_err(|e| {
             ArchiveError::format(Some(ArchiveFormat::SevenZip), format!("Invalid 7z: {}", e))

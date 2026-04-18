@@ -123,14 +123,9 @@ impl Archive {
     ///
     /// # Multi-Part Archives
     ///
-    /// For multi-part archives (`.z01`, `.001`, `.part1.rar`, etc.), extraction works
-    /// seamlessly:
-    /// - If you open the **first/main part** (e.g., `archive.zip`, `archive.001`, `archive.part1.rar`),
-    ///   extraction reads data from all parts automatically
-    /// - If you open a **middle/later part** (e.g., `archive.z02`, `archive.003`),
-    ///   extraction may fail or be incomplete - always open the first part
-    ///
-    /// Use [`Archive::detect_multipart()`] to find all parts if needed.
+    /// End-to-end split-volume extraction is currently supported for RAR/RAR5
+    /// archives only. ZIP split volumes (`.z01`, `.z02`, ...) and 7z numeric
+    /// split volumes (`.001`, `.002`, ...) are not supported in `v0.1.0`.
     ///
     /// # Examples
     ///
@@ -152,8 +147,8 @@ impl Archive {
     /// };
     /// archive.extract_all(options)?;
     ///
-    /// // Multi-part archive (open first part)
-    /// let archive = Archive::open("large.zip")?; // Opens .zip (first part)
+    /// // Multi-part archive (RAR/RAR5 only; open the first part)
+    /// let archive = Archive::open("backup.part1.rar")?;
     /// let (is_multipart, parts) = archive.detect_multipart()?;
     /// if is_multipart {
     ///     println!("Extracting {} parts...", parts.len());
@@ -168,7 +163,7 @@ impl Archive {
     pub fn extract_all(&self, mut options: ExtractionOptions) -> Result<ResultWithWarnings<()>> {
         ensure_destination(&options.destination)?;
 
-        let extraction_archive = if let Some(password) = password_as_str(&options.password) {
+        let extraction_archive = if let Some(password) = password_as_str(&options.password)? {
             Some(open_archive_for_extraction(&self.path, Some(password))?)
         } else {
             None
@@ -186,9 +181,9 @@ impl Archive {
             ops::EXTRACT_ALL,
         )?;
 
-        // Multi-part note: libarchive and UnRAR backends automatically handle
-        // multi-part archives when opening the first part. The backend reads
-        // subsequent parts (.z01, .z02, etc.) transparently.
+        // Multi-part note: the UnRAR backend handles RAR/RAR5 multi-part
+        // archives when the caller opens the first volume. Other backends
+        // currently expect single-file inputs in v0.1.0.
         let warnings: Vec<ArchiveWarning> = match &archive.backend {
             #[cfg(feature = "rar-support")]
             ArchiveBackend::Unrar(unrar) => unrar.extract_all_with_options(
@@ -232,7 +227,7 @@ impl Archive {
     pub fn extract_file(&self, file_path: &str, options: ExtractionOptions) -> Result<()> {
         ensure_destination(&options.destination)?;
 
-        let extraction_archive = if let Some(password) = password_as_str(&options.password) {
+        let extraction_archive = if let Some(password) = password_as_str(&options.password)? {
             Some(open_archive_for_extraction(&self.path, Some(password))?)
         } else {
             None
@@ -464,7 +459,7 @@ impl Archive {
         ensure_destination(&options.destination)?;
 
         // Get list of files to extract
-        let listing_archive = if let Some(password) = password_as_str(&options.password) {
+        let listing_archive = if let Some(password) = password_as_str(&options.password)? {
             Some(open_archive_for_extraction(&self.path, Some(password))?)
         } else {
             None
@@ -493,7 +488,7 @@ impl Archive {
 
         let archive_path = self.path.clone();
         let extraction_dest = options.destination.clone();
-        let pw_owned = password_as_str(&options.password).map(str::to_owned);
+        let pw_owned = password_as_str(&options.password)?.map(str::to_owned);
         let overwrite = options.overwrite;
         let verify_crc32 = options.verify_crc32;
         let preserve_permissions = options.preserve_permissions;
@@ -574,7 +569,7 @@ impl Archive {
         let mut seen = HashSet::new();
         let paths: Vec<&str> = paths.iter().copied().filter(|p| seen.insert(*p)).collect();
 
-        let listing_archive = if let Some(password) = password_as_str(&options.password) {
+        let listing_archive = if let Some(password) = password_as_str(&options.password)? {
             Some(open_archive_for_extraction(&self.path, Some(password))?)
         } else {
             None
@@ -608,7 +603,7 @@ impl Archive {
 
         let archive_path = self.path.clone();
         let extraction_dest = options.destination.clone();
-        let pw_owned = password_as_str(&options.password).map(str::to_owned);
+        let pw_owned = password_as_str(&options.password)?.map(str::to_owned);
         let overwrite = options.overwrite;
         let verify_crc32 = options.verify_crc32;
         let preserve_permissions = options.preserve_permissions;
@@ -699,7 +694,7 @@ impl Archive {
         let mut seen = HashSet::new();
         let ids: Vec<usize> = ids.iter().copied().filter(|id| seen.insert(*id)).collect();
 
-        let listing_archive = if let Some(password) = password_as_str(&options.password) {
+        let listing_archive = if let Some(password) = password_as_str(&options.password)? {
             Some(open_archive_for_extraction(&self.path, Some(password))?)
         } else {
             None
@@ -740,7 +735,7 @@ impl Archive {
 
         let archive_path = self.path.clone();
         let extraction_dest = options.destination.clone();
-        let pw_owned = password_as_str(&options.password).map(str::to_owned);
+        let pw_owned = password_as_str(&options.password)?.map(str::to_owned);
         let overwrite = options.overwrite;
         let verify_crc32 = options.verify_crc32;
         let preserve_permissions = options.preserve_permissions;

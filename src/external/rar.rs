@@ -223,7 +223,7 @@ impl RarCreator {
         cmd.arg(compression_arg);
 
         // Password encryption
-        if let Some(pwd_str) = crate::options::password_as_str(&self.password) {
+        if let Some(pwd_str) = crate::options::password_as_str(&self.password)? {
             cmd.arg(format!("-hp{}", pwd_str));
         }
 

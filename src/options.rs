@@ -2,21 +2,28 @@
 
 use crate::ArchiveFormat;
 use crate::entry::ArchiveEntry;
+use crate::error::ArchiveError;
 use crate::security::ExtractionLimits;
 use secstr::SecStr;
 use std::path::PathBuf;
 
 /// Extract password as `&str` from `Option<SecStr>`, if present.
 ///
-/// Returns `None` if the slot is empty **or** if the stored bytes are not valid
-/// UTF-8. Passwords crossing this library's public API are UTF-8 by contract
-/// (only `&str`/`String` constructors are intended); `SecStr::from_slice` with
-/// non-UTF-8 bytes is a caller bug and is coerced to "no password" rather than
-/// panicking the process.
-pub(crate) fn password_as_str(password: &Option<SecStr>) -> Option<&str> {
-    password
-        .as_ref()
-        .and_then(|s| std::str::from_utf8(s.unsecure()).ok())
+/// Returns `Ok(None)` when the slot is empty, `Ok(Some(..))` when the stored
+/// bytes are valid UTF-8, and `Err(InvalidInput)` when the bytes are not UTF-8.
+/// Passwords crossing this library's public API are UTF-8 by contract (only
+/// `&str`/`String` constructors are intended); non-UTF-8 bytes reaching this
+/// function mean a caller built a `SecStr` from raw bytes and should be told
+/// explicitly rather than silently treated as "no password".
+pub(crate) fn password_as_str(
+    password: &Option<SecStr>,
+) -> std::result::Result<Option<&str>, ArchiveError> {
+    match password.as_ref() {
+        None => Ok(None),
+        Some(s) => std::str::from_utf8(s.unsecure())
+            .map(Some)
+            .map_err(|_| ArchiveError::password("password bytes are not valid UTF-8")),
+    }
 }
 
 /// Entry filter type alias for filtering archive entries
@@ -261,7 +268,7 @@ mod tests {
             progress: None,
         };
         assert_eq!(opts.destination, PathBuf::from("/tmp/extract"));
-        assert_eq!(password_as_str(&opts.password), Some("secret"));
+        assert_eq!(password_as_str(&opts.password).unwrap(), Some("secret"));
         assert!(opts.overwrite);
         assert!(!opts.preserve_permissions);
         assert!(!opts.preserve_times);
@@ -297,20 +304,22 @@ mod tests {
     fn test_compression_options_with_password() {
         let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
         opts.password = Some("pw123".into());
-        assert_eq!(password_as_str(&opts.password), Some("pw123"));
+        assert_eq!(password_as_str(&opts.password).unwrap(), Some("pw123"));
     }
 
     #[test]
-    fn test_password_as_str_non_utf8_returns_none() {
-        // R0059-0014: a SecStr constructed from invalid UTF-8 bytes must not
-        // panic the process; password_as_str returns None for such inputs.
+    fn test_password_as_str_non_utf8_errors() {
+        // R0062-0005: a SecStr constructed from invalid UTF-8 bytes must
+        // surface an error rather than silently decode to "no password".
+        // Supersedes the prior R0059-0014 decision to return None.
         let bad = Some(SecStr::new(vec![0xff, 0xfe, 0xfd]));
-        assert_eq!(password_as_str(&bad), None);
+        let err = password_as_str(&bad).unwrap_err();
+        assert!(matches!(err, ArchiveError::Password { .. }));
     }
 
     #[test]
     fn test_password_as_str_empty_is_none() {
-        assert_eq!(password_as_str(&None), None);
+        assert_eq!(password_as_str(&None).unwrap(), None);
     }
 
     #[test]

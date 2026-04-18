@@ -117,7 +117,7 @@ impl UnrarArchive {
     /// UnRAR handles get exhausted after list_files(), so extraction operations
     /// need a fresh handle. This creates a new handle with the same path/password.
     fn fresh_handle(&self) -> Result<Self> {
-        if let Some(pwd_str) = crate::options::password_as_str(&self.password) {
+        if let Some(pwd_str) = crate::options::password_as_str(&self.password)? {
             Self::open_with_password(&self.path, pwd_str)
         } else {
             Self::open(&self.path)
@@ -644,7 +644,7 @@ impl UnrarArchive {
         let _guard = TempDirGuard::new(temp_dir.clone());
 
         // Open a fresh archive handle to avoid state issues
-        let fresh = if let Some(pwd_str) = crate::options::password_as_str(&self.password) {
+        let fresh = if let Some(pwd_str) = crate::options::password_as_str(&self.password)? {
             Self::open_with_password(&self.path, pwd_str)?
         } else {
             Self::open(&self.path)?
