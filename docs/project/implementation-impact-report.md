@@ -38,9 +38,9 @@ These gaps are explicitly out of MVP scope. They are architecturally present but
 
 | DEF ID | Gap | Open Issue | Scenario | Status |
 |---|---|---|---|---|
-| DEF-001 | `Archive::open_at_offset` returns `Unsupported` | — | SCN-SFX-* open flow | Open |
+| DEF-001 | `Archive::open_at_offset` returns `NotImplemented` | — | SCN-SFX-* open flow | Open |
 | DEF-002 | `CompressionOptions::split_size` not honored | — | SCN-CRE-* split creation | Open |
-| DEF-003 | Passwords stored in `Option<String>`; no SecStr | — | All password scenarios | Open |
+| DEF-003 | Passwords stored in `Option<String>`; no SecStr | OI-0057-003 | All password scenarios | **Closed 2026-04-17** (password fields migrated to `Option<SecStr>`) |
 | DEF-004 | Non-libarchive backends buffer then wrap in `Cursor` | — | SCN-EXT-* streaming | Open |
 | DEF-005 | ZIP `commit_changes()` edge cases | — | SCN-MOD-* | Open (some ZIP-specific scenarios remain; OI-025-001/OI-025-002 resolved 2026-04-14) |
 | DEF-006 | `CompressionOptions::progress` not consumed | OI-025-003 | SCN-CRE-04 | **Closed 2026-04-13** (DCR-001 Phase B.1, AD 0021) |
@@ -49,7 +49,7 @@ These gaps are explicitly out of MVP scope. They are architecturally present but
 
 Additional acknowledged implementation concerns:
 
-- ~~**Concurrent RAR test flakiness** (OI-026-004): UnRAR global state can cause concurrent test failures.~~ **Resolved 2026-04-13** (DCR-001 Phase A.2, AD 0019): `UNRAR_LOCK` process-wide mutex serializes all UnRAR FFI calls.
+- ~~**Concurrent RAR test flakiness**: UnRAR global state can cause concurrent test failures.~~ **Resolved 2026-04-13** (DCR-001 Phase A.2, AD 0019): `UNRAR_LOCK` process-wide mutex serializes all UnRAR FFI calls.
 - **Standalone compression formats** (per AD 0018): `ArchiveFormat::Gzip`, `Bzip2`, `Xz` enum variants exist. Standalone compressed files (.gz/.bz2/.xz) are now supported via libarchive `format_raw` (OI-026-003 resolved); TAR compound formats continue to work natively.
 
 ## Known documentation gaps
@@ -80,7 +80,7 @@ These items are tracked independently of the implementation gaps and represent d
 | Close out scenario/contract drift for `calculate_archive_crc()` / `calculate_manifest_digest()` / `calculate_manifest_summary()` by adding them to `inspection.md` | Documentation maintainer | **Closed 2026-04-13** |
 | Complete handoff checklist item "phase-state synchronized to this baseline" once contract drift is reconciled | Documentation maintainer | **Closed 2026-04-13** |
 | Resolve OI-027-001 (unknown-stub SFX scanning) | Implementation slice owner | **Closed 2026-04-13** (DCR-001 Phase A.1) |
-| Resolve OI-026-004 (RAR concurrent-call stabilization) | Implementation slice owner | **Closed 2026-04-13** (DCR-001 Phase A.2, AD 0019) |
+| Resolve RAR concurrent-call stabilization | Implementation slice owner | **Closed 2026-04-13** (DCR-001 Phase A.2, AD 0019) |
 | Resolve OI-025-003 (`CompressionOptions.progress` + `ModificationOptions` dead API) | Implementation slice owner | **Closed 2026-04-13** (DCR-001 Phases B.1 + B.2, ADs 0020 + 0021) |
 | Resolve OI-025-001 / OI-025-002 (modification metadata/settings preservation) | Implementation slice owner | **Closed 2026-04-14** (DCR-001 Phase C): `commit_changes()` preserves timestamps, permissions, and honors compression overrides |
 | Decide whether to promote any DEF entry into a subsequent MVP scope (requires new design change record if so) | Project lead | Open |

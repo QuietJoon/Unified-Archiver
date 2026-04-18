@@ -53,7 +53,7 @@ OI-025-001 (compression-setting preservation) and OI-025-002 (per-entry metadata
 | `docs/project/design-baseline.md` | Phase-state checkbox ticked |
 | `docs/project/phase-state.yaml` | `implementation.notes` reflects closed gaps |
 | `docs/project/status.md` | Refreshed to current state |
-| `reviews/Open_Issues.md` | OI-026-004 and OI-027-001 → RESOLVED; OI-025-003 → RESOLVED (2026-04-13) for wiring portion (`preserve_metadata` no-op pending Phase C.2 / OI-025-002) |
+| `reviews/Open_Issues.md` | OI-026-004 and OI-027-001 → RESOLVED; OI-025-003 → RESOLVED (2026-04-13) for wiring portion; OI-025-001/OI-025-002 → RESOLVED (2026-04-14) — `preserve_metadata` preserves timestamps and Unix permissions and `compression` overrides recreation settings. |
 
 ## Impacted slices
 

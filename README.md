@@ -113,7 +113,7 @@ if result.is_sfx {
     println!("Stub type: {:?}", result.stub_type);
     println!("{}", result.summary());
 
-    // Note: open_at_offset() is not yet implemented (returns Unsupported).
+    // Note: open_at_offset() is not yet implemented (returns NotImplemented).
     // Use detect_sfx() to identify the archive format and offset,
     // then extract the embedded archive data manually.
 }
@@ -188,7 +188,7 @@ See [quickstart guide](./specs/001-unified-archive/quickstart.md) for more examp
 
 †7z encryption: read-only via `open_encrypted()`
 
-‡GZIP, BZIP2, and XZ are currently supported only as TAR compound formats (`.tar.gz`, `.tar.bz2`, `.tar.xz`). Standalone `.gz`/`.bz2`/`.xz` files are not yet supported.
+‡GZIP, BZIP2, and XZ: TAR compound variants (`.tar.gz`, `.tar.bz2`, `.tar.xz`) are fully supported. Standalone `.gz`/`.bz2`/`.xz` files are supported for read/extract via libarchive's `format_raw` binding (AD 0019); creation of standalone compressed files remains out of scope per AD 0018 — use the TAR compound variants for compressed-archive creation.
 
 **Metadata Features:**
 - **Solid**: Solid compression detection (all files compressed as single stream)

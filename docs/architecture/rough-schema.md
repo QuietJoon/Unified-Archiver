@@ -76,7 +76,7 @@ These enum variants exist for format detection and capability queries but `Archi
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | destination | `PathBuf` | `"."` | Must be a directory |
-| password | `Option<String>` | None | Required for encrypted archives |
+| password | `Option<SecStr>` | None | Required for encrypted archives; stored zeroed via `secstr::SecStr` |
 | overwrite | `bool` | false | Fail if destination files exist (FR-023) |
 | preserve_permissions | `bool` | true | Unix mode bits |
 | preserve_times | `bool` | true | Modification timestamps |
@@ -93,7 +93,7 @@ These enum variants exist for format detection and capability queries but `Archi
 |---|---|---|---|
 | format | `ArchiveFormat` | Zip | Target archive format |
 | level | `CompressionLevel` | Normal | Store, Fastest, Fast, Normal, Maximum, Ultra |
-| password | `Option<String>` | None | Encryption (ZIP only currently) |
+| password | `Option<SecStr>` | None | Encryption (ZIP only currently); stored zeroed via `secstr::SecStr` |
 | split_size | `Option<u64>` | None | DEFERRED: not honored by writers |
 | progress | `Option<Box<dyn ProgressCallback>>` | None | Progress reporting callback |
 
@@ -109,7 +109,10 @@ These enum variants exist for format detection and capability queries but `Archi
 | Password | message | Recoverable |
 | Unsupported | operation, format, details: Option\<String\> | Fatal |
 | CodecUnavailable | codec, format, install_instructions | Fatal |
-| UnsupportedOperation | operation, reason | Fatal |
+| WriteModeOnly | operation | Fatal |
+| ReadOnlyBackend | operation | Fatal |
+| NotImplemented | operation, reason | Fatal |
+| OperationBlocked | operation, reason | Fatal |
 | InvalidPath | path, reason | Fatal (security) |
 
 - **Owned by:** `error.rs`

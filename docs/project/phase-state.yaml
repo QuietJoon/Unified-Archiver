@@ -30,7 +30,7 @@ implementation:
   allowed_parallel_slices: []
   active_impact_report: IIR-001
   status: complete_with_gaps
-  notes: "DCR-001 closed Phases A+B (2026-04-13): SCN-SFX-08 (OI-027-001), RAR concurrency (OI-026-004), SCN-CRE-04 (OI-025-003 creation progress), and ModificationOptions wiring (OI-025-003) all resolved. OI-025-001 and OI-025-002 resolved 2026-04-14. DEF-008 partially closed; DEF-005 still open."
+  notes: "DCR-001 closed Phases A+B (2026-04-13): SCN-SFX-08 (OI-027-001), RAR concurrency, SCN-CRE-04 (OI-025-003 creation progress), and ModificationOptions wiring (OI-025-003) all resolved. OI-025-001 and OI-025-002 resolved 2026-04-14. DEF-008 partially closed; DEF-005 still open."
 
 artifacts:
   intake: docs/project/intake.md

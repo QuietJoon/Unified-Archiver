@@ -21,7 +21,7 @@ Configuration categories, ownership, and usage.
 | Config Object | Owned By | Used By | Why Needed | Notes |
 |---|---|---|---|---|
 | `ExtractionOptions` | `options.rs` | `extraction.rs`, backends | Configure extraction behavior (destination, password, overwrite, progress, CRC, limits) | Policy object pattern — keeps method signatures stable |
-| `CompressionOptions` | `options.rs` | `creation.rs`, backends | Configure creation behavior (format, level, password, progress) | `split_size` field exists but not honored; creation encryption is ZIP-only; progress callback invoked per-entry with `total=None` (OI-025-003 resolved, AD 0021) |
+| `CompressionOptions` | `options.rs` | `creation.rs`, backends | Configure creation behavior (format, level, password, progress) | `password` field is `Option<SecStr>` (zeroized on drop); setting it to `Some(...)` for any format causes `Archive::create` to return `OperationBlocked` per AD 0027. `split_size` exists but not honored (DEF-002). Progress callback invoked per-entry with `total=None` (OI-025-003 resolved, AD 0021). |
 | `ExtractionLimits` | `security.rs` | `extraction.rs` | Zip bomb protection (max file size, max total size, max entry count) | Checked during extraction preflight |
 | `ModificationOptions` | `modification.rs` | `modification.rs` | Configure modification behavior (backup creation, metadata preservation) | Partially applied — some options not yet honored |
 | `RateLimiter` | `options.rs` | `extraction.rs` | Throttle progress callbacks to ~60 Hz | Prevents UI flooding; time-based gate |

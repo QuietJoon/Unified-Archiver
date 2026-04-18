@@ -36,7 +36,7 @@ Internally, `modify_with_options` delegates to `modify(path)` and stores the opt
 
 - `create_backup = true`: copy the original archive to `<path>.<normalized_suffix>` *after* the temp file is fully written but *before* the atomic rename. If the commit aborts before the rename, the backup is not left behind for a no-op commit.
 - `backup_suffix`: normalized via `backup_path_for()` — empty → `.bak`, `".bak"` → `.bak`, `"bak"` → `.bak`. Three cases collapse to one filesystem rule.
-- `preserve_metadata`: accepted but currently a no-op (metadata pipeline lands with Phase C.2 / OI-025-002). Documented in the contract as "scheduled for Phase C.2."
+- `preserve_metadata`: when `true`, `commit_changes()` preserves timestamps and Unix permissions on retained entries via metadata-aware add helpers (OI-025-002 resolved 2026-04-14).
 
 Status: Implemented (Phase B.2 of the in-flight remediation plan).
 
@@ -51,5 +51,5 @@ Status: Implemented (Phase B.2 of the in-flight remediation plan).
 * Good, because new functionality is opt-in and discoverable through the type system (the `ModificationOptions` argument).
 * Good, because `commit_changes()` keeps its zero-argument signature; option state is carried by the `Archive` handle, matching the lifetime where the options actually need to live.
 * Good, because the backup write happens *after* the temp file is built — no stale `.bak` if the commit fails before rename.
-* Bad, because `preserve_metadata = true` is currently a silent acceptance (no warning emitted yet). Will be honored when Phase C.2 lands; acceptable to ship this way because no caller depended on metadata preservation before this commit.
+* Neutral, because `preserve_metadata = true` preserves timestamps and Unix permissions via metadata-aware add helpers (OI-025-002 resolved 2026-04-14). Comments and extended attributes are not yet preserved.
 * Neutral, because `modify_with_options` delegates to `modify()`, so any future format-gating changes to `modify()` (e.g., enabling RAR/TAR modify) flow through automatically.

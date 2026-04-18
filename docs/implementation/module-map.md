@@ -9,7 +9,7 @@ Ownership and placement of key structural pieces.
 | library | `src/lib.rs` | Public crate surface and re-exports | Re-exports only |
 | library | `src/archive.rs` | Core Archive type, format detection, backend routing, mode lifecycle | `Archive`, `ArchiveBackend`, `ArchiveMode`, `entry_cache: OnceCell<Vec<ArchiveEntry>>`, `finish()` |
 | library | `src/entry.rs` | Entry metadata types | `ArchiveEntry`, `EntryType`, `FileAttributes` |
-| library | `src/error.rs` | Unified error types | `ArchiveError` (8 variants: Io, Format, Corruption, Password, Unsupported, CodecUnavailable, UnsupportedOperation, InvalidPath) |
+| library | `src/error.rs` | Unified error types | `ArchiveError` (11 variants: Io, Format, Corruption, Password, Unsupported, CodecUnavailable, WriteModeOnly, ReadOnlyBackend, NotImplemented, OperationBlocked, InvalidPath) |
 | library | `src/format.rs` | Format enumeration and detection | `ArchiveFormat` (12 variants), magic byte tables, capability matrix |
 | library | `src/options.rs` | Operational policy objects | `ExtractionOptions`, `CompressionOptions`, `CompressionLevel`, `ProgressCallback` trait, `RateLimiter` |
 | library | `src/security.rs` | Path sanitization, resource limits | `ExtractionLimits`, `sanitize_entry_path()`, zip bomb guards |

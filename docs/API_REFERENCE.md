@@ -64,10 +64,12 @@ use unified_archive::Archive;
 let archive = Archive::open("data.zip")?;
 ```
 
-**Supported formats:** RAR, RAR5, ZIP, 7z, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, ISO
+**Supported formats:** RAR, RAR5, ZIP, 7z, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, GZIP, BZIP2, XZ, ISO
 
-> **Note:** `Gzip`, `Bzip2`, and `Xz` variants exist in `ArchiveFormat` but currently only work
-> as part of TAR compound formats. Standalone `.gz`/`.bz2`/`.xz` files are not yet supported.
+> **Note:** Standalone `.gz`/`.bz2`/`.xz` files are supported for read/extract via libarchive's
+> `format_raw` binding (AD 0019); the single entry is renamed to the archive's file stem.
+> Creation of standalone compressed files remains out of scope per AD 0018 — use the TAR
+> compound variants (`.tar.gz`, `.tar.bz2`, `.tar.xz`) to produce compressed archives.
 
 **Errors:**
 - `ArchiveError::Io` - File does not exist
@@ -523,7 +525,7 @@ Finalize and close the archive. Must be called for Write mode archives to flush 
 pub struct CompressionOptions {
     pub format: ArchiveFormat,
     pub level: CompressionLevel,
-    pub password: Option<String>,
+    pub password: Option<SecStr>,
     pub split_size: Option<u64>,
     pub progress: Option<Box<dyn ProgressCallback>>,
 }
@@ -650,13 +652,13 @@ Detect if a file is a self-extracting archive. Uses 3-stage detection: executabl
 
 Convenience method: detect SFX and open the embedded archive in one call. Equivalent to `detect_sfx()` + `open_at_offset()`.
 
-> **Status:** Because `open_at_offset()` is not yet implemented, positive detections will fail with `ArchiveError::Unsupported`. Use `detect_sfx()` for detection-only workflows.
+> **Status:** Because `open_at_offset()` is not yet implemented, positive detections will fail with `ArchiveError::NotImplemented`. Use `detect_sfx()` for detection-only workflows.
 
 ---
 
 #### `Archive::open_at_offset(path: impl AsRef<Path>, offset: u64) -> Result<Archive>`
 
-Open an archive that starts at a specific byte offset within a file. Primarily for SFX archives. **Status:** not yet implemented; returns `ArchiveError::Unsupported`.
+Open an archive that starts at a specific byte offset within a file. Primarily for SFX archives. **Status:** not yet implemented (DEF-001); returns `ArchiveError::NotImplemented`.
 
 ---
 
@@ -848,8 +850,8 @@ pub struct ExtractionOptions {
     /// Destination directory for extracted files
     pub destination: PathBuf,
 
-    /// Password for encrypted archives
-    pub password: Option<String>,
+    /// Password for encrypted archives (stored zeroed via `secstr::SecStr`)
+    pub password: Option<SecStr>,
 
     /// Overwrite existing files (default: false, fails with error if files exist)
     pub overwrite: bool,
@@ -1019,8 +1021,17 @@ pub enum ArchiveError {
     /// Codec not available (requires installation)
     CodecUnavailable { codec: String, format: ArchiveFormat, install_instructions: String },
 
-    /// Operation invalid in the current mode or context (format-agnostic)
-    UnsupportedOperation { operation: String, reason: String },
+    /// Operation not available in the current archive mode (e.g. extracting from Write-mode)
+    WriteModeOnly { operation: String },
+
+    /// Backend does not support this operation (e.g. creation on read-only backend)
+    ReadOnlyBackend { operation: String },
+
+    /// Feature not yet implemented (deferred to a future phase)
+    NotImplemented { operation: String, reason: String },
+
+    /// Operation blocked by resource limits, conflicts, or format constraints
+    OperationBlocked { operation: String, reason: String },
 
     /// Invalid path
     InvalidPath { path: String, reason: String },
@@ -1079,11 +1090,11 @@ Create a `CodecUnavailable` error. Automatically embeds platform-specific instal
 
 #### `ArchiveError::write_mode_only(operation: impl Into<String>) -> Self`
 
-Create an `UnsupportedOperation` error for attempts to read from a write-only archive.
+Create a `WriteModeOnly` error for attempts to read from a write-only archive.
 
 #### `ArchiveError::read_only_backend(operation: impl Into<String>) -> Self`
 
-Create an `UnsupportedOperation` error for read-only backends that do not support creation.
+Create a `ReadOnlyBackend` error for read-only backends that do not support creation.
 
 ---
 

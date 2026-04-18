@@ -86,7 +86,7 @@
 - [x] `replace_entry()` queue file replacement
 - [x] `commit_changes()` copy-on-write rewrite with atomic rename
 - [x] Format validation (RAR correctly rejected as read-only)
-- [~] **Partial (AD 0020):** ModificationOptions — `create_backup`/`backup_suffix` honored via `modify_with_options()`; `preserve_metadata` accepted but no-op pending OI-025-002
+- [x] **Resolved (AD 0020, OI-025-001/002 2026-04-14):** ModificationOptions — `create_backup`/`backup_suffix` honored via `modify_with_options()`; `preserve_metadata` preserves timestamps and Unix permissions via metadata-aware add helpers; `compression` overrides recreation settings.
 - [x] Tests: integration/modification.rs (12 tests)
 - [ ] **Partial:** libarchive write API integration for commit (returns error for some paths)
 - [ ] **Partial:** ZIP modification reliability (some scenarios ignore-gated — DEF-005)
@@ -122,7 +122,7 @@
 **Design inputs:** Constitution (robustness, testing, contracts)
 
 - [ ] **Partial:** Unified error handling (ArchiveError) across all backends — error mapping is not fully normalized; backend-specific errors may surface inconsistently pending error-contract reconciliation
-- [x] Thread safety (Archive is Send; concurrent operations on different files) — RAR FFI calls serialized via `UNRAR_LOCK` mutex (OI-026-004 resolved)
+- [x] Thread safety (Archive is Send; concurrent operations on different files) — RAR FFI calls serialized via `UNRAR_LOCK` mutex
 - [x] RAII cleanup for all resources (handles, temp dirs, writers)
 - [x] Security: path sanitization, extraction limits
 - [ ] **Partial:** Documentation: `docs/API_REFERENCE.md`, `docs/GETTING_STARTED.md`, `examples/`, rustdoc — documentation exists but requires reconciliation with implementation (see status.md)

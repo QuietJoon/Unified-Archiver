@@ -42,7 +42,7 @@ Dependency-ordered implementation slices with risk notes. Retrospective — all 
 - RAR creation via external WinRAR CLI deferred — Windows-only, requires licensed WinRAR, behind `external-rar-create` feature flag
 - `split_size` option exists but is not honored by any writer — IG-005-08
 - Creation progress callback is invoked per-entry by both ZIP and libarchive backends with `total=None` (OI-025-003 resolved, AD 0021)
-- Creation encryption is ZIP-only; other formats silently ignore the password field
+- Creation encryption is blocked for every format per AD 0027: `Archive::create` with `password: Some(_)` returns `ArchiveError::OperationBlocked`. Encrypted *reads* remain supported via `Archive::open_encrypted()`.
 
 ### Slice 5: Modification (Phase 6)
 **Dependencies:** Slice 3 + Slice 4
@@ -54,12 +54,12 @@ Dependency-ordered implementation slices with risk notes. Retrospective — all 
 - ZIP modification using libarchive on the read side is unreliable — some test scenarios ignore-gated
 - Platform-specific atomic rename: Unix `rename` vs Windows retry logic
 - `commit_changes()` loses entry metadata during rewrite (OI-025-001) and does not apply `ModificationOptions` settings (OI-025-002)
-- Backup creation during modification: `create_backup` and `backup_suffix` are honored via `modify_with_options()` (AD 0020); `preserve_metadata` is accepted but no-op pending OI-025-002
+- Backup creation during modification: `create_backup` and `backup_suffix` are honored via `modify_with_options()` (AD 0020); `preserve_metadata` preserves timestamps and Unix permissions (OI-025-002 resolved 2026-04-14)
 
 ### Slice 6: SFX Detection (Phase 7)
 **Dependencies:** Slice 1
 **Scope:** `detect_sfx`, `open_sfx`, `extract_stub`, stub type detection (PE/ELF/Mach-O/Script), signature scanning, 3-stage pipeline
-**Status:** Partial: detection complete, `open_at_offset` deferred (returns `ArchiveError::Unsupported`)
+**Status:** Partial: detection complete, `open_at_offset` deferred (returns `ArchiveError::NotImplemented`)
 **Risk notes:**
 - 1MB scan limit is a design trade-off: covers known synthetic SFX stubs but misses custom stubs >1MB. Coverage validated against synthetic fixtures only (no real-world corpus); SFX tests are synthetic-suite-only evidence.
 - `open_at_offset` requires all backends to support offset-aware opening — architectural gap — IG-005-01
@@ -75,8 +75,8 @@ Dependency-ordered implementation slices with risk notes. Retrospective — all 
 | Modify-mode options partially applied | Backup/metadata preservation incomplete | Implement option-aware commit pipeline |
 | ZIP modification partially reliable | Some scenarios ignore-gated | Use ZIP-native read/write pipeline |
 | `ZipReader::list_files_for_limits` lacks optimization | Full CRC32 computed unnecessarily | Add metadata-only listing method |
-| Secure password handling not integrated | Passwords stored as `Option<String>` on heap; secstr crate imported but not wired into password fields | Wire SecStr into all password-accepting APIs |
+| ~~Secure password handling not integrated~~ | ~~Passwords stored as `Option<String>` on heap; secstr crate imported but not wired into password fields~~ | **Resolved** (OI-0057-003, 2026-04-17): `ExtractionOptions.password` and `CompressionOptions.password` are `Option<SecStr>`; UnRAR/WinRAR wrappers intern passwords as `SecStr` and decode only at the FFI boundary. |
 | `split_size` public but unused | API advertises non-functional feature | Implement or narrow API surface |
 | Creation progress callbacks (OI-025-003 resolved) | Per-entry progress now invoked during creation with `total=None` (AD 0021) | Resolved |
-| `ModificationOptions` partially wired (AD 0020) | `create_backup`/`backup_suffix` honored; `preserve_metadata` no-op pending OI-025-002 | Implement metadata preservation in commit pipeline |
+| `ModificationOptions` wired (AD 0020) | `create_backup`/`backup_suffix` honored; `preserve_metadata` preserves timestamps and Unix permissions (OI-025-002 resolved 2026-04-14). Comments and extended attributes not yet preserved. | Extend to cover comments, xattrs, and non-file entry types |
 | `commit_changes()` metadata loss (OI-025-001) | Entry timestamps and permissions dropped during copy-on-write rewrite | Preserve metadata through rewrite cycle |

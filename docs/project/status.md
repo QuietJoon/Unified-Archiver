@@ -22,7 +22,7 @@
 - Allowed parallel slices: all (implementation done)
 - Summary: All five user stories implemented. DCR-001 closed Phases A+B on 2026-04-13:
   - **OI-027-001 RESOLVED** (Phase A.1): unknown-stub SFX scanning now proceeds to signature scan instead of bailing at Stage 1. SCN-SFX-08 → Covered.
-  - **OI-026-004 RESOLVED** (Phase A.2): UnRAR FFI calls serialized behind a process-wide `UNRAR_LOCK` mutex (AD 0019). Concurrent RAR access from caller threads is now safe.
+  - **RAR concurrency serialization RESOLVED** (Phase A.2): UnRAR FFI calls serialized behind a process-wide `UNRAR_LOCK` mutex (AD 0019). Concurrent RAR access from caller threads is now safe.
   - **Documentation drift CLOSED** (Phase A.3): archive-level integrity contract section added to `inspection.md`; rough-schema cross-reference added; design-baseline phase-state checkbox ticked.
   - **OI-025-003 RESOLVED** (Phases B.1 + B.2): `CompressionOptions.progress` wired through both creation backends per-entry (AD 0021). `ModificationOptions::create_backup` + `backup_suffix` honored via new `Archive::modify_with_options(path, opts)` (AD 0020).
   - **OI-025-001 RESOLVED** (2026-04-14): `ModificationOptions.compression` overrides archive recreation settings; `commit_changes()` uses caller-supplied compression level and password.
@@ -30,7 +30,7 @@
   - **DEF-006 Closed**, **DEF-007 Closed**, **DEF-008 Partially Closed** in stub manifest.
 
   Remaining tracked gaps:
-  - DEF-001 (`open_at_offset`), DEF-002 (split creation), DEF-003 (SecStr migration), DEF-004 (true streaming for non-libarchive backends), DEF-005 (some ZIP modify edge cases) — all explicitly out-of-MVP-scope and tracked as DEFERRED.
+  - DEF-001 (`open_at_offset`), DEF-002 (split creation), DEF-004 (true streaming for non-libarchive backends), DEF-005 (some ZIP modify edge cases) — all explicitly out-of-MVP-scope and tracked as DEFERRED. DEF-003 (SecStr migration) closed 2026-04-17 (OI-0057-003).
 
 ## Immediate Next Actions
 - No critical Phase C gaps remain. Focus shifts to polish, test coverage, and deferred items for v0.2.0.

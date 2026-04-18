@@ -202,7 +202,7 @@ Large files memory-mapped without limits could exhaust RAM.
 // Check file size before mmap
 let metadata = file.metadata()?;
 if metadata.len() > DEFAULT_MAX_MMAP_SIZE {  // 100 MB limit
-    return Err(ArchiveError::UnsupportedOperation {
+    return Err(ArchiveError::OperationBlocked {
         operation: "open".to_string(),
         reason: format!("ZIP file too large for memory mapping: {} bytes",
                        metadata.len()),

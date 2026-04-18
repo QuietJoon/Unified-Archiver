@@ -53,7 +53,7 @@ Single library crate (`unified-archive`). No binaries, no processes, no services
 
 ## Persistence Overview
 
-**No durable internal database or config state.** All in-memory state lives within `Archive` handles and is dropped when handles go out of scope. Extraction and modification operations create temporary files on the filesystem; these are cleaned up via RAII (`TempDirGuard` / `Drop`) under normal execution. Backup archive creation during modification: `create_backup` and `backup_suffix` are honored via `modify_with_options()` (AD 0020); `preserve_metadata` is accepted but no-op pending OI-025-002.
+**No durable internal database or config state.** All in-memory state lives within `Archive` handles and is dropped when handles go out of scope. Extraction and modification operations create temporary files on the filesystem; these are cleaned up via RAII (`TempDirGuard` / `Drop`) under normal execution. Backup archive creation during modification: `create_backup` and `backup_suffix` are honored via `modify_with_options()` (AD 0020); `preserve_metadata` preserves timestamps and Unix permissions via metadata-aware add helpers (OI-025-002 resolved 2026-04-14).
 
 ## File-Handling Overview
 

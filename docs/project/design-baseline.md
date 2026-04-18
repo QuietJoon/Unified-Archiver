@@ -11,14 +11,14 @@
 ## Scope
 
 ### In-Scope
-- Archive inspection across all supported formats (ZIP, 7z, RAR, RAR5, TAR variants including .tar.gz/.tar.bz2/.tar.xz, ISO). Standalone GZIP, BZIP2, XZ are not supported; these compression formats are only handled as TAR compound variants per AD 0018.
+- Archive inspection across all supported formats (ZIP, 7z, RAR, RAR5, TAR variants including .tar.gz/.tar.bz2/.tar.xz, standalone GZIP/BZIP2/XZ read-only via libarchive `format_raw` per AD 0019, ISO). Standalone GZIP/BZIP2/XZ *creation* remains out of scope per AD 0018; produce compressed archives via the TAR compound variants.
 - Archive extraction with progress, passwords, parallel execution, CRC verification
-- Archive creation (ZIP, 7z, TAR variants) with compression levels and encryption (ZIP-only; 7z/TAR do not support creation encryption)
-- Archive modification (add, remove, replace entries) via copy-on-write — partial: `commit_changes()` uses full rewrite and loses metadata/settings in some flows (OI-025-001, OI-025-002)
+- Archive creation (ZIP, 7z, TAR variants) with compression levels. Creation-time encryption is **rejected for every format** per AD 0027: `Archive::create` with `password: Some(_)` returns `ArchiveError::OperationBlocked`. Encrypted *reads* remain supported via `Archive::open_encrypted()`.
+- Archive modification (add, remove, replace entries) via copy-on-write. OI-025-001/OI-025-002 resolved 2026-04-14: `commit_changes()` preserves timestamps, Unix permissions, and caller-supplied compression settings when `ModificationOptions.preserve_metadata` / `.compression` are set. Some ZIP-specific edge cases remain under DEF-005.
 - SFX detection (PE, ELF, Mach-O, ScriptInterpreter per AD 0016) with 3-stage pipeline
 
 ### Out-of-Scope
-- ISO creation, `open_at_offset` (deferred, non-functional on positive SFX matches), SecStr migration (not integrated in runtime API; passwords use `Option<String>`), split creation, true streaming, backend trait abstraction, interactive prompts, Windows/Linux production support
+- ISO creation, `open_at_offset` (deferred, non-functional on positive SFX matches), split creation, true streaming, backend trait abstraction, interactive prompts, Windows/Linux production support. (SecStr migration completed 2026-04-17 per OI-0057-003.)
 
 ## Mandatory Scenarios
 
@@ -93,12 +93,12 @@
 - **Why DEFERRED exists:** These features are explicitly out of MVP scope. Item-by-item status:
   - `open_at_offset` -- workaround: `extract_stub()` returns the executable prefix bytes; callers can use the detected offset to slice the archive payload manually. No convenience API for opening the embedded archive yet.
   - `split_size` -- split archive creation not yet implemented; field exists but no writer honors it.
-  - SecStr migration -- passwords use `Option<String>`; secstr not integrated in runtime API.
+  - SecStr migration -- RESOLVED 2026-04-17 (OI-0057-003): password fields are `Option<SecStr>` across `ExtractionOptions`, `CompressionOptions`, and the UnRAR/WinRAR wrappers.
   - True streaming -- non-libarchive backends buffer then wrap in Cursor.
-  - ZIP modification reliability -- `commit_changes()` loses metadata/settings (OI-025-001, OI-025-002).
+  - ZIP modification reliability -- OI-025-001/OI-025-002 resolved 2026-04-14 (metadata and compression settings preserved via `ModificationOptions`); some ZIP-specific edge cases remain under DEF-005.
   - Creation progress callbacks (OI-025-003) -- RESOLVED: per-entry progress invoked with `total=None` (AD 0021).
   - Unknown-stub SFX scanning (OI-027-001) -- RESOLVED: unknown stubs proceed to signature scanning.
-  - `ModificationOptions` -- `create_backup`/`backup_suffix` honored via `modify_with_options()` (AD 0020); `preserve_metadata` no-op pending OI-025-002.
+  - `ModificationOptions` -- all fields honored: `create_backup`/`backup_suffix` via `modify_with_options()` (AD 0020); `preserve_metadata` preserves timestamps and Unix permissions via metadata-aware add helpers (OI-025-002 resolved 2026-04-14); `compression` overrides recreation settings (OI-025-001 resolved 2026-04-14).
 
 ## Handoff Readiness Checklist
 

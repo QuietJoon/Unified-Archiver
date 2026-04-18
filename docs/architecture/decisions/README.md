@@ -37,3 +37,16 @@ design through review-driven refinement -- is traceable in one place.
 | 0019 | UnRAR FFI calls serialized behind a process-wide mutex | DCR-001 (Phase A.2) |
 | 0020 | `Archive::modify_with_options` is an additive extension | DCR-001 (Phase B.2) |
 | 0021 | Creation-side progress callbacks fire per entry | DCR-001 (Phase B.1) |
+| 0022 | Reject doc restructuring from reviews 042-043 | Review-driven |
+| 0023 | Reject archived review path rewrites | Review-driven |
+| 0024 | Reject archived review broken refs (046) | Review-driven |
+| 0025 | Reject archived review broken refs (047) | Review-driven |
+| 0026 | Reject archived review broken refs (048) | Review-driven |
+| 0027 | Reject archived review broken refs (049) | Review-driven |
+| 0028 | Reject archived review broken refs (050) | Review-driven |
+| 0029 | Extraction API redesign: extract_some | Review-driven |
+| 0030 | Remove clear_entries | Review-driven |
+| 0031 | Reject cross-doc caveat deduplication | Review-driven |
+| 0032 | Spec tracker reference cleanup | Review-driven |
+| 0033 | Restore `Result<ResultWithWarnings<()>>` dispatch per AD 0010 | Review-driven (R0059) |
+| 0034 | Unignore and enrich ZIP modification tests | Review-driven (R0059) |

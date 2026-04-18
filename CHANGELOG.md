@@ -175,7 +175,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- Passwords are passed as `Option<String>`. Secure zeroing (via secstr) is tracked for future implementation.
+- Passwords are stored as `Option<SecStr>` (via the `secstr` crate). Password bytes are zeroed on drop; decoding to `&str` happens only at the FFI boundary.
 - No password leakage in error messages or logs
 - Secure temporary file creation with unique names
 - Permission preservation for extracted files

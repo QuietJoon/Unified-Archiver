@@ -3,7 +3,7 @@
 > Retroactive intake record. Implementation is complete with tracked gaps. See Open_Issues.md for deferred items.
 
 ## Product Goal
-- Goal: Unified, format-agnostic Rust library for archive operations (inspection, extraction, creation, modification, SFX detection) across ZIP, 7z, RAR, RAR5, TAR (.tar.gz, .tar.bz2, .tar.xz), and ISO — inspired by 7zip-JBinding's design philosophy. Standalone GZIP, BZIP2, and XZ are not supported; these compressors are handled only as TAR compound formats per AD 0018.
+- Goal: Unified, format-agnostic Rust library for archive operations (inspection, extraction, creation, modification, SFX detection) across ZIP, 7z, RAR, RAR5, TAR (.tar.gz, .tar.bz2, .tar.xz), standalone GZIP/BZIP2/XZ (read-only, AD 0019), and ISO — inspired by 7zip-JBinding's design philosophy. Standalone compressed-file *creation* is out of scope per AD 0018; these compressors are produced only via the TAR compound variants.
 - Local run target: `cargo test` (full test suite, 867+ tests across unit, contract, and integration suites)
 - Definition of "working": All five user stories implemented with tracked gaps (open_at_offset deferred, native streaming buffers entries). Creation progress is now wired per-entry (OI-025-003 resolved). Library compiles on macOS (primary), with Windows/Linux as secondary targets. Bounded memory streaming (target: <100MB for 10GB+ archives) applies only to libarchive-backed extraction paths; native backends (Piz, ZipReader, SevenZ, UnRAR) buffer entries in memory.
 
@@ -27,7 +27,7 @@
 | SCN-EXT-05 | Monitor extraction progress | Large archive + callback | Rate-limited progress updates (frequency varies by backend) | No |
 | SCN-CRE-01 | Create archive in multiple formats | Files + format selection | Valid archive readable by standard tools | Yes |
 | SCN-CRE-02 | Create with max compression | Files + Maximum compression level | Optimal compression ratio per format | No |
-| SCN-CRE-03 | Create password-protected archive (ZIP-only; 7z/TAR creation encryption not supported) | Files + password | Encrypted ZIP archive requiring password | No |
+| SCN-CRE-03 | Create password-protected archive (rejected) | Files + password | `OperationBlocked` for every format per AD 0027; encrypted reads remain supported via `open_encrypted()` | Yes |
 | SCN-CRE-04 | Create from large dataset | 10GB+ data + callback | Bounded memory usage, per-entry progress with `total=None` | Resolved (OI-025-003, AD 0021) |
 | SCN-CRE-05 | Create with compression level control | Pre-compressed files + level adjustment | Adjustable compression overhead | No |
 | SCN-MOD-01 | Add files to existing archive | Archive + new files | Archive contains original + new entries | Yes |
@@ -48,7 +48,7 @@
 - True streaming extraction (native backends — Piz, ZipReader, SevenZ, UnRAR — buffer full entries before constructing StreamingExtractor; true streaming limited to libarchive-backed formats)
 - Split archive creation (`split_size` field exists but is unused — IG-005-08)
 - `open_at_offset` for SFX direct opening (deferred; `extract_stub()` returns the executable prefix bytes, not the embedded archive. No convenience extraction of the embedded archive payload exists yet — IG-005-01)
-- SecStr migration for all password fields (secstr imported but not yet fully integrated)
+- ~~SecStr migration for all password fields~~ — **Resolved 2026-04-17** (OI-0057-003): `ExtractionOptions.password` and `CompressionOptions.password` are `Option<SecStr>` with zeroize-on-drop.
 - Backend trait abstraction (manual dispatch is explicit and performant — IG-014-001)
 - Interactive password prompts (password must be provided before extraction)
 - Windows/Linux production-grade support (macOS is primary target; wchar_t layout issue on Linux — IG-020-003)
@@ -103,7 +103,7 @@
 
 - Item: SFX detection with malicious executables
 - Why critical: Security scanning is a primary use case for SFX detection.
-- Required negative path behavior: Detection scans only first 1MB. No execution of the SFX stub. `open_at_offset()` is deferred and returns `ArchiveError::Unsupported` (future-state: invalid archive at detected offset will return a clear error once offset-based opening is implemented).
+- Required negative path behavior: Detection scans only first 1MB. No execution of the SFX stub. `open_at_offset()` is deferred and returns `ArchiveError::NotImplemented` (DEF-001; future-state: invalid archive at detected offset will return a clear error once offset-based opening is implemented).
 
 ## Estimation Preference
 - Default: dependency-ordered slices with risk notes

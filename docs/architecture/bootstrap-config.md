@@ -40,7 +40,7 @@ This crate has no runtime configuration files, environment variables, or service
 
 - `ExtractionOptions`, `ExtractionLimits` — extraction-time tunables
 - `CompressionOptions` — creation-time tunables (compression level, password, etc.)
-- `ModificationOptions` — modification-time tunables (`create_backup`/`backup_suffix` honored via `modify_with_options()`, AD 0020; `preserve_metadata` no-op pending OI-025-002)
+- `ModificationOptions` — modification-time tunables (`create_backup`/`backup_suffix` honored via `modify_with_options()`, AD 0020; `preserve_metadata` preserves timestamps and Unix permissions via metadata-aware add helpers, OI-025-002 resolved 2026-04-14)
 
 See `docs/architecture/config-surface.md` for the complete configuration catalog.
 

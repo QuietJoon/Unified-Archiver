@@ -45,8 +45,8 @@
 | Item | Reason |
 |---|---|
 | ISO format creation | Read-only via libarchive; no write support in scope |
-| `open_at_offset` for SFX | Deferred. Requires significant changes to all backends. Returns `ArchiveError::Unsupported`. Workaround: `extract_stub()` returns the executable prefix bytes (up to the detected archive offset) for security analysis; no temp-file payload extraction helper exists yet. Callers can use `data_offset` from `SfxDetectionResult` to locate the embedded archive. |
-| SecStr migration for all password fields | secstr imported but not yet fully integrated; passwords remain in heap `String`s |
+| `open_at_offset` for SFX | Deferred. Requires significant changes to all backends. Returns `ArchiveError::NotImplemented` (DEF-001). Workaround: `extract_stub()` returns the executable prefix bytes (up to the detected archive offset) for security analysis; no temp-file payload extraction helper exists yet. Callers can use `data_offset` from `SfxDetectionResult` to locate the embedded archive. |
+| ~~SecStr migration for all password fields~~ | **Resolved 2026-04-17** (OI-0057-003): `ExtractionOptions.password` and `CompressionOptions.password` are `Option<SecStr>` with zeroize-on-drop; decoded only at the FFI boundary. |
 | Split archive creation | `split_size` field exists but ignored; multi-part creation deferred to v0.2.0 |
 | True streaming extraction | Native backends (Piz, ZipReader, SevenZ, UnRAR) buffer full entries; true streaming limited to libarchive. Current non-libarchive path: extract-to-memory + Cursor wrapper. ZipReader provides buffered decryption for encrypted ZIP. |
 | Backend trait abstraction | Manual dispatch is explicit and performant; refactoring deferred |
@@ -73,5 +73,5 @@
 
 | Placeholder | Location | Justification |
 |---|---|---|
-| `open_at_offset` | `src/archive.rs` | SFX direct opening requires multi-backend offset support; returns `ArchiveError::Unsupported`. Workaround: `extract_stub()` returns the executable prefix bytes for security analysis; callers can use `data_offset` from `SfxDetectionResult` to locate the embedded archive, but no helper to open at offset exists yet. |
+| `open_at_offset` | `src/archive.rs` | SFX direct opening requires multi-backend offset support; returns `ArchiveError::NotImplemented` (DEF-001). Workaround: `extract_stub()` returns the executable prefix bytes for security analysis; callers can use `data_offset` from `SfxDetectionResult` to locate the embedded archive, but no helper to open at offset exists yet. |
 | `split_size` | `src/options.rs` (CompressionOptions) | Field reserved for future multi-part creation; not currently honored by writers |
