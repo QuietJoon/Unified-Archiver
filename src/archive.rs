@@ -268,30 +268,19 @@ impl Archive {
     /// Open a self-extracting archive (SFX) for reading
     ///
     /// Convenience method that detects SFX and forwards to `open_at_offset()`.
-    ///
-    /// **Status (deferred)**: `open_at_offset()` currently returns
-    /// `ArchiveError::NotImplemented`, so `open_sfx()` will return the same
-    /// error on positive detection. Callers that need to inspect SFX contents
-    /// today should call [`detect_sfx()`](Self::detect_sfx) and then use
-    /// [`extract_stub()`](Self::extract_stub) to separate the stub from the
-    /// embedded archive. Direct in-place opening is tracked as future work
-    /// (see FR-029, DEF-001).
+    /// The embedded payload is materialized into a temporary file and then
+    /// opened through the normal archive pipeline.
     ///
     /// # Returns
     /// - `Err(ArchiveError::Format)` if the file is not an SFX
-    /// - `Err(ArchiveError::NotImplemented)` on positive detection (deferred)
+    /// - Other errors if detection succeeds but the embedded archive cannot be opened
     ///
     /// # Example
     /// ```no_run
     /// use unified_archive::Archive;
     ///
-    /// // Detection-only usage (opening the embedded archive is deferred):
-    /// let detection = Archive::detect_sfx("installer.exe")?;
-    /// if detection.is_sfx {
-    ///     if let Some(offset) = detection.data_offset {
-    ///         println!("Embedded archive starts at offset {offset}");
-    ///     }
-    /// }
+    /// let archive = Archive::open_sfx("installer.exe")?;
+    /// println!("Embedded entries: {}", archive.entry_count()?);
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
     pub fn open_sfx(path: impl AsRef<Path>) -> Result<Self> {
@@ -364,19 +353,31 @@ impl Archive {
             ));
         }
 
+        // Cap the staged payload to protect callers from corrupted/malicious
+        // SFX offsets that would otherwise copy gigabytes of unrelated data
+        // into the tempfile. Legitimate SFX payloads are well below this
+        // ceiling; raise if a real archive is rejected.
+        const MAX_SFX_PAYLOAD_SIZE: u64 = 16 * 1024 * 1024 * 1024; // 16 GiB
+        let payload_size = file_len - offset;
+        if payload_size > MAX_SFX_PAYLOAD_SIZE {
+            return Err(ArchiveError::format(
+                None,
+                format!(
+                    "open_at_offset: payload size {} bytes exceeds maximum {} bytes",
+                    payload_size, MAX_SFX_PAYLOAD_SIZE
+                ),
+            ));
+        }
+
         source
             .seek(SeekFrom::Start(offset))
             .map_err(|e| ArchiveError::io("seek", path_ref, e))?;
 
-        let temp_parent = Path::new("/Volumes/Temp/claude");
-        let mut builder = tempfile::Builder::new();
-        builder.prefix("unified-archive-sfx-").suffix(".bin");
-        let mut temp = if temp_parent.is_dir() {
-            builder.tempfile_in(temp_parent)
-        } else {
-            builder.tempfile()
-        }
-        .map_err(|e| ArchiveError::io("create_tempfile", path_ref, e))?;
+        let mut temp = tempfile::Builder::new()
+            .prefix("unified-archive-sfx-")
+            .suffix(".bin")
+            .tempfile()
+            .map_err(|e| ArchiveError::io("create_tempfile", path_ref, e))?;
 
         {
             use std::io::Write;
