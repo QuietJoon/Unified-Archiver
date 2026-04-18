@@ -23,6 +23,26 @@ Test archives for validating CRC32 extraction and unified interface.
 - **Expected CRC32**: `0x054607BC`
 - **Archive Size**: 97 bytes
 
+### test_encrypted_data.rar (RAR with data-only encryption)
+- **Format**: RAR 5 with data encryption (headers readable without password)
+- **Contains**: test_file.txt
+- **Password**: `test123`
+- **Expected CRC32**: `0x054607BC` (same payload as test.rar)
+
+Generation command:
+```bash
+cd tests/fixtures
+rar a -ptest123 test_encrypted_data.rar test_file.txt    # -p (data only), NOT -hp
+unrar t -ptest123 test_encrypted_data.rar                # must print "All OK"
+unrar l test_encrypted_data.rar                          # must list without password
+```
+
+The fixture MUST use data-only encryption (`-p`, not `-hp`). The
+`test_detect_encrypted_rar_archive` test opens the archive without a
+password and needs to read the headers to detect the encryption flag.
+Every regeneration must pass `unrar t -ptest123` and `unrar l` (no
+password) before the fixture is committed.
+
 ## Usage in Tests
 
 ```rust

@@ -12,6 +12,7 @@ fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_detect_encrypted_rar_archive() {
@@ -27,9 +28,9 @@ fn test_detect_encrypted_rar_archive() {
     );
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
-#[ignore = "Test fixture test_encrypted_data.rar appears to be corrupted (CRC32 checksum verification failed)"]
 fn test_open_encrypted_rar_with_correct_password() {
     // Test opening and extracting encrypted RAR with correct password
     // Note: Using test_encrypted_data.rar (data encrypted, headers not encrypted)
