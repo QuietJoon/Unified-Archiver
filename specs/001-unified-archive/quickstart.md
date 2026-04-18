@@ -195,13 +195,14 @@ maturity so callers know what works today and what is still in progress.
 - **Entry caching** via `OnceCell` (zero-cost repeated access)
 - **Progress callbacks** with `ControlFlow` cancellation for extraction; signature: `fn on_progress(&mut self, processed: u64, total: Option<u64>)`
 - **Streaming extraction**: memory-bounded for libarchive-backed formats; Piz, ZipReader, SevenZ, and UnRAR buffer entries
-- **Password handling**: password stored as plain `String`
+- **Password handling**: passwords stored as `Option<SecStr>` (zeroize-on-drop)
 - **CRC32 verification** during extraction
-- **SFX detection** with `SfxDetectionResult` (includes `confidence` field)
+- **SFX detection** with `SfxDetectionResult` (includes `confidence` field); `open_sfx()` and `open_at_offset()` are shipped (temp-file-backed payload opening)
+- **Raw compressed streams** (`.gz`, `.bz2`, `.xz`) are directly openable via `Archive::open()` per AD 0019 (only stream *creation* is out of scope per AD 0018)
 - **EntryType** variants: `File`, `Directory`, `Symlink`, `HardLink`, `Other`
-- **ArchiveError** variants: `Io`, `Format`, `Corruption`, `Password`, `Unsupported`, `CodecUnavailable`, `UnsupportedOperation`, `InvalidPath`
+- **ArchiveError** variants: `Io`, `Format`, `Corruption`, `Password`, `Unsupported`, `CodecUnavailable`, `WriteModeOnly`, `ReadOnlyBackend`, `NotImplemented`, `OperationBlocked`, `InvalidPath` (see `src/error.rs` for the canonical list)
 
-See `Open_Issues.md` for the full deferred-items list and known gaps.
+See [`reviews/Open_Issues.md`](../../reviews/Open_Issues.md) for the full deferred-items list and known gaps.
 
 ## License
 

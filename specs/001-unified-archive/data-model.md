@@ -4,6 +4,8 @@
 **Feature**: 001-unified-archive
 **Purpose**: Define core entities, their relationships, and state transitions for the unified archive interface
 
+> **Post-v0.1.0 reality check (2026-04-18):** Data model below has drifted from the shipped 0.1.0 crate. Canonical types live in `src/options.rs`, `src/error.rs`, `src/archive.rs`. Known deltas: (1) `ExtractionOptions.password` and `CompressionOptions.password` are `Option<SecStr>` (not `Option<String>`); (2) `ArchiveError` has no `UnsupportedOperation` variant — use `WriteModeOnly` / `ReadOnlyBackend` / `NotImplemented` / `OperationBlocked`; (3) standalone `.gz` / `.bz2` / `.xz` are openable per AD 0019; (4) extraction methods return `Result<ResultWithWarnings<()>>` per AD 0010.
+
 ## Overview
 
 The data model provides a unified, format-agnostic representation of archives and their contents. All entities are designed to work across different archive formats (7z, RAR, RAR5, ZIP, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, ISO) through a shared API surface, though individual field population is format-dependent (see per-entity notes). Standalone GZIP, BZIP2, and XZ streams are not directly openable; only their TAR compound forms are supported per AD 0018.

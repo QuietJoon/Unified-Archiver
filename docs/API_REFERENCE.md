@@ -2,6 +2,8 @@
 
 API reference for the unified-archive library. Covers inspection, extraction, creation, modification, SFX detection, streaming, and safety utilities.
 
+For a task-oriented guide, see the [User Manual](./USER_MANUAL.md).
+
 ## Internal types
 
 Per AD 0001 (Single Archive Facade with Backend Enum), the supported public surface
@@ -313,7 +315,7 @@ Scan the archive for symlink and hard-link entries. Returns a list of `ArchiveWa
 
 ### Extraction Methods
 
-#### `Archive::extract_all(&self, options: ExtractionOptions) -> Result<()>`
+#### `Archive::extract_all(&self, options: ExtractionOptions) -> Result<ResultWithWarnings<()>>`
 
 Extract all files from the archive.
 
@@ -370,7 +372,7 @@ archive.extract_file(
 
 ---
 
-#### `Archive::extract_filtered<F>(&self, predicate: F, options: ExtractionOptions) -> Result<()>`
+#### `Archive::extract_filtered<F>(&self, predicate: F, options: ExtractionOptions) -> Result<ResultWithWarnings<()>>`
 
 Extract files matching a predicate function.
 
@@ -400,7 +402,7 @@ archive.extract_filtered(
 
 ---
 
-#### `Archive::extract_files(&self, paths: &[&str], options: ExtractionOptions) -> Result<()>`
+#### `Archive::extract_files(&self, paths: &[&str], options: ExtractionOptions) -> Result<ResultWithWarnings<()>>`
 
 Extract multiple files by their paths within the archive.
 
@@ -408,7 +410,7 @@ Extract multiple files by their paths within the archive.
 
 ---
 
-#### `Archive::extract_by_ids(&self, ids: &[usize], options: ExtractionOptions) -> Result<()>`
+#### `Archive::extract_by_ids(&self, ids: &[usize], options: ExtractionOptions) -> Result<ResultWithWarnings<()>>`
 
 Extract multiple files by their sequential entry IDs (0-based, as returned by `list_files()`). Useful when entries have already been looked up by ID rather than path.
 
@@ -468,7 +470,9 @@ while let Ok(n) = stream.read(&mut buffer) {
 
 Create a new archive for writing. The returned handle is in Write mode. Fails if the output file already exists.
 
-**Supported formats:** ZIP (via zip crate), TAR, TAR.GZ, TAR.BZ2, TAR.XZ, 7z (via libarchive).
+**Supported formats:** ZIP, 7z, TAR, TAR.GZ, TAR.BZ2, TAR.XZ.
+
+**Important:** `CompressionOptions.password` is rejected by `Archive::create()` in `v0.1.0`. The library reads encrypted archives, but the main creation facade does not produce encrypted archives.
 
 **Example:**
 ```rust
@@ -532,6 +536,8 @@ pub struct CompressionOptions {
 ```
 
 Construct with `CompressionOptions::new(format)` or `CompressionOptions::builder(format)`. Default level is `CompressionLevel::Normal`.
+
+**Field behavior note:** `password` exists on the type because the crate also supports encrypted-read flows and optional external integrations, but `Archive::create()` rejects password-based archive creation in `v0.1.0` with `ArchiveError::OperationBlocked`.
 
 #### `CompressionOptions::builder(format: ArchiveFormat) -> Self`
 
@@ -634,7 +640,7 @@ Disable metadata preservation during the copy phase. When enabled (default), `co
 
 #### `compression: Option<CompressionOptions>`
 
-Override compression settings for the recreated archive. When `None` (default), uses format defaults (`CompressionLevel::Normal`, no password). Set this to preserve the original archive's compression level or password across modifications.
+Override compression settings for the recreated archive. When `None` (default), uses format defaults (`CompressionLevel::Normal`, no password). Use this to control the rewritten archive's compression settings; password-based creation is still rejected by the main facade in `v0.1.0`.
 
 ---
 
@@ -652,13 +658,13 @@ Detect if a file is a self-extracting archive. Uses 3-stage detection: executabl
 
 Convenience method: detect SFX and open the embedded archive in one call. Equivalent to `detect_sfx()` + `open_at_offset()`.
 
-> **Status:** Because `open_at_offset()` is not yet implemented, positive detections will fail with `ArchiveError::NotImplemented`. Use `detect_sfx()` for detection-only workflows.
+The embedded payload is materialized to a temporary file and opened through the normal archive pipeline.
 
 ---
 
 #### `Archive::open_at_offset(path: impl AsRef<Path>, offset: u64) -> Result<Archive>`
 
-Open an archive that starts at a specific byte offset within a file. Primarily for SFX archives. **Status:** not yet implemented (DEF-001); returns `ArchiveError::NotImplemented`.
+Open an archive that starts at a specific byte offset within a file. Primarily for SFX archives. `offset == 0` behaves like `Archive::open()`. Non-zero offsets materialize the payload to a temporary file and then open it.
 
 ---
 
@@ -802,9 +808,9 @@ pub enum ArchiveFormat {
     TarGzip,   // TAR + Gzip
     TarBzip2,  // TAR + Bzip2
     TarXz,     // TAR + XZ
-    Gzip,      // Gzip — currently only as part of TarGzip
-    Bzip2,     // Bzip2 — currently only as part of TarBzip2
-    Xz,        // XZ — currently only as part of TarXz
+    Gzip,      // Standalone GZIP (read/extract only)
+    Bzip2,     // Standalone BZIP2 (read/extract only)
+    Xz,        // Standalone XZ (read/extract only)
     Iso,       // ISO 9660
 }
 ```
@@ -825,7 +831,7 @@ Whether this format supports configurable compression levels.
 
 #### `ArchiveFormat::supports_encryption(&self) -> bool`
 
-Whether this format supports password-based encryption.
+Whether the archive format itself supports password-based encryption in either read or write form. This is a **format capability**, not a promise that `unified-archive` can create encrypted archives for that format.
 
 #### `ArchiveFormat::supports_multipart(&self) -> bool`
 
@@ -1337,6 +1343,12 @@ Enables RAR/RAR5 support via UnRAR library.
 [dependencies]
 unified-archive = { version = "0.1.0", default-features = false }
 ```
+
+### `external-rar-create`
+
+Enables the Windows-only `unified_archive::external::RarCreator` helper for out-of-process RAR creation through `rar.exe`.
+
+Use this only when you explicitly want the WinRAR CLI bridge. It is separate from `Archive::create()`.
 
 ---
 

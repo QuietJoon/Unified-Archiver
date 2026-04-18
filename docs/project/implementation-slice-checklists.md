@@ -109,10 +109,10 @@
 - [x] Resolved (OI-027-001): Unknown stubs classified as `StubType::Unknown` and proceed to signature scanning
 - [x] SfxDetectionResult with is_sfx, archive_format, data_offset, stub_type, confidence
 - [x] Tests: tests/integration/sfx_detection.rs, SFX coverage report
-- [ ] **Partial:** `open_sfx()` convenience method exists in public API but delegates to deferred `open_at_offset()`, so positive SFX detection does not yield a readable archive
-- [ ] **Deferred:** `open_at_offset` for direct offset-based archive opening (DEF-001, returns `Unsupported`)
+- [x] `open_sfx()` convenience method opens the detected archive payload (temp-file-backed); integration coverage at `tests/integration/sfx_detection.rs::test_open_sfx_with_real_zip_payload`
+- [x] `open_at_offset` for direct offset-based archive opening (temp-file-backed implementation in `src/archive.rs`; caveat: copies the payload tail to a temp file before dispatching to the backend)
 
-**Status:** Partial — detection pipeline complete; `open_sfx()` present but non-functional pending `open_at_offset` (DEF-001)
+**Status:** Shipped — detection pipeline and offset-based opening both implemented; `open_sfx()` returns a working `Archive` handle.
 
 ---
 

@@ -6,6 +6,8 @@
 **Status**: Implemented (retrospective documentation)
 **Scope**: Extraction and creation progress. Creation progress (`CompressionOptions.progress`) is invoked per-entry by both ZIP and libarchive backends with `total=None` (AD 0021 / OI-025-003 resolved).
 
+> **Post-v0.1.0 reality check (2026-04-18):** The extraction-entry-point signatures below still show `Result<()>` — the shipped code returns `Result<ResultWithWarnings<()>>` per AD 0010. Treat the snippets as illustrative for progress semantics only; use `docs/API_REFERENCE.md` for current signatures.
+
 ## Overview
 
 Progress callbacks are implemented for both extraction and creation via dispatch through boxed trait objects (`Box<dyn ProgressCallback>`). Creation progress is invoked per-entry by both ZIP and libarchive backends; `total` is `None` because creation cannot pre-size streamed sources. There is no separate validation-progress API. The implementation includes built-in cancellation support and automatic rate limiting (must not exceed ~60 callbacks/sec; actual frequency varies by backend and is often much lower).

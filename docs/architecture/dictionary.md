@@ -8,7 +8,7 @@ Project terminology for unified-archive. Started in Phase 0, updated throughout.
 |---|---|---|---|
 | Archive | Handle to an opened archive file providing inspection, extraction, creation, and modification operations via a format-agnostic API | A compressed file containing other files | `src/archive.rs` |
 | ArchiveEntry | Metadata for a single file or directory within an archive, normalized across all formats (path, size, compressed size, timestamps, CRC32, encryption status) | A file inside a compressed archive | `src/entry.rs` |
-| ArchiveFormat | Enumeration of 12 format variants (not all are independently openable — GZIP, BZIP2, XZ exist only as TAR compound formats per AD 0018) with capability queries (compression, encryption, multipart, modification) | The type of compression used | `src/format.rs` |
+| ArchiveFormat | Enumeration of 12 format variants with capability queries (compression, encryption, multipart, modification). Standalone `Gzip`/`Bzip2`/`Xz` are independently openable via `Archive::open()` per AD 0019; only *creation* of standalone raw streams is out of scope per AD 0018. | The type of compression used | `src/format.rs` |
 | ArchiveBackend | Internal enum dispatching operations to the correct native library (UnRAR, Piz, SevenZ, Libarchive, ZipReader) | N/A | `src/archive.rs` |
 | ArchiveMode | Access mode of an archive handle: Read, Write, or Modify | N/A | `src/archive.rs` |
 | EntryType | Classification of archive entries: File, Directory, Symlink, HardLink, Other | N/A | `src/entry.rs` |

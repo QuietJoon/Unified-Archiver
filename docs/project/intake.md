@@ -1,6 +1,6 @@
 # MVP Intake: unified-archive
 
-> Retroactive intake record. Implementation is complete with tracked gaps. See Open_Issues.md for deferred items.
+> Retroactive intake record. Implementation is complete with tracked gaps. See [`reviews/Open_Issues.md`](../../reviews/Open_Issues.md) for deferred items.
 
 ## Product Goal
 - Goal: Unified, format-agnostic Rust library for archive operations (inspection, extraction, creation, modification, SFX detection) across ZIP, 7z, RAR, RAR5, TAR (.tar.gz, .tar.bz2, .tar.xz), standalone GZIP/BZIP2/XZ (read-only, AD 0019), and ISO — inspired by 7zip-JBinding's design philosophy. Standalone compressed-file *creation* is out of scope per AD 0018; these compressors are produced only via the TAR compound variants.
@@ -74,7 +74,7 @@
 | Integration | Required for MVP? | Real or deferred? | Notes |
 |---|---|---|---|
 | UnRAR SDK (FFI) | Yes | Real | RAR/RAR5 read/extract. Statically linked. License: free for non-commercial use. |
-| libarchive (FFI) | Yes | Real | TAR family (.tar.gz, .tar.bz2, .tar.xz), ISO read, archive creation (7z/TAR — not ZIP). Standalone GZIP/BZIP2/XZ not supported per AD 0018. Linked via pkg-config. |
+| libarchive (FFI) | Yes | Real | TAR family (.tar.gz, .tar.bz2, .tar.xz), ISO read, archive creation (7z/TAR — not ZIP), and direct read/extract of standalone `.gz` / `.bz2` / `.xz` streams per AD 0019. Standalone stream *creation* remains out of scope per AD 0018. Linked via pkg-config. |
 | goblin crate | Yes | Real | PE/ELF/Mach-O binary parsing for SFX detection. Pure Rust. |
 | piz crate | Yes | Real | Native Rust ZIP inspection/extraction backend with parallel extraction and CRC32 metadata. |
 | sevenz-rust2 crate | Yes | Real | Native Rust 7z inspection/extraction backend with CRC32 metadata access. |

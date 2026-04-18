@@ -5,6 +5,8 @@
 **Status**: Implemented (retrospective documentation)
 **Purpose**: Define public API for opening, closing, and managing archive handles
 
+> **Post-v0.1.0 reality check (2026-04-18):** Contract text below has drifted from the shipped 0.1.0 crate. Canonical behavior is in `src/archive.rs`, `src/error.rs`, `docs/API_REFERENCE.md`. Known deltas: (1) `Archive::open_at_offset()` / `Archive::open_sfx()` are **shipped** (temp-file-backed), not deferred; (2) `ArchiveError` has no `UnsupportedOperation` variant — use `WriteModeOnly` / `ReadOnlyBackend` / `NotImplemented` / `OperationBlocked`; (3) standalone `.gz` / `.bz2` / `.xz` are openable via `Archive::open()` per AD 0019 (only stream *creation* is out of scope per AD 0018).
+
 ## Overview
 
 The `Archive` type is the primary entry point for all archive operations. It provides a common API surface with documented format caveats across all supported formats (7z, RAR, RAR5, ZIP, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, ISO). Not every operation is available on every format — see the Format-Specific Behavior section for capability differences. Standalone GZIP, BZIP2, and XZ are not supported through `Archive::open()` — only their TAR compound variants are in scope (AD 0018).

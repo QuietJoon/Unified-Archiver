@@ -4,6 +4,8 @@
 **Feature**: 001-unified-archive
 **Purpose**: Resolve technical unknowns from Technical Context and make informed technology decisions
 
+> **Post-v0.1.0 reality check (2026-04-18):** This research log is historical — it captures decisions made during planning, not shipped behavior. Canonical current behavior is in the source tree and `docs/architecture/decisions/*.md`. Notable deltas the research log predates: passwords are now `Option<SecStr>` (not plain strings); `Archive::open_at_offset()` and `open_sfx()` are shipped (not deferred); standalone `.gz` / `.bz2` / `.xz` read/extract are supported per AD 0019 (only stream *creation* is out of scope per AD 0018).
+
 ## Research Questions
 
 From Technical Context, we need to resolve:

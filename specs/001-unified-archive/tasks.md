@@ -5,6 +5,8 @@
 
 **Tests**: The project now has broad unit, integration, contract, and property-based test coverage.
 
+> **Post-v0.1.0 reality check (2026-04-18):** Task entries below are a planning artifact — they reflect the state during implementation and have not been line-edited to match shipped 0.1.0 status. Canonical current behavior lives in the source tree and `docs/architecture/decisions/*.md`. Known stale items: `open_sfx()` / `open_at_offset()` are **shipped** (temp-file-backed, not returning `Unsupported`); the `ArchiveError` enum no longer includes `UnsupportedOperation` — use `WriteModeOnly` / `ReadOnlyBackend` / `NotImplemented` / `OperationBlocked`.
+
 **Organization**: Tasks are grouped by user story to enable independent implementation and testing of each story.
 
 ## Format: `[ID] [P?] [Story] Description`

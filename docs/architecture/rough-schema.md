@@ -57,15 +57,15 @@ In-memory entity structure for unified-archive. This library has no database —
 | TarXz | `\xfd7zXZ\x00` | Yes | No | No | No |
 | Iso | `CD001` at offset 32769 | No | No | No | No |
 
-**Enum-only variants (not directly openable via `Archive::open()`):**
+**Raw compressed-stream variants (read/extract supported via libarchive per AD 0019; standalone *creation* out of scope per AD 0018):**
 
 | Variant | Magic Bytes | Notes |
 |---|---|---|
-| Gzip | `\x1f\x8b` | Standalone `.gz` not supported (AD 0018); use TarGzip for `.tar.gz` |
-| Bzip2 | `BZ` | Standalone `.bz2` not supported (AD 0018); use TarBzip2 for `.tar.bz2` |
-| Xz | `\xfd7zXZ\x00` | Standalone `.xz` not supported (AD 0018); use TarXz for `.tar.xz` |
+| Gzip | `\x1f\x8b` | Standalone `.gz` openable via `Archive::open()` (read/extract only); use TarGzip for `.tar.gz` multi-file archives |
+| Bzip2 | `BZ` | Standalone `.bz2` openable via `Archive::open()` (read/extract only); use TarBzip2 for `.tar.bz2` multi-file archives |
+| Xz | `\xfd7zXZ\x00` | Standalone `.xz` openable via `Archive::open()` (read/extract only); use TarXz for `.tar.xz` multi-file archives |
 
-These enum variants exist for format detection and capability queries but `Archive::open()` will return an error for standalone compressed streams. Only TAR compound formats (TarGzip, TarBzip2, TarXz) are supported.
+`Archive::open()` routes these variants to libarchive for read/extract (AD 0019). Standalone stream *creation* is not supported — compressing a single file into `.gz`/`.bz2`/`.xz` must be done outside this crate.
 
 - **Owned by:** `format.rs`
 - **Primary identifier:** Enum variant

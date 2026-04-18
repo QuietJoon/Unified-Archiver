@@ -5,6 +5,8 @@
 
 **Note**: Generated from speckit template (no longer present in repo).
 
+> **Post-v0.1.0 reality check (2026-04-18):** Plan text below was written before 0.1.0 shipped and has not been line-edited. Canonical behavior is in the source tree, `docs/API_REFERENCE.md`, and the `docs/architecture/decisions/*.md` records. Known deltas still readable below: (1) `Archive::open_at_offset()` / `Archive::open_sfx()` are **shipped** (temp-file-backed), not deferred placeholders returning `Unsupported`; (2) passwords are `Option<SecStr>` (`secstr` is integrated); (3) standalone `.gz` / `.bz2` / `.xz` read/extract are supported per AD 0019 (only *creation* of standalone streams is excluded per AD 0018).
+
 ## Summary
 
 This project implements a unified archive library for Rust that provides a single, format-agnostic API for handling multiple archive formats (7z, RAR, RAR5, ZIP, TAR compound formats, ISO). Standalone gz/bz2/xz streams are not supported as independent formats — only their TAR compound variants (TAR.GZ, TAR.BZ2, TAR.XZ) are handled (per AD 0018). The library includes **SFX (Self-Extracting Archive) detection** capabilities to identify embedded archives and report detection metadata (format, offset, confidence) from executable files across multiple platforms (Windows PE, Linux ELF, macOS Mach-O, Unix shell scripts).

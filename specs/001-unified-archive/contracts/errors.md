@@ -5,6 +5,8 @@
 **Purpose**: Unified error handling across all archive formats
 **Status**: Implemented (retrospective documentation)
 
+> **Post-v0.1.0 reality check (2026-04-18):** The enum block and examples below are stale — they still reference `UnsupportedOperation`, which does not exist in the shipped 0.1.0 crate. Canonical variants live in `src/error.rs`: `Io`, `Format`, `Corruption`, `Password`, `Unsupported`, `CodecUnavailable`, `WriteModeOnly`, `ReadOnlyBackend`, `NotImplemented`, `OperationBlocked`, `InvalidPath`. Replace any `UnsupportedOperation` usage with the appropriate narrower variant (most commonly `WriteModeOnly`, `ReadOnlyBackend`, or `NotImplemented`).
+
 ## ArchiveError Definition
 
 ```rust
