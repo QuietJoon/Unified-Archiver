@@ -33,6 +33,7 @@ fn contract_list_files_7z() {
     assert!(!entries.is_empty(), "7z should contain entries");
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn contract_list_files_rar() {
@@ -41,6 +42,7 @@ fn contract_list_files_rar() {
     assert!(!entries.is_empty(), "RAR should contain entries");
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn contract_list_files_rar5() {

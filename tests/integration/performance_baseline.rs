@@ -55,9 +55,10 @@ fn create_performance_test_archive(
         .output()?;
 
     if !output.status.success() {
-        return Err(std::io::Error::other(
-            format!("zip failed: {}", String::from_utf8_lossy(&output.stderr)),
-        ));
+        return Err(std::io::Error::other(format!(
+            "zip failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
     }
 
     Ok(())

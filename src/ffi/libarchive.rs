@@ -75,6 +75,7 @@ unsafe extern "C" {
     pub fn archive_entry_mode(entry: *mut LibarchiveEntry) -> c_int;
     pub fn archive_entry_filetype(entry: *mut LibarchiveEntry) -> c_int;
     pub fn archive_entry_hardlink(entry: *mut LibarchiveEntry) -> *const c_char;
+    pub fn archive_entry_symlink(entry: *mut LibarchiveEntry) -> *const c_char;
 
     // Phase 1: Additional metadata functions
     pub fn archive_entry_birthtime(entry: *mut LibarchiveEntry) -> i64;

@@ -6,6 +6,7 @@ use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex};
 use unified_archive::{Archive, ExtractionOptions};
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_progress_callback_called() {
@@ -177,6 +178,7 @@ fn test_progress_callback_7z() {
     let _ = std::fs::remove_dir_all(&dest);
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_progress_without_callback() {

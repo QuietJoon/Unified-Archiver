@@ -66,7 +66,9 @@ impl SfxDetectionResult {
             archive_format: Some(archive_format),
             data_offset: Some(data_offset),
             stub_type: Some(stub_type),
-            confidence: confidence.clamp(0.0, 1.0),
+            // Clamped to [0.0, 0.99] per AD 0014: probable() must never produce
+            // is_confirmed(). Only detected() is allowed to yield confidence == 1.0.
+            confidence: confidence.clamp(0.0, 0.99),
         }
     }
 
@@ -162,8 +164,12 @@ mod tests {
 
     #[test]
     fn test_summary_probable() {
-        let result =
-            SfxDetectionResult::probable(StubType::ScriptInterpreter, ArchiveFormat::Rar, 512, 0.75);
+        let result = SfxDetectionResult::probable(
+            StubType::ScriptInterpreter,
+            ArchiveFormat::Rar,
+            512,
+            0.75,
+        );
         let summary = result.summary();
         assert!(summary.contains("SFX detected"));
         assert!(summary.contains("probable"));
@@ -184,10 +190,14 @@ mod tests {
 
     #[test]
     fn test_confidence_clamping() {
-        // Test that confidence is clamped to 0.0-1.0 range
+        // Per AD 0014, probable() clamps confidence to [0.0, 0.99].
         let result_high =
             SfxDetectionResult::probable(StubType::WindowsPE, ArchiveFormat::Zip, 100, 1.5);
-        assert_eq!(result_high.confidence, 1.0);
+        assert_eq!(result_high.confidence, 0.99);
+
+        let result_at_one =
+            SfxDetectionResult::probable(StubType::WindowsPE, ArchiveFormat::Zip, 100, 1.0);
+        assert_eq!(result_at_one.confidence, 0.99);
 
         let result_low =
             SfxDetectionResult::probable(StubType::WindowsPE, ArchiveFormat::Zip, 100, -0.5);
@@ -196,18 +206,20 @@ mod tests {
 
     #[test]
     fn test_is_confirmed_boundary() {
-        // Only exactly 1.0 is confirmed; 0.99 is still probable
-        let result_100 =
+        // Only detected() can yield is_confirmed() == true;
+        // probable(..., 1.0) is clamped to 0.99 and must never be confirmed.
+        let result_from_probable_one =
             SfxDetectionResult::probable(StubType::WindowsPE, ArchiveFormat::Zip, 100, 1.0);
-        assert!(result_100.is_confirmed());
+        assert!(!result_from_probable_one.is_confirmed());
+        assert_eq!(result_from_probable_one.confidence, 0.99);
 
         let result_99 =
             SfxDetectionResult::probable(StubType::WindowsPE, ArchiveFormat::Zip, 100, 0.99);
         assert!(!result_99.is_confirmed());
 
-        let result_98 =
-            SfxDetectionResult::probable(StubType::WindowsPE, ArchiveFormat::Zip, 100, 0.98);
-        assert!(!result_98.is_confirmed());
+        let result_detected =
+            SfxDetectionResult::detected(StubType::WindowsPE, ArchiveFormat::Zip, 100);
+        assert!(result_detected.is_confirmed());
     }
 
     // ============================================================
@@ -251,7 +263,8 @@ mod tests {
     #[test]
     fn test_detected_with_zero_offset() {
         // Edge case: archive at offset 0
-        let result = SfxDetectionResult::detected(StubType::ScriptInterpreter, ArchiveFormat::Zip, 0);
+        let result =
+            SfxDetectionResult::detected(StubType::ScriptInterpreter, ArchiveFormat::Zip, 0);
         assert!(result.is_sfx);
         assert_eq!(result.data_offset, Some(0));
     }
@@ -278,10 +291,10 @@ mod tests {
 
     #[test]
     fn test_probable_confidence_one() {
-        // Exactly 1.0 confidence
+        // Per AD 0014: probable(..., 1.0) clamps to 0.99 and must not be confirmed.
         let result = SfxDetectionResult::probable(StubType::LinuxELF, ArchiveFormat::Zip, 500, 1.0);
-        assert!(result.is_confirmed());
-        assert_eq!(result.confidence, 1.0);
+        assert!(!result.is_confirmed());
+        assert_eq!(result.confidence, 0.99);
     }
 
     #[test]
@@ -337,7 +350,8 @@ mod tests {
     #[test]
     fn test_debug_format() {
         // Verify Debug trait produces readable output
-        let result = SfxDetectionResult::detected(StubType::ScriptInterpreter, ArchiveFormat::Rar, 512);
+        let result =
+            SfxDetectionResult::detected(StubType::ScriptInterpreter, ArchiveFormat::Rar, 512);
         let debug_str = format!("{:?}", result);
 
         assert!(debug_str.contains("SfxDetectionResult"));

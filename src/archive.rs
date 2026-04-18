@@ -5,6 +5,7 @@ use crate::error::{ArchiveError, Result};
 use crate::ffi::libarchive_wrapper::LibarchiveArchive;
 use crate::ffi::piz_wrapper::PizArchive;
 use crate::ffi::sevenz_wrapper::SevenZArchive;
+#[cfg(feature = "rar-support")]
 use crate::ffi::wrapper::UnrarArchive;
 use crate::ffi::zip_wrapper::ZipArchive;
 use crate::ffi::zip_writer::ZipWriter;
@@ -24,6 +25,7 @@ pub(crate) enum ArchiveMode {
 /// Internal archive backend
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum ArchiveBackend {
+    #[cfg(feature = "rar-support")]
     Unrar(UnrarArchive),
     Piz(PizArchive),
     SevenZ(SevenZArchive),
@@ -106,9 +108,9 @@ pub struct Archive {
 //   Single-threaded access is already enforced by !Sync + the fact that extraction creates
 //   fresh handles via fresh_handle().
 // - Piz(PizArchive): Contains only PathBuf (Send+Sync). All operations re-open/mmap the file.
-// - SevenZ(SevenZArchive): Contains PathBuf + Option<String> (Send+Sync).
+// - SevenZ(SevenZArchive): Contains PathBuf + Option<SecStr> (Send+Sync).
 // - ZipWriter(ZipWriter): Contains owned zip::ZipWriter<File> which is Send.
-// - ZipReader(ZipArchive): Contains PathBuf + Option<String> (Send+Sync).
+// - ZipReader(ZipArchive): Contains PathBuf + Option<SecStr> (Send+Sync).
 // - Libarchive(LibarchiveArchive): Contains owned String + Option<*mut Archive>.
 //   The raw pointer is only used in Write mode and is accessed exclusively by the owning thread.
 //
@@ -147,9 +149,22 @@ impl Archive {
 
         // Route to appropriate backend
         let backend = match format {
+            #[cfg(feature = "rar-support")]
             ArchiveFormat::Rar | ArchiveFormat::Rar5 => {
                 let unrar = UnrarArchive::open(&path_buf)?;
                 ArchiveBackend::Unrar(unrar)
+            }
+            #[cfg(not(feature = "rar-support"))]
+            ArchiveFormat::Rar | ArchiveFormat::Rar5 => {
+                return Err(ArchiveError::unsupported(
+                    "open",
+                    format,
+                    Some(
+                        "RAR/RAR5 support is disabled in this build (enable the \
+                         `rar-support` Cargo feature to include UnRAR)"
+                            .to_string(),
+                    ),
+                ));
             }
             ArchiveFormat::Zip => {
                 let piz = PizArchive::open(&path_buf)?;
@@ -181,9 +196,22 @@ impl Archive {
         let format = ArchiveFormat::detect(&path_buf)?;
 
         let backend = match format {
+            #[cfg(feature = "rar-support")]
             ArchiveFormat::Rar | ArchiveFormat::Rar5 => {
                 let unrar = UnrarArchive::open_with_password(&path_buf, password.as_ref())?;
                 ArchiveBackend::Unrar(unrar)
+            }
+            #[cfg(not(feature = "rar-support"))]
+            ArchiveFormat::Rar | ArchiveFormat::Rar5 => {
+                return Err(ArchiveError::unsupported(
+                    "open_encrypted",
+                    format,
+                    Some(
+                        "RAR/RAR5 support is disabled in this build (enable the \
+                         `rar-support` Cargo feature to include UnRAR)"
+                            .to_string(),
+                    ),
+                ));
             }
             ArchiveFormat::Zip => {
                 // Use zip crate backend for encrypted ZIP (piz can't decrypt)
@@ -236,16 +264,16 @@ impl Archive {
     /// Convenience method that detects SFX and forwards to `open_at_offset()`.
     ///
     /// **Status (deferred)**: `open_at_offset()` currently returns
-    /// `ArchiveError::Unsupported`, so `open_sfx()` will return the same error
-    /// on positive detection. Callers that need to inspect SFX contents today
-    /// should call [`detect_sfx()`](Self::detect_sfx) and then use
+    /// `ArchiveError::NotImplemented`, so `open_sfx()` will return the same
+    /// error on positive detection. Callers that need to inspect SFX contents
+    /// today should call [`detect_sfx()`](Self::detect_sfx) and then use
     /// [`extract_stub()`](Self::extract_stub) to separate the stub from the
     /// embedded archive. Direct in-place opening is tracked as future work
-    /// (see FR-029).
+    /// (see FR-029, DEF-001).
     ///
     /// # Returns
     /// - `Err(ArchiveError::Format)` if the file is not an SFX
-    /// - `Err(ArchiveError::Unsupported)` on positive detection (deferred)
+    /// - `Err(ArchiveError::NotImplemented)` on positive detection (deferred)
     ///
     /// # Example
     /// ```no_run
@@ -303,13 +331,10 @@ impl Archive {
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
     pub fn open_at_offset(path: impl AsRef<Path>, offset: u64) -> Result<Self> {
-        // Simplified: Return unsupported error immediately without wasted I/O
-        // TODO: Implement backend support for offset-based opening
-        let _ = (path, offset); // Suppress unused warnings
-        Err(ArchiveError::unsupported(
+        let _ = (path, offset);
+        Err(ArchiveError::not_implemented(
             "open_at_offset",
-            ArchiveFormat::Zip, // Placeholder format
-            Some("Offset-based archive opening requires backend implementation. Use extract_stub() to create temporary archive file as workaround.".to_string()),
+            "Offset-based archive opening is deferred (DEF-001). Use extract_stub() to materialize the embedded archive as a temporary file.",
         ))
     }
 
@@ -417,6 +442,7 @@ impl Archive {
     /// ```
     pub fn has_recovery_record(&self) -> Result<bool> {
         match &self.backend {
+            #[cfg(feature = "rar-support")]
             ArchiveBackend::Unrar(unrar) => unrar.has_recovery_record(),
             // Other formats don't support recovery records
             ArchiveBackend::Piz(_)
@@ -458,6 +484,7 @@ impl Archive {
     /// ```
     pub fn recovery_percentage(&self) -> Result<Option<u8>> {
         match &self.backend {
+            #[cfg(feature = "rar-support")]
             ArchiveBackend::Unrar(unrar) => unrar.recovery_percentage(),
             // Other formats don't support recovery records
             ArchiveBackend::Piz(_)
@@ -492,6 +519,7 @@ impl Archive {
     /// ```
     pub fn is_solid(&self) -> Result<bool> {
         match &self.backend {
+            #[cfg(feature = "rar-support")]
             ArchiveBackend::Unrar(unrar) => unrar.is_solid(),
             ArchiveBackend::SevenZ(sevenz) => sevenz.is_solid(),
             ArchiveBackend::Piz(_)
@@ -524,11 +552,14 @@ impl Archive {
                 ArchiveBackend::Libarchive(backend) => {
                     backend.close_write()?;
                 }
-                ArchiveBackend::Unrar(_)
-                | ArchiveBackend::Piz(_)
+                #[cfg(feature = "rar-support")]
+                ArchiveBackend::Unrar(_) => {
+                    return Err(ArchiveError::read_only_backend(crate::error::ops::FINISH));
+                }
+                ArchiveBackend::Piz(_)
                 | ArchiveBackend::SevenZ(_)
                 | ArchiveBackend::ZipReader(_) => {
-                    return Err(ArchiveError::read_only_backend("finish"));
+                    return Err(ArchiveError::read_only_backend(crate::error::ops::FINISH));
                 }
             }
         }
@@ -596,6 +627,7 @@ mod tests {
         assert_eq!(archive.path(), fixture("test.zip"));
     }
 
+    #[cfg(feature = "rar-support")]
     #[test]
     fn test_open_valid_rar() {
         let archive = Archive::open(fixture("test.rar")).unwrap();
@@ -724,6 +756,7 @@ mod tests {
         assert!(!archive.is_encrypted().unwrap());
     }
 
+    #[cfg(feature = "rar-support")]
     #[test]
     fn test_is_encrypted_encrypted_rar() {
         // test_encrypted.rar has header encryption - is_encrypted() may fail
@@ -789,13 +822,13 @@ mod tests {
     // ── Archive::open_at_offset tests ──
 
     #[test]
-    fn test_open_at_offset_returns_unsupported() {
+    fn test_open_at_offset_returns_not_implemented() {
         let result = Archive::open_at_offset(fixture("test.zip"), 0);
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert!(matches!(
             err,
-            crate::error::ArchiveError::Unsupported { .. }
+            crate::error::ArchiveError::NotImplemented { .. }
         ));
     }
 

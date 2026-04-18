@@ -49,6 +49,7 @@ fn test_crc32_error_mapping_libarchive() {
     // Test passes if the mapping code compiles and is accessible
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_crc32_verification_disabled() {
@@ -79,6 +80,7 @@ fn test_crc32_verification_disabled() {
     );
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_metadata_crc32_present() {

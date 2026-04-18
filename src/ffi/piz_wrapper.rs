@@ -4,9 +4,9 @@
 //! and parallel extraction. Piz explicitly exposes CRC32 in file metadata.
 
 use crate::entry::{ArchiveEntry, EntryType};
-use crate::error::{ArchiveError, Result};
+use crate::error::{ArchiveError, ArchiveWarning, Result};
 use crate::ffi::common::{
-    compute_crc32_reader, copy_with_optional_crc, create_output_file, normalize_path,
+    AtomicOutputFile, compute_crc32_reader, copy_with_optional_crc, normalize_path,
 };
 use crate::format::ArchiveFormat;
 use crate::options::ProgressCallback;
@@ -68,7 +68,7 @@ impl PizArchive {
     /// CRC32 is read directly from ZIP central directory (no decompression).
     /// Piz explicitly exposes CRC32 in FileMetadata.
     pub fn list_files(&self) -> Result<Vec<ArchiveEntry>> {
-        let mapping = self.open_mmap("list_files")?;
+        let mapping = self.open_mmap(crate::error::ops::LIST_FILES)?;
 
         let archive = piz::ZipArchive::new(&mapping).map_err(|e| {
             ArchiveError::format(Some(ArchiveFormat::Zip), format!("Invalid ZIP: {}", e))
@@ -100,9 +100,7 @@ impl PizArchive {
         let is_dir = !metadata.is_file();
 
         // Detect symlinks via Unix mode bits (S_IFLNK = 0xA000)
-        let is_symlink = metadata
-            .unix_mode
-            .is_some_and(|m| (m & 0xF000) == 0xA000);
+        let is_symlink = metadata.unix_mode.is_some_and(|m| (m & 0xF000) == 0xA000);
 
         let entry_type = if is_dir {
             EntryType::Directory
@@ -147,7 +145,7 @@ impl PizArchive {
         &self,
         dest_path: &Path,
         progress: Option<&mut Box<dyn ProgressCallback>>,
-    ) -> Result<()> {
+    ) -> Result<Vec<ArchiveWarning>> {
         self.extract_all_with_options(dest_path, progress, true, false)
     }
 
@@ -157,8 +155,9 @@ impl PizArchive {
         mut progress: Option<&mut Box<dyn ProgressCallback>>,
         overwrite: bool,
         verify_crc32: bool,
-    ) -> Result<()> {
-        let mapping = self.open_mmap("extract_all")?;
+    ) -> Result<Vec<ArchiveWarning>> {
+        let mut warnings: Vec<ArchiveWarning> = Vec::new();
+        let mapping = self.open_mmap(crate::error::ops::EXTRACT_ALL)?;
 
         let archive = piz::ZipArchive::new(&mapping).map_err(|e| {
             ArchiveError::format(Some(ArchiveFormat::Zip), format!("Invalid ZIP: {}", e))
@@ -204,6 +203,10 @@ impl PizArchive {
                 .unix_mode
                 .is_some_and(|m| (m & 0xF000) == 0xA000);
             if is_symlink {
+                warnings.push(ArchiveWarning::SkippedSymlink {
+                    path: entry_metadata.path.as_ref().as_str().to_string(),
+                    target: None,
+                });
                 continue;
             }
 
@@ -217,7 +220,7 @@ impl PizArchive {
                     ArchiveError::format(Some(ArchiveFormat::Zip), format!("Read entry: {}", e))
                 })?;
 
-                let mut output_file = create_output_file(&entry_path, overwrite)?;
+                let mut output_file = AtomicOutputFile::create(&entry_path, overwrite)?;
                 let expected_crc = if verify_crc32 {
                     Some(entry_metadata.crc32)
                 } else {
@@ -226,11 +229,12 @@ impl PizArchive {
 
                 let bytes_written = copy_with_optional_crc(
                     &mut reader,
-                    &mut output_file,
+                    output_file.file_mut(),
                     expected_crc,
                     entry_metadata.path.as_str(),
                     &entry_path,
                 )?;
+                output_file.commit()?;
 
                 bytes_processed += bytes_written;
             }
@@ -241,7 +245,7 @@ impl PizArchive {
             let _ = callback.on_progress(total_bytes, Some(total_bytes));
         }
 
-        Ok(())
+        Ok(warnings)
     }
 
     /// Extract a single file by path
@@ -256,7 +260,7 @@ impl PizArchive {
         overwrite: bool,
         verify_crc32: bool,
     ) -> Result<()> {
-        let mapping = self.open_mmap("extract_file")?;
+        let mapping = self.open_mmap(crate::error::ops::EXTRACT_FILE)?;
 
         let archive = piz::ZipArchive::new(&mapping).map_err(|e| {
             ArchiveError::format(Some(ArchiveFormat::Zip), format!("Invalid ZIP: {}", e))
@@ -288,7 +292,7 @@ impl PizArchive {
             ArchiveError::format(Some(ArchiveFormat::Zip), format!("Read entry: {}", e))
         })?;
 
-        let mut output_file = create_output_file(&output_path, overwrite)?;
+        let mut output_file = AtomicOutputFile::create(&output_path, overwrite)?;
         let expected_crc = if verify_crc32 {
             Some(entry_metadata.crc32)
         } else {
@@ -297,11 +301,12 @@ impl PizArchive {
 
         copy_with_optional_crc(
             &mut reader,
-            &mut output_file,
+            output_file.file_mut(),
             expected_crc,
             file_path,
             &output_path,
         )?;
+        output_file.commit()?;
 
         Ok(())
     }
@@ -317,7 +322,7 @@ impl PizArchive {
         file_path: &str,
         verify_crc: bool,
     ) -> Result<Vec<u8>> {
-        let mapping = self.open_mmap("extract_to_memory")?;
+        let mapping = self.open_mmap(crate::error::ops::EXTRACT_TO_MEMORY)?;
 
         let archive = piz::ZipArchive::new(&mapping).map_err(|e| {
             ArchiveError::format(Some(ArchiveFormat::Zip), format!("Invalid ZIP: {}", e))
@@ -347,7 +352,7 @@ impl PizArchive {
         buffer
             .try_reserve(expected_size)
             .map_err(|_| ArchiveError::OperationBlocked {
-                operation: "extract_to_memory".to_string(),
+                operation: crate::error::ops::EXTRACT_TO_MEMORY.to_string(),
                 reason: format!(
                     "Unable to allocate {} bytes for entry '{}'",
                     expected_size, file_path

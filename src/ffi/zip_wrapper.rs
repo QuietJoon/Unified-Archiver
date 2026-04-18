@@ -4,17 +4,18 @@
 //! Falls back to computing CRC32 when null/missing in the archive.
 
 use crate::entry::{ArchiveEntry, EntryType};
-use crate::error::{ArchiveError, Result};
+use crate::error::{ArchiveError, ArchiveWarning, Result};
 use crate::format::ArchiveFormat;
 use crate::options::ProgressCallback;
 use crate::security::sanitize_entry_path;
+use secstr::SecStr;
 use std::fs::File;
 use std::io::Read;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use zip::ZipArchive as RawZipArchive;
 
-use super::common::{compute_crc32_reader, copy_with_optional_crc, create_output_file};
+use super::common::{AtomicOutputFile, compute_crc32_reader, copy_with_optional_crc};
 
 /// Open a ZIP entry by index, using password decryption if provided
 fn open_entry_by_index<'a>(
@@ -83,7 +84,7 @@ fn open_zip(path: &Path) -> Result<RawZipArchive<File>> {
 /// Automatically computes CRC32 when missing/null in archive.
 pub struct ZipArchive {
     path: PathBuf,
-    password: Option<String>,
+    password: Option<SecStr>,
 }
 
 impl ZipArchive {
@@ -100,7 +101,7 @@ impl ZipArchive {
     /// Open encrypted ZIP archive with password
     pub fn open_with_password(path: impl AsRef<Path>, password: &str) -> Result<Self> {
         let mut archive = Self::open(path)?;
-        archive.password = Some(password.to_string());
+        archive.password = Some(SecStr::from(password));
         Ok(archive)
     }
 
@@ -188,7 +189,7 @@ impl ZipArchive {
         &self,
         dest_path: &Path,
         progress: Option<&mut Box<dyn ProgressCallback>>,
-    ) -> Result<()> {
+    ) -> Result<Vec<ArchiveWarning>> {
         self.extract_all_with_options(dest_path, progress, true, false)
     }
 
@@ -200,19 +201,20 @@ impl ZipArchive {
     /// Extract a single file to memory
     pub fn extract_to_memory(&self, file_path: &str) -> Result<Vec<u8>> {
         let mut zip = open_zip(&self.path)?;
+        let password = crate::options::password_as_str(&self.password);
 
-        let mut zip_file = open_entry_by_name(&mut zip, file_path, self.password.as_deref())?;
+        let mut zip_file = open_entry_by_name(&mut zip, file_path, password)?;
 
         let size = zip_file.size();
         let size_usize = usize::try_from(size).map_err(|_| ArchiveError::OperationBlocked {
-            operation: "extract_to_memory".to_string(),
+            operation: crate::error::ops::EXTRACT_TO_MEMORY.to_string(),
             reason: format!("Entry too large for memory: {} bytes", size),
         })?;
         let mut buffer = Vec::new();
         buffer
             .try_reserve(size_usize)
             .map_err(|_| ArchiveError::OperationBlocked {
-                operation: "extract_to_memory".to_string(),
+                operation: crate::error::ops::EXTRACT_TO_MEMORY.to_string(),
                 reason: format!("Failed to allocate {} bytes", size),
             })?;
         zip_file
@@ -242,7 +244,8 @@ impl ZipArchive {
         progress: Option<&mut Box<dyn ProgressCallback>>,
         overwrite: bool,
         verify_crc32: bool,
-    ) -> Result<()> {
+    ) -> Result<Vec<ArchiveWarning>> {
+        let mut warnings: Vec<ArchiveWarning> = Vec::new();
         std::fs::create_dir_all(dest_path)
             .map_err(|e| ArchiveError::io("create_dir", dest_path.to_path_buf(), e))?;
 
@@ -264,6 +267,7 @@ impl ZipArchive {
         let mut bytes_processed = 0u64;
         let mut progress = progress;
         let num_entries = zip.len();
+        let password = crate::options::password_as_str(&self.password);
 
         for i in 0..num_entries {
             if let Some(callback) = progress.as_mut() {
@@ -274,7 +278,7 @@ impl ZipArchive {
                 }
             }
 
-            let mut zip_file = open_entry_by_index(&mut zip, i, self.password.as_deref())?;
+            let mut zip_file = open_entry_by_index(&mut zip, i, password)?;
 
             let entry_path = sanitize_entry_path(zip_file.name(), dest_path)?;
 
@@ -285,6 +289,10 @@ impl ZipArchive {
 
             // Skip symlinks for security
             if zip_file.is_symlink() {
+                warnings.push(ArchiveWarning::SkippedSymlink {
+                    path: zip_file.name().to_string(),
+                    target: None,
+                });
                 continue;
             }
 
@@ -300,15 +308,16 @@ impl ZipArchive {
 
                 let entry_name = zip_file.name().to_string();
                 let entry_size = zip_file.size();
-                let mut output_file = create_output_file(&entry_path, overwrite)?;
+                let mut output_file = AtomicOutputFile::create(&entry_path, overwrite)?;
 
                 copy_with_optional_crc(
                     &mut zip_file,
-                    &mut output_file,
+                    output_file.file_mut(),
                     expected_crc,
                     &entry_name,
                     &entry_path,
                 )?;
+                output_file.commit()?;
 
                 bytes_processed += entry_size;
             }
@@ -318,7 +327,7 @@ impl ZipArchive {
             let _ = callback.on_progress(total_bytes, Some(total_bytes));
         }
 
-        Ok(())
+        Ok(warnings)
     }
 
     /// Extract a single file with options (overwrite, verify_crc32)
@@ -333,8 +342,9 @@ impl ZipArchive {
             .map_err(|e| ArchiveError::io("create_dir", dest_path.to_path_buf(), e))?;
 
         let mut zip = open_zip(&self.path)?;
+        let password = crate::options::password_as_str(&self.password);
 
-        let mut zip_file = open_entry_by_name(&mut zip, file_path, self.password.as_deref())?;
+        let mut zip_file = open_entry_by_name(&mut zip, file_path, password)?;
 
         let output_path = sanitize_entry_path(zip_file.name(), dest_path)?;
 
@@ -349,15 +359,16 @@ impl ZipArchive {
             None
         };
 
-        let mut output_file = create_output_file(&output_path, overwrite)?;
+        let mut output_file = AtomicOutputFile::create(&output_path, overwrite)?;
 
         copy_with_optional_crc(
             &mut zip_file,
-            &mut output_file,
+            output_file.file_mut(),
             expected_crc,
             file_path,
             &output_path,
         )?;
+        output_file.commit()?;
 
         Ok(())
     }
@@ -369,9 +380,10 @@ impl ZipArchive {
     pub fn test_integrity(&self) -> Result<Vec<String>> {
         let mut zip = open_zip(&self.path)?;
         let mut failed = Vec::new();
+        let password = crate::options::password_as_str(&self.password);
 
         for i in 0..zip.len() {
-            let mut zip_file = open_entry_by_index(&mut zip, i, self.password.as_deref())?;
+            let mut zip_file = open_entry_by_index(&mut zip, i, password)?;
 
             if zip_file.is_dir() {
                 continue;

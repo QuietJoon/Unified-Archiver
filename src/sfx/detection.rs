@@ -466,7 +466,10 @@ mod tests {
         temp.flush().unwrap();
 
         let result = detect_sfx(temp.path()).unwrap();
-        assert!(result.is_sfx, "unknown-stub SFX with ZIP payload should be detected");
+        assert!(
+            result.is_sfx,
+            "unknown-stub SFX with ZIP payload should be detected"
+        );
         assert_eq!(result.stub_type, Some(StubType::Unknown));
         assert_eq!(result.archive_format, Some(ArchiveFormat::Zip));
         assert!(result.data_offset.unwrap() >= 500);
@@ -482,7 +485,10 @@ mod tests {
         temp.flush().unwrap();
 
         let result = detect_sfx(temp.path()).unwrap();
-        assert!(!result.is_sfx, "unknown header without archive signature must not be SFX");
+        assert!(
+            !result.is_sfx,
+            "unknown header without archive signature must not be SFX"
+        );
     }
 
     #[test]

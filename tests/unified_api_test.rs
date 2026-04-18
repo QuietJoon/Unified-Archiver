@@ -4,6 +4,7 @@
 
 use unified_archive::{Archive, ArchiveFormat, EntryType};
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_unified_api_open_rar4() {
@@ -17,6 +18,7 @@ fn test_unified_api_open_rar4() {
     assert!(archive.path().to_string_lossy().ends_with("test.rar"));
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_unified_api_open_rar5() {
@@ -27,6 +29,7 @@ fn test_unified_api_open_rar5() {
     assert_eq!(archive.format(), ArchiveFormat::Rar5);
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_unified_api_list_files_rar4() {
@@ -43,6 +46,7 @@ fn test_unified_api_list_files_rar4() {
     assert_eq!(entry.crc32, Some(0x054607BC));
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_unified_api_list_files_rar5() {
@@ -60,6 +64,7 @@ fn test_unified_api_list_files_rar5() {
     assert_eq!(entry.crc32, Some(0x054607BC));
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_unified_api_entry_count() {

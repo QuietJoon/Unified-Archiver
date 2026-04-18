@@ -5,7 +5,6 @@
 use unified_archive::{Archive, ArchiveFormat, CompressionLevel, CompressionOptions};
 
 #[test]
-#[ignore = "ZIP modification via libarchive has known issues - use 7z/tar for modification"]
 fn test_add_files_to_archive() {
     let tmp_dir = tempfile::tempdir().unwrap();
     let test_path = tmp_dir.path().join("test_modify_add.zip");
@@ -40,7 +39,6 @@ fn test_add_files_to_archive() {
 }
 
 #[test]
-#[ignore = "ZIP modification via libarchive has known issues - use 7z/tar for modification"]
 fn test_remove_files_from_archive() {
     let tmp_dir = tempfile::tempdir().unwrap();
     let test_path = tmp_dir.path().join("test_modify_remove.zip");
@@ -80,7 +78,6 @@ fn test_remove_files_from_archive() {
 }
 
 #[test]
-#[ignore = "ZIP modification via libarchive has known issues - use 7z/tar for modification"]
 fn test_replace_files_in_archive() {
     let tmp_dir = tempfile::tempdir().unwrap();
     let test_path = tmp_dir.path().join("test_modify_replace.zip");
@@ -111,7 +108,6 @@ fn test_replace_files_in_archive() {
 }
 
 #[test]
-#[ignore = "ZIP modification via libarchive has known issues - use 7z/tar for modification"]
 fn test_combined_operations() {
     let tmp_dir = tempfile::tempdir().unwrap();
     let test_path = tmp_dir.path().join("test_modify_combined.zip");

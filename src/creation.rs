@@ -28,7 +28,7 @@ impl Archive {
 
         if path_buf.exists() {
             return Err(ArchiveError::io(
-                "create",
+                crate::error::ops::CREATE,
                 &path_buf,
                 std::io::Error::new(
                     std::io::ErrorKind::AlreadyExists,
@@ -77,10 +77,9 @@ impl Archive {
         match &mut self.backend {
             ArchiveBackend::ZipWriter(writer) => writer.add_file_from_data(path, data),
             ArchiveBackend::Libarchive(backend) => backend.add_file_from_data(path, data),
-            ArchiveBackend::Unrar(_)
-            | ArchiveBackend::Piz(_)
-            | ArchiveBackend::SevenZ(_)
-            | ArchiveBackend::ZipReader(_) => {
+            #[cfg(feature = "rar-support")]
+            ArchiveBackend::Unrar(_) => Err(ArchiveError::read_only_backend("add_file_from_data")),
+            ArchiveBackend::Piz(_) | ArchiveBackend::SevenZ(_) | ArchiveBackend::ZipReader(_) => {
                 Err(ArchiveError::read_only_backend("add_file_from_data"))
             }
         }
@@ -115,10 +114,11 @@ impl Archive {
             ArchiveBackend::Libarchive(backend) => {
                 backend.add_file_from_path(fs_path, archive_path)
             }
-            ArchiveBackend::Unrar(_)
-            | ArchiveBackend::Piz(_)
-            | ArchiveBackend::SevenZ(_)
-            | ArchiveBackend::ZipReader(_) => {
+            #[cfg(feature = "rar-support")]
+            ArchiveBackend::Unrar(_) => {
+                Err(ArchiveError::read_only_backend("add_file_from_path_as"))
+            }
+            ArchiveBackend::Piz(_) | ArchiveBackend::SevenZ(_) | ArchiveBackend::ZipReader(_) => {
                 Err(ArchiveError::read_only_backend("add_file_from_path_as"))
             }
         }
@@ -129,10 +129,11 @@ impl Archive {
         match &mut self.backend {
             ArchiveBackend::ZipWriter(writer) => writer.add_directory_entry(path),
             ArchiveBackend::Libarchive(backend) => backend.add_directory_entry(path),
-            ArchiveBackend::Unrar(_)
-            | ArchiveBackend::Piz(_)
-            | ArchiveBackend::SevenZ(_)
-            | ArchiveBackend::ZipReader(_) => Err(ArchiveError::read_only_backend("add_directory")),
+            #[cfg(feature = "rar-support")]
+            ArchiveBackend::Unrar(_) => Err(ArchiveError::read_only_backend("add_directory")),
+            ArchiveBackend::Piz(_) | ArchiveBackend::SevenZ(_) | ArchiveBackend::ZipReader(_) => {
+                Err(ArchiveError::read_only_backend("add_directory"))
+            }
         }
     }
 
@@ -143,10 +144,11 @@ impl Archive {
         match &mut self.backend {
             ArchiveBackend::ZipWriter(writer) => writer.add_directory_recursive(path),
             ArchiveBackend::Libarchive(backend) => backend.add_directory_recursive(path),
-            ArchiveBackend::Unrar(_)
-            | ArchiveBackend::Piz(_)
-            | ArchiveBackend::SevenZ(_)
-            | ArchiveBackend::ZipReader(_) => {
+            #[cfg(feature = "rar-support")]
+            ArchiveBackend::Unrar(_) => {
+                Err(ArchiveError::read_only_backend("add_directory_recursive"))
+            }
+            ArchiveBackend::Piz(_) | ArchiveBackend::SevenZ(_) | ArchiveBackend::ZipReader(_) => {
                 Err(ArchiveError::read_only_backend("add_directory_recursive"))
             }
         }

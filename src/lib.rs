@@ -111,7 +111,6 @@
 //! let options = CompressionOptions {
 //!     format: ArchiveFormat::Zip,
 //!     level: CompressionLevel::Normal,
-//!     password: Some("secret".to_string().into()),
 //!     ..Default::default()
 //! };
 //!
@@ -143,21 +142,25 @@
 //! |-----------|------|---------|--------|-------|------------|---------------|
 //! | **RAR**   | ✅   | ✅      | 🪟*    | ✅    | ✅         | ✅            |
 //! | **RAR5**  | ✅   | ✅      | 🪟*    | ✅    | ✅         | ✅            |
-//! | **ZIP**   | ✅   | ✅      | ✅     | ✅    | ✅         | ✅            |
+//! | **ZIP**   | ✅   | ✅      | ✅     | ✅    | 📖§        | ✅            |
 //! | **7z**    | ✅   | ✅      | ✅     | ✅    | ✅†        | ✅            |
 //! | **TAR**   | ✅   | ✅      | ✅     | ✅    | ❌         | ❌            |
 //! | **TAR.GZ**| ✅   | ✅      | ✅     | ✅    | ❌         | ❌            |
 //! | **TAR.BZ2**| ✅  | ✅      | ✅     | ✅    | ❌         | ❌            |
 //! | **TAR.XZ**| ✅   | ✅      | ✅     | ✅    | ❌         | ❌            |
-//! | **GZIP**  | ✅‡  | ✅‡     | ❌     | ✅    | ❌         | ❌            |
-//! | **BZIP2** | ✅‡  | ✅‡     | ❌     | ✅    | ❌         | ❌            |
-//! | **XZ**    | ✅‡  | ✅‡     | ❌     | ✅    | ❌         | ❌            |
+//! | **GZIP**  | ✅   | ✅      | ❌     | ✅    | ❌         | ❌            |
+//! | **BZIP2** | ✅   | ✅      | ❌     | ✅    | ❌         | ❌            |
+//! | **XZ**    | ✅   | ✅      | ❌     | ✅    | ❌         | ❌            |
 //! | **ISO**   | ✅   | ✅      | ❌     | ⏳    | ❌         | ❌            |
 //!
-//! *🪟 RAR creation requires WinRAR on Windows with `external-rar-create` feature flag*
+//! *🪟 RAR creation requires `external-rar-create` feature + Windows host + licensed WinRAR (`rar.exe`)*
 //! *† 7z encryption: read-only via `open_encrypted()`*
-//! *‡ Standalone `.gz`/`.bz2`/`.xz` files are not yet supported. These formats currently
-//! only work as part of TAR compound formats (`.tar.gz`, `.tar.bz2`, `.tar.xz`).*
+//! Standalone `.gz`/`.bz2`/`.xz` files are supported for read/extract via libarchive's
+//! raw-format binding (AD 0019). Creation of standalone compressed files is out of scope
+//! per AD 0018; use the TAR compound variants to produce compressed archives.
+//! *§ ZIP encryption is read-only (AD 0027): `open_encrypted()` reads AES/ZipCrypto
+//! archives, but this library deliberately does not produce encrypted archives. Supplying
+//! a password to `Archive::create` for ZIP returns `OperationBlocked`.*
 //!
 //! ## Performance
 //!
@@ -223,8 +226,8 @@ pub use options::{
     CompressionLevel, CompressionOptions, EntryFilter, ExtractionOptions, ProgressCallback,
 };
 pub use security::{
-    ExtractionLimits, check_archive_ratio, check_extraction_safe, sanitize_entry_path,
-    validate_entry_path, verify_crc32,
+    ExtractionLimits, check_archive_ratio, check_extraction_safe, check_single_entry_safe,
+    sanitize_entry_path, validate_entry_path, verify_crc32,
 };
 pub use sfx::{SfxDetectionResult, StubType}; // Phase 7: SFX detection
 pub use stream_crc::{

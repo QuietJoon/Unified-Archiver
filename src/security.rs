@@ -81,6 +81,33 @@ impl ExtractionLimits {
         self.max_mmap_size = Some(size);
         self
     }
+
+    /// Reject suspiciously high uncompressed/compressed ratios (zip-bomb gate).
+    ///
+    /// `label` is interpolated into the error to identify the entry or archive
+    /// the violation belongs to. Returns `Ok(())` if the ratio limit is
+    /// effectively unlimited or the compressed size is zero.
+    pub(crate) fn check_ratio(
+        &self,
+        uncompressed: u64,
+        compressed: u64,
+        label: &str,
+    ) -> Result<()> {
+        if compressed == 0 || self.max_compression_ratio >= f64::MAX {
+            return Ok(());
+        }
+        let ratio = uncompressed as f64 / compressed as f64;
+        if ratio > self.max_compression_ratio {
+            return Err(ArchiveError::OperationBlocked {
+                operation: "extract".to_string(),
+                reason: format!(
+                    "{} compression ratio {:.1}:1 exceeds limit of {:.1}:1 (possible zip bomb)",
+                    label, ratio, self.max_compression_ratio
+                ),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Get the effective maximum mmap size
@@ -169,34 +196,39 @@ pub fn sanitize_entry_path(entry_path: &str, dest: &Path) -> Result<PathBuf> {
     // Join with destination
     let full_path = dest.join(&normalized);
 
-    // Verify the path stays within destination
-    // We need to handle non-existent paths (files not yet extracted)
+    // Canonicalize destination to a stable base. After `normalize_entry_components`
+    // stripped all `..`/absolute components, `normalized` is guaranteed relative, so
+    // `full_path` cannot lexically escape `dest`. We still canonicalize `dest` (and
+    // only existing ancestors of `full_path`) so subsequent symlink checks compare
+    // against a canonical base — we deliberately do NOT create parent directories
+    // here to keep this function side-effect-free (callers create dirs if needed).
     let canonical_dest = dest
         .canonicalize()
         .map_err(|e| ArchiveError::io("canonicalize destination", dest.to_path_buf(), e))?;
 
-    // For safety, we verify that the path (when normalized) stays within destination
-    // We can't use canonicalize on non-existent paths, so we build the expected path
-    // and verify it's a child of the canonical destination
-
-    // Create all parent directories to allow canonicalization
+    // Find the deepest existing ancestor and verify it is within canonical_dest.
+    // If an attacker placed a symlink inside `dest` pointing outside, this catches
+    // it without creating any new directories on disk.
     if let Some(parent) = full_path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| ArchiveError::io("create parent dirs", parent.to_path_buf(), e))?;
+        let mut existing: Option<&Path> = None;
+        let mut candidate: Option<&Path> = Some(parent);
+        while let Some(p) = candidate {
+            if p.exists() {
+                existing = Some(p);
+                break;
+            }
+            candidate = p.parent();
         }
-
-        // Now canonicalize the parent (which exists)
-        let canonical_parent = parent
-            .canonicalize()
-            .map_err(|e| ArchiveError::io("canonicalize parent", parent.to_path_buf(), e))?;
-
-        // Verify parent is within destination
-        if !canonical_parent.starts_with(&canonical_dest) {
-            return Err(ArchiveError::InvalidPath {
-                path: entry_path.to_string(),
-                reason: "Path traversal attempt detected".to_string(),
-            });
+        if let Some(p) = existing {
+            let canonical_ancestor = p
+                .canonicalize()
+                .map_err(|e| ArchiveError::io("canonicalize ancestor", p.to_path_buf(), e))?;
+            if !canonical_ancestor.starts_with(&canonical_dest) {
+                return Err(ArchiveError::InvalidPath {
+                    path: entry_path.to_string(),
+                    reason: "Path traversal attempt detected".to_string(),
+                });
+            }
         }
     }
 
@@ -292,18 +324,7 @@ pub fn check_extraction_safe(entries: &[ArchiveEntry], limits: &ExtractionLimits
 
         // Check compression ratio (zip bomb detection)
         if let (Some(uncompressed), Some(compressed)) = (entry.size, entry.compressed_size) {
-            if compressed > 0 {
-                let ratio = uncompressed as f64 / compressed as f64;
-                if ratio > limits.max_compression_ratio {
-                    return Err(ArchiveError::OperationBlocked {
-                        operation: "extract".to_string(),
-                        reason: format!(
-                            "File '{}' has suspicious compression ratio: {:.1}:1 exceeds limit of {:.1}:1 (possible zip bomb)",
-                            entry.path, ratio, limits.max_compression_ratio
-                        ),
-                    });
-                }
-            }
+            limits.check_ratio(uncompressed, compressed, &format!("File '{}'", entry.path))?;
         }
     }
 
@@ -331,14 +352,13 @@ pub fn check_archive_ratio(
     archive_path: &Path,
     limits: &ExtractionLimits,
 ) -> Result<()> {
-    // Skip if ratio limit is effectively unlimited
     if limits.max_compression_ratio >= f64::MAX {
         return Ok(());
     }
 
     let archive_size = std::fs::metadata(archive_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+        .map_err(|e| ArchiveError::io("stat archive", archive_path.to_path_buf(), e))?
+        .len();
 
     if archive_size == 0 {
         return Ok(());
@@ -350,19 +370,61 @@ pub fn check_archive_ratio(
         .filter_map(|e| e.size)
         .sum();
 
-    if total_uncompressed == 0 {
-        return Ok(());
-    }
+    limits.check_ratio(total_uncompressed, archive_size, "Archive")
+}
 
-    let ratio = total_uncompressed as f64 / archive_size as f64;
-    if ratio > limits.max_compression_ratio {
-        return Err(ArchiveError::OperationBlocked {
+/// Combined per-archive safety check: runs `check_extraction_safe` and
+/// `check_archive_ratio` against the same entry slice. Use this from
+/// extraction backends to avoid two separate traversals.
+pub fn check_extraction_safe_with_archive(
+    entries: &[ArchiveEntry],
+    archive_path: &Path,
+    limits: &ExtractionLimits,
+) -> Result<()> {
+    check_extraction_safe(entries, limits)?;
+    check_archive_ratio(entries, archive_path, limits)
+}
+
+/// Check a single-entry extraction against resource limits.
+///
+/// Used by `extract_to_memory` and `extract_to_stream`, which otherwise bypass
+/// the `check_extraction_safe` gate that wraps disk-based extraction paths.
+/// The entry is identified by `file_path` (normalized archive path).
+///
+/// Returns `OperationBlocked` if:
+/// * the entry is not present in `entries`,
+/// * its uncompressed size exceeds `limits.max_file_size`, or
+/// * its per-entry compression ratio exceeds `limits.max_compression_ratio`.
+///
+/// Entries without size metadata are allowed through — the backend stream is
+/// still responsible for honoring the limit as bytes arrive.
+pub fn check_single_entry_safe(
+    entries: &[ArchiveEntry],
+    file_path: &str,
+    limits: &ExtractionLimits,
+) -> Result<()> {
+    let entry = entries
+        .iter()
+        .find(|e| e.path == file_path)
+        .ok_or_else(|| ArchiveError::OperationBlocked {
             operation: "extract".to_string(),
-            reason: format!(
-                "Archive compression ratio {:.1}:1 exceeds limit of {:.1}:1 (possible zip bomb)",
-                ratio, limits.max_compression_ratio
-            ),
-        });
+            reason: format!("Entry '{}' not found in archive metadata", file_path),
+        })?;
+
+    if let Some(size) = entry.size {
+        if size > limits.max_file_size {
+            return Err(ArchiveError::OperationBlocked {
+                operation: "extract".to_string(),
+                reason: format!(
+                    "File '{}' too large: {} bytes exceeds limit of {} bytes",
+                    entry.path, size, limits.max_file_size
+                ),
+            });
+        }
+
+        if let Some(compressed) = entry.compressed_size {
+            limits.check_ratio(size, compressed, &format!("File '{}'", entry.path))?;
+        }
     }
 
     Ok(())

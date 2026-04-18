@@ -3,11 +3,12 @@
 //! Provides memory-safe and ergonomic interfaces with RAII patterns
 
 use crate::entry::{ArchiveEntry, EntryType};
-use crate::error::{ArchiveError, Result};
+use crate::error::{ArchiveError, ArchiveWarning, Result};
 use crate::ffi::unrar::*;
 use crate::format::ArchiveFormat;
 use crate::options::{ProgressCallback, RateLimiter};
 use crate::security::sanitize_entry_path;
+use secstr::SecStr;
 use std::ffi::CString;
 use std::ops::ControlFlow;
 use std::os::raw::{c_int, c_uint};
@@ -16,6 +17,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::common::{TempDirGuard, normalize_path};
+use tempfile::NamedTempFile;
 
 /// Seconds between Windows FILETIME epoch (1601-01-01) and Unix epoch (1970-01-01)
 const FILETIME_UNIX_EPOCH_DIFF_SECS: u64 = 11_644_473_600;
@@ -47,7 +49,7 @@ fn unrar_lock() -> MutexGuard<'static, ()> {
 pub struct UnrarArchive {
     handle: RARHandle,
     path: String,
-    password: Option<String>,
+    password: Option<SecStr>,
     /// Archive header flags (includes solid, volume, locked flags)
     flags: c_uint,
 }
@@ -105,7 +107,7 @@ impl UnrarArchive {
         }
 
         // Store password for fresh handle creation
-        archive.password = Some(password.to_string());
+        archive.password = Some(SecStr::from(password));
 
         Ok(archive)
     }
@@ -115,9 +117,8 @@ impl UnrarArchive {
     /// UnRAR handles get exhausted after list_files(), so extraction operations
     /// need a fresh handle. This creates a new handle with the same path/password.
     fn fresh_handle(&self) -> Result<Self> {
-        // Create a new handle with same path/password
-        if let Some(pwd) = &self.password {
-            Self::open_with_password(&self.path, pwd)
+        if let Some(pwd_str) = crate::options::password_as_str(&self.password) {
+            Self::open_with_password(&self.path, pwd_str)
         } else {
             Self::open(&self.path)
         }
@@ -451,7 +452,7 @@ impl UnrarArchive {
         &self,
         dest_path: &std::path::Path,
         progress: Option<&mut Box<dyn ProgressCallback>>,
-    ) -> Result<()> {
+    ) -> Result<Vec<ArchiveWarning>> {
         self.extract_all_with_options(dest_path, progress, true)
     }
 
@@ -460,18 +461,15 @@ impl UnrarArchive {
         dest_path: &std::path::Path,
         mut progress: Option<&mut Box<dyn ProgressCallback>>,
         overwrite: bool,
-    ) -> Result<()> {
+    ) -> Result<Vec<ArchiveWarning>> {
+        let mut warnings: Vec<ArchiveWarning> = Vec::new();
         // Compute total_bytes from a dedicated fresh handle. The original
         // `self.handle` may already be EOF-positioned (e.g., after
         // `list_files_for_limits()` during open), so calling `self.list_files()`
         // here yields zero entries and `total_bytes == 0`, breaking progress.
         let total_bytes: u64 = if progress.is_some() {
             let prescan = self.fresh_handle()?;
-            prescan
-                .list_files()?
-                .iter()
-                .filter_map(|e| e.size)
-                .sum()
+            prescan.list_files()?.iter().filter_map(|e| e.size).sum()
         } else {
             0
         };
@@ -497,11 +495,19 @@ impl UnrarArchive {
             }
 
             // Skip symlinks and hardlinks for security
-            if entry.entry_type == EntryType::Symlink || entry.entry_type == EntryType::HardLink {
-                unsafe {
-                    let _guard = unrar_lock();
-                    RARProcessFile(fresh.handle, RAR_SKIP, std::ptr::null(), std::ptr::null());
-                }
+            if entry.entry_type == EntryType::Symlink {
+                warnings.push(ArchiveWarning::SkippedSymlink {
+                    path: entry.path.clone(),
+                    target: None,
+                });
+                fresh.skip_entry()?;
+                continue;
+            }
+            if entry.entry_type == EntryType::HardLink {
+                warnings.push(ArchiveWarning::SkippedHardLink {
+                    path: entry.path.clone(),
+                });
+                fresh.skip_entry()?;
                 continue;
             }
 
@@ -516,32 +522,25 @@ impl UnrarArchive {
                 }
             }
 
-            if !overwrite && entry.is_file() && safe_path.exists() {
-                return Err(ArchiveError::OperationBlocked {
-                    operation: "extract_all".to_string(),
-                    reason: format!("Destination file already exists: {}", safe_path.display()),
-                });
-            }
-
-            // Extract using the full absolute path as dest_name
-            let safe_path_str = safe_path.to_string_lossy();
-            let dest_name_cstr = CString::new(safe_path_str.as_bytes()).map_err(|_| {
-                ArchiveError::invalid_path(safe_path_str.as_ref(), "Contains null byte")
-            })?;
-
-            // Extract current file using full absolute path as the destination filename
-            unsafe {
-                // Serialize UnRAR FFI calls (global state is not thread-safe).
-                let _guard = unrar_lock();
-                let result = RARProcessFile(
-                    fresh.handle,
-                    RAR_EXTRACT,
-                    std::ptr::null(), // NULL for directory (use full path in dest_name)
-                    dest_name_cstr.as_ptr(), // Full absolute path
-                );
-
-                if result != ERAR_SUCCESS {
-                    return Err(map_unrar_error(result, &self.path));
+            if entry.is_file() {
+                unrar_extract_atomic(fresh.handle, &safe_path, overwrite, &self.path)?;
+            } else {
+                // Directories — let UnRAR create them (via RAR_EXTRACT to the path).
+                let safe_path_str = safe_path.to_string_lossy();
+                let dest_name_cstr = CString::new(safe_path_str.as_bytes()).map_err(|_| {
+                    ArchiveError::invalid_path(safe_path_str.as_ref(), "Contains null byte")
+                })?;
+                unsafe {
+                    let _guard = unrar_lock();
+                    let result = RARProcessFile(
+                        fresh.handle,
+                        RAR_EXTRACT,
+                        std::ptr::null(),
+                        dest_name_cstr.as_ptr(),
+                    );
+                    if result != ERAR_SUCCESS {
+                        return Err(map_unrar_error(result, &self.path));
+                    }
                 }
             }
 
@@ -556,7 +555,7 @@ impl UnrarArchive {
             let _ = callback.on_progress(total_bytes, Some(total_bytes));
         }
 
-        Ok(())
+        Ok(warnings)
     }
 
     /// Extract a single file by path
@@ -587,10 +586,7 @@ impl UnrarArchive {
                         {
                             return Err(ArchiveError::format(
                                 Some(ArchiveFormat::Rar),
-                                format!(
-                                    "Refusing to extract link entry: {}",
-                                    file_path
-                                ),
+                                format!("Refusing to extract link entry: {}", file_path),
                             ));
                         }
 
@@ -605,41 +601,7 @@ impl UnrarArchive {
                             }
                         }
 
-                        if !overwrite && entry.is_file() && safe_path.exists() {
-                            return Err(ArchiveError::OperationBlocked {
-                                operation: "extract_file".to_string(),
-                                reason: format!(
-                                    "Destination file already exists: {}",
-                                    safe_path.display()
-                                ),
-                            });
-                        }
-
-                        // Extract using the full absolute path as dest_name
-                        let safe_path_str = safe_path.to_string_lossy();
-                        let dest_name_cstr =
-                            CString::new(safe_path_str.as_bytes()).map_err(|_| {
-                                ArchiveError::invalid_path(
-                                    safe_path_str.as_ref(),
-                                    "Contains null byte",
-                                )
-                            })?;
-
-                        // Extract this file using full absolute path as the destination filename
-                        unsafe {
-                            // Serialize UnRAR FFI calls (global state is not thread-safe).
-                            let _guard = unrar_lock();
-                            let result = RARProcessFile(
-                                fresh.handle,
-                                RAR_EXTRACT,
-                                std::ptr::null(), // NULL for directory (use full path in dest_name)
-                                dest_name_cstr.as_ptr(), // Full absolute path
-                            );
-
-                            if result != ERAR_SUCCESS {
-                                return Err(map_unrar_error(result, &self.path));
-                            }
-                        }
+                        unrar_extract_atomic(fresh.handle, &safe_path, overwrite, &self.path)?;
                         return Ok(());
                     } else {
                         // Skip this file
@@ -682,8 +644,8 @@ impl UnrarArchive {
         let _guard = TempDirGuard::new(temp_dir.clone());
 
         // Open a fresh archive handle to avoid state issues
-        let fresh = if let Some(pwd) = &self.password {
-            Self::open_with_password(&self.path, pwd)?
+        let fresh = if let Some(pwd_str) = crate::options::password_as_str(&self.password) {
+            Self::open_with_password(&self.path, pwd_str)?
         } else {
             Self::open(&self.path)?
         };
@@ -703,7 +665,7 @@ impl UnrarArchive {
 
         if len > usize::MAX as u64 {
             return Err(ArchiveError::OperationBlocked {
-                operation: "extract_to_memory".to_string(),
+                operation: crate::error::ops::EXTRACT_TO_MEMORY.to_string(),
                 reason: format!(
                     "File '{}' is too large to buffer in memory: {} bytes",
                     file_path, len
@@ -715,7 +677,7 @@ impl UnrarArchive {
         buffer
             .try_reserve(len as usize)
             .map_err(|_| ArchiveError::OperationBlocked {
-                operation: "extract_to_memory".to_string(),
+                operation: crate::error::ops::EXTRACT_TO_MEMORY.to_string(),
                 reason: format!("Unable to allocate {} bytes for file '{}'", len, file_path),
             })?;
 
@@ -965,6 +927,70 @@ fn resolve_dest_path(dest_path: &Path) -> Result<std::path::PathBuf> {
                 .join(dest_path))
         }
     })
+}
+
+/// Atomically extract a single RAR file entry to `safe_path`.
+///
+/// UnRAR writes the file directly via `RARProcessFile`, so we cannot share
+/// `AtomicOutputFile` (which owns the file handle). We mirror its semantics
+/// by giving UnRAR a sibling tempfile path; on success the tempfile is
+/// renamed into place via `persist`/`persist_noclobber`. On any failure the
+/// `TempPath` drops and removes the partial file, so the destination is
+/// never left half-extracted.
+fn unrar_extract_atomic(
+    handle: RARHandle,
+    safe_path: &Path,
+    overwrite: bool,
+    archive_path: &str,
+) -> Result<()> {
+    if !overwrite && safe_path.exists() {
+        return Err(ArchiveError::OperationBlocked {
+            operation: "extract".to_string(),
+            reason: format!("Destination file already exists: {}", safe_path.display()),
+        });
+    }
+
+    let parent = safe_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+
+    let temp = NamedTempFile::new_in(parent)
+        .map_err(|e| ArchiveError::io("create_temp", parent.to_path_buf(), e))?;
+    let temp_path = temp.into_temp_path();
+
+    let temp_path_str = temp_path.to_string_lossy();
+    let dest_name_cstr = CString::new(temp_path_str.as_bytes())
+        .map_err(|_| ArchiveError::invalid_path(temp_path_str.as_ref(), "Contains null byte"))?;
+
+    unsafe {
+        let _guard = unrar_lock();
+        let result = RARProcessFile(
+            handle,
+            RAR_EXTRACT,
+            std::ptr::null(),
+            dest_name_cstr.as_ptr(),
+        );
+        if result != ERAR_SUCCESS {
+            return Err(map_unrar_error(result, archive_path));
+        }
+    }
+
+    if overwrite {
+        #[cfg(windows)]
+        if safe_path.exists() {
+            let _ = std::fs::remove_file(safe_path);
+        }
+        temp_path
+            .persist(safe_path)
+            .map_err(|e| ArchiveError::io("rename", safe_path.to_path_buf(), e.error))?;
+    } else {
+        temp_path
+            .persist_noclobber(safe_path)
+            .map_err(|e| ArchiveError::io("rename", safe_path.to_path_buf(), e.error))?;
+    }
+
+    Ok(())
 }
 
 /// Map UnRAR error code to ArchiveError

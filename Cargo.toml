@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 authors = ["unified-archive Contributors"]
 license = "MIT"
-description = "Unified, format-agnostic Rust bindings for 7zip archive operations across ZIP, 7z, RAR, TAR, and more"
+description = "Unified archive library for Rust — read, extract, create, and modify ZIP, 7z, RAR, TAR (gz/bz2/xz), and ISO archives through a single multi-backend API"
 repository = "https://github.com/QuietJoon/unified-archive"
 keywords = ["archive", "7zip", "compression", "extraction", "unified"]
 categories = ["compression", "filesystem"]
@@ -21,10 +21,10 @@ piz = "0.5"  # Native Rust ZIP backend with parallel extraction and CRC32 metada
 sevenz-rust2 = "0.19"  # Native Rust 7z backend with CRC32 metadata access (maintained fork)
 memmap2 = "0.9"  # Memory mapping for piz (requires &[u8])
 zip = { version = "2.2", default-features = false, features = ["deflate", "aes-crypto"] }  # Native Rust ZIP creation + encrypted ZIP reading
+tempfile = "3.0"  # Atomic write helper backing AtomicOutputFile and modification temp paths
 
 [dev-dependencies]
 criterion = "0.5"
-tempfile = "3.0"
 proptest = "1.4"
 serial_test = { version = "3", features = ["file_locks"] }
 

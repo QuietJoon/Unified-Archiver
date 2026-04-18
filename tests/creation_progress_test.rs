@@ -14,10 +14,12 @@ struct Recorder {
 
 impl Recorder {
     fn callback(this: Arc<Mutex<Self>>) -> Box<dyn unified_archive::ProgressCallback> {
-        Box::new(move |processed: u64, _total: Option<u64>| -> ControlFlow<()> {
-            this.lock().unwrap().invocations.push(processed);
-            ControlFlow::Continue(())
-        })
+        Box::new(
+            move |processed: u64, _total: Option<u64>| -> ControlFlow<()> {
+                this.lock().unwrap().invocations.push(processed);
+                ControlFlow::Continue(())
+            },
+        )
     }
 }
 
@@ -63,7 +65,11 @@ fn progress_callback_invoked_once_per_entry_tar() {
     archive.finish().unwrap();
 
     let invocations = recorder.lock().unwrap().invocations.clone();
-    assert_eq!(invocations.len(), 5, "one callback per added entry (TAR via libarchive)");
+    assert_eq!(
+        invocations.len(),
+        5,
+        "one callback per added entry (TAR via libarchive)"
+    );
     assert_eq!(*invocations.last().unwrap(), 5 * 32);
 }
 

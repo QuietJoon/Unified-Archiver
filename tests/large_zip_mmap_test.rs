@@ -64,7 +64,7 @@ fn test_large_zip_behavior() {
 
     let extract_result = archive2.extract_all(options);
     match &extract_result {
-        Ok(()) => {
+        Ok(_) => {
             println!("OK: Extraction completed");
             for entry in std::fs::read_dir(EXTRACT_PATH).unwrap() {
                 let entry = entry.unwrap();

@@ -11,24 +11,23 @@ fn main() {
         // On macOS with Homebrew, libarchive is keg-only
         #[cfg(target_os = "macos")]
         {
-            let homebrew_prefix = std::path::PathBuf::from("/opt/homebrew/opt/libarchive");
-            if homebrew_prefix.exists() {
-                println!(
-                    "cargo:rustc-link-search=native={}/lib",
-                    homebrew_prefix.display()
-                );
+            // Apple Silicon (`/opt/homebrew`) and Intel (`/usr/local`) layouts.
+            let candidates = [
+                std::path::PathBuf::from("/opt/homebrew/opt/libarchive"),
+                std::path::PathBuf::from("/usr/local/opt/libarchive"),
+            ];
+            let homebrew_prefix = candidates.iter().find(|p| p.exists());
+            if let Some(prefix) = homebrew_prefix {
+                println!("cargo:rustc-link-search=native={}/lib", prefix.display());
                 println!("cargo:rustc-link-lib=dylib=archive");
                 println!(
                     "cargo:warning=Using Homebrew libarchive from {}",
-                    homebrew_prefix.display()
+                    prefix.display()
                 );
-            } else {
-                // Try standard pkg-config
-                if pkg_config::probe_library("libarchive").is_err() {
-                    eprintln!("ERROR: libarchive not found");
-                    eprintln!("Please install: brew install libarchive");
-                    std::process::exit(1);
-                }
+            } else if pkg_config::probe_library("libarchive").is_err() {
+                println!("cargo:warning=libarchive not found");
+                println!("cargo:warning=Please install: brew install libarchive");
+                std::process::exit(1);
             }
         }
 
@@ -36,10 +35,10 @@ fn main() {
         #[cfg(not(target_os = "macos"))]
         {
             if pkg_config::probe_library("libarchive").is_err() {
-                eprintln!("ERROR: libarchive not found via pkg-config");
-                eprintln!("Please install libarchive development files:");
-                eprintln!("  Ubuntu/Debian: sudo apt-get install libarchive-dev");
-                eprintln!("  Fedora/RHEL: sudo dnf install libarchive-devel");
+                println!("cargo:warning=libarchive not found via pkg-config");
+                println!("cargo:warning=Please install libarchive development files:");
+                println!("cargo:warning=  Ubuntu/Debian: sudo apt-get install libarchive-dev");
+                println!("cargo:warning=  Fedora/RHEL: sudo dnf install libarchive-devel");
                 std::process::exit(1);
             }
         }
@@ -54,10 +53,12 @@ fn main() {
         );
     }
 
-    // Build and link UnRAR library (MANDATORY for RAR/RAR5 CRC32 support)
+    // Build and link UnRAR library (only when rar-support feature is enabled)
+    #[cfg(feature = "rar-support")]
     build_unrar();
 }
 
+#[cfg(feature = "rar-support")]
 fn build_unrar() {
     use std::path::PathBuf;
     use std::process::Command;
@@ -68,25 +69,35 @@ fn build_unrar() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
 
     // Compile UnRAR library using its makefile
-    let status = Command::new("make")
+    let status = match Command::new("make")
         .current_dir(&unrar_dir)
         .arg("lib")
         .status()
-        .expect("Failed to execute make - is make installed?");
+    {
+        Ok(s) => s,
+        Err(e) => {
+            println!("cargo:warning=Failed to execute make: {e}");
+            println!("cargo:warning=Install 'make' or disable the rar-support feature");
+            std::process::exit(1);
+        }
+    };
 
     if !status.success() {
-        panic!("Failed to build UnRAR library");
+        println!("cargo:warning=Failed to build UnRAR library (make returned {status})");
+        std::process::exit(1);
     }
 
     // Copy libunrar.a to OUT_DIR for linking
-    std::fs::copy(
+    if let Err(e) = std::fs::copy(
         unrar_dir.join("libunrar.a"),
         PathBuf::from(&out_dir).join("libunrar.a"),
-    )
-    .expect("Failed to copy libunrar.a");
+    ) {
+        println!("cargo:warning=Failed to copy libunrar.a: {e}");
+        std::process::exit(1);
+    }
 
     // Tell cargo to link the library
-    println!("cargo:rustc-link-search=native={}", out_dir);
+    println!("cargo:rustc-link-search=native={out_dir}");
     println!("cargo:rustc-link-lib=static=unrar");
 
     // Link C++ standard library (CRITICAL for UnRAR C++ code)

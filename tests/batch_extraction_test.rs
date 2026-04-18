@@ -52,6 +52,7 @@ fn test_extract_files_by_path_array_zip() {
     cleanup_temp_dir(&temp_dir);
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_extract_files_by_path_array_rar() {
@@ -172,6 +173,7 @@ fn test_extract_by_ids_zip() {
     cleanup_temp_dir(&temp_dir);
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_extract_by_ids_rar() {

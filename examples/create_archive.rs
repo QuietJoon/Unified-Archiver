@@ -5,9 +5,12 @@
 //! - Adding files from data (in-memory)
 //! - Adding files from filesystem paths
 //! - Setting compression levels
-//! - Password-protecting archives
+//! - Encrypted-archive creation is NOT supported (see AD 0027) —
+//!   use the demo below to see how the API rejects such requests.
 
-use unified_archive::{Archive, ArchiveFormat, CompressionLevel, CompressionOptions, Result};
+use unified_archive::{
+    Archive, ArchiveError, ArchiveFormat, CompressionLevel, CompressionOptions, Result,
+};
 
 fn main() -> Result<()> {
     println!("unified-archive creation examples");
@@ -19,8 +22,8 @@ fn main() -> Result<()> {
     // Example 2: Create a TAR.GZ archive
     example_create_tar_gz()?;
 
-    // Example 3: Create a password-protected archive
-    example_create_encrypted()?;
+    // Example 3: Demonstrate that encrypted creation is rejected
+    example_encrypted_creation_rejected()?;
 
     // Example 4: Create archive with maximum compression
     example_create_maximum_compression()?;
@@ -84,26 +87,37 @@ fn example_create_tar_gz() -> Result<()> {
     Ok(())
 }
 
-/// Create a password-protected archive
-fn example_create_encrypted() -> Result<()> {
-    println!("3. Creating password-protected archive...");
+/// Demonstrate that encrypted-archive creation is rejected (AD 0027).
+///
+/// `Archive::create` with a password set returns `ArchiveError::OperationBlocked`
+/// for every supported format. Encrypted reads are still fully supported via
+/// `Archive::open_encrypted`.
+fn example_encrypted_creation_rejected() -> Result<()> {
+    println!("3. Encrypted-archive creation is rejected (AD 0027)...");
 
     let options = CompressionOptions {
         format: ArchiveFormat::Zip,
         level: CompressionLevel::Normal,
-        password: Some("secret123".to_string().into()),
+        password: Some("secret123".into()),
         split_size: None,
         progress: None,
     };
 
-    let mut archive = Archive::create("/Volumes/Temp/claude/encrypted.zip", options)?;
+    match Archive::create("/Volumes/Temp/claude/encrypted.zip", options) {
+        Ok(_) => {
+            println!("   ✗ Unexpected: creation succeeded (should have been blocked)\n");
+        }
+        Err(ArchiveError::OperationBlocked { operation, reason }) => {
+            println!(
+                "   ✓ Creation correctly rejected [{}]: {}\n",
+                operation, reason
+            );
+        }
+        Err(err) => {
+            println!("   ✓ Creation rejected with: {}\n", err);
+        }
+    }
 
-    archive.add_file_from_data("secret.txt", b"This is confidential data\n")?;
-    archive.add_file_from_data("passwords.txt", b"admin:hunter2\nuser:password123\n")?;
-
-    archive.finish()?;
-
-    println!("   ✓ Created /Volumes/Temp/claude/encrypted.zip (password: secret123)\n");
     Ok(())
 }
 

@@ -8,12 +8,15 @@ use std::path::PathBuf;
 
 /// Extract password as `&str` from `Option<SecStr>`, if present.
 ///
-/// Panics if the password bytes are not valid UTF-8 (passwords are always
-/// constructed from `&str` or `String` inputs, so this is safe).
+/// Returns `None` if the slot is empty **or** if the stored bytes are not valid
+/// UTF-8. Passwords crossing this library's public API are UTF-8 by contract
+/// (only `&str`/`String` constructors are intended); `SecStr::from_slice` with
+/// non-UTF-8 bytes is a caller bug and is coerced to "no password" rather than
+/// panicking the process.
 pub(crate) fn password_as_str(password: &Option<SecStr>) -> Option<&str> {
     password
         .as_ref()
-        .map(|s| std::str::from_utf8(s.unsecure()).expect("password is not valid UTF-8"))
+        .and_then(|s| std::str::from_utf8(s.unsecure()).ok())
 }
 
 /// Entry filter type alias for filtering archive entries
@@ -295,6 +298,19 @@ mod tests {
         let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
         opts.password = Some("pw123".into());
         assert_eq!(password_as_str(&opts.password), Some("pw123"));
+    }
+
+    #[test]
+    fn test_password_as_str_non_utf8_returns_none() {
+        // R0059-0014: a SecStr constructed from invalid UTF-8 bytes must not
+        // panic the process; password_as_str returns None for such inputs.
+        let bad = Some(SecStr::new(vec![0xff, 0xfe, 0xfd]));
+        assert_eq!(password_as_str(&bad), None);
+    }
+
+    #[test]
+    fn test_password_as_str_empty_is_none() {
+        assert_eq!(password_as_str(&None), None);
     }
 
     #[test]

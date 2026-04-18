@@ -29,12 +29,11 @@ impl Archive {
     pub fn list_files(&self) -> Result<&[ArchiveEntry]> {
         self.entry_cache
             .get_or_try_init(|| match &self.backend {
+                #[cfg(feature = "rar-support")]
                 ArchiveBackend::Unrar(unrar) => unrar.list_files(),
                 ArchiveBackend::Piz(piz) => piz.list_files(),
                 ArchiveBackend::SevenZ(sevenz) => sevenz.list_files(),
-                ArchiveBackend::ZipWriter(_) => {
-                    Err(ArchiveError::write_mode_only(ops::LIST_FILES))
-                }
+                ArchiveBackend::ZipWriter(_) => Err(ArchiveError::write_mode_only(ops::LIST_FILES)),
                 ArchiveBackend::ZipReader(zip) => zip.list_files(),
                 // Skip the CRC-walk variant on the public listing path — CRC
                 // verification belongs in `validate_integrity()`, not routine listing.
@@ -52,6 +51,7 @@ impl Archive {
     /// Note: This method does NOT cache results. For repeated access, use `list_files()`.
     pub fn list_files_for_limits(&self) -> Result<Vec<ArchiveEntry>> {
         match &self.backend {
+            #[cfg(feature = "rar-support")]
             ArchiveBackend::Unrar(unrar) => unrar.list_files(),
             ArchiveBackend::Piz(piz) => piz.list_files(),
             ArchiveBackend::SevenZ(sevenz) => sevenz.list_files(),
@@ -124,6 +124,7 @@ impl Archive {
 
         // Call backend-specific test_integrity method
         let failed = match &self.backend {
+            #[cfg(feature = "rar-support")]
             ArchiveBackend::Unrar(unrar) => unrar.test_integrity()?,
             ArchiveBackend::Piz(piz) => piz.test_integrity()?,
             ArchiveBackend::SevenZ(sevenz) => sevenz.test_integrity()?,
@@ -563,6 +564,7 @@ mod tests {
         assert!(!entries.is_empty());
     }
 
+    #[cfg(feature = "rar-support")]
     #[test]
     fn test_list_files_rar() {
         let archive = Archive::open(fixture("test.rar")).unwrap();

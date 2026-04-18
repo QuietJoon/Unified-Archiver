@@ -2,6 +2,8 @@
 //!
 //! Validates that CRC32 checksums are correctly extracted from RAR and RAR5 archives
 
+#![cfg(feature = "rar-support")]
+
 use unified_archive::ffi::wrapper::UnrarArchive;
 
 #[test]

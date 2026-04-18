@@ -27,7 +27,10 @@ fn main() {
     });
 
     println!("Entries: {}\n", entries.len());
-    println!("{:<50} {:>12} {:>12} {:>10}", "Path", "Size", "Compressed", "CRC32");
+    println!(
+        "{:<50} {:>12} {:>12} {:>10}",
+        "Path", "Size", "Compressed", "CRC32"
+    );
     println!("{}", "-".repeat(88));
 
     for entry in entries {
@@ -44,6 +47,9 @@ fn main() {
             .map(|c| format!("{:08X}", c))
             .unwrap_or_else(|| "-".to_string());
 
-        println!("{:<50} {:>12} {:>12} {:>10}", entry.path, size, compressed, crc);
+        println!(
+            "{:<50} {:>12} {:>12} {:>10}",
+            entry.path, size, compressed, crc
+        );
     }
 }

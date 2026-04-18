@@ -4,6 +4,7 @@
 
 use unified_archive::{Archive, ArchiveFormat, EntryType, ValidationReport};
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_rar5_format_detection() {
@@ -12,6 +13,7 @@ fn test_rar5_format_detection() {
     assert_eq!(archive.format(), ArchiveFormat::Rar5);
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_rar5_list_files() {
@@ -24,6 +26,7 @@ fn test_rar5_list_files() {
     assert_eq!(entries[0].entry_type, EntryType::File);
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_rar5_entry_count() {
@@ -34,6 +37,7 @@ fn test_rar5_entry_count() {
     assert_eq!(count, 1);
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_rar5_find_entry() {
@@ -57,6 +61,7 @@ fn test_rar5_find_entry() {
     assert!(not_found.is_none());
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_rar5_validate_integrity() {
@@ -71,6 +76,7 @@ fn test_rar5_validate_integrity() {
     assert!(report.failed.is_empty());
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_rar5_metadata_consistency() {
@@ -125,6 +131,7 @@ fn test_validation_report_structure() {
 }
 
 /// Test that the same API works for both RAR and RAR5
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_api_consistency_rar_and_rar5() {
@@ -329,20 +336,17 @@ fn test_tar_xz_extract_to_memory() {
 }
 
 // ── GZIP format tests ──
-// Note: Plain .gz files (not .tar.gz) require archive_read_support_format_raw()
-// which is not yet bound. libarchive treats these as compression filters, not
-// archive formats. These tests document the expected behavior once format_raw
-// support is added.
+// Plain .gz / .bz2 / .xz files use archive_read_support_format_raw() via
+// libarchive. Per AD 0019, the single "data" entry is renamed to the archive's
+// file stem (e.g., test.gz → "test") for a stable, predictable API.
 
 #[test]
-#[ignore = "Plain GZIP requires format_raw support in libarchive bindings"]
 fn test_gzip_format_detection() {
     let archive = Archive::open("tests/fixtures/test.gz").expect("Failed to open GZIP archive");
     assert_eq!(archive.format(), ArchiveFormat::Gzip);
 }
 
 #[test]
-#[ignore = "Plain GZIP requires format_raw support in libarchive bindings"]
 fn test_gzip_list_files() {
     let archive = Archive::open("tests/fixtures/test.gz").expect("Failed to open GZIP archive");
     let entries = archive.list_files().expect("Failed to list files");
@@ -351,7 +355,6 @@ fn test_gzip_list_files() {
 }
 
 #[test]
-#[ignore = "Plain GZIP requires format_raw support in libarchive bindings"]
 fn test_gzip_extract_to_memory() {
     let archive = Archive::open("tests/fixtures/test.gz").expect("Failed to open GZIP archive");
     let entries = archive.list_files().expect("Failed to list files");
@@ -365,14 +368,12 @@ fn test_gzip_extract_to_memory() {
 // ── BZIP2 format tests ──
 
 #[test]
-#[ignore = "Plain BZIP2 requires format_raw support in libarchive bindings"]
 fn test_bzip2_format_detection() {
     let archive = Archive::open("tests/fixtures/test.bz2").expect("Failed to open BZIP2 archive");
     assert_eq!(archive.format(), ArchiveFormat::Bzip2);
 }
 
 #[test]
-#[ignore = "Plain BZIP2 requires format_raw support in libarchive bindings"]
 fn test_bzip2_list_files() {
     let archive = Archive::open("tests/fixtures/test.bz2").expect("Failed to open BZIP2 archive");
     let entries = archive.list_files().expect("Failed to list files");
@@ -380,7 +381,6 @@ fn test_bzip2_list_files() {
 }
 
 #[test]
-#[ignore = "Plain BZIP2 requires format_raw support in libarchive bindings"]
 fn test_bzip2_extract_to_memory() {
     let archive = Archive::open("tests/fixtures/test.bz2").expect("Failed to open BZIP2 archive");
     let entries = archive.list_files().expect("Failed to list files");
@@ -394,14 +394,12 @@ fn test_bzip2_extract_to_memory() {
 // ── XZ format tests ──
 
 #[test]
-#[ignore = "Plain XZ requires format_raw support in libarchive bindings"]
 fn test_xz_format_detection() {
     let archive = Archive::open("tests/fixtures/test.xz").expect("Failed to open XZ archive");
     assert_eq!(archive.format(), ArchiveFormat::Xz);
 }
 
 #[test]
-#[ignore = "Plain XZ requires format_raw support in libarchive bindings"]
 fn test_xz_list_files() {
     let archive = Archive::open("tests/fixtures/test.xz").expect("Failed to open XZ archive");
     let entries = archive.list_files().expect("Failed to list files");
@@ -409,7 +407,6 @@ fn test_xz_list_files() {
 }
 
 #[test]
-#[ignore = "Plain XZ requires format_raw support in libarchive bindings"]
 fn test_xz_extract_to_memory() {
     let archive = Archive::open("tests/fixtures/test.xz").expect("Failed to open XZ archive");
     let entries = archive.list_files().expect("Failed to list files");
@@ -446,9 +443,8 @@ fn test_cross_format_content_consistency() {
 }
 
 /// All single-stream formats should produce identical decompressed content
-/// Currently ignored: plain .gz/.bz2/.xz require archive_read_support_format_raw()
+/// via libarchive's format_raw (AD 0019).
 #[test]
-#[ignore = "Plain compressed streams require format_raw support in libarchive bindings"]
 fn test_single_stream_content_consistency() {
     let stream_formats = vec![
         "tests/fixtures/test.gz",

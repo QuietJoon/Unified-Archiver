@@ -126,7 +126,7 @@ fn bench_stub_extraction(c: &mut Criterion) {
                 b.iter(|| {
                     let stub = Archive::extract_stub(black_box(file.path()), black_box(&detection))
                         .unwrap();
-                    assert!(stub.len() > 0);
+                    assert!(!stub.is_empty());
                 });
             },
         );

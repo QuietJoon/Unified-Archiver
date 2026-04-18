@@ -4,6 +4,7 @@
 
 use unified_archive::Archive;
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_is_solid_rar() {
@@ -13,6 +14,7 @@ fn test_is_solid_rar() {
     assert!(result.is_ok(), "is_solid() should succeed for RAR archives");
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_is_solid_rar5() {
@@ -48,6 +50,7 @@ fn test_is_solid_7z() {
 }
 
 // Recovery record tests
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_has_recovery_rar() {
@@ -60,6 +63,7 @@ fn test_has_recovery_rar() {
     );
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_has_recovery_rar5() {
@@ -100,6 +104,7 @@ fn test_has_recovery_7z() {
 }
 
 // Recovery percentage tests
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_recovery_percentage_rar() {
@@ -122,6 +127,7 @@ fn test_recovery_percentage_rar() {
     }
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_recovery_percentage_rar5() {

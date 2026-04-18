@@ -223,8 +223,8 @@ pub fn extract_stream_checksum(path: impl AsRef<Path>) -> Result<StreamChecksum>
     let path_ref = path.as_ref();
 
     // Prefer magic-byte detection for robustness (handles renamed/mislabeled files)
-    let mut file = File::open(path_ref)
-        .map_err(|e| ArchiveError::io("open", path_ref.to_path_buf(), e))?;
+    let mut file =
+        File::open(path_ref).map_err(|e| ArchiveError::io("open", path_ref.to_path_buf(), e))?;
 
     let mut magic = [0u8; 6];
     file.read_exact(&mut magic)

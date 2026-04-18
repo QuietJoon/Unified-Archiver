@@ -21,6 +21,7 @@ use unified_archive::{Archive, ExtractionOptions};
 
 // ── Contract 1: Progress callback is called ──
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn contract_progress_callback_is_invoked_for_rar() {
@@ -75,6 +76,7 @@ fn contract_progress_callback_accepted_for_zip() {
 
 // ── Contract 2: Progress values are monotonic ──
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn contract_progress_monotonic_for_rar() {
@@ -115,6 +117,7 @@ fn contract_progress_monotonic_for_rar() {
 
 // ── Contract 3: Cancellation via ControlFlow::Break ──
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn contract_progress_cancellation() {
@@ -176,6 +179,7 @@ fn contract_progress_callback_with_no_op() {
 
 // ── Extra: Progress with encrypted RAR ──
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn contract_progress_encrypted_rar() {

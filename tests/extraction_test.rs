@@ -7,10 +7,10 @@ mod common;
 use std::fs;
 use unified_archive::{Archive, ExtractionOptions};
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_extract_all_rar5() {
-
     let temp = common::temp_test_dir();
 
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
@@ -35,10 +35,10 @@ fn test_extract_all_rar5() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_extract_single_file_rar5() {
-
     let temp = common::temp_test_dir();
 
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
@@ -63,10 +63,10 @@ fn test_extract_single_file_rar5() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_extract_nonexistent_file() {
-
     let temp = common::temp_test_dir();
 
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
@@ -86,10 +86,10 @@ fn test_extract_nonexistent_file() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_extract_to_nonexistent_directory() {
-
     let temp = common::temp_test_dir().join("nested/path/that/does/not/exist");
 
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
@@ -115,10 +115,10 @@ fn test_extract_to_nonexistent_directory() {
     common::cleanup(&common::temp_test_dir());
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_extract_rar5_alternate() {
-
     let temp = common::temp_test_dir();
 
     let archive =
@@ -143,11 +143,10 @@ fn test_extract_rar5_alternate() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_extract_to_memory() {
-
-
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 
     let content = archive
@@ -159,11 +158,10 @@ fn test_extract_to_memory() {
     assert_eq!(content_str, "Hello, RAR World!\n");
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_extract_to_memory_nonexistent() {
-
-
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 
     let result = archive.extract_to_memory("nonexistent.txt");
@@ -174,10 +172,10 @@ fn test_extract_to_memory_nonexistent() {
     );
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_extract_filtered_txt_files() {
-
     let temp = common::temp_test_dir();
 
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
@@ -199,10 +197,10 @@ fn test_extract_filtered_txt_files() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_extract_filtered_no_matches() {
-
     let temp = common::temp_test_dir();
 
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");

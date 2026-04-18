@@ -30,6 +30,7 @@ fn fixture_name_strategy() -> impl Strategy<Value = &'static str> {
 
 proptest! {
     /// Property: Format detection is deterministic across random iteration counts
+    #[cfg(feature = "rar-support")]
     #[test]
     #[serial_test::file_serial(rar)]
     fn prop_format_detection_deterministic(
@@ -52,6 +53,7 @@ proptest! {
     }
 
     /// Property: Entry count is consistent regardless of how many times list_files is called
+    #[cfg(feature = "rar-support")]
     #[test]
     #[serial_test::file_serial(rar)]
     fn prop_entry_count_consistent(
@@ -80,6 +82,7 @@ proptest! {
     }
 
     /// Property: Entry paths are always unique within any archive
+    #[cfg(feature = "rar-support")]
     #[test]
     #[serial_test::file_serial(rar)]
     fn prop_entry_paths_unique(filename in fixture_name_strategy()) {
@@ -99,6 +102,7 @@ proptest! {
     }
 
     /// Property: All file entries in RAR archives have CRC32 checksums
+    #[cfg(feature = "rar-support")]
     #[test]
     #[serial_test::file_serial(rar)]
     fn prop_rar_file_entries_have_crc32(_dummy in 0u8..1) {
@@ -121,6 +125,7 @@ proptest! {
     }
 
     /// Property: Extracted data size matches the entry's reported size
+    #[cfg(feature = "rar-support")]
     #[test]
     #[serial_test::file_serial(rar)]
     fn prop_extracted_size_matches_entry(filename in fixture_name_strategy()) {
@@ -149,6 +154,7 @@ proptest! {
     }
 
     /// Property: Streaming extraction produces identical data to memory extraction
+    #[cfg(feature = "rar-support")]
     #[test]
     #[serial_test::file_serial(rar)]
     fn prop_streaming_equals_memory_extraction(filename in fixture_name_strategy()) {
@@ -178,6 +184,7 @@ proptest! {
     }
 
     /// Property: Archive opening is idempotent (N random opens all succeed)
+    #[cfg(feature = "rar-support")]
     #[test]
     #[serial_test::file_serial(rar)]
     fn prop_archive_open_idempotent(
@@ -197,6 +204,7 @@ proptest! {
     }
 
     /// Property: Validation reports are consistent across multiple runs
+    #[cfg(feature = "rar-support")]
     #[test]
     #[serial_test::file_serial(rar)]
     fn prop_validation_consistent(
@@ -230,6 +238,7 @@ proptest! {
     }
 
     /// Property: find_entry is equivalent to filtering list_files
+    #[cfg(feature = "rar-support")]
     #[test]
     #[serial_test::file_serial(rar)]
     fn prop_find_entry_equivalent_to_filter(filename in fixture_name_strategy()) {
@@ -264,6 +273,7 @@ proptest! {
     }
 
     /// Property: Entry IDs are sequential starting from 0
+    #[cfg(feature = "rar-support")]
     #[test]
     #[serial_test::file_serial(rar)]
     fn prop_entry_ids_sequential(filename in fixture_name_strategy()) {
@@ -284,6 +294,7 @@ proptest! {
     }
 
     /// Property: File entries have non-negative sizes
+    #[cfg(feature = "rar-support")]
     #[test]
     #[serial_test::file_serial(rar)]
     fn prop_file_entries_have_sizes(filename in fixture_name_strategy()) {
@@ -306,6 +317,7 @@ proptest! {
     }
 
     /// Property: Compression ratio, when present, is non-negative
+    #[cfg(feature = "rar-support")]
     #[test]
     #[serial_test::file_serial(rar)]
     fn prop_compression_ratio_non_negative(filename in fixture_name_strategy()) {

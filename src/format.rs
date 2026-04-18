@@ -192,7 +192,7 @@ impl ArchiveFormat {
         match self {
             ArchiveFormat::Zip => FormatCapabilities {
                 encryption_read: Support::Full,
-                encryption_write: Support::Full,
+                encryption_write: Support::None,
                 multipart_read: Support::Partial, // libarchive; needs first volume
                 multipart_write: Support::None,
                 modification: Support::Full,
@@ -654,11 +654,33 @@ mod tests {
     fn test_zip_capabilities() {
         let caps = ArchiveFormat::Zip.capabilities();
         assert_eq!(caps.encryption_read, Support::Full);
-        assert_eq!(caps.encryption_write, Support::Full);
+        // Per AD 0027: encrypted archive creation is rejected; read-only support.
+        assert_eq!(caps.encryption_write, Support::None);
         assert_eq!(caps.multipart_read, Support::Partial);
         assert_eq!(caps.multipart_write, Support::None);
         assert_eq!(caps.modification, Support::Full);
         assert_eq!(caps.compression, Support::Full);
+    }
+
+    #[test]
+    fn test_create_with_password_rejected_for_zip() {
+        use crate::options::CompressionOptions;
+        use secstr::SecStr;
+        let tmp = std::env::temp_dir().join("ua_encrypted_create_rejected.zip");
+        let _ = std::fs::remove_file(&tmp);
+        let opts = CompressionOptions {
+            format: ArchiveFormat::Zip,
+            password: Some(SecStr::from("secret")),
+            ..Default::default()
+        };
+        let result = crate::Archive::create(&tmp, opts);
+        assert!(result.is_err(), "expected an error, got Ok");
+        let err = result.err().unwrap();
+        assert!(
+            matches!(err, crate::ArchiveError::OperationBlocked { .. }),
+            "expected OperationBlocked, got a different error variant"
+        );
+        let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]
@@ -729,8 +751,7 @@ mod tests {
             );
             assert_eq!(
                 fmt.supports_encryption(),
-                caps.encryption_read != Support::None
-                    || caps.encryption_write != Support::None,
+                caps.encryption_read != Support::None || caps.encryption_write != Support::None,
                 "{:?} encryption mismatch",
                 fmt
             );

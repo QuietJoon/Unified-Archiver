@@ -4,11 +4,12 @@
 //! sevenz-rust2 is a maintained fork with Rust 2024 edition support.
 
 use crate::entry::{ArchiveEntry, EntryType};
-use crate::error::{ArchiveError, Result};
-use crate::ffi::common::{copy_with_optional_crc, create_output_file, normalize_path};
+use crate::error::{ArchiveError, ArchiveWarning, Result};
+use crate::ffi::common::{AtomicOutputFile, copy_with_optional_crc, normalize_path};
 use crate::format::ArchiveFormat;
 use crate::options::ProgressCallback;
 use crate::security::sanitize_entry_path;
+use secstr::SecStr;
 use sevenz_rust2::{ArchiveReader, Password};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -18,7 +19,7 @@ use std::path::{Path, PathBuf};
 /// Provides 7z operations with CRC32 from metadata when available.
 pub struct SevenZArchive {
     path: PathBuf,
-    password: Option<String>,
+    password: Option<SecStr>,
 }
 
 impl SevenZArchive {
@@ -35,7 +36,7 @@ impl SevenZArchive {
     /// Open encrypted 7z archive with password
     pub fn open_with_password(path: impl AsRef<Path>, password: &str) -> Result<Self> {
         let mut archive = Self::open(path)?;
-        archive.password = Some(password.to_string());
+        archive.password = Some(SecStr::from(password));
         Ok(archive)
     }
 
@@ -46,10 +47,8 @@ impl SevenZArchive {
 
     /// Open a 7z ArchiveReader with the stored path and password
     fn open_reader(&self) -> Result<ArchiveReader<std::fs::File>> {
-        let password = self
-            .password
-            .as_ref()
-            .map_or_else(Password::empty, |p| Password::from(p.as_str()));
+        let password = crate::options::password_as_str(&self.password)
+            .map_or_else(Password::empty, Password::from);
         ArchiveReader::open(&self.path, password).map_err(|e| {
             ArchiveError::format(Some(ArchiveFormat::SevenZip), format!("Invalid 7z: {}", e))
         })
@@ -187,7 +186,7 @@ impl SevenZArchive {
         &self,
         dest_path: &Path,
         progress: Option<&mut Box<dyn ProgressCallback>>,
-    ) -> Result<()> {
+    ) -> Result<Vec<ArchiveWarning>> {
         self.extract_all_with_options(dest_path, progress, true, false)
     }
 
@@ -197,7 +196,8 @@ impl SevenZArchive {
         mut progress: Option<&mut Box<dyn ProgressCallback>>,
         overwrite: bool,
         verify_crc32: bool,
-    ) -> Result<()> {
+    ) -> Result<Vec<ArchiveWarning>> {
+        let mut warnings: Vec<ArchiveWarning> = Vec::new();
         let mut reader = self.open_reader()?;
 
         // Calculate total size for progress
@@ -251,9 +251,13 @@ impl SevenZArchive {
             // Skip symlinks for security (detected via windows_attributes)
             if entry.has_windows_attributes {
                 let unix_mode = (entry.windows_attributes >> 16) as u16;
-                let is_link = (unix_mode & 0xF000) == 0xA000
-                    || (entry.windows_attributes & 0x0400) != 0;
+                let is_link =
+                    (unix_mode & 0xF000) == 0xA000 || (entry.windows_attributes & 0x0400) != 0;
                 if is_link {
+                    warnings.push(ArchiveWarning::SkippedSymlink {
+                        path: entry.name.clone(),
+                        target: None,
+                    });
                     return Ok(true); // skip, continue to next entry
                 }
             }
@@ -266,7 +270,7 @@ impl SevenZArchive {
                 }
             } else {
                 // Extract file
-                let mut output_file = match create_output_file(&entry_path, overwrite) {
+                let mut output_file = match AtomicOutputFile::create(&entry_path, overwrite) {
                     Ok(f) => f,
                     Err(e) => {
                         extraction_error = Some(e);
@@ -282,12 +286,18 @@ impl SevenZArchive {
 
                 match copy_with_optional_crc(
                     entry_reader,
-                    &mut output_file,
+                    output_file.file_mut(),
                     expected_crc,
                     &normalized_path,
                     &entry_path,
                 ) {
-                    Ok(bytes_written) => bytes_processed += bytes_written,
+                    Ok(bytes_written) => {
+                        if let Err(e) = output_file.commit() {
+                            extraction_error = Some(e);
+                            return Ok(false);
+                        }
+                        bytes_processed += bytes_written;
+                    }
                     Err(e) => {
                         extraction_error = Some(e);
                         return Ok(false);
@@ -311,7 +321,7 @@ impl SevenZArchive {
             let _ = callback.on_progress(total_bytes, Some(total_bytes));
         }
 
-        Ok(())
+        Ok(warnings)
     }
 
     /// Extract a single file by path
@@ -348,7 +358,7 @@ impl SevenZArchive {
                 }
 
                 // Extract file
-                let mut output_file = match create_output_file(&output_path, overwrite) {
+                let mut output_file = match AtomicOutputFile::create(&output_path, overwrite) {
                     Ok(f) => f,
                     Err(e) => {
                         extraction_error = Some(e);
@@ -364,11 +374,15 @@ impl SevenZArchive {
 
                 if let Err(e) = copy_with_optional_crc(
                     entry_reader,
-                    &mut output_file,
+                    output_file.file_mut(),
                     expected_crc,
                     file_path,
                     &output_path,
                 ) {
+                    extraction_error = Some(e);
+                    return Ok(false);
+                }
+                if let Err(e) = output_file.commit() {
                     extraction_error = Some(e);
                     return Ok(false);
                 }
@@ -410,7 +424,7 @@ impl SevenZArchive {
                 let expected_size = entry.size;
                 if expected_size > usize::MAX as u64 {
                     extraction_error = Some(ArchiveError::OperationBlocked {
-                        operation: "extract_to_memory".to_string(),
+                        operation: crate::error::ops::EXTRACT_TO_MEMORY.to_string(),
                         reason: format!(
                             "Entry '{}' is too large to buffer in memory: {} bytes",
                             file_path, expected_size
@@ -422,7 +436,7 @@ impl SevenZArchive {
                 let mut buffer = Vec::new();
                 if buffer.try_reserve(expected_size as usize).is_err() {
                     extraction_error = Some(ArchiveError::OperationBlocked {
-                        operation: "extract_to_memory".to_string(),
+                        operation: crate::error::ops::EXTRACT_TO_MEMORY.to_string(),
                         reason: format!(
                             "Unable to allocate {} bytes for entry '{}'",
                             expected_size, file_path

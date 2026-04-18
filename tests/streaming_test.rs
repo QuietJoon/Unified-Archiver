@@ -11,6 +11,7 @@ fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_streaming_extraction_rar() {
@@ -87,6 +88,7 @@ fn test_streaming_extraction_7z() {
     assert!(!buffer.is_empty(), "Stream should contain data");
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_streaming_progress_tracking() {
@@ -137,6 +139,7 @@ fn test_streaming_progress_tracking() {
     }
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_streaming_nonexistent_file() {
@@ -148,6 +151,7 @@ fn test_streaming_nonexistent_file() {
     assert!(result.is_err(), "Should fail for non-existent file");
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_streaming_chunked_reading() {
@@ -185,6 +189,7 @@ fn test_streaming_chunked_reading() {
     );
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_streaming_memory_efficiency() {

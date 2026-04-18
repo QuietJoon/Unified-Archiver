@@ -21,6 +21,7 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_open_multiple_formats() {
@@ -59,6 +60,7 @@ fn test_open_multiple_formats() {
     }
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_list_files_consistency() {
@@ -72,7 +74,8 @@ fn test_list_files_consistency() {
             continue;
         }
 
-        let archive = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
+        let archive =
+            Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
         let entries = archive
             .list_files()
             .unwrap_or_else(|_| panic!("Failed to list files in {}", filename));
@@ -109,6 +112,7 @@ fn test_list_files_consistency() {
     }
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_entry_count_consistency() {
@@ -122,7 +126,8 @@ fn test_entry_count_consistency() {
             continue;
         }
 
-        let archive = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
+        let archive =
+            Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
 
         let entry_count = archive
             .entry_count()
@@ -140,6 +145,7 @@ fn test_entry_count_consistency() {
     }
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_find_entry_consistency() {
@@ -156,7 +162,8 @@ fn test_find_entry_consistency() {
             continue;
         }
 
-        let archive = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
+        let archive =
+            Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
 
         // Get first entry from list_files for testing
         let entries = archive
@@ -189,6 +196,7 @@ fn test_find_entry_consistency() {
     }
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_find_entry_not_found() {
@@ -202,7 +210,8 @@ fn test_find_entry_not_found() {
             continue;
         }
 
-        let archive = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
+        let archive =
+            Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
 
         let found = archive
             .find_entry("nonexistent_file_12345.txt")
@@ -216,6 +225,7 @@ fn test_find_entry_not_found() {
     }
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_validate_integrity_consistency() {
@@ -229,7 +239,8 @@ fn test_validate_integrity_consistency() {
             continue;
         }
 
-        let archive = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
+        let archive =
+            Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
 
         let report = archive
             .validate_integrity()
@@ -255,6 +266,7 @@ fn test_validate_integrity_consistency() {
     }
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_path_getter_consistency() {
@@ -268,7 +280,8 @@ fn test_path_getter_consistency() {
             continue;
         }
 
-        let archive = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
+        let archive =
+            Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
 
         assert_eq!(
             archive.path(),
@@ -279,6 +292,7 @@ fn test_path_getter_consistency() {
     }
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_is_encrypted_consistency() {
@@ -292,7 +306,8 @@ fn test_is_encrypted_consistency() {
             continue;
         }
 
-        let archive = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
+        let archive =
+            Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
 
         let is_encrypted = archive
             .is_encrypted()
@@ -350,6 +365,7 @@ fn test_is_encrypted_consistency() {
     }
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_calculate_archive_crc_consistency() {
@@ -363,7 +379,8 @@ fn test_calculate_archive_crc_consistency() {
             continue;
         }
 
-        let archive = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
+        let archive =
+            Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
 
         let archive_crc = archive
             .calculate_archive_crc()
@@ -371,11 +388,11 @@ fn test_calculate_archive_crc_consistency() {
 
         // Archive CRC should be deterministic
         // Calculate again and verify consistency
-        let archive2 = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to reopen {}", filename));
-        let archive_crc2 = archive2.calculate_archive_crc().unwrap_or_else(|_| panic!(
-            "Failed to recalculate archive CRC for {}",
-            filename
-        ));
+        let archive2 =
+            Archive::open(&path).unwrap_or_else(|_| panic!("Failed to reopen {}", filename));
+        let archive_crc2 = archive2
+            .calculate_archive_crc()
+            .unwrap_or_else(|_| panic!("Failed to recalculate archive CRC for {}", filename));
 
         assert_eq!(
             archive_crc, archive_crc2,
@@ -385,6 +402,7 @@ fn test_calculate_archive_crc_consistency() {
     }
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_unified_api_cross_format() {
@@ -404,7 +422,8 @@ fn test_unified_api_cross_format() {
         }
 
         // 1. Open archive
-        let archive = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
+        let archive =
+            Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
 
         // 2. Verify format detection
         assert_eq!(archive.format(), expected_format);

@@ -5,6 +5,7 @@
 
 use unified_archive::Archive;
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_entry_caching_same_pointer() {
@@ -58,6 +59,7 @@ fn test_entry_caching_7z() {
     );
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_dependent_methods_use_cache() {
@@ -80,6 +82,7 @@ fn test_dependent_methods_use_cache() {
     assert!(std::ptr::eq(entries.as_ptr(), entries_again.as_ptr()));
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_caching_resolves_unrar_limitation() {

@@ -27,9 +27,7 @@ fn create_test_zip(path: &Path, content: &str) -> std::io::Result<()> {
         .output()?;
 
     if !output.status.success() {
-        return Err(std::io::Error::other(
-            "Failed to create ZIP",
-        ));
+        return Err(std::io::Error::other("Failed to create ZIP"));
     }
 
     Ok(())
@@ -247,10 +245,11 @@ fn test_no_data_races_on_repeated_access() {
     assert_eq!(iteration_count.load(Ordering::SeqCst), 40);
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_concurrent_rar_open_and_list() {
-    // OI-026-004: UnRAR has process-wide global state. Without serialization,
+    // UnRAR has process-wide global state. Without serialization,
     // concurrent open/list across different RAR archives corrupts results.
     // After Phase A.2 (process-wide UNRAR_LOCK), zero CRC mismatches are expected.
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");

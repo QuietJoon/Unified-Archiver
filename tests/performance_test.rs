@@ -21,6 +21,7 @@ fn fixtures_dir() -> PathBuf {
 ///
 /// Target: <100ms for our small test archives (1 file)
 /// Scales to ~1s for 10k files based on linear extrapolation.
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn perf_entry_listing_cached() {
@@ -28,7 +29,8 @@ fn perf_entry_listing_cached() {
 
     for filename in test_files {
         let path = fixtures_dir().join(filename);
-        let archive = Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
+        let archive =
+            Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
 
         // First call populates cache
         let _ = archive.list_files().expect("First list failed");
@@ -88,6 +90,7 @@ fn perf_format_detection() {
 /// Performance target: Archive opening overhead
 ///
 /// Target: <10ms to open small archive
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn perf_archive_open() {
@@ -119,6 +122,7 @@ fn perf_archive_open() {
 /// Performance target: Small file extraction
 ///
 /// Target: <50ms to extract small file (< 1KB)
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn perf_small_file_extraction() {
@@ -213,6 +217,7 @@ fn perf_streaming_overhead() {
 /// Performance target: Entry lookup is efficient
 ///
 /// Target: find_entry() should be O(n) but fast for small archives
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn perf_entry_lookup() {
@@ -249,6 +254,7 @@ fn perf_entry_lookup() {
 /// Performance target: Validation is reasonably fast
 ///
 /// Target: <100ms for small archives
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn perf_validation() {
@@ -285,6 +291,7 @@ fn perf_validation() {
 ///
 /// This test verifies that streaming doesn't accumulate data (SC-009).
 /// For our small test file, we verify the concept works correctly.
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn perf_streaming_memory_bounded() {
@@ -343,6 +350,7 @@ fn perf_streaming_memory_bounded() {
 ///
 /// This test establishes baseline timing for future comparison.
 /// Fails if operations are suspiciously slow (>10x expected).
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn perf_regression_check() {

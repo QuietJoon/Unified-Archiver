@@ -14,6 +14,7 @@ use unified_archive::Archive;
 // CONSISTENCY TESTS: has_recovery_record() vs recovery_percentage()
 // ============================================================================
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_consistency_rar_recovery_methods() {
@@ -43,6 +44,7 @@ fn test_consistency_rar_recovery_methods() {
     }
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_consistency_rar5_recovery_methods() {
@@ -160,6 +162,7 @@ fn test_recovery_percentage_empty_file() {
 // BOUNDARY CONDITION TESTS
 // ============================================================================
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_recovery_percentage_range_validation() {
@@ -181,6 +184,7 @@ fn test_recovery_percentage_range_validation() {
     }
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_recovery_percentage_multiple_calls() {
@@ -199,6 +203,7 @@ fn test_recovery_percentage_multiple_calls() {
 // FORMAT-SPECIFIC TESTS
 // ============================================================================
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_recovery_percentage_rar4_vs_rar5() {
@@ -219,13 +224,22 @@ fn test_recovery_percentage_rar4_vs_rar5() {
 
     // If either has recovery, percentage should be valid
     if let Some(p) = pct4 {
-        assert!((1..=100).contains(&p), "RAR4 percentage out of range: {}", p);
+        assert!(
+            (1..=100).contains(&p),
+            "RAR4 percentage out of range: {}",
+            p
+        );
     }
     if let Some(p) = pct5 {
-        assert!((1..=100).contains(&p), "RAR5 percentage out of range: {}", p);
+        assert!(
+            (1..=100).contains(&p),
+            "RAR5 percentage out of range: {}",
+            p
+        );
     }
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_recovery_percentage_all_supported_formats() {
@@ -238,7 +252,8 @@ fn test_recovery_percentage_all_supported_formats() {
     ];
 
     for (path, format, supports_recovery) in test_cases {
-        let archive = Archive::open(path).unwrap_or_else(|_| panic!("Failed to open {} archive", format));
+        let archive =
+            Archive::open(path).unwrap_or_else(|_| panic!("Failed to open {} archive", format));
 
         let result = archive.recovery_percentage();
         assert!(
@@ -264,6 +279,7 @@ fn test_recovery_percentage_all_supported_formats() {
 // EDGE CASE: SPECIAL ARCHIVE TYPES
 // ============================================================================
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_recovery_percentage_encrypted_archive() {
@@ -277,6 +293,7 @@ fn test_recovery_percentage_encrypted_archive() {
     assert!(result.is_ok(), "Should handle archives gracefully");
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_recovery_percentage_solid_archive() {
@@ -298,6 +315,7 @@ fn test_recovery_percentage_solid_archive() {
 // PERFORMANCE AND RESOURCE TESTS
 // ============================================================================
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_recovery_percentage_does_not_extract() {
@@ -321,6 +339,7 @@ fn test_recovery_percentage_does_not_extract() {
     );
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_recovery_percentage_read_only_operation() {
@@ -399,6 +418,7 @@ fn test_recovery_percentage_after_list_files() {
     // Test passes if we get here without panicking
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_recovery_percentage_independent_of_format_detection() {

@@ -1,9 +1,11 @@
 //! Common utilities shared across FFI wrappers
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{Read, Write};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+
+use tempfile::NamedTempFile;
 
 use crate::error::{ArchiveError, Result};
 use crate::format::ArchiveFormat;
@@ -12,16 +14,19 @@ use crate::security::verify_crc32_value;
 
 /// RAII guard for temporary directories
 /// Ensures cleanup on drop, even if an error occurs
+#[cfg(feature = "rar-support")]
 pub(crate) struct TempDirGuard {
     path: PathBuf,
 }
 
+#[cfg(feature = "rar-support")]
 impl TempDirGuard {
     pub fn new(path: PathBuf) -> Self {
         Self { path }
     }
 }
 
+#[cfg(feature = "rar-support")]
 impl Drop for TempDirGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
@@ -34,25 +39,85 @@ pub(crate) fn normalize_path(path: &str) -> String {
     path.replace('\\', "/")
 }
 
-/// Create an output file with overwrite control
-pub(crate) fn create_output_file(path: &Path, overwrite: bool) -> Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true);
-    if overwrite {
-        options.create(true).truncate(true);
-    } else {
-        options.create_new(true);
-    }
-    options.open(path).map_err(|e| {
-        if !overwrite && e.kind() == std::io::ErrorKind::AlreadyExists {
-            ArchiveError::operation_blocked(
+/// Atomic output file backed by `tempfile::NamedTempFile`.
+///
+/// Writes go to a randomly-named sibling tempfile in the destination's
+/// parent directory. `commit()` atomically renames it into place via
+/// `persist`/`persist_noclobber`; if the value is dropped before commit,
+/// `NamedTempFile` removes the temp file automatically.
+pub(crate) struct AtomicOutputFile {
+    inner: Option<NamedTempFile>,
+    final_path: PathBuf,
+    overwrite: bool,
+}
+
+impl AtomicOutputFile {
+    /// Open a tempfile in `path`'s parent directory; commit will move it to `path`.
+    ///
+    /// When `overwrite` is false the existence check is racy by design: it
+    /// fails fast for the common case, and `commit()`'s `persist_noclobber`
+    /// closes the actual race window via `link()`+`unlink()` (Unix) /
+    /// `CreateFileW` exclusive flags (Windows).
+    pub fn create(path: &Path, overwrite: bool) -> Result<Self> {
+        if !overwrite && path.exists() {
+            return Err(ArchiveError::operation_blocked(
                 "extract",
                 format!("Destination file already exists: {}", path.display()),
-            )
-        } else {
-            ArchiveError::io("create", path.to_path_buf(), e)
+            ));
         }
-    })
+
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let inner = NamedTempFile::new_in(parent)
+            .map_err(|e| ArchiveError::io(crate::error::ops::CREATE, parent.to_path_buf(), e))?;
+
+        Ok(Self {
+            inner: Some(inner),
+            final_path: path.to_path_buf(),
+            overwrite,
+        })
+    }
+
+    /// Mutable access to the underlying file for writing.
+    pub fn file_mut(&mut self) -> &mut File {
+        self.inner
+            .as_mut()
+            .expect("file present until commit()")
+            .as_file_mut()
+    }
+
+    /// Flush and atomically install the tempfile at the destination path.
+    pub fn commit(mut self) -> Result<()> {
+        let inner = self.inner.take().expect("file present until commit()");
+        inner
+            .as_file()
+            .sync_data()
+            .map_err(|e| ArchiveError::io("flush", self.final_path.clone(), e))?;
+
+        if self.overwrite {
+            #[cfg(windows)]
+            {
+                // Windows persist (and the underlying MoveFile) refuses an
+                // existing destination; pre-remove matches the previous
+                // behaviour. The TOCTOU window here is unavoidable without
+                // ReplaceFileW.
+                if self.final_path.exists() {
+                    std::fs::remove_file(&self.final_path)
+                        .map_err(|e| ArchiveError::io("remove", self.final_path.clone(), e))?;
+                }
+            }
+            inner
+                .persist(&self.final_path)
+                .map_err(|e| ArchiveError::io("rename", self.final_path.clone(), e.error))?;
+        } else {
+            inner
+                .persist_noclobber(&self.final_path)
+                .map_err(|e| ArchiveError::io("rename", self.final_path.clone(), e.error))?;
+        }
+        Ok(())
+    }
 }
 
 /// Convert year/month/day/hour/minute/second to SystemTime
@@ -116,8 +181,7 @@ pub(crate) fn system_time_to_zip_datetime(time: std::time::SystemTime) -> Option
     let z = days as i64 + 719468; // shift epoch from 1970-01-01 to 0000-03-01
     let era = z.div_euclid(146097);
     let doe = z.rem_euclid(146097) as u64; // day of era [0, 146096]
-    let yoe =
-        (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era [0, 399]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era [0, 399]
     let y = (yoe as i64) + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year [0, 365]
     let mp = (5 * doy + 2) / 153; // [0, 11]
@@ -168,10 +232,7 @@ pub(crate) fn notify_creation_progress(
     *bytes_written = bytes_written.saturating_add(additional);
     if let Some(cb) = progress.as_mut() {
         if let ControlFlow::Break(()) = cb.on_progress(*bytes_written, None) {
-            return Err(ArchiveError::format(
-                format,
-                "Creation cancelled by user",
-            ));
+            return Err(ArchiveError::format(format, "Creation cancelled by user"));
         }
     }
     Ok(())

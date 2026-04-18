@@ -51,6 +51,7 @@ fn contract_streaming_basic_read_zip() {
     }
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn contract_streaming_basic_read_rar() {
@@ -163,6 +164,7 @@ fn contract_streaming_matches_extract_to_memory() {
 
 // ── Contract 4: Password-protected streaming ──
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn contract_streaming_encrypted_rar() {
@@ -186,6 +188,7 @@ fn contract_streaming_encrypted_rar() {
     }
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 fn contract_streaming_without_password_fails() {
     // test_encrypted_data.rar has data encryption (headers readable without password)

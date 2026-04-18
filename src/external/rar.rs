@@ -39,6 +39,7 @@
 
 use crate::error::{ArchiveError, Result};
 use crate::options::CompressionLevel;
+use secstr::SecStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -50,7 +51,7 @@ pub struct RarCreator {
     /// Compression level
     compression_level: CompressionLevel,
     /// Optional password
-    password: Option<String>,
+    password: Option<SecStr>,
     /// Files and directories to add
     entries: Vec<PathBuf>,
     /// Path to rar.exe
@@ -144,7 +145,7 @@ impl RarCreator {
 
     /// Set password for encryption
     pub fn set_password(&mut self, password: impl Into<String>) {
-        self.password = Some(password.into());
+        self.password = Some(SecStr::from(password.into()));
     }
 
     /// Add a file to the archive
@@ -222,8 +223,8 @@ impl RarCreator {
         cmd.arg(compression_arg);
 
         // Password encryption
-        if let Some(ref password) = self.password {
-            cmd.arg(format!("-hp{}", password));
+        if let Some(pwd_str) = crate::options::password_as_str(&self.password) {
+            cmd.arg(format!("-hp{}", pwd_str));
         }
 
         // Recursive mode for directories

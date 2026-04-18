@@ -30,6 +30,7 @@ fn contract_open_valid_7z() {
     assert_eq!(archive.format(), ArchiveFormat::SevenZip);
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn contract_open_valid_rar() {
@@ -42,6 +43,7 @@ fn contract_open_valid_rar() {
     );
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn contract_open_valid_rar5() {

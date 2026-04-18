@@ -20,6 +20,7 @@ fn test_integrity_check_valid_zip() {
     println!("✓ ZIP: {} files validated successfully", report.validated);
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_integrity_check_valid_rar() {
@@ -39,6 +40,7 @@ fn test_integrity_check_valid_rar() {
     println!("✓ RAR: {} files validated successfully", report.validated);
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_integrity_check_valid_rar5() {

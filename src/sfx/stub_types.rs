@@ -89,7 +89,10 @@ mod tests {
     #[test]
     fn test_shell_script_detection() {
         let script = b"#!/bin/sh\necho test";
-        assert_eq!(StubType::detect(script).unwrap(), StubType::ScriptInterpreter);
+        assert_eq!(
+            StubType::detect(script).unwrap(),
+            StubType::ScriptInterpreter
+        );
     }
 
     #[test]
@@ -227,7 +230,10 @@ mod tests {
         // Just #! with nothing after
         let minimal = b"#!";
         // This should still be detected as shell script
-        assert_eq!(StubType::detect(minimal).unwrap(), StubType::ScriptInterpreter);
+        assert_eq!(
+            StubType::detect(minimal).unwrap(),
+            StubType::ScriptInterpreter
+        );
     }
 
     #[test]

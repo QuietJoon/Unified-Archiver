@@ -48,6 +48,7 @@ fn contract_extract_all_7z() {
     );
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn contract_extract_all_rar() {
@@ -205,6 +206,7 @@ fn contract_extract_multiple_files_match() {
 
 // ── Contract 3: Test password-protected extraction ──
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn contract_extract_encrypted_rar_with_password() {
@@ -224,6 +226,7 @@ fn contract_extract_encrypted_rar_with_password() {
     );
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 fn contract_extract_encrypted_without_password_fails() {
     let archive = Archive::open(fixture("test_encrypted.rar")).unwrap();

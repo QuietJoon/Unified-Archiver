@@ -1,8 +1,10 @@
 //! Phase B.2 — `Archive::modify_with_options` wiring (OI-025-003)
 //!
-//! Validates that the public `ModificationOptions` fields are now honored by
-//! the modify/commit pipeline. Per-entry metadata fidelity is **not** under
-//! test here — that lands with Phase C.2.
+//! Validates that the public `ModificationOptions` fields are honored by the
+//! modify/commit pipeline. Per-entry metadata fidelity (preservation of
+//! timestamps and Unix permissions on retained entries) is covered by
+//! `tests/integration/modification.rs` under `ModificationOptions { preserve_metadata: true, .. }`
+//! (OI-025-002 resolved 2026-04-14).
 
 use std::path::PathBuf;
 use unified_archive::{Archive, ArchiveFormat, CompressionOptions, ModificationOptions};
@@ -10,10 +12,7 @@ use unified_archive::{Archive, ArchiveFormat, CompressionOptions, ModificationOp
 fn fresh_zip(dir: &std::path::Path, name: &str) -> PathBuf {
     let path = dir.join(name);
     let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
-    let mut archive = Archive::create(&path, {
-        std::mem::take(&mut opts)
-    })
-    .unwrap();
+    let mut archive = Archive::create(&path, { std::mem::take(&mut opts) }).unwrap();
     archive.add_file_from_data("a.txt", b"original A").unwrap();
     archive.add_file_from_data("b.txt", b"original B").unwrap();
     archive.finish().unwrap();
@@ -73,7 +72,10 @@ fn create_backup_disabled_by_default() {
     modifying.commit_changes().unwrap();
 
     let backup_path = archive_path.with_extension("zip.bak");
-    assert!(!backup_path.exists(), "no backup expected with default modify()");
+    assert!(
+        !backup_path.exists(),
+        "no backup expected with default modify()"
+    );
 }
 
 #[test]

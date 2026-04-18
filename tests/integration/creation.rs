@@ -38,8 +38,14 @@ fn test_unsupported_format_rejected() {
 
     if let Err(e) = result {
         assert!(
-            matches!(e, ArchiveError::Unsupported { .. } | ArchiveError::OperationBlocked { .. } | ArchiveError::ReadOnlyBackend { .. }),
-            "Expected Unsupported or OperationBlocked/ReadOnlyBackend, got {:?}", e
+            matches!(
+                e,
+                ArchiveError::Unsupported { .. }
+                    | ArchiveError::OperationBlocked { .. }
+                    | ArchiveError::ReadOnlyBackend { .. }
+            ),
+            "Expected Unsupported or OperationBlocked/ReadOnlyBackend, got {:?}",
+            e
         );
     }
 }
@@ -223,7 +229,12 @@ fn test_compression_levels() {
         // Verify archive is readable
         let reader = Archive::open(&archive_path).unwrap();
         let entries = reader.list_files().unwrap();
-        assert_eq!(entries.len(), 1, "Level {:?} should produce readable archive", level);
+        assert_eq!(
+            entries.len(),
+            1,
+            "Level {:?} should produce readable archive",
+            level
+        );
     }
 }
 
@@ -234,9 +245,7 @@ fn test_finish_succeeds() {
 
     let opts = CompressionOptions::new(ArchiveFormat::Zip);
     let mut creator = Archive::create(&archive_path, opts).unwrap();
-    creator
-        .add_file_from_data("test.txt", b"content")
-        .unwrap();
+    creator.add_file_from_data("test.txt", b"content").unwrap();
 
     assert!(creator.finish().is_ok());
     assert!(archive_path.exists());

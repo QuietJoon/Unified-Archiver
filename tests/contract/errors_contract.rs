@@ -37,6 +37,7 @@ fn contract_format_error_for_invalid_file() {
     );
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn contract_password_error_for_encrypted_without_password() {

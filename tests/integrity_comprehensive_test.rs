@@ -302,8 +302,8 @@ fn test_concurrent_validation_same_archive() {
         .map(|i| {
             let path = archive_path.to_string();
             thread::spawn(move || {
-                let archive =
-                    Archive::open(&path).unwrap_or_else(|_| panic!("Thread {} should open archive", i));
+                let archive = Archive::open(&path)
+                    .unwrap_or_else(|_| panic!("Thread {} should open archive", i));
                 let report = archive
                     .validate_integrity()
                     .unwrap_or_else(|_| panic!("Thread {} validation should succeed", i));

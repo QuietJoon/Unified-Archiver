@@ -6,9 +6,12 @@
 use crate::archive::{Archive, ArchiveBackend};
 use crate::entry::ArchiveEntry;
 use crate::error::ops;
-use crate::error::{ArchiveError, Result};
+use crate::error::{ArchiveError, ArchiveWarning, Result, ResultWithWarnings};
 use crate::options::{ExtractionOptions, password_as_str};
-use crate::security::{check_archive_ratio, check_extraction_safe, validate_entry_path};
+use crate::security::{
+    ExtractionLimits, check_extraction_safe, check_extraction_safe_with_archive,
+    check_single_entry_safe, validate_entry_path,
+};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -83,6 +86,7 @@ fn extract_single_entry(
 ) -> Result<()> {
     let extract_archive = open_archive_for_extraction(archive_path, password)?;
     match &extract_archive.backend {
+        #[cfg(feature = "rar-support")]
         ArchiveBackend::Unrar(unrar) => {
             unrar.extract_file_with_options(entry_path, dest, overwrite)
         }
@@ -161,7 +165,7 @@ impl Archive {
     /// archive.extract_all(options)?;
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
-    pub fn extract_all(&self, mut options: ExtractionOptions) -> Result<()> {
+    pub fn extract_all(&self, mut options: ExtractionOptions) -> Result<ResultWithWarnings<()>> {
         ensure_destination(&options.destination)?;
 
         let extraction_archive = if let Some(password) = password_as_str(&options.password) {
@@ -174,8 +178,7 @@ impl Archive {
         // Security: Check extraction safety (zip bomb protection)
         // Use metadata-only listing to avoid decompressing data before limit checks
         let entries = archive.list_files_for_limits()?;
-        check_extraction_safe(&entries, &options.limits)?;
-        check_archive_ratio(&entries, &archive.path, &options.limits)?;
+        check_extraction_safe_with_archive(&entries, &archive.path, &options.limits)?;
         check_overwrite_conflicts(
             &entries,
             &options.destination,
@@ -186,39 +189,43 @@ impl Archive {
         // Multi-part note: libarchive and UnRAR backends automatically handle
         // multi-part archives when opening the first part. The backend reads
         // subsequent parts (.z01, .z02, etc.) transparently.
-        match &archive.backend {
+        let warnings: Vec<ArchiveWarning> = match &archive.backend {
+            #[cfg(feature = "rar-support")]
             ArchiveBackend::Unrar(unrar) => unrar.extract_all_with_options(
                 &options.destination,
                 options.progress.as_mut(),
                 options.overwrite,
-            ),
+            )?,
             ArchiveBackend::Piz(piz) => piz.extract_all_with_options(
                 &options.destination,
                 options.progress.as_mut(),
                 options.overwrite,
                 options.verify_crc32,
-            ),
+            )?,
             ArchiveBackend::SevenZ(sevenz) => sevenz.extract_all_with_options(
                 &options.destination,
                 options.progress.as_mut(),
                 options.overwrite,
                 options.verify_crc32,
-            ),
-            ArchiveBackend::ZipWriter(_) => Err(ArchiveError::write_mode_only(ops::EXTRACT_ALL)),
+            )?,
+            ArchiveBackend::ZipWriter(_) => {
+                return Err(ArchiveError::write_mode_only(ops::EXTRACT_ALL));
+            }
             ArchiveBackend::ZipReader(zip) => zip.extract_all_with_options(
                 &options.destination,
                 options.progress.as_mut(),
                 options.overwrite,
                 options.verify_crc32,
-            ),
+            )?,
             ArchiveBackend::Libarchive(libarchive) => libarchive.extract_all_with_options(
                 &options.destination,
                 options.progress.as_mut(),
                 options.overwrite,
                 options.preserve_permissions,
                 options.preserve_times,
-            ),
-        }
+            )?,
+        };
+        Ok(ResultWithWarnings::with_warnings((), warnings))
     }
 
     /// Extract a single file from archive
@@ -254,6 +261,7 @@ impl Archive {
 
         // Use the current archive handle for extraction
         match &archive.backend {
+            #[cfg(feature = "rar-support")]
             ArchiveBackend::Unrar(unrar) => {
                 unrar.extract_file_with_options(file_path, &options.destination, options.overwrite)
             }
@@ -286,11 +294,42 @@ impl Archive {
         }
     }
 
-    /// Extract a single file to memory
+    /// Extract a single file to memory.
     ///
-    /// Returns the file contents as a Vec<u8> without writing to disk.
+    /// Returns the file contents as a `Vec<u8>` without writing to disk.
+    ///
+    /// # Limits and DOS surface
+    ///
+    /// This function applies [`ExtractionLimits::default`] before dispatching
+    /// to the backend — it does *not* accept a caller-supplied
+    /// [`ExtractionOptions`]. The default limits are the same ones
+    /// [`Archive::extract_all`] uses when the caller passes
+    /// `ExtractionOptions::default()`. Tighter caps cannot be threaded through
+    /// this entry point today; if you need them, either:
+    ///
+    /// * pre-validate with [`Archive::find_entry`] and reject entries whose
+    ///   `size` exceeds your own budget before calling `extract_to_memory`, or
+    /// * use [`Archive::extract_to_stream`] with [`Read::take`] to bound the
+    ///   number of bytes read.
+    ///
+    /// The compression-ratio guard is applied **per entry**, so an archive with
+    /// many moderately-bloating entries can still exhaust caller memory if the
+    /// entries are fetched serially without a running total on the caller side.
+    /// An `ExtractionOptions`-aware overload is tracked in OI-0057-005.
     pub fn extract_to_memory(&self, file_path: &str) -> Result<Vec<u8>> {
+        if !matches!(self.backend, ArchiveBackend::ZipWriter(_)) {
+            let entries = self.list_files()?;
+            check_single_entry_safe(entries, file_path, &ExtractionLimits::default())?;
+        }
+        self.extract_to_memory_unchecked(file_path)
+    }
+
+    /// Same as `extract_to_memory` but skips the per-call entry-list rebuild and
+    /// safety pre-check. Internal callers (e.g. `commit_changes`) use this when
+    /// the entry has already been validated against a fresh listing.
+    pub(crate) fn extract_to_memory_unchecked(&self, file_path: &str) -> Result<Vec<u8>> {
         match &self.backend {
+            #[cfg(feature = "rar-support")]
             ArchiveBackend::Unrar(unrar) => unrar.extract_to_memory(file_path),
             ArchiveBackend::Piz(piz) => piz.extract_to_memory(file_path),
             ArchiveBackend::SevenZ(sevenz) => sevenz.extract_to_memory(file_path),
@@ -302,11 +341,25 @@ impl Archive {
         }
     }
 
-    /// Extract a single file to a stream
+    /// Extract a single file to a stream.
     ///
-    /// Phase 2.4: Returns a StreamingExtractor that implements Read trait,
-    /// allowing memory-efficient processing of large files without loading
-    /// entire contents into RAM.
+    /// Returns a [`StreamingExtractor`](crate::streaming::StreamingExtractor) that
+    /// implements [`Read`](std::io::Read), allowing memory-efficient processing
+    /// of large files without loading entire contents into RAM.
+    ///
+    /// # Limits and DOS surface
+    ///
+    /// Applies [`ExtractionLimits::default`] to the entry metadata before
+    /// dispatching — the archive-declared size is checked, but the stream
+    /// itself is not truncated. A malicious or corrupt archive can return
+    /// more bytes than its entry header promised, so callers that read from
+    /// the returned stream in a security-sensitive context should wrap it
+    /// with [`Read::take(max)`](std::io::Read::take) sized to the entry's
+    /// declared size (or to a caller-chosen budget).
+    ///
+    /// Like [`Archive::extract_to_memory`], this entry point does *not* accept
+    /// an [`ExtractionOptions`] and only uses default limits. Threading custom
+    /// limits through is tracked in OI-0057-005.
     ///
     /// # Example
     /// ```no_run
@@ -327,7 +380,21 @@ impl Archive {
         &self,
         file_path: &str,
     ) -> Result<crate::streaming::StreamingExtractor> {
+        if !matches!(self.backend, ArchiveBackend::ZipWriter(_)) {
+            let entries = self.list_files()?;
+            check_single_entry_safe(entries, file_path, &ExtractionLimits::default())?;
+        }
+        self.extract_to_stream_unchecked(file_path)
+    }
+
+    /// Same as `extract_to_stream` but skips the per-call entry-list rebuild and
+    /// safety pre-check. Used by `commit_changes` to copy retained entries.
+    pub(crate) fn extract_to_stream_unchecked(
+        &self,
+        file_path: &str,
+    ) -> Result<crate::streaming::StreamingExtractor> {
         match &self.backend {
+            #[cfg(feature = "rar-support")]
             ArchiveBackend::Unrar(unrar) => unrar.extract_to_stream(file_path),
             ArchiveBackend::Piz(piz) => piz.extract_to_stream(file_path),
             ArchiveBackend::SevenZ(sevenz) => sevenz.extract_to_stream(file_path),
@@ -345,7 +412,11 @@ impl Archive {
     ///
     /// Phase 2.7: Uses parallel extraction when multiple files match.
     /// For 4+ files, uses rayon to extract in parallel for improved performance.
-    pub fn extract_filtered<F>(&self, predicate: F, options: ExtractionOptions) -> Result<()>
+    pub fn extract_filtered<F>(
+        &self,
+        predicate: F,
+        options: ExtractionOptions,
+    ) -> Result<ResultWithWarnings<()>>
     where
         F: Fn(&ArchiveEntry) -> bool + Sync,
     {
@@ -363,13 +434,12 @@ impl Archive {
         let to_extract: Vec<_> = entries.iter().filter(|e| predicate(e)).collect();
 
         if to_extract.is_empty() {
-            return Ok(());
+            return Ok(ResultWithWarnings::ok(()));
         }
 
         let to_extract_entries: Vec<ArchiveEntry> =
             to_extract.iter().map(|entry| (*entry).clone()).collect();
-        check_extraction_safe(&to_extract_entries, &options.limits)?;
-        check_archive_ratio(&to_extract_entries, &self.path, &options.limits)?;
+        check_extraction_safe_with_archive(&to_extract_entries, &self.path, &options.limits)?;
         check_overwrite_conflicts(
             &to_extract_entries,
             &options.destination,
@@ -419,7 +489,7 @@ impl Archive {
             to_extract.iter().try_for_each(extract_one)?;
         }
 
-        Ok(())
+        Ok(ResultWithWarnings::ok(()))
     }
 
     /// Extract multiple files by their paths
@@ -448,11 +518,15 @@ impl Archive {
     /// )?;
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
-    pub fn extract_files(&self, paths: &[&str], options: ExtractionOptions) -> Result<()> {
+    pub fn extract_files(
+        &self,
+        paths: &[&str],
+        options: ExtractionOptions,
+    ) -> Result<ResultWithWarnings<()>> {
         ensure_destination(&options.destination)?;
 
         if paths.is_empty() {
-            return Ok(());
+            return Ok(ResultWithWarnings::ok(()));
         }
 
         // Deduplicate requested paths
@@ -480,8 +554,7 @@ impl Archive {
                 })?;
             to_extract_entries.push(entry.clone());
         }
-        check_extraction_safe(&to_extract_entries, &options.limits)?;
-        check_archive_ratio(&to_extract_entries, &self.path, &options.limits)?;
+        check_extraction_safe_with_archive(&to_extract_entries, &self.path, &options.limits)?;
         check_overwrite_conflicts(
             &to_extract_entries,
             &options.destination,
@@ -530,7 +603,7 @@ impl Archive {
             paths.iter().try_for_each(extract_one)?;
         }
 
-        Ok(())
+        Ok(ResultWithWarnings::ok(()))
     }
 
     /// Extract files by their IDs
@@ -570,11 +643,15 @@ impl Archive {
     /// )?;
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
-    pub fn extract_by_ids(&self, ids: &[usize], options: ExtractionOptions) -> Result<()> {
+    pub fn extract_by_ids(
+        &self,
+        ids: &[usize],
+        options: ExtractionOptions,
+    ) -> Result<ResultWithWarnings<()>> {
         ensure_destination(&options.destination)?;
 
         if ids.is_empty() {
-            return Ok(());
+            return Ok(ResultWithWarnings::ok(()));
         }
 
         // Deduplicate requested IDs
@@ -609,8 +686,7 @@ impl Archive {
             to_extract_entries.push(entry.clone());
         }
 
-        check_extraction_safe(&to_extract_entries, &options.limits)?;
-        check_archive_ratio(&to_extract_entries, &self.path, &options.limits)?;
+        check_extraction_safe_with_archive(&to_extract_entries, &self.path, &options.limits)?;
         check_overwrite_conflicts(
             &to_extract_entries,
             &options.destination,
@@ -659,7 +735,7 @@ impl Archive {
             paths.iter().try_for_each(extract_one)?;
         }
 
-        Ok(())
+        Ok(ResultWithWarnings::ok(()))
     }
 }
 

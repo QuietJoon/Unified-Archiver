@@ -72,6 +72,8 @@ pub(crate) mod ops {
     pub const REMOVE_ENTRY: &str = "remove_entry";
     pub const COMMIT_CHANGES: &str = "commit_changes";
     pub const ADD_DIRECTORY_ENTRY: &str = "add_directory_entry";
+    pub const CREATE: &str = "create";
+    pub const FINISH: &str = "finish";
 }
 
 impl std::error::Error for ArchiveError {
@@ -395,6 +397,7 @@ impl std::fmt::Display for ArchiveWarning {
 }
 
 /// Result type that includes warnings
+#[derive(Debug)]
 pub struct ResultWithWarnings<T> {
     /// Operation result
     pub value: T,
