@@ -221,6 +221,18 @@ Implementation progress:
 - ✅ Symlink detection and warnings
 - ✅ Streaming extraction (<100MB memory for 10GB+ archives for libarchive-backed formats (TAR family); ZIP, 7z, and RAR backends currently buffer entries during streaming extraction)
 
+## Limitations
+
+See [Limitations.md](./Limitations.md) for the full catalog. Key caveats in v0.1.0:
+
+- **Modification is ZIP/7z only and lossy.** `commit_changes()` rewrites the archive from scratch; original timestamps, permissions, and per-entry compression settings are not preserved (archive comment and method are). RAR and TAR are read-only.
+- **Streaming bounded-memory is libarchive-only.** `extract_to_stream()` reads TAR/ISO in chunks; ZIP, 7z, and RAR backends present the `Read` surface but buffer the entry in memory first.
+- **Split archives: RAR only.** ZIP and 7z split volumes are not supported.
+- **Creation-time encryption is ZIP-only.** 7z and TAR creation does not encrypt. RAR creation requires an external licensed `rar` CLI and is feature-gated behind `external-rar-create`.
+- **Standalone `.gz` / `.bz2` / `.xz` are read-only.** Use the `.tar.*` compound variants for compressed-archive creation.
+- **Encrypted-header RAR** (`-hp`) cannot be listed without the password — other formats surface entry names without one.
+- **Platform coverage:** macOS and Linux tested; Windows builds are untested.
+
 ## Architecture
 
 **Backend Engines:**
