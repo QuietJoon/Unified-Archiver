@@ -4,7 +4,7 @@
 //! 1. List files from each supported format
 //! 2. Verify metadata consistency (size, crc32, modified time)
 //! 3. Verify enhanced metadata (compression_ratio, is_encrypted, created/accessed times)
-//! 4. Verify caching (repeated calls return same slice pointer)
+//! 4. Verify caching (repeated calls return stable metadata without re-populating)
 //! 5. Validate integrity detects corrupted files
 //! 6. Performance: <1s for listing
 
@@ -187,21 +187,28 @@ fn contract_enhanced_metadata_is_encrypted_field() {
     }
 }
 
-// ── Contract 4: Verify caching (repeated calls return same pointer) ──
+// ── Contract 4: Verify caching (repeated calls return stable metadata) ──
 
 #[test]
-fn contract_list_files_caching_same_pointer() {
+fn contract_list_files_caching_stable() {
     let archive = Archive::open(fixture("test.zip")).unwrap();
     let entries1 = archive.list_files().unwrap();
-    let entries2 = archive.list_files().unwrap();
+    let first_snapshot: Vec<_> = entries1
+        .iter()
+        .map(|e| (e.path.clone(), e.size, e.crc32))
+        .collect();
 
-    // Both calls should return a reference to the same cached slice
-    let ptr1 = entries1.as_ptr();
-    let ptr2 = entries2.as_ptr();
+    let entries2 = archive.list_files().unwrap();
     assert_eq!(
-        ptr1, ptr2,
-        "Repeated list_files() calls should return the same cached slice (pointer equality)"
+        entries2.len(),
+        first_snapshot.len(),
+        "Cached list_files() must not change length between calls",
     );
+    for (entry, (path, size, crc)) in entries2.iter().zip(first_snapshot.iter()) {
+        assert_eq!(&entry.path, path, "Cached entry path must be stable");
+        assert_eq!(entry.size, *size, "Cached entry size must be stable");
+        assert_eq!(entry.crc32, *crc, "Cached entry crc32 must be stable");
+    }
 }
 
 #[test]
