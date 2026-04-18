@@ -344,8 +344,12 @@ impl Archive {
     /// Extract a single file to a stream.
     ///
     /// Returns a [`StreamingExtractor`](crate::streaming::StreamingExtractor) that
-    /// implements [`Read`](std::io::Read), allowing memory-efficient processing
-    /// of large files without loading entire contents into RAM.
+    /// implements [`Read`](std::io::Read). Only libarchive-backed formats (TAR,
+    /// TAR.GZ, TAR.BZ2, TAR.XZ, TAR.ZST) truly stream — Piz, ZipReader, SevenZ,
+    /// and UnRAR backends currently materialize the entry into memory before
+    /// wrapping it in a [`Cursor`](std::io::Cursor) (tracked by DEF-004 and
+    /// OI-0057-007). For bounded memory use on those backends, check entry size
+    /// via [`find_entry`](Self::find_entry) before extraction.
     ///
     /// # Limits and DOS surface
     ///

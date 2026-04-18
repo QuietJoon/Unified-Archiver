@@ -48,7 +48,7 @@ OI-025-001 (compression-setting preservation) and OI-025-002 (per-entry metadata
 | `docs/architecture/verification-matrix.md` | SCN-CRE-04, SCN-SFX-08, RAR concurrency rows updated |
 | `docs/architecture/decisions/0019-…/0020-…/0021-…` | New ADRs |
 | `docs/architecture/decisions/README.md` | Index entries for ADRs 0019–0021 |
-| `docs/project/stub-manifest.md` | DEF-006 → Closed; DEF-007 → Closed; DEF-008 → Partially closed |
+| `docs/project/stub-manifest.md` | DEF-006 → Closed; DEF-007 → Closed; DEF-008 → Closed (2026-04-14) |
 | `docs/project/implementation-impact-report.md` | Drift rows closed; in-flight items moved to "Closed" |
 | `docs/project/design-baseline.md` | Phase-state checkbox ticked |
 | `docs/project/phase-state.yaml` | `implementation.notes` reflects closed gaps |

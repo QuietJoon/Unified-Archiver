@@ -12,7 +12,7 @@ use unified_archive::{Archive, ArchiveFormat, CompressionOptions, ModificationOp
 fn fresh_zip(dir: &std::path::Path, name: &str) -> PathBuf {
     let path = dir.join(name);
     let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
-    let mut archive = Archive::create(&path, { std::mem::take(&mut opts) }).unwrap();
+    let mut archive = Archive::create(&path, std::mem::take(&mut opts)).unwrap();
     archive.add_file_from_data("a.txt", b"original A").unwrap();
     archive.add_file_from_data("b.txt", b"original B").unwrap();
     archive.finish().unwrap();

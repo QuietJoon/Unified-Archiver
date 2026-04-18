@@ -53,8 +53,7 @@ Dependency-ordered implementation slices with risk notes. Retrospective — all 
 - Copy-on-write rewrite requires full archive read + write — significant temp disk usage for large archives
 - ZIP modification using libarchive on the read side is unreliable — some test scenarios ignore-gated
 - Platform-specific atomic rename: Unix `rename` vs Windows retry logic
-- `commit_changes()` loses entry metadata during rewrite (OI-025-001) and does not apply `ModificationOptions` settings (OI-025-002)
-- Backup creation during modification: `create_backup` and `backup_suffix` are honored via `modify_with_options()` (AD 0020); `preserve_metadata` preserves timestamps and Unix permissions (OI-025-002 resolved 2026-04-14)
+- Backup creation during modification: `create_backup` and `backup_suffix` are honored via `modify_with_options()` (AD 0020); `preserve_metadata` preserves timestamps and Unix permissions (OI-025-002 resolved 2026-04-14); `ModificationOptions::compression` overrides archive recreation settings (OI-025-001 resolved 2026-04-14)
 
 ### Slice 6: SFX Detection (Phase 7)
 **Dependencies:** Slice 1

@@ -27,7 +27,7 @@
   - **OI-025-003 RESOLVED** (Phases B.1 + B.2): `CompressionOptions.progress` wired through both creation backends per-entry (AD 0021). `ModificationOptions::create_backup` + `backup_suffix` honored via new `Archive::modify_with_options(path, opts)` (AD 0020).
   - **OI-025-001 RESOLVED** (2026-04-14): `ModificationOptions.compression` overrides archive recreation settings; `commit_changes()` uses caller-supplied compression level and password.
   - **OI-025-002 RESOLVED** (2026-04-14): `commit_changes()` preserves timestamps and Unix permissions via `add_file_from_data_with_metadata()` on both ZipWriter and LibarchiveArchive backends. `preserve_metadata` flag is now functional.
-  - **DEF-006 Closed**, **DEF-007 Closed**, **DEF-008 Partially Closed** in stub manifest.
+  - **DEF-006 Closed**, **DEF-007 Closed**, **DEF-008 Closed** (2026-04-14) in stub manifest.
 
   Remaining tracked gaps:
   - DEF-001 (`open_at_offset`), DEF-002 (split creation), DEF-004 (true streaming for non-libarchive backends), DEF-005 (some ZIP modify edge cases) — all explicitly out-of-MVP-scope and tracked as DEFERRED. DEF-003 (SecStr migration) closed 2026-04-17 (OI-0057-003).

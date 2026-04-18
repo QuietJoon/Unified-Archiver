@@ -204,8 +204,8 @@ Implementation progress:
 - ✅ Phase 2: Foundation - Complete (format detection, error handling, FFI bindings)
 - ✅ Phase 3: Archive Inspection - Complete (list files, metadata, validation, multi-part detection)
 - ✅ Phase 4: Archive Extraction - Complete (all formats, progress tracking, streaming, multi-part support)
-- 🚧 Phase 5: Archive Creation - Implemented with tracked gaps (metadata preservation, progress callbacks)
-- 🚧 Phase 6: Archive Modification - Implemented with tracked gaps (settings/metadata loss during commit)
+- 🚧 Phase 5: Archive Creation - Implemented with tracked gaps (split-archive creation, optional external RAR creation)
+- 🚧 Phase 6: Archive Modification - Implemented with tracked gaps (ZIP-modify edge cases; metadata/settings preservation resolved 2026-04-14)
 - 🚧 Phase 7: SFX Detection - Detection and stub extraction working; offset-based opening deferred (Windows PE, Linux ELF, macOS Mach-O, Script interpreters)
 - ✅ Phase 8: Polish - Complete; documentation reconciliation in progress (architecture docs and contracts being aligned with implementation state)
 
