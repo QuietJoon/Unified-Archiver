@@ -27,10 +27,14 @@ pub const DEFAULT_MAX_ENTRY_COUNT: usize = 100_000;
 
 /// Maximum SFX payload staged to disk by `Archive::open_at_offset` (16 GiB).
 ///
-/// Authoritative home of AD 0040's ceiling since the R0081 innovation I1
-/// folded it into [`ExtractionLimits::max_sfx_payload_size`]. The
-/// `crate::sfx::limits::MAX_SFX_PAYLOAD_SIZE` alias re-exports this value
-/// so the SFX size-relationship documentation stays in one module.
+/// **This is the default only, not the gate.** AD 0040's ceiling became
+/// configurable in R0081 innovation I1 when it was folded into
+/// [`ExtractionLimits::max_sfx_payload_size`]; that accessor is what a
+/// staging site must consult, because a caller who *lowers* the cap gets
+/// no protection from a gate that reads this constant (or the
+/// `crate::sfx::limits::MAX_SFX_PAYLOAD_SIZE` alias of it) instead. The
+/// alias exists so the SFX size-relationship documentation stays in one
+/// module.
 pub const DEFAULT_MAX_SFX_PAYLOAD_SIZE: u64 = 16 * 1024 * 1024 * 1024;
 
 /// Maximum allowed archive comment size (65,535 bytes).
@@ -239,10 +243,11 @@ pub struct ExtractionLimits {
     max_sfx_payload_size: Cap,
     /// Reject (rather than lossily repair) unsafe entry paths (AD 0066).
     ///
-    /// Behaviour is still deferred: the flag has a typed home so AD 0066
-    /// is no longer a bare deferral, but the strict-reject path itself is
-    /// not yet implemented (OI-0076-003 item 1). Default `false` preserves
-    /// the current lossy-repair baseline.
+    /// Enforced: when set, the pre-extraction gate
+    /// ([`check_extraction_safe`]) and the entry-path normaliser both
+    /// refuse an entry whose stored name carries traversal, absolute, or
+    /// current-directory components instead of rewriting it. Default
+    /// `false` keeps the AD 0066 lossy-repair baseline byte-for-byte.
     reject_unsafe_paths: bool,
 }
 
@@ -301,6 +306,14 @@ impl ExtractionLimits {
 
     /// Maximum SFX payload staged to disk by `Archive::open_at_offset`
     /// (AD 0040).
+    ///
+    /// **This accessor is the authoritative ceiling for an SFX staging
+    /// operation.** [`DEFAULT_MAX_SFX_PAYLOAD_SIZE`] (and the
+    /// `crate::sfx::limits::MAX_SFX_PAYLOAD_SIZE` alias of it) is only the
+    /// value this field defaults to; a staging site that reads the
+    /// constant instead of this accessor silently ignores a caller who
+    /// *lowered* the cap. Compare with [`Cap::exceeded_by`] so
+    /// [`Cap::Unlimited`] means "no ceiling" rather than `u64::MAX`.
     #[must_use]
     pub const fn max_sfx_payload_size(&self) -> Cap {
         self.max_sfx_payload_size
@@ -309,8 +322,9 @@ impl ExtractionLimits {
     /// Whether the extractor rejects (rather than lossily repairs) unsafe
     /// entry paths (AD 0066).
     ///
-    /// Behaviour is deferred: this reports the configured flag, but the
-    /// strict-reject path is not yet wired (OI-0076-003 item 1).
+    /// Enforced (see the field docs): `true` turns traversal / absolute /
+    /// current-directory entry names into
+    /// [`ArchiveError::OperationBlocked`] instead of a silent rewrite.
     #[must_use]
     pub const fn reject_unsafe_paths(&self) -> bool {
         self.reject_unsafe_paths
@@ -403,7 +417,7 @@ impl ExtractionLimits {
 ///     .max_file_size(64 * 1024 * 1024)         // 64 MiB, via `From<u64>`
 ///     .max_total_size(Cap::Unlimited)          // no cumulative ceiling
 ///     .max_compression_ratio(CompressionRatio::whole(500)?)
-///     .reject_unsafe_paths(true)         // records intent; enforcement deferred (AD 0066)
+///     .reject_unsafe_paths(true)               // block, don't repair, unsafe entry names
 ///     .build();
 /// # Ok::<(), unified_archive::ArchiveError>(())
 /// ```
@@ -454,7 +468,9 @@ impl ExtractionLimitsBuilder {
     }
 
     /// Set the maximum SFX payload staged to disk (AD 0040). Accepts a
-    /// `u64` (becomes [`Cap::Limited`]) or [`Cap::Unlimited`].
+    /// `u64` (becomes [`Cap::Limited`]) or [`Cap::Unlimited`]. Read back
+    /// through [`ExtractionLimits::max_sfx_payload_size`], which is the
+    /// value the staging gate must consult.
     #[must_use]
     pub fn max_sfx_payload_size(mut self, cap: impl Into<Cap>) -> Self {
         self.inner.max_sfx_payload_size = cap.into();
@@ -463,8 +479,12 @@ impl ExtractionLimitsBuilder {
 
     /// Reject (rather than lossily repair) unsafe entry paths (AD 0066).
     ///
-    /// Behaviour is deferred (OI-0076-003 item 1); this only records the
-    /// flag.
+    /// `true` makes an entry whose stored name carries `..`, an absolute
+    /// prefix, or a `.` segment fail with
+    /// [`ArchiveError::OperationBlocked`] (`operation = "extract"`,
+    /// reason containing `unsafe path components`) rather than being
+    /// rewritten into a safe-looking name. Default `false` keeps the
+    /// lossy-repair baseline.
     #[must_use]
     pub fn reject_unsafe_paths(mut self, reject: bool) -> Self {
         self.inner.reject_unsafe_paths = reject;
@@ -479,8 +499,62 @@ impl ExtractionLimitsBuilder {
     }
 }
 
-/// Normalize entry path by stripping non-normal components (traversal, root, current dir)
-fn normalize_entry_components(entry_path: &str) -> Result<PathBuf> {
+/// What to do with an entry name that cannot be honoured verbatim
+/// (AD 0066).
+///
+/// [`Repair`](Self::Repair) is the shipped baseline that AD 0066
+/// ratified: traversal / root / current-directory components are dropped
+/// and the safe-named remainder is extracted.
+/// [`Reject`](Self::Reject) is the strict opt-in the same record queued,
+/// selected by [`ExtractionLimits::reject_unsafe_paths`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnsafePathPolicy {
+    /// Strip the offending components and continue (default).
+    Repair,
+    /// Refuse the entry with [`ArchiveError::OperationBlocked`].
+    Reject,
+}
+
+impl UnsafePathPolicy {
+    /// The policy the caller's limits select.
+    pub(crate) fn from_limits(limits: &ExtractionLimits) -> Self {
+        if limits.reject_unsafe_paths {
+            Self::Reject
+        } else {
+            Self::Repair
+        }
+    }
+}
+
+/// Describe why `entry_path` cannot be extracted under its stored name,
+/// or `None` when the name is already safe.
+///
+/// Judged on `/`-delimited segments after collapsing `\` → `/`, so a
+/// Windows-flavoured `..\..\evil` is caught on a Unix host too — the
+/// strict policy is opt-in, so being stricter than the host's own path
+/// grammar here cannot regress a default-configured caller. The absolute
+/// test also asks `Path` for a root/prefix component so a host-specific
+/// spelling (`C:\x` on Windows) is still seen.
+fn unsafe_entry_path_reason(entry_path: &str) -> Option<&'static str> {
+    let normalized = entry_path.replace('\\', "/");
+    if normalized.starts_with('/')
+        || Path::new(&normalized)
+            .components()
+            .any(|c| matches!(c, Component::RootDir | Component::Prefix(_)))
+    {
+        return Some("absolute path prefix");
+    }
+    normalized.split('/').find_map(|segment| match segment {
+        ".." => Some("'..' parent-directory segment"),
+        "." => Some("'.' current-directory segment"),
+        _ => None,
+    })
+}
+
+/// Normalize entry path by stripping non-normal components (traversal,
+/// root, current dir), or — under [`UnsafePathPolicy::Reject`] — refuse
+/// the entry outright (AD 0066).
+fn normalize_entry_components(entry_path: &str, policy: UnsafePathPolicy) -> Result<PathBuf> {
     // R0001-0072: reject an embedded NUL before any component processing.
     // `Component::Normal` happily carries a NUL through, so the name used to
     // reach the extractor, get its parent directories created, and only then
@@ -492,6 +566,22 @@ fn normalize_entry_components(entry_path: &str) -> Result<PathBuf> {
             entry_path,
             "entry path must not contain NUL",
         ));
+    }
+
+    // AD 0066 strict opt-in: report the hostile name instead of laundering
+    // it into a safe-looking one. The record fixes both the error variant
+    // and the wording ("unsafe path components"), so callers and tests can
+    // match on it.
+    if policy == UnsafePathPolicy::Reject {
+        if let Some(detail) = unsafe_entry_path_reason(entry_path) {
+            return Err(ArchiveError::OperationBlocked {
+                operation: crate::error::ops::EXTRACT.to_string(),
+                reason: format!(
+                    "unsafe path components in entry '{entry_path}': {detail} \
+                     (ExtractionLimits::reject_unsafe_paths is set)"
+                ),
+            });
+        }
     }
 
     let normalized = Path::new(entry_path)
@@ -512,50 +602,235 @@ fn normalize_entry_components(entry_path: &str) -> Result<PathBuf> {
     Ok(normalized)
 }
 
-/// Validate an archive-internal name at the creation/modification boundary.
+/// Naming rules applied to caller-supplied archive-internal names at the
+/// creation/modification facade boundary (AD 0044).
 ///
-/// Reject names the extraction side would refuse to honour verbatim — traversal
-/// segments (`..`), absolute prefixes (`/`, `C:\\`), NUL bytes, and empty
-/// strings. Callers on the write path are expected to pass names that round-trip
-/// cleanly through `sanitize_entry_path`; this helper fails fast instead of
-/// silently writing an entry whose name the extractor would later rewrite.
-///
-/// **Backslash normalization (R0070-0020).** Path components are inspected
-/// after collapsing `\\` → `/`. Without this step, a Unix host treats
-/// `..\\..\\evil` as a single `Normal` component and lets it into the
-/// archive — where a Windows consumer would later interpret the
-/// backslashes as separators and traverse upward at extract time.
-/// Normalising the boundary input keeps the same path shape rejected on
-/// both platforms.
-pub(crate) fn validate_archive_internal_path(archive_path: &str) -> Result<()> {
-    let reason = if archive_path.is_empty() {
-        Some("must not be empty")
-    } else if archive_path.contains('\0') {
-        Some("must not contain NUL")
-    } else {
-        let normalized = archive_path.replace('\\', "/");
-        Path::new(&normalized)
-            .components()
-            .find_map(|component| match component {
-                Component::Normal(_) => None,
-                Component::CurDir => Some("must not contain '.' segments"),
-                Component::ParentDir => Some("must not contain '..' segments"),
-                Component::RootDir | Component::Prefix(_) => Some("must be relative"),
-            })
-    };
+/// An archive is a *portable container*: the name a caller stores travels
+/// to hosts whose path grammars differ from the writer's. Judging that
+/// name with the writing host's rules (what `Path::components` gives you)
+/// therefore lets host-specific hazards into the archive — on a Unix
+/// writer `C:/x` and `n:stream` are ordinary segment text, and `CON.txt`
+/// is a perfectly good file name that no Windows consumer can create.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum ArchivePathPolicy {
+    /// **Default.** Accept only names that mean the same thing on every
+    /// supported host: no absolute prefix, no empty / `.` / `..` segment
+    /// in any position, no `:` in a segment (drive letters and NTFS
+    /// alternate data streams), no segment ending in `.` or ` ` (Windows
+    /// silently trims those), and no Windows reserved device name (`CON`,
+    /// `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, case-insensitive,
+    /// with or without an extension).
+    #[default]
+    Portable = 0,
+    /// Escape hatch: judge the name by the *writing host's* path grammar
+    /// only — empty, NUL, absolute-per-this-host, and `.` / `..` segments
+    /// are still refused, but nothing else is. A Unix writer may then
+    /// store `C:/x`, `n:stream` or `CON`; a Windows writer will still see
+    /// `C:/x` as absolute and refuse it. Choose this only when the archive
+    /// is deliberately host-specific.
+    Host = 1,
+}
 
-    match reason {
+/// Process-wide default [`ArchivePathPolicy`] consulted by the write-side
+/// facade. `Portable` until a caller opts out.
+static ARCHIVE_PATH_POLICY: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(ArchivePathPolicy::Portable as u8);
+
+fn policy_from_u8(raw: u8) -> ArchivePathPolicy {
+    if raw == ArchivePathPolicy::Host as u8 {
+        ArchivePathPolicy::Host
+    } else {
+        ArchivePathPolicy::Portable
+    }
+}
+
+/// The [`ArchivePathPolicy`] the write-side facade currently enforces.
+#[must_use]
+pub fn archive_path_policy() -> ArchivePathPolicy {
+    policy_from_u8(ARCHIVE_PATH_POLICY.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Opt the whole process out of (or back into) archive-portable name
+/// validation, returning the policy that was in effect.
+///
+/// This is the documented escape hatch for callers who deliberately want
+/// host naming rules on the write path: `add_file_from_data`,
+/// `add_file_from_path_as`, `add_directory`, `add_entry`,
+/// `add_directory_entry` and `remove_entry` all validate through
+/// [`archive_path_policy`], so setting [`ArchivePathPolicy::Host`] once
+/// during start-up changes what those APIs accept. It is a *naming*
+/// (authorship) knob, not a security gate — the extraction-side sanitiser
+/// is unaffected, and `.`/`..`/absolute names stay refused under either
+/// policy.
+///
+/// Being process-wide, it should be set once before any archive is
+/// written rather than toggled around individual calls.
+pub fn set_archive_path_policy(policy: ArchivePathPolicy) -> ArchivePathPolicy {
+    policy_from_u8(ARCHIVE_PATH_POLICY.swap(policy as u8, std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Windows reserved device names. A file whose *stem* is one of these
+/// cannot be created on Windows at all, whatever extension follows.
+const WINDOWS_RESERVED_DEVICE_NAMES: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// True when `segment`'s stem (the text before the first `.`) is a
+/// Windows reserved device name, compared case-insensitively.
+fn is_windows_reserved_device_name(segment: &str) -> bool {
+    let stem = match segment.find('.') {
+        Some(dot) => &segment[..dot],
+        None => segment,
+    };
+    WINDOWS_RESERVED_DEVICE_NAMES
+        .iter()
+        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
+}
+
+/// True when `segment` opens with a `X:` drive-letter prefix.
+fn has_drive_letter_prefix(segment: &str) -> bool {
+    let bytes = segment.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
+/// Portable-policy rules for one already-non-empty, non-`.`, non-`..`
+/// segment. `leading` marks the first segment, where a drive letter is
+/// diagnosed as such rather than as a stray colon.
+fn portable_segment_reason(segment: &str, leading: bool) -> Option<&'static str> {
+    if leading && has_drive_letter_prefix(segment) {
+        return Some("must not start with a drive-letter prefix such as \"C:\"");
+    }
+    if segment.contains(':') {
+        return Some(
+            "segments must not contain ':' (drive or NTFS alternate-data-stream separator)",
+        );
+    }
+    if segment.ends_with('.') || segment.ends_with(' ') {
+        return Some("segments must not end with '.' or ' '");
+    }
+    if is_windows_reserved_device_name(segment) {
+        return Some(
+            "must not use a Windows reserved device name (CON, PRN, AUX, NUL, COM1-9, LPT1-9)",
+        );
+    }
+    None
+}
+
+/// Why `archive_path` is unacceptable under `policy`, or `None` when it
+/// is acceptable.
+///
+/// **Segment-wise, not `Path::components()` (R0081 / R0001 validator
+/// fix).** `Path::components()` cannot express this check: it *eats*
+/// interior and trailing `.` segments (`a/./b` and `a/b/.` both yield
+/// `[a, b]`), so the `CurDir` arm it feeds only ever fired for a leading
+/// `./`, and on a Unix host it hands back `C:/x` as two ordinary
+/// `Normal` segments. Splitting the (backslash-normalised) string
+/// ourselves judges every position on every host.
+///
+/// **Backslash normalization (R0070-0020).** Segments are cut after
+/// collapsing `\` → `/`. Without this step a Unix host treats
+/// `..\..\evil` as a single segment and lets it into the archive — where
+/// a Windows consumer would later read the backslashes as separators and
+/// traverse upward at extract time.
+fn archive_internal_path_reason(
+    archive_path: &str,
+    policy: ArchivePathPolicy,
+) -> Option<&'static str> {
+    if archive_path.is_empty() {
+        return Some("must not be empty");
+    }
+    if archive_path.contains('\0') {
+        return Some("must not contain NUL");
+    }
+
+    let normalized = archive_path.replace('\\', "/");
+    if normalized.starts_with('/') {
+        return Some("must be relative");
+    }
+    if policy == ArchivePathPolicy::Host
+        && Path::new(&normalized)
+            .components()
+            .any(|c| matches!(c, Component::RootDir | Component::Prefix(_)))
+    {
+        // Host policy defers to the platform for what "absolute" means,
+        // so a Windows build still refuses `C:\x` and `\\server\share`.
+        return Some("must be relative");
+    }
+
+    // One trailing `/` is the conventional spelling of a directory entry
+    // (`add_directory("dup/")`) and is not an empty segment; anything
+    // else empty (`a//b`) is a malformed name.
+    let body = normalized.strip_suffix('/').unwrap_or(&normalized);
+    if body.is_empty() {
+        return Some("must not be empty");
+    }
+
+    for (index, segment) in body.split('/').enumerate() {
+        match segment {
+            "" => return Some("must not contain empty segments"),
+            "." => return Some("must not contain '.' segments"),
+            ".." => return Some("must not contain '..' segments"),
+            _ => {}
+        }
+        if policy == ArchivePathPolicy::Portable {
+            if let Some(reason) = portable_segment_reason(segment, index == 0) {
+                return Some(reason);
+            }
+        }
+    }
+
+    None
+}
+
+/// Validate an archive-internal name under an explicit policy.
+///
+/// Public counterpart of the facade's own boundary check: pre-flight a
+/// name with the exact rules the write-side APIs will apply, or check one
+/// against [`ArchivePathPolicy::Host`] before opting the process into that
+/// policy with [`set_archive_path_policy`].
+///
+/// # Errors
+/// [`ArchiveError::InvalidPath`] naming the rule the path broke.
+pub fn validate_archive_internal_path_as(
+    archive_path: &str,
+    policy: ArchivePathPolicy,
+) -> Result<()> {
+    match archive_internal_path_reason(archive_path, policy) {
         None => Ok(()),
-        Some(r) => Err(ArchiveError::invalid_path(
+        Some(reason) => Err(ArchiveError::invalid_path(
             archive_path,
-            format!("archive-internal path {r}"),
+            format!("archive-internal path {reason}"),
         )),
     }
 }
 
+/// Validate an archive-internal name at the creation/modification
+/// boundary under the process policy (AD 0044).
+///
+/// Reject names the extraction side would refuse to honour verbatim —
+/// traversal segments (`..`), current-directory segments (`.`) in *any*
+/// position, absolute prefixes, NUL bytes, empty strings — plus, under the
+/// default [`ArchivePathPolicy::Portable`], names that only one host can
+/// represent. Callers on the write path are expected to pass names that
+/// round-trip cleanly through `sanitize_entry_path`; this helper fails
+/// fast instead of silently writing an entry whose name the extractor —
+/// or another host's filesystem — would later rewrite.
+///
+/// Use [`validate_archive_internal_path_as`] to check a name against a
+/// specific policy, and [`set_archive_path_policy`] to change the one
+/// enforced here.
+pub(crate) fn validate_archive_internal_path(archive_path: &str) -> Result<()> {
+    validate_archive_internal_path_as(archive_path, archive_path_policy())
+}
+
 /// Sanitize an archive entry path to prevent path traversal attacks.
 ///
-/// **Lossy normalisation** (R0070-0057, R0070-0058).
+/// **Lossy normalisation** (R0070-0057, R0070-0058) — the AD 0066
+/// baseline. Callers who prefer a hard refusal set
+/// [`ExtractionLimits::reject_unsafe_paths`], which makes the
+/// pre-extraction gate block the archive before this rewrite happens.
 ///
 /// This function removes:
 /// - Absolute path components (e.g., `/etc/passwd` → `etc/passwd`)
@@ -615,7 +890,25 @@ pub(crate) fn sanitize_entry_path_with_base(
     dest: &Path,
     canonical_dest: &Path,
 ) -> Result<PathBuf> {
-    let normalized = normalize_entry_components(entry_path)?;
+    sanitize_entry_path_with_base_policy(entry_path, dest, canonical_dest, UnsafePathPolicy::Repair)
+}
+
+/// [`sanitize_entry_path_with_base`] with an explicit AD 0066 policy.
+///
+/// The seam for a call site that has the caller's [`ExtractionLimits`] in
+/// scope: pass `UnsafePathPolicy::from_limits(limits)` and an unsafe name
+/// is refused here rather than repaired. Sites without limits in scope
+/// keep the `Repair` baseline; the archive-wide pre-extraction gate
+/// ([`check_extraction_safe`]) is what makes
+/// [`ExtractionLimits::reject_unsafe_paths`] bind for every extraction
+/// route today.
+pub(crate) fn sanitize_entry_path_with_base_policy(
+    entry_path: &str,
+    dest: &Path,
+    canonical_dest: &Path,
+    policy: UnsafePathPolicy,
+) -> Result<PathBuf> {
+    let normalized = normalize_entry_components(entry_path, policy)?;
 
     // Join with destination
     let full_path = dest.join(&normalized);
@@ -702,6 +995,13 @@ pub(crate) fn check_extraction_safe<E: Borrow<ArchiveEntry>>(
     entries: &[E],
     limits: &ExtractionLimits,
 ) -> Result<()> {
+    // AD 0066 strict opt-in. Runs before any size accounting so a hostile
+    // name is reported as such rather than as a budget violation, and
+    // before the destination directory is created. A no-op — not even a
+    // pass over `entries` — under the default `reject_unsafe_paths =
+    // false`, which is what keeps the lossy-repair baseline exact.
+    check_entry_paths_safe(entries, limits)?;
+
     // Check entry count.
     //
     // OI-0080-003: this post-materialization gate stays the authoritative
@@ -803,6 +1103,37 @@ pub(crate) fn check_extraction_safe<E: Borrow<ArchiveEntry>>(
         });
     }
 
+    Ok(())
+}
+
+/// Strict entry-name gate for [`ExtractionLimits::reject_unsafe_paths`]
+/// (AD 0066).
+///
+/// AD 0066 put the strict-reject decision in
+/// [`normalize_entry_components`], which only sees one name at a time and
+/// has no [`ExtractionLimits`] in scope. This is where the flag actually
+/// binds: every extraction route reaches the pre-extraction gate with the
+/// caller's limits, so one pass over the entries about to be materialized
+/// refuses the hostile archive *before* a destination directory is created
+/// or a byte is decoded — and reports the offending name instead of a
+/// laundered one.
+///
+/// Returns `Ok(())` immediately under the default
+/// [`UnsafePathPolicy::Repair`], so the AD 0066 baseline pays nothing and
+/// behaves exactly as before.
+fn check_entry_paths_safe<E: Borrow<ArchiveEntry>>(
+    entries: &[E],
+    limits: &ExtractionLimits,
+) -> Result<()> {
+    let policy = UnsafePathPolicy::from_limits(limits);
+    if policy == UnsafePathPolicy::Repair {
+        return Ok(());
+    }
+    for entry in entries {
+        // Directories are materialized on disk too, so every entry kind
+        // is judged — not just the ones that carry a payload.
+        normalize_entry_components(&entry.borrow().path, policy)?;
+    }
     Ok(())
 }
 
@@ -1256,7 +1587,7 @@ mod tests {
     #[test]
     fn test_normalize_entry_components_rejects_nul() {
         for input in ["evil\0.txt", "dir/evil\0.txt", "\0"] {
-            let err = normalize_entry_components(input)
+            let err = normalize_entry_components(input, UnsafePathPolicy::Repair)
                 .expect_err("NUL-bearing entry path must be rejected");
             match err {
                 ArchiveError::InvalidPath { reason, .. } => assert!(
@@ -1389,11 +1720,26 @@ mod tests {
 
     #[test]
     fn test_validate_archive_internal_path_rejects_curdir() {
-        // `./file.txt` keeps a leading CurDir component (Path::components
-        // preserves it at the start); an interior `a/./b` is normalized away
-        // by Path, so only the leading form is observable here.
+        // A `.` segment is refused in every position. The former
+        // `Path::components()` implementation could only see the leading
+        // form — std eats `a/./b` and `a/b/.` before the check runs — so the
+        // interior and trailing cases silently passed validation and were
+        // then rewritten by the extractor.
         assert_invalid_path_with_reason("./file.txt", "'.'");
         assert_invalid_path_with_reason(".", "'.'");
+        assert_invalid_path_with_reason("a/./b", "'.'");
+        assert_invalid_path_with_reason("a/b/.", "'.'");
+        assert_invalid_path_with_reason("a/./b/./c", "'.'");
+        // Under host semantics too: the positional bug was never a
+        // platform-rules question.
+        for policy in [ArchivePathPolicy::Portable, ArchivePathPolicy::Host] {
+            for input in ["./file.txt", "a/./b", "a/b/."] {
+                assert!(
+                    validate_archive_internal_path_as(input, policy).is_err(),
+                    "{input:?} must be rejected under {policy:?}"
+                );
+            }
+        }
     }
 
     fn assert_invalid_path_with_reason(input: &str, reason_substring: &str) {
@@ -1429,6 +1775,289 @@ mod tests {
     #[test]
     fn test_validate_archive_internal_path_rejects_absolute() {
         assert_invalid_path_with_reason("/etc/passwd", "must be relative");
+    }
+
+    /// The conventional directory-entry spelling keeps working: exactly one
+    /// trailing `/` is a separator artifact, not an empty segment.
+    /// `add_directory("dup/")` / `add_directory_entry("dup/")` depend on it.
+    #[test]
+    fn test_validate_archive_internal_path_accepts_trailing_slash() {
+        for policy in [ArchivePathPolicy::Portable, ArchivePathPolicy::Host] {
+            for input in ["dup/", "mydir/", "a/b/"] {
+                validate_archive_internal_path_as(input, policy)
+                    .unwrap_or_else(|e| panic!("{input:?} under {policy:?} must pass: {e}"));
+            }
+        }
+    }
+
+    /// Any *other* empty segment is a malformed name.
+    #[test]
+    fn test_validate_archive_internal_path_rejects_empty_segments() {
+        assert_invalid_path_with_reason("a//b", "empty segments");
+        assert_invalid_path_with_reason("a/b//", "empty segments");
+        // A backslash run collapses to `/` first, so the same shape written
+        // Windows-style is caught too.
+        assert_invalid_path_with_reason("a\\\\b", "empty segments");
+    }
+
+    /// Portable policy: Windows reserved device names cannot be created on
+    /// Windows at all, with or without an extension, in any case, in any
+    /// position.
+    #[test]
+    fn test_validate_archive_internal_path_rejects_reserved_device_names() {
+        for input in [
+            "CON",
+            "con",
+            "Con",
+            "NUL",
+            "nul.txt",
+            "AUX",
+            "prn",
+            "COM1",
+            "com9.dat",
+            "LPT1",
+            "lpt9.log",
+            "dir/CON",
+            "dir/nul.txt/leaf.txt",
+        ] {
+            assert_invalid_path_with_reason(input, "reserved device name");
+        }
+        // Names that merely *start* with a reserved stem are fine.
+        for input in ["console.log", "connect", "nullable.rs", "com10", "lpt0"] {
+            validate_archive_internal_path(input)
+                .unwrap_or_else(|e| panic!("{input:?} must pass: {e}"));
+        }
+    }
+
+    /// Portable policy: Windows silently trims a trailing `.` or space from
+    /// a path component, so such a name cannot round-trip there.
+    #[test]
+    fn test_validate_archive_internal_path_rejects_trailing_dot_or_space() {
+        for input in ["name.", "name ", "dir./file.txt", "dir /file.txt", "a/b."] {
+            assert_invalid_path_with_reason(input, "must not end with '.' or ' '");
+        }
+    }
+
+    /// Portable policy: a colon is a drive separator or an NTFS
+    /// alternate-data-stream separator, never part of a portable name.
+    /// `Path::components()` on Unix hands both shapes back as ordinary
+    /// `Normal` segments, which is why the old validator accepted them.
+    #[test]
+    fn test_validate_archive_internal_path_rejects_colon_segments() {
+        assert_invalid_path_with_reason("C:/x", "drive-letter prefix");
+        assert_invalid_path_with_reason("c:\\x", "drive-letter prefix");
+        assert_invalid_path_with_reason("n:stream", "drive-letter prefix");
+        // Not a leading drive letter, still a colon.
+        assert_invalid_path_with_reason("dir/file.txt:stream", "must not contain ':'");
+        assert_invalid_path_with_reason("dir/ab:cd", "must not contain ':'");
+        assert_invalid_path_with_reason("a:b/c", "drive-letter prefix");
+    }
+
+    /// The two policies must genuinely differ, not just be documented as
+    /// differing: `C:/x` and `CON` are the canonical cases.
+    #[test]
+    fn test_archive_path_policy_portable_and_host_differ() {
+        // Portable refuses both, on every host.
+        for input in ["C:/x", "CON"] {
+            assert!(
+                validate_archive_internal_path_as(input, ArchivePathPolicy::Portable).is_err(),
+                "portable policy must reject {input:?}"
+            );
+        }
+
+        // Host policy defers to the writing platform: a device name is an
+        // ordinary file name everywhere std is concerned.
+        validate_archive_internal_path_as("CON", ArchivePathPolicy::Host)
+            .expect("host policy must accept 'CON'");
+
+        // `C:/x` is ordinary segment text on Unix and an absolute path on
+        // Windows — that host-dependence is exactly what the escape hatch
+        // opts into.
+        #[cfg(unix)]
+        validate_archive_internal_path_as("C:/x", ArchivePathPolicy::Host)
+            .expect("host policy on Unix must accept 'C:/x'");
+        #[cfg(windows)]
+        assert!(
+            validate_archive_internal_path_as("C:/x", ArchivePathPolicy::Host).is_err(),
+            "host policy on Windows must reject an absolute 'C:/x'"
+        );
+
+        // Neither policy is a bypass for traversal or absolute names.
+        for policy in [ArchivePathPolicy::Portable, ArchivePathPolicy::Host] {
+            for input in ["../secret", "/etc/passwd", "", "a\0b"] {
+                assert!(
+                    validate_archive_internal_path_as(input, policy).is_err(),
+                    "{input:?} must be rejected under {policy:?}"
+                );
+            }
+        }
+    }
+
+    /// The process-wide escape hatch is what makes the host policy
+    /// reachable from the public write-side APIs, which take no policy
+    /// argument. Serialized and restored: it is global state.
+    #[test]
+    #[serial_test::serial]
+    fn test_set_archive_path_policy_switches_the_facade_default() {
+        assert_eq!(
+            archive_path_policy(),
+            ArchivePathPolicy::Portable,
+            "portable must be the shipped default"
+        );
+        assert!(validate_archive_internal_path("CON").is_err());
+
+        let previous = set_archive_path_policy(ArchivePathPolicy::Host);
+        assert_eq!(previous, ArchivePathPolicy::Portable);
+        let host_verdict = validate_archive_internal_path("CON");
+        let restored = set_archive_path_policy(previous);
+        assert_eq!(restored, ArchivePathPolicy::Host);
+
+        host_verdict.expect("host policy must accept 'CON' through the facade validator");
+        assert!(validate_archive_internal_path("CON").is_err());
+        assert_eq!(archive_path_policy(), ArchivePathPolicy::Portable);
+    }
+
+    /// AD 0066 default: unsafe names are repaired, never rejected. The gate
+    /// must not even look at the names, so the baseline is byte-for-byte
+    /// what it was before the flag was wired.
+    #[test]
+    fn test_reject_unsafe_paths_default_repairs() {
+        let limits = ExtractionLimits::default();
+        assert!(!limits.reject_unsafe_paths());
+
+        let entries: Vec<_> = ["../../etc/passwd", "/etc/shadow", "./a", "a/../b"]
+            .iter()
+            .enumerate()
+            .map(|(id, path)| ArchiveEntry::new((*path).to_string(), id))
+            .collect();
+        check_extraction_safe(&entries, &limits)
+            .expect("the lossy-repair baseline must accept unsafe names");
+
+        assert_eq!(
+            normalize_entry_components("../../etc/passwd", UnsafePathPolicy::Repair)
+                .expect("repair"),
+            PathBuf::from("etc/passwd")
+        );
+    }
+
+    /// AD 0066 strict opt-in: every unsafe shape is blocked, with the
+    /// record's own error variant, operation label and wording.
+    #[test]
+    fn test_reject_unsafe_paths_blocks_unsafe_entries() {
+        let limits = ExtractionLimits::builder()
+            .reject_unsafe_paths(true)
+            .build();
+        assert!(limits.reject_unsafe_paths());
+
+        for (path, detail) in [
+            ("../../etc/passwd", "'..'"),
+            ("a/../b", "'..'"),
+            ("a/b/..", "'..'"),
+            ("..\\..\\evil", "'..'"),
+            ("/etc/shadow", "absolute"),
+            ("./a", "'.'"),
+            ("a/./b", "'.'"),
+            ("a/b/.", "'.'"),
+        ] {
+            let entries = vec![ArchiveEntry::new(path.to_string(), 0)];
+            let err = check_extraction_safe(&entries, &limits)
+                .expect_err("strict policy must block unsafe entry names");
+            match err {
+                ArchiveError::OperationBlocked { operation, reason } => {
+                    assert_eq!(operation, crate::error::ops::EXTRACT);
+                    assert!(
+                        reason.contains("unsafe path components"),
+                        "reason {reason:?} missing the AD 0066 wording"
+                    );
+                    assert!(
+                        reason.contains(path) && reason.contains(detail),
+                        "reason {reason:?} should name {path:?} and its {detail} problem"
+                    );
+                }
+                other => panic!("expected OperationBlocked, got {other:?}"),
+            }
+        }
+
+        // Safe names still extract under the strict policy, and a mixed
+        // archive is refused as a whole.
+        let safe = vec![ArchiveEntry::new("dir/file.txt".to_string(), 0)];
+        check_extraction_safe(&safe, &limits).expect("safe names must pass the strict policy");
+
+        let mixed = vec![
+            ArchiveEntry::new("dir/file.txt".to_string(), 0),
+            ArchiveEntry::new("../escape".to_string(), 1),
+        ];
+        assert!(
+            check_extraction_safe(&mixed, &limits).is_err(),
+            "one hostile entry must block the whole extraction"
+        );
+    }
+
+    /// The strict policy also reaches the per-entry sanitiser seam, so a
+    /// call site holding the caller's limits can refuse before joining the
+    /// name onto the destination. No filesystem access is needed: the
+    /// rejection happens before any stat.
+    #[test]
+    fn test_sanitize_entry_path_with_base_policy_rejects() {
+        let dest = Path::new("/nonexistent-unified-archive-strict-policy");
+        let err = sanitize_entry_path_with_base_policy(
+            "../../etc/passwd",
+            dest,
+            dest,
+            UnsafePathPolicy::Reject,
+        )
+        .expect_err("strict policy must refuse before touching the filesystem");
+        match err {
+            ArchiveError::OperationBlocked { operation, reason } => {
+                assert_eq!(operation, crate::error::ops::EXTRACT);
+                assert!(reason.contains("unsafe path components"));
+            }
+            other => panic!("expected OperationBlocked, got {other:?}"),
+        }
+        assert_eq!(
+            UnsafePathPolicy::from_limits(&ExtractionLimits::default()),
+            UnsafePathPolicy::Repair
+        );
+        assert_eq!(
+            UnsafePathPolicy::from_limits(
+                &ExtractionLimits::builder()
+                    .reject_unsafe_paths(true)
+                    .build()
+            ),
+            UnsafePathPolicy::Reject
+        );
+    }
+
+    /// AD 0040 / R0081 I1: the configured SFX ceiling is readable from the
+    /// limits and defaults to the shipped constant, so a staging gate can
+    /// consult the caller's value instead of the constant. A *lowered* cap
+    /// must be visible — that is the whole point of the accessor.
+    #[test]
+    fn test_max_sfx_payload_size_is_readable_and_defaults_unchanged() {
+        assert_eq!(
+            ExtractionLimits::default().max_sfx_payload_size(),
+            Cap::Limited(DEFAULT_MAX_SFX_PAYLOAD_SIZE)
+        );
+        assert_eq!(
+            crate::sfx::limits::MAX_SFX_PAYLOAD_SIZE,
+            DEFAULT_MAX_SFX_PAYLOAD_SIZE,
+            "the sfx alias must keep naming the same default"
+        );
+
+        let lowered = ExtractionLimits::builder()
+            .max_sfx_payload_size(1024u64)
+            .build();
+        assert_eq!(lowered.max_sfx_payload_size(), Cap::Limited(1024));
+        assert!(
+            lowered.max_sfx_payload_size().exceeded_by(1025),
+            "a lowered cap must actually be exceeded by a larger payload"
+        );
+        assert!(!lowered.max_sfx_payload_size().exceeded_by(1024));
+
+        let unlimited = ExtractionLimits::builder()
+            .max_sfx_payload_size(Cap::Unlimited)
+            .build();
+        assert!(!unlimited.max_sfx_payload_size().exceeded_by(u64::MAX));
     }
 
     #[test]

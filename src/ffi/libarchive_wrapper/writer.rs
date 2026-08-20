@@ -11,6 +11,38 @@ enum EntryDataSource<'a> {
     },
 }
 
+/// Classify a failed `archive_write_add_filter_*` registration as
+/// [`ArchiveError::CodecUnavailable`].
+///
+/// A libarchive built without a codec's *write* filter reports the
+/// registration as `ARCHIVE_WARN`/`ARCHIVE_FATAL` here, which used to
+/// surface as a generic `Format` error with libarchive's own sentence
+/// and nothing actionable. The typed variant names the codec and
+/// carries the per-platform install instructions the error module
+/// already maintains, so the caller can tell "your libarchive lacks
+/// zstd" apart from "this archive is malformed".
+///
+/// libarchive's own text is appended to the instructions rather than
+/// dropped: it is the only place the native reason (external-program
+/// fallback, unknown option, …) is recorded.
+fn codec_unavailable_with_detail(
+    codec: &str,
+    format: crate::ArchiveFormat,
+    detail: &str,
+) -> ArchiveError {
+    let instructions = ArchiveError::codec_install_instructions(codec);
+    let install_instructions = if detail.trim().is_empty() {
+        instructions
+    } else {
+        format!("{instructions} (libarchive reported: {detail})")
+    };
+    ArchiveError::CodecUnavailable {
+        codec: codec.to_string(),
+        format,
+        install_instructions,
+    }
+}
+
 /// RAII guard for a libarchive entry pointer; frees on drop so error paths
 /// can use `?` without leaking.
 struct EntryGuard {
@@ -77,6 +109,14 @@ impl LibarchiveArchive {
                 ));
             }
 
+            // Which compression filter the arm below registered, if
+            // any. `Some(codec)` means the only remaining failure the
+            // shared check can see came from the *filter* registration
+            // (each arm returns early on its own format-setup failure),
+            // so it is classified as `CodecUnavailable` naming that
+            // codec; `None` keeps the generic `Format` classification.
+            let mut filter_codec: Option<&'static str> = None;
+
             // Set format. For tar-with-filter formats both the format
             // *and* the filter setup return codes must be checked
             // (R0070-0042). The previous code discarded
@@ -95,6 +135,7 @@ impl LibarchiveArchive {
                         archive_write_free(archive);
                         return Err(ArchiveError::format(Some(format), error_msg));
                     }
+                    filter_codec = Some("gzip");
                     archive_write_add_filter_gzip(archive)
                 }
                 crate::ArchiveFormat::TarBzip2 => {
@@ -104,6 +145,7 @@ impl LibarchiveArchive {
                         archive_write_free(archive);
                         return Err(ArchiveError::format(Some(format), error_msg));
                     }
+                    filter_codec = Some("bzip2");
                     archive_write_add_filter_bzip2(archive)
                 }
                 crate::ArchiveFormat::TarXz => {
@@ -113,6 +155,7 @@ impl LibarchiveArchive {
                         archive_write_free(archive);
                         return Err(ArchiveError::format(Some(format), error_msg));
                     }
+                    filter_codec = Some("xz");
                     archive_write_add_filter_xz(archive)
                 }
                 crate::ArchiveFormat::TarZst => {
@@ -125,9 +168,10 @@ impl LibarchiveArchive {
                     // A libarchive built without libzstd registers the
                     // filter as an external-program fallback and returns
                     // ARCHIVE_WARN here; the shared `format_result` check
-                    // below converts that into a hard `Format` error
-                    // instead of silently shelling out (R0070-0041 loud
-                    // failure posture).
+                    // below converts that into a hard `CodecUnavailable`
+                    // error instead of silently shelling out (R0070-0041
+                    // loud failure posture).
+                    filter_codec = Some("zstd");
                     archive_write_add_filter_zstd(archive)
                 }
                 crate::ArchiveFormat::TarLz4 => {
@@ -138,6 +182,7 @@ impl LibarchiveArchive {
                         return Err(ArchiveError::format(Some(format), error_msg));
                     }
                     // Same external-program-fallback caveat as zstd above.
+                    filter_codec = Some("lz4");
                     archive_write_add_filter_lz4(archive)
                 }
                 crate::ArchiveFormat::TarLzma => {
@@ -147,6 +192,7 @@ impl LibarchiveArchive {
                         archive_write_free(archive);
                         return Err(ArchiveError::format(Some(format), error_msg));
                     }
+                    filter_codec = Some("lzma");
                     archive_write_add_filter_lzma(archive)
                 }
                 _ => {
@@ -167,7 +213,10 @@ impl LibarchiveArchive {
             if format_result != ARCHIVE_OK {
                 let error_msg = get_archive_error(archive);
                 archive_write_free(archive);
-                return Err(ArchiveError::format(Some(format), error_msg));
+                return Err(match filter_codec {
+                    Some(codec) => codec_unavailable_with_detail(codec, format, &error_msg),
+                    None => ArchiveError::format(Some(format), error_msg),
+                });
             }
 
             // Set compression level for all supported formats
@@ -948,13 +997,19 @@ impl LibarchiveArchive {
                         )
                     })?;
                     if total > expected_size {
-                        return Err(ArchiveError::io(
-                            "write_data",
+                        // DCR-011: a source that hands the writer a byte
+                        // count other than the size it declared is a
+                        // declared-size violation, not an I/O fault, so
+                        // every commit route classifies it the same way
+                        // through the shared constructor. `total` is a
+                        // lower bound here — the `take(expected + 1)`
+                        // probe byte stops the copy instead of draining
+                        // the source — which is why the rendered message
+                        // says "at least".
+                        return Err(ArchiveError::declared_length_mismatch(
                             archive_path,
-                            std::io::Error::other(format!(
-                                "Stream length mismatch: declared {} bytes, read {} bytes",
-                                expected_size, total
-                            )),
+                            expected_size,
+                            total,
                         ));
                     }
                     let written = unsafe {
@@ -982,13 +1037,13 @@ impl LibarchiveArchive {
                     notify(n as u64)?;
                 }
                 if total != expected_size {
-                    return Err(ArchiveError::io(
-                        "write_data",
+                    // Under-production (the reader hit EOF early); same
+                    // DCR-011 classification as the over-production
+                    // guard above.
+                    return Err(ArchiveError::declared_length_mismatch(
                         archive_path,
-                        std::io::Error::other(format!(
-                            "Stream length mismatch: declared {} bytes, read {} bytes",
-                            expected_size, total
-                        )),
+                        expected_size,
+                        total,
                     ));
                 }
                 // Empty-stream guard: still fire one per-entry callback
@@ -1220,5 +1275,169 @@ mod close_write_state_tests {
         writer
             .close_write()
             .expect("a second finish after a successful one stays Ok");
+    }
+}
+
+/// The two classification decisions this module owns: a declared-size
+/// violation is `Corruption` (DCR-011), and a missing *write* filter is
+/// `CodecUnavailable` with install instructions rather than a generic
+/// `Format` error.
+#[cfg(test)]
+mod classification_tests {
+    use super::codec_unavailable_with_detail;
+    use crate::error::ArchiveError;
+    use crate::ffi::libarchive_wrapper::LibarchiveArchive;
+
+    /// A source that produces more than it declared is a declared-size
+    /// violation, not an I/O fault: DCR-011 already classifies those as
+    /// `Corruption` on the digest routes, so the write routes must agree.
+    #[test]
+    fn overproducing_stream_is_corruption_naming_the_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tar_path = dir.path().join("overproduce.tar");
+        let mut options = crate::options::CompressionOptions::default();
+        let mut writer =
+            LibarchiveArchive::create(&tar_path, crate::ArchiveFormat::Tar, &mut options)
+                .expect("create tar");
+
+        let mut reader = std::io::Cursor::new(vec![b'x'; 70_000]);
+        let err = writer
+            .add_file_from_reader("big.txt", &mut reader, 4)
+            .expect_err("overproduction must be rejected");
+
+        match &err {
+            ArchiveError::Corruption { path, details } => {
+                assert_eq!(path, "big.txt", "the entry name must survive: {err}");
+                assert!(
+                    details.contains("over-produced"),
+                    "the direction must be stated: {details}"
+                );
+                assert!(
+                    details.contains('4'),
+                    "the declared size must be stated: {details}"
+                );
+            }
+            other => panic!("declared-size violations are Corruption, got {other:?}"),
+        }
+    }
+
+    /// The mirror case: a reader that hits EOF early. Same variant, the
+    /// other direction.
+    #[test]
+    fn underproducing_stream_is_corruption_naming_the_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tar_path = dir.path().join("underproduce.tar");
+        let mut options = crate::options::CompressionOptions::default();
+        let mut writer =
+            LibarchiveArchive::create(&tar_path, crate::ArchiveFormat::Tar, &mut options)
+                .expect("create tar");
+
+        let mut reader = std::io::Cursor::new(b"ab".to_vec());
+        let err = writer
+            .add_file_from_reader("short.txt", &mut reader, 64)
+            .expect_err("underproduction must be rejected");
+
+        match &err {
+            ArchiveError::Corruption { path, details } => {
+                assert_eq!(path, "short.txt", "the entry name must survive: {err}");
+                assert!(
+                    details.contains("under-produced"),
+                    "the direction must be stated: {details}"
+                );
+            }
+            other => panic!("declared-size violations are Corruption, got {other:?}"),
+        }
+    }
+
+    /// A failed write-filter registration is a deployment problem the
+    /// caller can act on, so it carries the codec name and the
+    /// per-platform install hint the error module maintains. Driven
+    /// directly because a real failure needs a libarchive built without
+    /// the codec.
+    #[test]
+    fn failed_write_filter_registration_maps_to_codec_unavailable() {
+        for codec in ["zstd", "lz4", "lzma", "xz", "bzip2", "gzip"] {
+            let err = codec_unavailable_with_detail(
+                codec,
+                crate::ArchiveFormat::Tar,
+                "Unsupported compression",
+            );
+            match &err {
+                ArchiveError::CodecUnavailable {
+                    codec: reported,
+                    format,
+                    install_instructions,
+                } => {
+                    assert_eq!(reported, codec, "the codec must be named");
+                    assert_eq!(*format, crate::ArchiveFormat::Tar);
+                    assert!(
+                        install_instructions.contains("Unsupported compression"),
+                        "libarchive's own reason must survive: {install_instructions}"
+                    );
+                    assert!(
+                        !install_instructions.trim().is_empty(),
+                        "install instructions must be populated"
+                    );
+                }
+                other => panic!("expected CodecUnavailable for {codec}, got {other:?}"),
+            }
+        }
+    }
+
+    /// The lower-case libarchive filter names must reach the real
+    /// per-platform arms of the install table, not the generic
+    /// fallback — that is the whole point of naming the codec.
+    #[test]
+    fn libarchive_filter_names_reach_the_real_install_instructions() {
+        for codec in ["xz", "lzma", "bzip2"] {
+            let generic = format!("Install {codec} codec for your platform");
+            let err = codec_unavailable_with_detail(codec, crate::ArchiveFormat::TarXz, "");
+            let msg = err.to_string();
+            assert!(
+                !msg.contains(&generic),
+                "{codec} must not fall back to the generic hint: {msg}"
+            );
+            assert!(
+                msg.contains(codec),
+                "the caller's spelling must be preserved: {msg}"
+            );
+        }
+    }
+
+    /// With no native detail there is no trailing parenthetical — the
+    /// message stays the plain install instruction.
+    #[test]
+    fn empty_native_detail_leaves_the_instructions_alone() {
+        let with_detail =
+            codec_unavailable_with_detail("zstd", crate::ArchiveFormat::TarZst, "   ");
+        match with_detail {
+            ArchiveError::CodecUnavailable {
+                install_instructions,
+                ..
+            } => assert!(
+                !install_instructions.contains("libarchive reported"),
+                "blank detail must not be appended: {install_instructions}"
+            ),
+            other => panic!("expected CodecUnavailable, got {other:?}"),
+        }
+    }
+
+    /// Default behaviour is unchanged: on a libarchive that *does* carry
+    /// the filters, creating each filtered format still succeeds.
+    #[test]
+    fn filtered_formats_still_construct_on_a_complete_libarchive() {
+        for (format, name) in [
+            (crate::ArchiveFormat::TarGzip, "a.tar.gz"),
+            (crate::ArchiveFormat::TarBzip2, "a.tar.bz2"),
+            (crate::ArchiveFormat::TarXz, "a.tar.xz"),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join(name);
+            let mut options = crate::options::CompressionOptions::default();
+            let mut writer = LibarchiveArchive::create(&path, format, &mut options)
+                .unwrap_or_else(|e| panic!("create {format:?}: {e}"));
+            writer.add_file_from_data("a.txt", b"alpha").expect("add");
+            writer.close_write().expect("finish");
+        }
     }
 }

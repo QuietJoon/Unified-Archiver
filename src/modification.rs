@@ -6,7 +6,9 @@
 use crate::archive::{Archive, ArchiveBackend, ArchiveMode};
 use crate::entry::ArchiveEntry;
 use crate::error::ops;
-use crate::error::{ArchiveError, Result};
+use crate::error::{
+    ArchiveError, ArchiveWarning, Result, ResultWithWarnings, UnsupportedEntryKind,
+};
 use crate::format::ArchiveFormat;
 use fs4::FileExt;
 use std::collections::HashSet;
@@ -962,11 +964,51 @@ impl Archive {
     /// 1. Validate the pending commit (namespace conflicts, retained-path
     ///    shape, statically-knowable option gates).
     /// 2. Create a temporary archive in the same format.
-    /// 3. Copy retained entries from the original.
+    /// 3. Copy retained entries from the original — except symlinks,
+    ///    hard links and other non-regular entries, which the rewrite
+    ///    **drops with a warning** (see below).
     /// 4. Materialise queued sources (buffered / path / reader) and write them.
     /// 5. Atomically rename the temp file over the original (with optional
     ///    backup), carrying the original file's own permissions across the
     ///    replace (R0079-0021).
+    ///
+    /// # Dropped link / special entries (FR-022)
+    ///
+    /// The rewrite can only re-emit regular files and directories, so a
+    /// retained symlink, hard link, or other non-regular entry
+    /// (FIFO, socket, device node) is **dropped** — the committed
+    /// archive does not contain it. This is lossy and it is not
+    /// silent: one
+    /// [`ArchiveWarning::SkippedUnsupportedEntry`](crate::error::ArchiveWarning)
+    /// carrying the entry path and kind is emitted per dropped entry.
+    /// The operation is **not** refused and the entry is **not**
+    /// re-emitted in some substitute form.
+    ///
+    /// This method discards those warnings to keep its `Result<()>`
+    /// signature. Call
+    /// [`Archive::commit_changes_with_warnings`] instead to receive
+    /// them; that is the only way to learn which entries the round-trip
+    /// lost.
+    ///
+    /// # Crash safety and temporary files
+    ///
+    /// The rewrite is copy-on-write: every byte lands in a sibling
+    /// staging file named `<archive>.tmp.<pid>.<nanos>.<counter>` and
+    /// the original is only replaced by a single atomic rename at the
+    /// very end. There is deliberately **no journal** (DEF-005): a
+    /// crash, kill, or power loss mid-rewrite therefore leaves the
+    /// original archive byte-for-byte intact — either the rename
+    /// happened and the new archive is installed, or it did not and
+    /// nothing was touched.
+    ///
+    /// The accepted cost is an orphaned staging file: a process that
+    /// dies mid-rewrite cannot clean up after itself. Every *error*
+    /// path removes its own staging file (and a partially written
+    /// backup, and a backup orphaned by a failed rename), so a
+    /// returned `Err` never leaks one; only an abnormal process exit
+    /// does. Such orphans are inert, are never read back, and are
+    /// recognizable by the `.tmp.<pid>.<nanos>.<counter>` suffix
+    /// appended after the original extension.
     ///
     /// # Metadata preservation on the replaced archive
     ///
@@ -1013,7 +1055,30 @@ impl Archive {
     ///
     /// # Errors
     /// Returns error if not in Modify mode or if I/O operations fail.
-    pub fn commit_changes(mut self) -> Result<()> {
+    pub fn commit_changes(self) -> Result<()> {
+        self.commit_changes_with_warnings()
+            .map(|result| result.value)
+    }
+
+    /// [`Archive::commit_changes`] that also hands back the warnings the
+    /// rewrite produced.
+    ///
+    /// Identical in behaviour and error contract to `commit_changes` —
+    /// same validation, same copy-on-write staging, same atomic
+    /// replace, same consume-on-error semantics; read that method's
+    /// documentation for all of it. The only difference is the return
+    /// type: on success the caller receives a
+    /// [`ResultWithWarnings`](crate::error::ResultWithWarnings) whose
+    /// `warnings` vector holds one
+    /// [`ArchiveWarning::SkippedUnsupportedEntry`](crate::error::ArchiveWarning)
+    /// per retained symlink / hard link / special entry the rewrite
+    /// dropped (FR-022), in source-listing order.
+    ///
+    /// An empty vector means the commit was lossless with respect to
+    /// entry kinds. Warnings are only produced on the success path: a
+    /// failed commit returns `Err` and replaces nothing, so there is no
+    /// lossy result to describe.
+    pub fn commit_changes_with_warnings(mut self) -> Result<ResultWithWarnings<()>> {
         if self.mode != ArchiveMode::Modify {
             return Err(ArchiveError::operation_blocked(
                 ops::COMMIT_CHANGES,
@@ -1051,7 +1116,7 @@ impl Archive {
             && modifications.removed.is_empty()
             && modifications.added_directories.is_empty()
         {
-            return Ok(());
+            return Ok(ResultWithWarnings::ok(()));
         }
 
         // Unique temp path beside the original. nanos+pid handles cross-process
@@ -1084,7 +1149,14 @@ impl Archive {
         // ZIP central directory (DEF-005).
         let validated_zip_extras = self.validate_pending_commit(&modifications)?;
 
-        let result = (|| -> Result<()> {
+        // FR-022 drop warnings, collected by the retained-entry replay
+        // loop below. Declared outside the write closure (and passed in
+        // by `&mut`) so they survive to the return statement instead of
+        // being logged and lost inside it: the whole point of the
+        // warning is that it reaches the caller.
+        let mut warnings: Vec<ArchiveWarning> = Vec::new();
+
+        let result = (|warnings: &mut Vec<ArchiveWarning>| -> Result<()> {
             // Use caller-supplied compression settings, or format defaults.
             // `take()` lets us move the single owned `CompressionOptions`
             // (progress callback and all) into the new archive; cloning
@@ -1153,7 +1225,17 @@ impl Archive {
                 // The shared predicate keeps this loop and the
                 // `validate_pending_commit` namespace gate in lockstep
                 // (R0079-0037).
-                if rewrite_drops_entry_type(entry.entry_type) {
+                //
+                // Dropping is lossy, so it must not be silent: emit one
+                // warning per dropped entry naming the path and the
+                // kind. `dropped_entry_kind` is the same function
+                // `rewrite_drops_entry_type` is defined in terms of, so
+                // a dropped entry can never fail to produce a warning.
+                if let Some(kind) = dropped_entry_kind(entry.entry_type) {
+                    warnings.push(ArchiveWarning::dropped_unsupported_entry(
+                        entry.path.as_str(),
+                        kind,
+                    ));
                     continue;
                 }
 
@@ -1511,9 +1593,15 @@ impl Archive {
                     Err(rename_err)
                 }
             }
-        })();
+        })(&mut warnings);
 
-        // Clean up temp file on any failure (finish, write, or rename)
+        // Clean up the staging file on any failure (finish, write, or
+        // rename) so a returned `Err` never leaves an orphan behind —
+        // the DEF-005 "no journaling" decision accepts orphans only
+        // from an abnormal process exit, not from a handled error.
+        // `new_archive` was scoped to the closure above, so its handle
+        // on the staging file is already closed and the removal cannot
+        // be refused for a sharing violation on Windows.
         if result.is_err() {
             let _ = std::fs::remove_file(&temp_path);
             // R0075-0005: a failed commit leaves the backend in an
@@ -1528,7 +1616,10 @@ impl Archive {
             self.finalized = true;
         }
 
-        result
+        // The FR-022 drop warnings only describe a committed archive,
+        // so they ride out on the success path; a failed commit
+        // replaced nothing and has no lossy result to report.
+        result.map(|()| ResultWithWarnings::with_warnings((), warnings))
     }
 }
 
@@ -1680,7 +1771,10 @@ fn stage_unknown_size_entry(
 /// the declared `size` so a contract violation is caught here rather
 /// than silently committed. The `take(size + 1)` cap upper-bounds the
 /// read so an over-producing reader is detected; the post-read length
-/// check catches short reads.
+/// check catches short reads. The mismatch is reported through
+/// [`ArchiveError::declared_length_mismatch`] — the same `Corruption`
+/// classification the streaming routes use (DCR-011) — so this
+/// fallback is not a third spelling of the same violation.
 fn buffered_ingest_reader<R: Read>(
     new_archive: &mut Archive,
     path: &str,
@@ -1700,14 +1794,11 @@ fn buffered_ingest_reader<R: Read>(
         .read_to_end(&mut buf)
         .map_err(|e| ArchiveError::io(io_op, path, e))?;
     if buf.len() as u64 != size {
-        return Err(ArchiveError::OperationBlocked {
-            operation: ops::COMMIT_CHANGES.to_string(),
-            reason: format!(
-                "{size_label} declared {} bytes but reader delivered {}",
-                size,
-                buf.len()
-            ),
-        });
+        return Err(ArchiveError::declared_length_mismatch(
+            path,
+            size,
+            buf.len() as u64,
+        ));
     }
     new_archive.add_file_from_data(path, &buf)
 }
@@ -1919,12 +2010,33 @@ fn check_rewrite_format_override(
 /// entirely. Shared between `commit_changes`'s retained-entry replay
 /// loop and `validate_pending_commit`'s namespace gate so the dry-run
 /// models exactly the namespace the commit will produce (R0079-0037).
+///
+/// Defined in terms of [`dropped_entry_kind`] so the predicate and the
+/// warning can never disagree — a type this returns `true` for always
+/// has a warning kind to report, and vice versa.
 fn rewrite_drops_entry_type(entry_type: crate::entry::EntryType) -> bool {
+    dropped_entry_kind(entry_type).is_some()
+}
+
+/// The warning kind to report for an entry type the rewrite drops, or
+/// `None` for a type the rewrite re-emits faithfully.
+///
+/// Dropping a retained entry is lossy, so `commit_changes` reports one
+/// [`ArchiveWarning::SkippedUnsupportedEntry`] per dropped entry
+/// instead of deleting it silently. The `EntryType::Other` bucket maps
+/// to [`UnsupportedEntryKind::Other`] rather than a specific special
+/// kind: `ArchiveEntry::permissions` is masked to `0o7777` by every
+/// backend (the `S_IFMT` bits are stripped before the field is
+/// populated), so there is nothing left to refine a FIFO from a socket
+/// from a device node with at this layer.
+fn dropped_entry_kind(entry_type: crate::entry::EntryType) -> Option<UnsupportedEntryKind> {
     use crate::entry::EntryType;
-    matches!(
-        entry_type,
-        EntryType::Symlink | EntryType::HardLink | EntryType::Other
-    )
+    match entry_type {
+        EntryType::Symlink => Some(UnsupportedEntryKind::Symlink),
+        EntryType::HardLink => Some(UnsupportedEntryKind::HardLink),
+        EntryType::Other => Some(UnsupportedEntryKind::Other),
+        EntryType::File | EntryType::Directory => None,
+    }
 }
 
 /// Detect archive format from an already-locked file handle without
@@ -2057,6 +2169,278 @@ use crate::ffi::common::rename_with_overwrite;
 
 #[cfg(test)]
 mod tests;
+
+/// FR-022 drop warnings, the shared `Corruption` classification of a
+/// declared-vs-actual length mismatch, and the DEF-005 staging-file
+/// cleanup guarantee. Inline module (not `modification/tests.rs`) so
+/// the cases live next to `dropped_entry_kind`,
+/// `buffered_ingest_reader`, and the `commit_changes` cleanup arm they
+/// pin down.
+#[cfg(test)]
+mod commit_warning_and_cleanup_tests {
+    use super::{Archive, ArchiveError, buffered_ingest_reader};
+    use crate::error::{ArchiveWarning, EntrySkipReason, UnsupportedEntryKind};
+    use std::io::Write;
+
+    /// A ZIP carrying one regular file and one symlink, plus a
+    /// hard-link-free baseline the rewrite can re-emit.
+    fn zip_with_symlink(path: &std::path::Path) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+        writer.start_file("keep.txt", opts).unwrap();
+        writer.write_all(b"keep").unwrap();
+        writer.add_symlink("link_path", "keep.txt", opts).unwrap();
+        writer.finish().unwrap();
+    }
+
+    /// The rewrite drops the symlink (FR-022) but must not do it
+    /// silently: exactly one warning naming the path and the kind
+    /// reaches the caller through `ResultWithWarnings`.
+    #[test]
+    fn dropped_symlink_surfaces_as_a_warning_to_the_caller() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("warn_symlink.zip");
+        zip_with_symlink(&archive_path);
+
+        let mut archive = Archive::modify(&archive_path).unwrap();
+        archive.add_entry("added.txt", b"added").unwrap();
+        let committed = archive.commit_changes_with_warnings().unwrap();
+
+        assert_eq!(
+            committed.warnings.len(),
+            1,
+            "expected exactly one drop warning, got: {:?}",
+            committed.warnings
+        );
+        match &committed.warnings[0] {
+            ArchiveWarning::SkippedUnsupportedEntry { path, kind, reason } => {
+                assert_eq!(path, "link_path");
+                assert_eq!(*kind, UnsupportedEntryKind::Symlink);
+                assert_eq!(*reason, EntrySkipReason::DroppedDuringModify);
+            }
+            other => panic!("expected SkippedUnsupportedEntry, got: {other:?}"),
+        }
+        // The warning describes a *committed* archive: the drop really
+        // happened, and the operation was not refused.
+        let reopened = Archive::open(&archive_path).unwrap();
+        let entries = reopened.list_files().unwrap();
+        assert!(
+            entries.iter().any(|e| e.path == "added.txt"),
+            "the commit must still succeed, not be refused"
+        );
+        assert!(
+            !entries.iter().any(|e| e.path == "link_path"),
+            "the dropped symlink must not be re-emitted in any form"
+        );
+    }
+
+    /// The warning must name the kind it dropped, so a rendered
+    /// diagnostic tells the user what they lost.
+    #[test]
+    fn drop_warning_renders_the_kind_and_the_path() {
+        let warning =
+            ArchiveWarning::dropped_unsupported_entry("link_path", UnsupportedEntryKind::Symlink);
+        let rendered = warning.to_string();
+        assert!(rendered.contains("link_path"), "{rendered}");
+        assert!(rendered.contains("symbolic link"), "{rendered}");
+    }
+
+    /// A kind-lossless rewrite reports no warnings at all, so a caller
+    /// can treat a non-empty vector as "this round-trip lost entries".
+    #[test]
+    fn lossless_commit_reports_no_warnings() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("lossless.zip");
+        {
+            let file = std::fs::File::create(&archive_path).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+            writer.start_file("keep.txt", opts).unwrap();
+            writer.write_all(b"keep").unwrap();
+            writer.add_directory("dir/", opts).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let mut archive = Archive::modify(&archive_path).unwrap();
+        archive.add_entry("added.txt", b"added").unwrap();
+        let committed = archive.commit_changes_with_warnings().unwrap();
+        assert!(
+            committed.warnings.is_empty(),
+            "a files-and-directories-only rewrite must warn about nothing, got: {:?}",
+            committed.warnings
+        );
+    }
+
+    /// The plain `commit_changes` keeps its `Result<()>` shape and
+    /// still commits; it discards the warnings by design, which is why
+    /// the `_with_warnings` sibling exists.
+    #[test]
+    fn plain_commit_changes_still_commits_a_dropping_rewrite() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("plain_commit.zip");
+        zip_with_symlink(&archive_path);
+
+        let mut archive = Archive::modify(&archive_path).unwrap();
+        archive.add_entry("added.txt", b"added").unwrap();
+        archive.commit_changes().unwrap();
+
+        let reopened = Archive::open(&archive_path).unwrap();
+        assert_eq!(reopened.list_files().unwrap().len(), 2);
+    }
+
+    /// DEF-005 third caveat: journaling is deliberately absent, so the
+    /// accepted guarantee is "original intact, staging file removed".
+    /// A commit that fails *after* the staging archive exists must not
+    /// leak it, and must leave the original byte-for-byte unchanged.
+    #[test]
+    fn failed_commit_leaves_no_staging_file_and_keeps_the_original() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("failing.zip");
+        {
+            let file = std::fs::File::create(&archive_path).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+            writer.start_file("keep.txt", opts).unwrap();
+            writer.write_all(b"keep").unwrap();
+            writer.finish().unwrap();
+        }
+        let original = std::fs::read(&archive_path).unwrap();
+
+        let mut archive = Archive::modify(&archive_path).unwrap();
+        // Passes every pre-write gate (valid archive-internal path) and
+        // fails only once the replay loop opens the source — i.e. after
+        // `Self::create` has already materialised the staging file.
+        archive
+            .add_entry_from_path("missing.txt", &temp.path().join("does_not_exist.bin"))
+            .unwrap();
+        let err = archive.commit_changes().unwrap_err();
+        assert!(
+            matches!(err, ArchiveError::Io { .. }),
+            "expected the missing source to surface as I/O, got: {err:?}"
+        );
+
+        assert_eq!(
+            std::fs::read(&archive_path).unwrap(),
+            original,
+            "a failed commit must leave the original archive untouched"
+        );
+        let leaked: Vec<_> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp."))
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "a failed commit must remove its staging file, found: {leaked:?}"
+        );
+    }
+
+    /// The buffered fallback route classifies a declared-vs-actual
+    /// length mismatch exactly like the streaming routes: `Corruption`
+    /// via the shared constructor (DCR-011), not a third spelling.
+    #[test]
+    fn buffered_fallback_length_mismatch_is_corruption() {
+        let temp = tempfile::tempdir().unwrap();
+        let out = temp.path().join("buffered.zip");
+        let mut archive = Archive::create(
+            &out,
+            crate::options::CompressionOptions::new(super::ArchiveFormat::Zip),
+        )
+        .unwrap();
+
+        let under = buffered_ingest_reader(
+            &mut archive,
+            "short.txt",
+            &b"abc"[..],
+            5,
+            "reader-source declared",
+            "commit_add_reader",
+        )
+        .unwrap_err();
+        match &under {
+            ArchiveError::Corruption { path, details } => {
+                assert_eq!(path, "short.txt");
+                assert!(details.contains("under-produced"), "{details}");
+            }
+            other => panic!("expected Corruption, got: {other:?}"),
+        }
+
+        let over = buffered_ingest_reader(
+            &mut archive,
+            "long.txt",
+            &b"abcde"[..],
+            2,
+            "reader-source declared",
+            "commit_add_reader",
+        )
+        .unwrap_err();
+        match &over {
+            ArchiveError::Corruption { path, details } => {
+                assert_eq!(path, "long.txt");
+                assert!(details.contains("over-produced"), "{details}");
+            }
+            other => panic!("expected Corruption, got: {other:?}"),
+        }
+    }
+
+    /// The ZIP commit route (`add_file_from_reader_with_size`) reports
+    /// the same `Corruption`, so `add_entry_from_reader`'s rustdoc
+    /// promise holds for a real modify commit and not just for the
+    /// helper.
+    #[test]
+    fn zip_commit_route_length_mismatch_is_corruption() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("mismatch.zip");
+        {
+            let file = std::fs::File::create(&archive_path).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+            writer.start_file("keep.txt", opts).unwrap();
+            writer.write_all(b"keep").unwrap();
+            writer.finish().unwrap();
+        }
+
+        let mut archive = Archive::modify(&archive_path).unwrap();
+        archive
+            .add_entry_from_reader("liar.txt", std::io::Cursor::new(b"abc".to_vec()), Some(99))
+            .unwrap();
+        let err = archive.commit_changes().unwrap_err();
+        match &err {
+            ArchiveError::Corruption { path, details } => {
+                assert_eq!(path, "liar.txt");
+                assert!(details.contains("under-produced"), "{details}");
+            }
+            other => panic!("expected Corruption, got: {other:?}"),
+        }
+    }
+
+    /// `dropped_entry_kind` and `rewrite_drops_entry_type` are one
+    /// decision: nothing can be dropped without a warning kind, and
+    /// nothing re-emitted can carry one.
+    #[test]
+    fn drop_predicate_and_warning_kind_agree() {
+        use crate::entry::EntryType;
+        for entry_type in [
+            EntryType::File,
+            EntryType::Directory,
+            EntryType::Symlink,
+            EntryType::HardLink,
+            EntryType::Other,
+        ] {
+            assert_eq!(
+                super::rewrite_drops_entry_type(entry_type),
+                super::dropped_entry_kind(entry_type).is_some(),
+                "predicate and warning kind disagree for {entry_type:?}"
+            );
+        }
+        assert_eq!(
+            super::dropped_entry_kind(EntryType::HardLink),
+            Some(UnsupportedEntryKind::HardLink)
+        );
+    }
+}
 
 /// R0001-0011 / R0001-0071: the directory-side ancestor reservation and
 /// the mode-before-input error precedence on the queued-add methods.

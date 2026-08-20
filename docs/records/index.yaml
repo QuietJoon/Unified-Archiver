@@ -377,6 +377,12 @@ records:
     status: archived
     file: AD-0068-reject-review-0067-duplicate-of-0066.md
     reviews: [R0057, R0058, R0066, R0067]
+  - id: AD-0069
+    type: AD
+    title: "AD 0069: Review closure is recorded in focused records, not in one omnibus routing table"
+    status: active
+    file: AD-0069-focused-closure-records-replace-omnibus-routing-tables.md
+    reviews: [R0076-0051]
   - id: DCR-001
     type: DCR
     title: "Design Change Record"

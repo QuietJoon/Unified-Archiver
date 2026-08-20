@@ -55,10 +55,22 @@ fn write_data_chunked(
 /// R0080-0039). The reader is wrapped in `Read::take(expected_size + 1)`
 /// (saturating) so an over-producing source hits the cap instead of
 /// being silently committed under a size that disagrees with the entry
-/// header / ZIP64 planning; a byte count that differs from
-/// `expected_size` surfaces as a typed `Format` error naming `label`.
+/// header / ZIP64 planning.
+///
+/// A byte count that differs from `expected_size` surfaces as
+/// [`ArchiveError::declared_length_mismatch`] — i.e.
+/// `ArchiveError::Corruption` — because a source that hands the writer
+/// a byte count other than the length it declared is a declared-size
+/// violation, and DCR-011 already classifies those as `Corruption`.
+/// The classification is shared with every other commit route through
+/// that one constructor; before it existed this site raised `Format`
+/// and the libarchive writer raised `Io` for the same condition, so no
+/// caller could match on it. Detection is unchanged — only the variant
+/// is.
+///
 /// `label` identifies the source in diagnostics (the archive path for
-/// reader adds, the filesystem path for `add_file_from_path`).
+/// reader adds, the filesystem path for `add_file_from_path`) and
+/// becomes the `path` field of the `Corruption` error.
 fn stream_reader_exact<R: Read + ?Sized>(
     reader: &mut R,
     writer: &mut RawZipWriter<File>,
@@ -73,22 +85,11 @@ fn stream_reader_exact<R: Read + ?Sized>(
     let mut bounded = std::io::Read::take(reader, cap);
     let written =
         super::common::copy_with_progress(&mut bounded, writer, write_error_path, notify)?;
-    if written > expected_size {
-        return Err(ArchiveError::format(
-            Some(ArchiveFormat::Zip),
-            format!(
-                "Source for '{}' over-produced: declared {} bytes, observed at least {}",
-                label, expected_size, written
-            ),
-        ));
-    }
-    if written < expected_size {
-        return Err(ArchiveError::format(
-            Some(ArchiveFormat::Zip),
-            format!(
-                "Source for '{}' under-produced: declared {} bytes, observed {}",
-                label, expected_size, written
-            ),
+    if written != expected_size {
+        return Err(ArchiveError::declared_length_mismatch(
+            label,
+            expected_size,
+            written,
         ));
     }
     Ok(())
@@ -367,8 +368,11 @@ impl ZipWriter {
     /// over-producing source yields a clean EOF at the cap instead of
     /// being silently committed under the wrong size. After streaming,
     /// the actual byte count is compared against `expected_size`; any
-    /// mismatch (over- or under-production) surfaces as a typed `Format`
-    /// error.
+    /// mismatch (over- or under-production) surfaces as
+    /// [`ArchiveError::Corruption`] via
+    /// [`ArchiveError::declared_length_mismatch`], the one constructor
+    /// every commit route shares for a declared-size violation
+    /// (DCR-011).
     pub fn add_file_from_reader_with_size<R: Read>(
         &mut self,
         archive_path: &str,
@@ -420,8 +424,9 @@ impl ZipWriter {
                 // R0080-0038: when the source declares a size, enforce it
                 // exactly — `metadata.size` drives the ZIP64 decision, so a
                 // stale or changed retained source whose length disagrees
-                // must fail loudly instead of committing content of the
-                // wrong size. An unknown size opts the entry into ZIP64
+                // must fail loudly (as `Corruption`, see
+                // `stream_reader_exact`) instead of committing content of
+                // the wrong size. An unknown size opts the entry into ZIP64
                 // (see `needs_zip64`) and streams unbounded like
                 // `add_file_from_reader`.
                 match expected_size {
@@ -512,7 +517,9 @@ impl ZipWriter {
             // equality so concurrent growth or truncation between the stat
             // and the stream fails loudly rather than silently archiving a
             // different byte count than the header and central directory
-            // were planned for.
+            // were planned for. The stat'd length is the declared size
+            // here, so the mismatch is classified like every other
+            // declared-size violation: `Corruption` (DCR-011).
             let label = fs_path.to_string_lossy();
             stream_reader_exact(&mut file, writer, path, &label, expected_len, notify)
         })
@@ -1001,8 +1008,16 @@ mod tests {
             .add_file_from_reader_with_metadata("short.txt", &mut &b"abc"[..], &meta, None)
             .unwrap_err();
         assert!(
+            matches!(err, ArchiveError::Corruption { .. }),
+            "a declared-size violation must be Corruption (DCR-011), got: {err:?}"
+        );
+        assert!(
             err.to_string().contains("under-produced"),
             "expected under-production error, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("short.txt"),
+            "the error must name the offending entry, got: {err}"
         );
 
         // Over-production: declares 2 bytes, yields 5.
@@ -1016,9 +1031,52 @@ mod tests {
             .add_file_from_reader_with_metadata("long.txt", &mut &b"abcde"[..], &meta, None)
             .unwrap_err();
         assert!(
+            matches!(err, ArchiveError::Corruption { .. }),
+            "a declared-size violation must be Corruption (DCR-011), got: {err:?}"
+        );
+        assert!(
             err.to_string().contains("over-produced"),
             "expected over-production error, got: {err}"
         );
+    }
+
+    /// The declared-size gate on the plain (non-metadata) reader route
+    /// classifies the same way: `add_file_from_reader_with_size` is the
+    /// method `commit_changes` uses for a `size: Some(n)` reader source,
+    /// and `add_entry_from_reader`'s rustdoc promises `Corruption` for a
+    /// length mismatch (DCR-011).
+    #[test]
+    fn test_reader_with_size_length_mismatch_is_corruption() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let path_under = tmp.path().join("under.zip");
+        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut writer = ZipWriter::create(&path_under, &mut opts).unwrap();
+        let err = writer
+            .add_file_from_reader_with_size("short.txt", &mut &b"abc"[..], 5)
+            .unwrap_err();
+        match &err {
+            ArchiveError::Corruption { path, details } => {
+                assert_eq!(path, "short.txt");
+                assert!(details.contains("under-produced"), "{details}");
+                assert!(details.contains('5') && details.contains('3'), "{details}");
+            }
+            other => panic!("expected Corruption, got: {other:?}"),
+        }
+
+        let path_over = tmp.path().join("over.zip");
+        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut writer = ZipWriter::create(&path_over, &mut opts).unwrap();
+        let err = writer
+            .add_file_from_reader_with_size("long.txt", &mut &b"abcde"[..], 2)
+            .unwrap_err();
+        match &err {
+            ArchiveError::Corruption { path, details } => {
+                assert_eq!(path, "long.txt");
+                assert!(details.contains("over-produced"), "{details}");
+            }
+            other => panic!("expected Corruption, got: {other:?}"),
+        }
     }
 
     /// R0080-0038: an unknown declared size still streams the whole

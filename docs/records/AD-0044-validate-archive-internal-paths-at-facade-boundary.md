@@ -71,3 +71,86 @@ Re-open if:
 
 * A legitimate use case appears for writing `..`-containing archive entries (none known).
 * The validator needs to become platform-aware (e.g. rejecting backslashes on Unix, reserved DOS device names on Windows) — currently deferred as out-of-scope for this review.
+
+## Amendment (2026-08-20, archive-portable validation replaces host semantics)
+
+The revisit trigger above has fired, and the resolution is not the one it
+anticipated: the validator did not become *platform-aware*, it became
+**platform-independent**. `validate_archive_internal_path` now judges the
+name against an archive-portable policy by default
+(`security::ArchivePathPolicy::Portable`), with an explicit opt-out for
+callers who deliberately want the writing host's rules
+(`security::ArchivePathPolicy::Host`, selected process-wide through
+`security::set_archive_path_policy`, or per-name through
+`security::validate_archive_internal_path_as`).
+
+### Why this record's central promise read as broken
+
+The Implementation section above states the validator "walks
+`Path::new(archive_path).components()`" and accepts `Component::CurDir`
+"so `"./file.txt"` round-trips as `"file.txt"`". That delegation is what
+broke the Decision Drivers' promise that "authored names round-trip
+losslessly", in two ways that a reader of this record could not have
+predicted:
+
+1. **`std` eats `.` segments before the check can see them.** Verified by
+   experiment (rustc, 2026-08-20): `"./a/b"` yields
+   `[CurDir, Normal(a), Normal(b)]`, but `"a/./b"` and `"a/b/."` both
+   yield `[Normal(a), Normal(b)]` — the interior and trailing dots are
+   gone. The `CurDir` arm therefore only ever fired for a *leading*
+   `./`. `add_file_from_data("a/./b", …)` passed validation, was written
+   verbatim by the permissive backend writer, and came back out of this
+   crate's own extractor as `a/b` — precisely the "archive round-trips
+   through **different names** in and out, with no error anywhere"
+   footgun this record exists to close.
+2. **Host path grammar leaked into a portable container.** On a Unix
+   writer `Path::components()` reports `"C:/x"` as `[Normal("C:"),
+   Normal(x)]` and `"n:stream"` as one `Normal` segment, so both passed.
+   A Windows consumer extracting the same archive reads `C:` as a
+   `Prefix` (dropped, so the entry silently becomes `x`) and `n:stream`
+   as an NTFS alternate-data-stream write. `CON`, `NUL.txt`, `name.` and
+   `name ` passed too, though Windows cannot create the first two at all
+   and silently trims the trailing `.`/space from the others.
+
+### What the validator now rejects
+
+Under the default portable policy, in **every** segment position:
+
+* empty segments (`a//b`) — with one carve-out below; `.`; `..`;
+* NUL bytes; the empty name; any absolute prefix;
+* a drive-letter prefix (`C:/x`, `c:\x`) and a `:` anywhere in a segment
+  (NTFS alternate data streams);
+* a segment ending in `.` or ` `;
+* Windows reserved device names — `CON`, `PRN`, `AUX`, `NUL`,
+  `COM1`–`COM9`, `LPT1`–`LPT9` — case-insensitive, with or without an
+  extension (`nul.txt` is refused, `nullable.rs` is not).
+
+Two deliberate limits. **Carve-out:** exactly one trailing `/` is the
+conventional spelling of a directory entry (`add_directory("dup/")`) and
+is treated as a separator artifact, not an empty segment; any other empty
+segment is refused. **Not policed:** the rest of the Windows-forbidden
+character set (`< > " | ? *`) and control characters are still accepted —
+the portable policy covers the classes that silently *rename* or *fail*
+an entry, and widening it further is a separate decision.
+
+The name check is no longer delegated to `Path::components()` at all: the
+input is normalised (`\` → `/`, as R0070-0020 already required) and split
+on `/`, so each segment is judged in place on every host.
+
+### Consequences beyond the original record
+
+* The asymmetry this record calls "the point" (validate rejects what
+  sanitize strips) is now genuinely symmetric for `.` in all positions,
+  and is *stricter* than the extraction-side sanitiser for the portable
+  name classes — deliberately, because sanitize defends against archives
+  written by other tools while validate governs authorship.
+* Rebuild paths that re-author existing entry names through the facade
+  (`commit_changes` re-adds directory entries via `add_directory`) will
+  now refuse a wild archive carrying a non-portable directory name. That
+  is the intended reading of "callers deserve an error, not a silent
+  rename", but it is a behaviour change for archives produced elsewhere;
+  the host policy is the escape hatch.
+* AD 0066's extraction-side counterpart landed in the same pass: the
+  strict-reject opt-in (`ExtractionLimits::reject_unsafe_paths`) is now
+  enforced rather than merely recorded, so a caller can have hostile
+  entry names refused instead of repaired on the read side as well.

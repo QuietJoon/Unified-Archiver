@@ -10,10 +10,13 @@ fn main() {
     // `cargo:rerun-if-env-changed` for every variable it actually consults
     // (PKG_CONFIG, PKG_CONFIG_PATH/LIBDIR/SYSROOT_DIR, LIBARCHIVE_* overrides,
     // and their target-suffixed variants). This script reads no discovery env
-    // vars directly. The UnRAR build (see build_unrar) is driven by the `cc`
-    // crate, which emits its own `cargo:rerun-if-env-changed` for the toolchain
-    // vars it consults (CC/CXX/AR/CFLAGS/CXXFLAGS and target-suffixed variants),
-    // so no directive is duplicated here.
+    // vars directly on Unix; the Windows arm below *inspects* a few link
+    // configuration vars to decide whether its advisory warning applies, and
+    // emits its own `rerun-if-env-changed` for each one. The UnRAR build (see
+    // build_unrar) is driven by the `cc` crate, which emits its own
+    // `cargo:rerun-if-env-changed` for the toolchain vars it consults
+    // (CC/CXX/AR/CFLAGS/CXXFLAGS and target-suffixed variants), so no
+    // directive is duplicated here.
 
     // Link to libarchive using pkg-config
     // This will automatically handle platform-specific linking
@@ -63,11 +66,28 @@ fn main() {
 
     #[cfg(target_os = "windows")]
     {
-        // On Windows, we'll bundle libarchive or expect it in a known location
-        // This will be implemented later with vcpkg or direct linking
-        println!(
-            "cargo:warning=Windows libarchive linking will be configured in future implementation"
-        );
+        // On Windows the link configuration comes from outside this script:
+        // OI-0065-001 keeps the discovery mechanism (vcpkg-root autodetect vs
+        // explicit env vars vs vendoring) an open decision, so this arm
+        // deliberately emits no `rustc-link-search` / `rustc-link-lib` and the
+        // operator supplies the path per README — libarchive under `vcpkg`
+        // with `RUSTFLAGS="-L native=<path>"`, or a vendored precompiled
+        // `.lib`.
+        //
+        // The warning below is only *true* for a build with no such
+        // configuration. Printing it unconditionally also told operators whose
+        // link then succeeded that their build was unconfigured, which is how
+        // `cargo:warning` output gets trained away. So: detect, never
+        // configure — reading these vars decides whether to warn and nothing
+        // else, which leaves the OI-0065-001 decision untouched.
+        for var in WINDOWS_LINK_CONFIG_VARS {
+            println!("cargo:rerun-if-env-changed={var}");
+        }
+        if !windows_libarchive_link_config_present() {
+            println!(
+                "cargo:warning=Windows libarchive linking will be configured in future implementation"
+            );
+        }
     }
 
     // Build and link the UnRAR library from the vendored C++ sources. Gated on
@@ -79,6 +99,75 @@ fn main() {
     // cite as "AD 0020" — plus AD 0039; OI-0080-001 vendored half).
     #[cfg(feature = "rar-support")]
     build_unrar();
+}
+
+/// Environment variables the Windows arm inspects to decide whether the
+/// "will be configured in future implementation" warning applies to this
+/// build. None of them is turned into a `rustc-link-*` directive here — the
+/// discovery mechanism itself is still OI-0065-001.
+#[cfg(target_os = "windows")]
+const WINDOWS_LINK_CONFIG_VARS: [&str; 4] = [
+    "CARGO_ENCODED_RUSTFLAGS",
+    "RUSTFLAGS",
+    "LIBARCHIVE_LIB_DIR",
+    "LIB",
+];
+
+/// Whether this Windows build already carries a plausible libarchive link
+/// configuration, i.e. whether the advisory warning would be describing some
+/// other build than this one.
+///
+/// Two independent signals, one per route README documents:
+///
+/// * a link-search flag in the rustflags Cargo will hand `rustc`
+///   (`RUSTFLAGS="-L native=<path>"`), and
+/// * an import library that actually exists in an MSVC link search path
+///   (`LIB`) or in an explicit `LIBARCHIVE_LIB_DIR`.
+///
+/// The rustflags signal cannot confirm the directory holds libarchive (the
+/// flag may point at a tree a wrapper script prepared), so it is read as
+/// intent: an operator who passed `-L` has engaged with linking already. The
+/// path signals are stricter and require the file to be present, so a stale
+/// `LIB` entry does not silence the warning.
+#[cfg(target_os = "windows")]
+fn windows_libarchive_link_config_present() -> bool {
+    if windows_rustflags_carry_link_search() {
+        return true;
+    }
+    // `LIBARCHIVE_LIB_DIR` names one directory; `LIB` is the MSVC
+    // `;`-separated search path. `split_paths` handles both.
+    ["LIBARCHIVE_LIB_DIR", "LIB"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .flat_map(|value| std::env::split_paths(&value).collect::<Vec<std::path::PathBuf>>())
+        .any(|dir| {
+            ["archive.lib", "libarchive.lib", "archive_static.lib"]
+                .iter()
+                .any(|lib| dir.join(lib).is_file())
+        })
+}
+
+/// Whether the rustflags Cargo will pass to `rustc` carry a `-L` link-search
+/// flag.
+///
+/// `CARGO_ENCODED_RUSTFLAGS` is the authoritative form inside a build script:
+/// Cargo sets it for every build-script invocation and separates flags with
+/// `\x1f`, so `-L` and its value arrive as distinct units and no
+/// space-splitting heuristic can mis-parse a path containing spaces. Plain
+/// `RUSTFLAGS` is a fallback for drivers that set it without Cargo re-encoding
+/// it. An empty encoded value means "no flags", not "unset", so the fallback
+/// still runs.
+#[cfg(target_os = "windows")]
+fn windows_rustflags_carry_link_search() -> bool {
+    let encoded_has_link_search = std::env::var("CARGO_ENCODED_RUSTFLAGS")
+        .map(|flags| flags.split('\u{1f}').any(|flag| flag.starts_with("-L")))
+        .unwrap_or(false);
+    if encoded_has_link_search {
+        return true;
+    }
+    std::env::var("RUSTFLAGS")
+        .map(|flags| flags.split_whitespace().any(|flag| flag.starts_with("-L")))
+        .unwrap_or(false)
 }
 
 // UNIX (`make lib` target) curated object set. Many vendored `.cpp` files are

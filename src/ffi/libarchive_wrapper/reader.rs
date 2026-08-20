@@ -1132,7 +1132,12 @@ impl LibarchiveArchive {
     /// Symlinks, hard links, and (R0001-0001) special filesystem nodes
     /// — FIFOs, sockets, character and block devices — are skipped
     /// rather than materialized; only regular files and directories are
-    /// written to the destination.
+    /// written to the destination. Every skip is reported in the
+    /// returned warnings: links through
+    /// [`ArchiveWarning::SkippedSymlink`] /
+    /// [`ArchiveWarning::SkippedHardLink`], special nodes through
+    /// [`ArchiveWarning::SkippedUnsupportedEntry`] carrying the precise
+    /// [`crate::error::UnsupportedEntryKind`] (DCR-010).
     ///
     /// `max_total_size = Some(n)` (R0075-0010) caps the cumulative
     /// decoded byte count across every entry written to disk. The
@@ -1345,6 +1350,22 @@ impl LibarchiveArchive {
                 // extraction of the rest — the same treatment the ZIP
                 // backend gives `EntryType::Other` (R0081-0077).
                 if entry_filetype != AE_IFREG && entry_filetype != AE_IFDIR {
+                    // DCR-010: the skip is reported, not silent. A
+                    // caller auditing what never reached disk gets the
+                    // precise kind (FIFO / socket / character or block
+                    // device) instead of an unexplained absence, and
+                    // never gets a *link* warning for a device node.
+                    // Links are already handled above, so only
+                    // special / unclassifiable kinds arrive here; a
+                    // filetype with no format bits at all carries no
+                    // kind information, so it is reported as `Other`
+                    // rather than dropped.
+                    let path = entry_pathname_string(entry_ptr);
+                    let kind = crate::error::UnsupportedEntryKind::from_unix_mode(u32::from(
+                        entry_filetype,
+                    ))
+                    .unwrap_or(crate::error::UnsupportedEntryKind::Other);
+                    warnings.push(ArchiveWarning::skipped_unsupported_entry(path, kind));
                     checked_data_skip(archive)?;
                     continue;
                 }
@@ -2677,5 +2698,190 @@ mod tests {
         );
         assert_ne!(ARCHIVE_FORMAT_ZIP_BASE, ARCHIVE_FORMAT_TAR_BASE);
         assert_ne!(ARCHIVE_FORMAT_ZIP_BASE, ARCHIVE_FORMAT_RAW_BASE);
+    }
+
+    // ── DCR-010 / R0001-0001: the kind-allowlist skip is reported ──
+
+    /// One 512-byte ustar header.
+    ///
+    /// Hand-rolled because neither of the fixture routes works here:
+    /// this crate's writer only emits regular files, and a real FIFO or
+    /// device node needs `mkfifo`/`mknod` (no libc dependency, and
+    /// device nodes need root). libarchive reads the synthesised header
+    /// exactly as it reads a GNU tar one, which is all the walk cares
+    /// about.
+    fn ustar_header(name: &str, typeflag: u8, size: usize) -> [u8; 512] {
+        fn put(h: &mut [u8; 512], off: usize, text: &str) {
+            h[off..off + text.len()].copy_from_slice(text.as_bytes());
+        }
+
+        let mut h = [0u8; 512];
+        let name_bytes = name.as_bytes();
+        assert!(
+            name_bytes.len() < 100,
+            "fixture names must fit the ustar name field"
+        );
+        h[..name_bytes.len()].copy_from_slice(name_bytes);
+        // Directory entries need the traversal bit or the entries
+        // beneath them cannot be created.
+        let mode = if typeflag == b'5' {
+            "0000755\0"
+        } else {
+            "0000644\0"
+        };
+        put(&mut h, 100, mode);
+        put(&mut h, 108, "0000000\0"); // uid
+        put(&mut h, 116, "0000000\0"); // gid
+        put(&mut h, 124, &format!("{size:011o}\0")); // size
+        put(&mut h, 136, "00000000000\0"); // mtime
+        h[156] = typeflag;
+        put(&mut h, 257, "ustar\0"); // magic
+        put(&mut h, 263, "00"); // version
+        put(&mut h, 329, "0000000\0"); // devmajor
+        put(&mut h, 337, "0000000\0"); // devminor
+
+        // Checksum: unsigned sum of every byte with the checksum field
+        // itself read as spaces.
+        for b in h[148..156].iter_mut() {
+            *b = b' ';
+        }
+        let sum: u32 = h.iter().map(|b| u32::from(*b)).sum();
+        put(&mut h, 148, &format!("{sum:06o}\0 "));
+        h
+    }
+
+    /// Write a tar holding zero-length `specials` (name, ustar typeflag)
+    /// followed by one real regular file, so a test can assert both the
+    /// skip warnings and that the allowlisted entry still lands.
+    fn write_ustar(path: &Path, specials: &[(&str, u8)], regular: (&str, &[u8])) {
+        let mut buf: Vec<u8> = Vec::new();
+        for (name, typeflag) in specials {
+            buf.extend_from_slice(&ustar_header(name, *typeflag, 0));
+        }
+        buf.extend_from_slice(&ustar_header(regular.0, b'0', regular.1.len()));
+        buf.extend_from_slice(regular.1);
+        let pad = (512 - regular.1.len() % 512) % 512;
+        let padded = buf.len() + pad;
+        buf.resize(padded, 0);
+        // Two zero blocks mark end-of-archive.
+        let with_eoa = buf.len() + 1024;
+        buf.resize(with_eoa, 0);
+        std::fs::write(path, &buf).expect("write fixture tar");
+    }
+
+    /// FIFOs, character devices and block devices are skipped by the
+    /// R0001-0001 allowlist, and the skip must reach the caller as
+    /// `SkippedUnsupportedEntry` naming the precise kind — never as a
+    /// link warning, and never silently. The allowlisted entry in the
+    /// same archive still extracts.
+    #[test]
+    fn special_nodes_are_reported_as_skipped_unsupported_entries() {
+        use crate::error::{EntrySkipReason, UnsupportedEntryKind};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tar = dir.path().join("special.tar");
+        write_ustar(
+            &tar,
+            &[("pipe", b'6'), ("chardev", b'3'), ("blockdev", b'4')],
+            ("real.txt", b"payload"),
+        );
+        let dest = dir.path().join("out");
+        std::fs::create_dir_all(&dest).expect("create dest");
+
+        let archive = LibarchiveArchive::open(&tar).expect("open fixture tar");
+        let warnings = archive.extract_all(&dest, None).expect("extract");
+
+        assert_eq!(
+            std::fs::read(dest.join("real.txt")).expect("the regular entry must extract"),
+            b"payload",
+            "one hostile entry must not deny extraction of the rest"
+        );
+        for skipped in ["pipe", "chardev", "blockdev"] {
+            assert!(
+                !dest.join(skipped).exists(),
+                "{skipped} must never be materialized"
+            );
+        }
+
+        let mut reported: Vec<(String, UnsupportedEntryKind)> = warnings
+            .iter()
+            .filter_map(|w| match w {
+                ArchiveWarning::SkippedUnsupportedEntry { path, kind, reason } => {
+                    assert_eq!(
+                        *reason,
+                        EntrySkipReason::UnsupportedKindOnExtract,
+                        "extraction skips carry the extraction reason"
+                    );
+                    Some((path.clone(), *kind))
+                }
+                _ => None,
+            })
+            .collect();
+        // `UnsupportedEntryKind` is deliberately not `Ord`; the path
+        // alone gives a stable order for the comparison below.
+        reported.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            reported,
+            vec![
+                ("blockdev".to_string(), UnsupportedEntryKind::BlockDevice),
+                ("chardev".to_string(), UnsupportedEntryKind::CharacterDevice),
+                ("pipe".to_string(), UnsupportedEntryKind::Fifo),
+            ],
+            "every skipped special node must be named with its kind; got {warnings:?}"
+        );
+        assert!(
+            !warnings.iter().any(|w| matches!(
+                w,
+                ArchiveWarning::SkippedSymlink { .. } | ArchiveWarning::SkippedHardLink { .. }
+            )),
+            "a device node must never be reported as a link: {warnings:?}"
+        );
+    }
+
+    /// The rendered warning has to be readable on its own — a caller
+    /// logging it should see the kind, the path, and why nothing was
+    /// written.
+    #[test]
+    fn skipped_special_node_warning_renders_kind_and_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tar = dir.path().join("fifo.tar");
+        write_ustar(&tar, &[("var/run/sock.fifo", b'6')], ("keep.txt", b"x"));
+        let dest = dir.path().join("out");
+        std::fs::create_dir_all(&dest).expect("create dest");
+
+        let archive = LibarchiveArchive::open(&tar).expect("open fixture tar");
+        let warnings = archive.extract_all(&dest, None).expect("extract");
+        let rendered = warnings
+            .iter()
+            .map(|w| w.to_string())
+            .find(|m| m.contains("var/run/sock.fifo"))
+            .unwrap_or_else(|| panic!("no warning mentioned the skipped FIFO: {warnings:?}"));
+        assert!(
+            rendered.contains("FIFO"),
+            "the warning must name the kind: {rendered}"
+        );
+    }
+
+    /// An archive of only allowlisted kinds must stay warning-free — the
+    /// new emission must not fire on regular files or directories.
+    #[test]
+    fn allowlisted_kinds_emit_no_unsupported_entry_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tar = dir.path().join("plain.tar");
+        write_ustar(&tar, &[("adir/", b'5')], ("adir/file.txt", b"data"));
+        let dest = dir.path().join("out");
+        std::fs::create_dir_all(&dest).expect("create dest");
+
+        let archive = LibarchiveArchive::open(&tar).expect("open fixture tar");
+        let warnings = archive.extract_all(&dest, None).expect("extract");
+        assert!(
+            warnings.is_empty(),
+            "files and directories are materialized, not skipped: {warnings:?}"
+        );
+        assert!(dest.join("adir").is_dir(), "directory entry extracted");
+        assert_eq!(
+            std::fs::read(dest.join("adir/file.txt")).expect("file entry extracted"),
+            b"data"
+        );
     }
 }

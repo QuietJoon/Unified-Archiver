@@ -576,10 +576,26 @@ mod tests {
         let err = writer
             .add_file_from_reader("big.txt", &mut reader, 4)
             .expect_err("overproduction must be rejected");
-        assert!(
-            err.to_string().contains("Stream length mismatch"),
-            "unexpected error: {err}"
-        );
+        // DCR-011 / ticgit 9bdf2ca1 item 3: a declared-versus-actual length
+        // mismatch is a declared-size violation, so every commit route now
+        // classifies it as `Corruption` through
+        // `ArchiveError::declared_length_mismatch` rather than as the `Io`
+        // "Stream length mismatch" this test used to match. Assert the
+        // variant and both numbers rather than the prose, so a future
+        // rewording cannot silently make this vacuous.
+        match &err {
+            ArchiveError::Corruption { details, .. } => {
+                assert!(
+                    details.contains("over-produced"),
+                    "expected an over-production report, got: {details}"
+                );
+                assert!(
+                    details.contains('4'),
+                    "the declared size must appear in the message: {details}"
+                );
+            }
+            other => panic!("expected Corruption for a length mismatch, got: {other}"),
+        }
         // The surplus is caught at the first extra byte, so the reader still
         // holds almost all of its bytes.
         assert!(

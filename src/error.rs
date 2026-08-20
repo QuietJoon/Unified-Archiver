@@ -434,6 +434,50 @@ impl ArchiveError {
         }
     }
 
+    /// Create the corruption error for a declared-vs-actual payload
+    /// length mismatch.
+    ///
+    /// One constructor for every commit route, because a source that
+    /// hands the writer a byte count other than the length it declared
+    /// is a declared-size violation, and DCR-011 already classifies
+    /// those as `Corruption` on the digest routes. Before this existed
+    /// the same condition surfaced three ways — `Format`
+    /// "over-produced"/"under-produced" from the ZIP writer, `Io`
+    /// "Stream length mismatch" from the libarchive writer, and a third
+    /// spelling from the buffered fallback — so a caller could not
+    /// match on it.
+    ///
+    /// `actual` for an over-producing source is normally a *lower
+    /// bound*: the write paths read through `Read::take(declared + 1)`
+    /// and fail on the probe byte rather than draining the source, so
+    /// the message says "at least" in that direction. The message
+    /// always states both numbers, so the caller can see which way the
+    /// mismatch went.
+    pub fn declared_length_mismatch(path: impl Into<String>, declared: u64, actual: u64) -> Self {
+        let details = if actual > declared {
+            format!(
+                "payload over-produced: declared {} bytes, observed at least {} bytes",
+                declared, actual
+            )
+        } else if actual < declared {
+            format!(
+                "payload under-produced: declared {} bytes, observed {} bytes",
+                declared, actual
+            )
+        } else {
+            // Not a mismatch. Reachable only from a mis-wired caller;
+            // stay truthful rather than asserting a direction.
+            format!(
+                "payload length reported as mismatched: declared {} bytes, observed {} bytes",
+                declared, actual
+            )
+        };
+        Self::Corruption {
+            path: path.into(),
+            details,
+        }
+    }
+
     /// Create a password error
     pub fn password(message: impl Into<String>) -> Self {
         Self::Password {
@@ -474,6 +518,16 @@ impl ArchiveError {
         }
     }
 
+    /// Platform-specific installation instructions for a codec.
+    ///
+    /// Public so a caller that wants the hint without building an error
+    /// — a write-filter registration site probing codec availability,
+    /// for instance — can reach it from outside this module.
+    /// `ArchiveError::codec_unavailable` embeds the same text.
+    pub fn codec_install_instructions(codec: &str) -> String {
+        Self::get_codec_install_instructions(codec)
+    }
+
     /// Get platform-specific installation instructions for a codec
     fn get_codec_install_instructions(codec: &str) -> String {
         // Detect platform
@@ -486,7 +540,12 @@ impl ArchiveError {
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         let platform = "unknown";
 
-        match (codec, platform) {
+        // Codec names arrive in whatever spelling the backend uses —
+        // libarchive filter names are lower-case ("xz", "lzma"), the 7z
+        // and RAR paths use upper-case — so match on a folded key and
+        // keep the caller's spelling for the message.
+        let key = codec.to_ascii_uppercase();
+        match (key.as_str(), platform) {
             // LZMA/LZMA2
             ("LZMA" | "LZMA2", "macos") => {
                 "Install p7zip: brew install p7zip".to_string()
@@ -566,6 +625,128 @@ impl ArchiveError {
     }
 }
 
+/// Entry kind that no backend can materialize on extraction and that no
+/// writer can re-emit on modify.
+///
+/// DCR-010 turned the FR-022 skip policy from a *link denylist* into a
+/// *kind allowlist*: only regular files and directories may reach the
+/// disk writer, so FIFOs, sockets and character/block device nodes are
+/// skipped. That skip class had no `ArchiveWarning` of its own, which
+/// made the rejections in the libarchive reader (R0001-0001) and the 7z
+/// reader (R0001-0022) silent. This enum names the kind precisely so a
+/// security-auditing caller is never handed a link warning for a device
+/// node.
+///
+/// `#[non_exhaustive]` so further kinds can be named without breaking
+/// downstream exhaustive matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum UnsupportedEntryKind {
+    /// Symbolic link. Only produced by the modify path, which drops link
+    /// entries it cannot re-emit; extraction reports symlinks through
+    /// the dedicated `ArchiveWarning::SkippedSymlink` (which also
+    /// carries the link target).
+    Symlink,
+    /// Hard link. Same split as `Symlink`: extraction uses
+    /// `ArchiveWarning::SkippedHardLink`.
+    HardLink,
+    /// Named pipe (`S_IFIFO`).
+    Fifo,
+    /// Unix domain socket (`S_IFSOCK`).
+    Socket,
+    /// Character device node (`S_IFCHR`).
+    CharacterDevice,
+    /// Block device node (`S_IFBLK`).
+    BlockDevice,
+    /// A kind the backend recognised as neither a regular file nor a
+    /// directory but could not classify further — for example a 7z
+    /// entry whose `S_IFMT` bits are absent or unknown, decoded as
+    /// `EntryType::Other`.
+    Other,
+}
+
+impl UnsupportedEntryKind {
+    /// Classify a raw Unix mode word.
+    ///
+    /// The argument may be a full `st_mode` / `AE_IFMT` word: the format
+    /// bits are masked out here, so callers do not have to. Returns
+    /// `None` for regular files and directories (the two allowlisted
+    /// kinds) and for a mode word with no format bits set at all, which
+    /// carries no kind information and must not be reported as a
+    /// skipped special entry.
+    pub fn from_unix_mode(mode: u32) -> Option<Self> {
+        // S_IFMT and friends, spelled out so this compiles identically
+        // on every target without pulling in `libc`. These values are
+        // fixed by POSIX and match libarchive's `AE_IF*` constants.
+        const S_IFMT: u32 = 0o170_000;
+        const S_IFIFO: u32 = 0o010_000;
+        const S_IFCHR: u32 = 0o020_000;
+        const S_IFDIR: u32 = 0o040_000;
+        const S_IFBLK: u32 = 0o060_000;
+        const S_IFREG: u32 = 0o100_000;
+        const S_IFLNK: u32 = 0o120_000;
+        const S_IFSOCK: u32 = 0o140_000;
+
+        match mode & S_IFMT {
+            S_IFREG | S_IFDIR => None,
+            0 => None,
+            S_IFIFO => Some(Self::Fifo),
+            S_IFCHR => Some(Self::CharacterDevice),
+            S_IFBLK => Some(Self::BlockDevice),
+            S_IFLNK => Some(Self::Symlink),
+            S_IFSOCK => Some(Self::Socket),
+            _ => Some(Self::Other),
+        }
+    }
+}
+
+impl std::fmt::Display for UnsupportedEntryKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            UnsupportedEntryKind::Symlink => "symbolic link",
+            UnsupportedEntryKind::HardLink => "hard link",
+            UnsupportedEntryKind::Fifo => "FIFO",
+            UnsupportedEntryKind::Socket => "socket",
+            UnsupportedEntryKind::CharacterDevice => "character device",
+            UnsupportedEntryKind::BlockDevice => "block device",
+            UnsupportedEntryKind::Other => "unsupported-kind",
+        };
+        f.write_str(name)
+    }
+}
+
+/// Why an entry of an unsupported kind never reached its destination.
+///
+/// Both arms describe the *same* class of entry — one during read-out,
+/// one during rewrite — so they share
+/// `ArchiveWarning::SkippedUnsupportedEntry` rather than splitting into
+/// two variants a caller would have to match twice.
+///
+/// `#[non_exhaustive]` so further stages can be named without breaking
+/// downstream exhaustive matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum EntrySkipReason {
+    /// Skipped during extraction: the entry kind is not materializable,
+    /// so it was passed over instead of being written to the
+    /// destination (DCR-010).
+    UnsupportedKindOnExtract,
+    /// Dropped during a modify-mode rewrite: the entry exists in the
+    /// source archive but the writer cannot re-emit its kind, so the
+    /// rewritten archive does not contain it.
+    DroppedDuringModify,
+}
+
+impl std::fmt::Display for EntrySkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            EntrySkipReason::UnsupportedKindOnExtract => "skipped during extraction",
+            EntrySkipReason::DroppedDuringModify => "dropped during modify",
+        };
+        f.write_str(name)
+    }
+}
+
 /// Warning emitted during archive operations (FR-022).
 ///
 /// Warnings indicate non-fatal conditions that may require user attention.
@@ -611,6 +792,30 @@ pub enum ArchiveWarning {
         /// Archive path of the later entry whose output path collides
         second: String,
     },
+
+    /// Entry passed over because its *kind* is not supported
+    ///
+    /// DCR-010 widened the FR-022 skip class from links to every entry
+    /// kind outside the regular-file/directory allowlist, but left the
+    /// caller-visible half unbuilt: the libarchive reader (R0001-0001)
+    /// and the 7z reader (R0001-0022) skipped FIFOs, sockets and device
+    /// nodes silently, which contradicts MADR-0010's "silent data loss
+    /// is unacceptable". This variant closes that gap, and the
+    /// modify-mode rewrite reuses it for link and special entries it
+    /// cannot re-emit — `reason` says which of the two happened, and
+    /// `kind` says exactly what was lost, so a security-auditing caller
+    /// is never told "symlink" about a device node.
+    SkippedUnsupportedEntry {
+        /// Archive path of the entry, in the same normalised spelling
+        /// that listing and filtering report, so callers can correlate
+        /// by string match
+        path: String,
+        /// Kind of the entry that was skipped or dropped
+        kind: UnsupportedEntryKind,
+        /// Whether the entry was skipped on extraction or dropped by a
+        /// modify-mode rewrite
+        reason: EntrySkipReason,
+    },
 }
 
 impl std::fmt::Display for ArchiveWarning {
@@ -645,6 +850,40 @@ impl std::fmt::Display for ArchiveWarning {
                     first, second
                 )
             }
+            ArchiveWarning::SkippedUnsupportedEntry { path, kind, reason } => match reason {
+                EntrySkipReason::UnsupportedKindOnExtract => write!(
+                    f,
+                    "Skipped {} entry '{}': only regular files and directories are materialized (DCR-010)",
+                    kind, path
+                ),
+                EntrySkipReason::DroppedDuringModify => write!(
+                    f,
+                    "Dropped {} entry '{}' while rewriting the archive: the writer cannot re-emit this entry kind",
+                    kind, path
+                ),
+            },
+        }
+    }
+}
+
+impl ArchiveWarning {
+    /// Report an entry skipped during extraction because its kind is
+    /// outside the regular-file/directory allowlist (DCR-010).
+    pub fn skipped_unsupported_entry(path: impl Into<String>, kind: UnsupportedEntryKind) -> Self {
+        Self::SkippedUnsupportedEntry {
+            path: path.into(),
+            kind,
+            reason: EntrySkipReason::UnsupportedKindOnExtract,
+        }
+    }
+
+    /// Report an entry dropped by a modify-mode rewrite because the
+    /// writer cannot re-emit its kind.
+    pub fn dropped_unsupported_entry(path: impl Into<String>, kind: UnsupportedEntryKind) -> Self {
+        Self::SkippedUnsupportedEntry {
+            path: path.into(),
+            kind,
+            reason: EntrySkipReason::DroppedDuringModify,
         }
     }
 }
@@ -1046,6 +1285,157 @@ mod tests {
         }
     }
 
+    // ── Declared-vs-actual length mismatch ──
+
+    #[test]
+    fn declared_length_mismatch_is_corruption_naming_both_lengths() {
+        let err = ArchiveError::declared_length_mismatch("dir/data.bin", 100, 42);
+        match &err {
+            ArchiveError::Corruption { path, details } => {
+                assert_eq!(path, "dir/data.bin");
+                assert!(
+                    details.contains("100"),
+                    "declared length missing: {details}"
+                );
+                assert!(details.contains("42"), "actual length missing: {details}");
+            }
+            other => panic!("Expected Corruption variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn declared_length_mismatch_says_which_direction_it_went() {
+        let under = ArchiveError::declared_length_mismatch("e", 100, 42).to_string();
+        assert!(under.contains("under-produced"), "{under}");
+        assert!(!under.contains("over-produced"), "{under}");
+
+        let over = ArchiveError::declared_length_mismatch("e", 100, 101).to_string();
+        assert!(over.contains("over-produced"), "{over}");
+        // The write paths stop on the `take(declared + 1)` probe byte, so
+        // the over-production count is a lower bound, not a total.
+        assert!(over.contains("at least"), "{over}");
+    }
+
+    #[test]
+    fn declared_length_mismatch_display_names_the_entry() {
+        let msg = ArchiveError::declared_length_mismatch("dir/data.bin", 7, 0).to_string();
+        assert!(msg.contains("dir/data.bin"), "{msg}");
+        assert!(msg.starts_with("Corruption detected"), "{msg}");
+    }
+
+    #[test]
+    fn declared_length_mismatch_equal_lengths_stay_truthful() {
+        // A mis-wired caller must not get a false direction claim.
+        let msg = ArchiveError::declared_length_mismatch("e", 5, 5).to_string();
+        assert!(msg.contains('5'), "{msg}");
+        assert!(!msg.contains("over-produced"), "{msg}");
+        assert!(!msg.contains("under-produced"), "{msg}");
+    }
+
+    // ── SkippedUnsupportedEntry ──
+
+    #[test]
+    fn skipped_unsupported_entry_carries_path_kind_and_reason() {
+        let warn = ArchiveWarning::skipped_unsupported_entry(
+            "dev/null",
+            UnsupportedEntryKind::CharacterDevice,
+        );
+        match &warn {
+            ArchiveWarning::SkippedUnsupportedEntry { path, kind, reason } => {
+                assert_eq!(path, "dev/null");
+                assert_eq!(*kind, UnsupportedEntryKind::CharacterDevice);
+                assert_eq!(*reason, EntrySkipReason::UnsupportedKindOnExtract);
+            }
+            other => panic!("Expected SkippedUnsupportedEntry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dropped_unsupported_entry_marks_the_modify_reason() {
+        let warn = ArchiveWarning::dropped_unsupported_entry("link", UnsupportedEntryKind::Symlink);
+        match &warn {
+            ArchiveWarning::SkippedUnsupportedEntry { reason, kind, .. } => {
+                assert_eq!(*reason, EntrySkipReason::DroppedDuringModify);
+                assert_eq!(*kind, UnsupportedEntryKind::Symlink);
+            }
+            other => panic!("Expected SkippedUnsupportedEntry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skipped_unsupported_entry_display_names_kind_and_stage() {
+        let extract =
+            ArchiveWarning::skipped_unsupported_entry("p/fifo", UnsupportedEntryKind::Fifo)
+                .to_string();
+        assert!(extract.contains("p/fifo"), "{extract}");
+        assert!(extract.contains("FIFO"), "{extract}");
+        assert!(extract.starts_with("Skipped"), "{extract}");
+
+        let modify =
+            ArchiveWarning::dropped_unsupported_entry("p/sock", UnsupportedEntryKind::Socket)
+                .to_string();
+        assert!(modify.contains("p/sock"), "{modify}");
+        assert!(modify.contains("socket"), "{modify}");
+        assert!(modify.starts_with("Dropped"), "{modify}");
+    }
+
+    #[test]
+    fn skipped_unsupported_entry_never_claims_a_link_for_a_device_node() {
+        // The whole point of the variant (DCR-010): a security-auditing
+        // caller must not read "symbolic link" for a block device.
+        let msg = ArchiveWarning::skipped_unsupported_entry("d", UnsupportedEntryKind::BlockDevice)
+            .to_string();
+        assert!(msg.contains("block device"), "{msg}");
+        assert!(!msg.contains("link"), "{msg}");
+    }
+
+    #[test]
+    fn skipped_unsupported_entry_equality_distinguishes_kind_and_reason() {
+        let a = ArchiveWarning::skipped_unsupported_entry("p", UnsupportedEntryKind::Fifo);
+        let b = ArchiveWarning::skipped_unsupported_entry("p", UnsupportedEntryKind::Fifo);
+        let other_kind =
+            ArchiveWarning::skipped_unsupported_entry("p", UnsupportedEntryKind::Socket);
+        let other_reason =
+            ArchiveWarning::dropped_unsupported_entry("p", UnsupportedEntryKind::Fifo);
+        assert_eq!(a, b);
+        assert_ne!(a, other_kind);
+        assert_ne!(a, other_reason);
+    }
+
+    #[test]
+    fn unsupported_entry_kind_from_unix_mode_classifies_special_kinds() {
+        // Full mode words, format bits plus permission bits.
+        assert_eq!(
+            UnsupportedEntryKind::from_unix_mode(0o010_644),
+            Some(UnsupportedEntryKind::Fifo)
+        );
+        assert_eq!(
+            UnsupportedEntryKind::from_unix_mode(0o020_666),
+            Some(UnsupportedEntryKind::CharacterDevice)
+        );
+        assert_eq!(
+            UnsupportedEntryKind::from_unix_mode(0o060_660),
+            Some(UnsupportedEntryKind::BlockDevice)
+        );
+        assert_eq!(
+            UnsupportedEntryKind::from_unix_mode(0o120_777),
+            Some(UnsupportedEntryKind::Symlink)
+        );
+        assert_eq!(
+            UnsupportedEntryKind::from_unix_mode(0o140_755),
+            Some(UnsupportedEntryKind::Socket)
+        );
+    }
+
+    #[test]
+    fn unsupported_entry_kind_from_unix_mode_allows_files_dirs_and_bare_modes() {
+        assert_eq!(UnsupportedEntryKind::from_unix_mode(0o100_644), None);
+        assert_eq!(UnsupportedEntryKind::from_unix_mode(0o040_755), None);
+        // No format bits at all carries no kind information, so it must
+        // not be reported as a skipped special entry.
+        assert_eq!(UnsupportedEntryKind::from_unix_mode(0o644), None);
+    }
+
     // ── Codec install instructions ──
 
     #[test]
@@ -1060,6 +1450,44 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn codec_install_instructions_are_case_insensitive() {
+        // libarchive spells its filters in lower case; the instruction
+        // table is keyed in upper case. Both must reach the same arm so
+        // a write-filter registration site gets the real hint instead of
+        // the generic fallback.
+        let upper = ArchiveError::codec_install_instructions("XZ");
+        let lower = ArchiveError::codec_install_instructions("xz");
+        assert_eq!(upper, lower);
+        // The instruction table only has XZ arms for the three
+        // first-class platforms; elsewhere both spellings share the
+        // generic fallback, which the equality assertion above already
+        // covers.
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        assert!(!lower.contains("libarchive documentation"), "{lower}");
+    }
+
+    #[test]
+    fn codec_unavailable_is_constructible_and_displayable_from_a_filter_name() {
+        // Shape check for the libarchive write-filter call site: a
+        // lower-case `&str` codec name plus a format is all it needs.
+        let err = ArchiveError::codec_unavailable("zstd", ArchiveFormat::Tar);
+        let msg = err.to_string();
+        match &err {
+            ArchiveError::CodecUnavailable {
+                codec,
+                format,
+                install_instructions,
+            } => {
+                assert_eq!(codec, "zstd");
+                assert_eq!(*format, ArchiveFormat::Tar);
+                assert!(!install_instructions.is_empty());
+            }
+            other => panic!("Expected CodecUnavailable variant, got {other:?}"),
+        }
+        assert!(msg.contains("zstd"), "{msg}");
     }
 
     #[test]

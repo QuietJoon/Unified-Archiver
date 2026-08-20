@@ -62,30 +62,66 @@ pub(crate) fn classify_zip_entry_type(unix_mode: Option<u32>, name_is_dir: bool)
     }
 }
 
-/// Open a ZIP entry by index, using password decryption if provided
+/// Is this `zip`-crate error the "the entry is encrypted and you supplied
+/// no password" condition?
+///
+/// The crate reports it as `UnsupportedArchive(ZipError::PASSWORD_REQUIRED)`
+/// — the same variant it uses for genuinely unsupported archive shapes — so
+/// the discriminator is the message constant the crate publishes for exactly
+/// this case (`zip::result::ZipError::PASSWORD_REQUIRED`), compared by value
+/// rather than by pointer identity.
+fn is_password_required(e: &zip::result::ZipError) -> bool {
+    matches!(
+        e,
+        zip::result::ZipError::UnsupportedArchive(message)
+            if *message == zip::result::ZipError::PASSWORD_REQUIRED
+    )
+}
+
+/// Open a ZIP entry by index, using password decryption if provided.
+///
+/// **Missing-credential classification (ticgit `9bdf2c`).** A read of an
+/// encrypted entry through a handle that carries no password is a *missing
+/// credential*, not a malformed archive, so it surfaces as
+/// [`ArchiveError::Password`] — matching the RAR backend
+/// (`ERAR_MISSING_PASSWORD`) and the 7z backend (`Error::PasswordRequired`),
+/// and matching what `docs/API_REFERENCE.md` promises callers. It used to
+/// surface as [`ArchiveError::Format`] carrying the crate's "Password
+/// required to decrypt file" text, so ZIP was the one backend where a
+/// caller had to string-match to tell a missing password from corruption.
+/// DCR-012 made that user-visible on a second path: the content-multiset
+/// digest streams AE-2 entries, so digesting a password-protected ZIP
+/// reaches exactly here.
+///
+/// Only the missing-credential condition moved. A wrong password stays
+/// [`ArchiveError::Password`] (the crate's `InvalidPassword`), and every
+/// other failure — a truncated local header, an unsupported compression
+/// method, a decoder setup failure — stays [`ArchiveError::Format`].
 fn open_entry_by_index<'a>(
     zip: &'a mut RawZipArchive<File>,
     index: usize,
     password: Option<&str>,
 ) -> Result<zip::read::ZipFile<'a>> {
-    if let Some(pw) = password {
-        zip.by_index_decrypt(index, pw.as_bytes()).map_err(|e| {
-            if matches!(e, zip::result::ZipError::InvalidPassword) {
-                ArchiveError::password(format!("Invalid password for ZIP entry {}", index))
-            } else {
-                ArchiveError::format(
-                    Some(ArchiveFormat::Zip),
-                    format!("Read entry {}: {}", index, e),
-                )
-            }
-        })
-    } else {
-        zip.by_index(index).map_err(|e| {
+    let classify = |e: zip::result::ZipError| -> ArchiveError {
+        if matches!(e, zip::result::ZipError::InvalidPassword) {
+            ArchiveError::password(format!("Invalid password for ZIP entry {}", index))
+        } else if is_password_required(&e) {
+            ArchiveError::password(format!(
+                "Password required to decrypt ZIP entry {}: reopen the archive with its password",
+                index
+            ))
+        } else {
             ArchiveError::format(
                 Some(ArchiveFormat::Zip),
                 format!("Read entry {}: {}", index, e),
             )
-        })
+        }
+    };
+
+    if let Some(pw) = password {
+        zip.by_index_decrypt(index, pw.as_bytes()).map_err(classify)
+    } else {
+        zip.by_index(index).map_err(classify)
     }
 }
 
@@ -359,47 +395,164 @@ fn open_zip(path: &Path) -> Result<RawZipArchive<File>> {
 /// The parsed listing is additionally memoised in `listing`
 /// (AD 0065 / OI-0065-003) and shared out via `Arc::clone`.
 ///
-/// **Duplicate-name rejection (R0079-0026 / DCR-009 — AD 0007 collapse).**
+/// **Duplicate-collapse rejection, and the one raw index behind it
+/// (R0079-0026 / DCR-009 — AD 0007 collapse; widened by OI-0001-003).**
 /// The `zip` crate keys its central-directory map by exact name, so two
 /// records sharing a byte-identical name collapse to a single listing
 /// entry (the last record wins). The removed piz reader kept every record,
 /// so its listing carried both and the single-entry gate refused the
-/// ambiguity. To preserve that rejection now that `zip` is the sole ZIP
-/// backend, `duplicate_guard` memoises a raw central-directory scan
-/// (`scan_duplicate_names`) and the by-name single-entry paths refuse any
-/// normalized path that appeared more than once in the raw directory.
+/// ambiguity. `raw_directory` restores that by memoising ONE
+/// [`RawCentralDirectory`] index — read through the same open descriptor
+/// every extraction reads through — and every operation consults it:
+/// the by-name single-entry paths refuse an ambiguous name, and the paths
+/// that consume the whole collapsed view (bulk extraction, the integrity
+/// walk, an id-addressed stream) refuse the archive instead of silently
+/// omitting a shadowed record.
 pub struct ZipArchive {
     path: PathBuf,
     password: Option<Password>,
     cached_zip: std::sync::Mutex<Option<RawZipArchive<File>>>,
     listing: once_cell::sync::OnceCell<std::sync::Arc<Vec<ArchiveEntry>>>,
-    /// Memoised raw-central-directory duplicate-name detection
-    /// (R0079-0026 / DCR-009). Populated lazily on the first single-entry
-    /// extraction.
-    duplicate_guard: once_cell::sync::OnceCell<DuplicateGuard>,
+    /// Memoised raw-central-directory index (R0079-0026 / DCR-009 /
+    /// OI-0001-003). Populated lazily on the first operation that consults
+    /// it, which since OI-0001-003 is any listing, extraction or integrity
+    /// call rather than only a by-name single-entry extraction.
+    raw_directory: once_cell::sync::OnceCell<RawCentralDirectory>,
 }
 
-/// Result of scanning the RAW central directory for duplicate normalized
-/// entry names (R0079-0026 / DCR-009).
-struct DuplicateGuard {
+/// One raw central-directory record, as the file physically carries it.
+struct RawRecord {
+    /// The entry name exactly as stored — never decoded here, because the
+    /// `zip` crate collapses on these bytes (R0001-0029).
+    name: Vec<u8>,
+    /// The `zip`-crate listing indices whose stored name is these bytes.
+    /// Empty when the crate never parsed a record with this spelling (e.g.
+    /// the EOCD undercounts the directory), and several indices when one
+    /// raw spelling backs more than one listed entry because two records
+    /// disagree about the general-purpose UTF-8 flag.
+    listed_indices: Vec<usize>,
+}
+
+/// The single raw-central-directory index every ZIP operation consults
+/// (R0079-0026 / DCR-009 / OI-0001-003).
+///
+/// **Why an index rather than more guard calls.** Before OI-0001-003 the
+/// collapse was re-scanned only by the by-name single-entry paths, and the
+/// scan re-opened `self.path` independently of the cached handle — so the
+/// scan and the extractor could read two different files, and every other
+/// surface (listing, counts, by-id and bulk extraction, integrity) consumed
+/// the `zip` crate's already-collapsed view without ever learning the
+/// archive was ambiguous. This index closes both halves at once: it is read
+/// through the descriptor the cached `RawZipArchive` already owns
+/// ([`ZipArchive::with_cached_file`], never a second `File::open`), and it is
+/// memoised once per handle so every operation can afford to consult it.
+struct RawCentralDirectory {
+    /// Every record the raw directory physically carries, in stored order.
+    records: Vec<RawRecord>,
+    /// How many entries the `zip` crate's deduped map exposes — the count
+    /// every `zip.len()` walk in this file iterates.
+    deduped_len: usize,
     /// Normalized paths that appear more than once across the raw
     /// central-directory records. The by-name single-entry paths refuse
     /// these because the `zip` crate's deduped listing would otherwise
     /// silently hand back the surviving (last) record's payload.
-    names: HashSet<String>,
+    duplicate_names: HashSet<String>,
     /// `true` when at least one record the `zip` crate collapsed could not
     /// be attributed to a specific listed name (e.g. an exotic
     /// mixed-encoding collision whose two raw byte strings decode to one
     /// name, or a record the crate never parsed because the EOCD undercounts
-    /// the directory). In that case every by-name single-entry extraction is
-    /// refused rather than risk silently returning the wrong payload — a
+    /// the directory). In that case even the by-name surface is refused
+    /// wholesale rather than risk silently returning the wrong payload — a
     /// safe over-rejection for a genuinely ambiguous archive.
     ///
     /// R0001-0028: this is decided by counting, not by
-    /// `names.is_empty()`. The old heuristic disarmed itself the moment a
-    /// single ordinary duplicate was attributed, so a crafted archive could
-    /// hide an unattributable collision behind an ordinary one.
+    /// `duplicate_names.is_empty()`. The old heuristic disarmed itself the
+    /// moment a single ordinary duplicate was attributed, so a crafted
+    /// archive could hide an unattributable collision behind an ordinary
+    /// one.
     any_undetected: bool,
+}
+
+impl RawCentralDirectory {
+    /// How many records the raw directory physically carries.
+    fn raw_len(&self) -> usize {
+        self.records.len()
+    }
+
+    /// Did the `zip` crate collapse anything at all — an ambiguous name, or
+    /// a record it could not account for?
+    fn is_collapsed(&self) -> bool {
+        self.any_undetected || !self.duplicate_names.is_empty()
+    }
+
+    /// The records the `zip` crate never mapped to a listing index — the
+    /// ones no id can address and no name can name. A non-empty result is
+    /// what `any_undetected` is usually reporting.
+    fn unaddressable_records(&self) -> Vec<&RawRecord> {
+        self.records
+            .iter()
+            .filter(|record| record.listed_indices.is_empty())
+            .collect()
+    }
+
+    /// The ambiguous listed paths, sorted so a refusal message is stable.
+    fn ambiguous_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.duplicate_names.iter().map(String::as_str).collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// Refusal text for an operation that would consume the collapsed view.
+    ///
+    /// The name list is capped: entry names are attacker-controlled, so an
+    /// archive with thousands of colliding names must not be able to turn a
+    /// rejection into an unbounded string.
+    fn collapsed_reason(&self) -> String {
+        const MAX_NAMES: usize = 8;
+        const NAME_PREVIEW_CHARS: usize = 64;
+
+        let mut reason = format!(
+            "ambiguous ZIP central directory: {} raw record(s) resolve to {} addressable entry/entries",
+            self.raw_len(),
+            self.deduped_len
+        );
+        let names = self.ambiguous_names();
+        if !names.is_empty() {
+            reason.push_str("; ambiguous name(s): ");
+            reason.push_str(&names[..names.len().min(MAX_NAMES)].join(", "));
+            if names.len() > MAX_NAMES {
+                reason.push_str(&format!(" (and {} more)", names.len() - MAX_NAMES));
+            }
+        }
+        if self.any_undetected {
+            reason.push_str(
+                "; at least one collapsed record could not be attributed to a listed name",
+            );
+            let orphans = self.unaddressable_records();
+            if let Some(first) = orphans.first() {
+                // A diagnostic preview only — never a key. Attacker-controlled
+                // bytes are decoded lossily and truncated, and the raw
+                // spelling is what the reader failed to parse, so the CP437
+                // vs UTF-8 question the tally cares about (R0001-0029) does
+                // not arise here.
+                let preview: String = String::from_utf8_lossy(&first.name)
+                    .chars()
+                    .take(NAME_PREVIEW_CHARS)
+                    .collect();
+                reason.push_str(&format!(
+                    " ({} record(s) carry a name the reader never parsed, first '{}')",
+                    orphans.len(),
+                    preview
+                ));
+            }
+        }
+        reason.push_str(
+            ". A shadowed record has no listing id, so it can be neither addressed nor \
+             extracted, and this operation would silently omit it \
+             (R0079-0026 / DCR-009 / OI-0001-003)",
+        );
+        reason
+    }
 }
 
 impl ZipArchive {
@@ -419,7 +572,7 @@ impl ZipArchive {
             password: None,
             cached_zip: std::sync::Mutex::new(None),
             listing: once_cell::sync::OnceCell::new(),
-            duplicate_guard: once_cell::sync::OnceCell::new(),
+            raw_directory: once_cell::sync::OnceCell::new(),
         })
     }
 
@@ -444,6 +597,55 @@ impl ZipArchive {
             slot => slot.insert(open_zip(&self.path)?),
         };
         f(zip)
+    }
+
+    /// Run `f` against the very `File` the cached `RawZipArchive` reads
+    /// through — the atomicity half of OI-0001-003 (R0001-0026).
+    ///
+    /// The raw central-directory scan used to do its own
+    /// `File::open(&self.path)`, so the scan and every subsequent extraction
+    /// could read two different files: replace the path between the two
+    /// opens and the guard blesses one archive while the extractor reads
+    /// another. There is no revalidation to add because the backend records
+    /// no open-time identity — so instead of opening twice, this hands out
+    /// the descriptor that is already open. The `zip` crate exposes its
+    /// reader only by consuming the archive (`into_inner`), so the cached
+    /// handle is taken apart under the same mutex acquisition and rebuilt
+    /// from the same descriptor before the lock is released; the one extra
+    /// central-directory parse is paid once per handle, when the index is
+    /// built.
+    fn with_cached_file<T>(&self, f: impl FnOnce(&mut File) -> Result<T>) -> Result<T> {
+        let mut guard = self.cached_zip.lock().map_err(|_| {
+            ArchiveError::format(
+                Some(ArchiveFormat::Zip),
+                "ZIP archive cache mutex poisoned by an earlier panic; reopen the archive",
+            )
+        })?;
+        // Materialise the cache first: `f` must receive the descriptor every
+        // other operation reads through, whether or not one was open yet.
+        if guard.is_none() {
+            *guard = Some(open_zip(&self.path)?);
+        }
+        let zip = guard
+            .take()
+            .expect("cache was just materialised, so the slot is occupied");
+        let mut file = zip.into_inner();
+
+        let out = f(&mut file);
+
+        // Rebuild from the SAME descriptor. A rebuild failure leaves the
+        // cache empty (a later call reopens) and is reported only when `f`
+        // itself succeeded, so the caller's own error is never masked.
+        match RawZipArchive::new(file) {
+            Ok(zip) => {
+                *guard = Some(zip);
+                out
+            }
+            Err(e) => out.and(Err(ArchiveError::format(
+                Some(ArchiveFormat::Zip),
+                format!("Invalid ZIP: {}", e),
+            ))),
+        }
     }
 
     /// Open encrypted ZIP archive with password.
@@ -490,6 +692,15 @@ impl ZipArchive {
     /// **Caching (AD 0065 / OI-0065-003).** The first call walks the
     /// central directory and memoises the result; subsequent calls
     /// share the snapshot via `Arc::clone`.
+    ///
+    /// **Collapsed records (OI-0001-003).** The listing is the `zip` crate's
+    /// deduped view, so an archive whose raw central directory carries
+    /// byte-identical duplicate names lists fewer entries than it holds.
+    /// Listing therefore consults the raw index and fails closed
+    /// ([`ArchiveError::OperationBlocked`]) when the collapse cannot be
+    /// attributed to specific names — see
+    /// [`Self::reject_if_unlocalizable`] for why an *attributable*
+    /// duplicate still lists.
     pub fn list_files(&self) -> Result<std::sync::Arc<Vec<ArchiveEntry>>> {
         self.list_files_budgeted(None)
     }
@@ -505,7 +716,8 @@ impl ZipArchive {
         &self,
         budget: Option<usize>,
     ) -> Result<std::sync::Arc<Vec<ArchiveEntry>>> {
-        self.listing
+        let entries = self
+            .listing
             .get_or_try_init(|| {
                 self.with_zip(|zip| {
                     // OI-0080-003: `zip.len()` is the count the `zip` crate
@@ -553,7 +765,21 @@ impl ZipArchive {
                     Ok(std::sync::Arc::new(entries))
                 })
             })
-            .map(std::sync::Arc::clone)
+            .map(std::sync::Arc::clone)?;
+        // OI-0001-003: the count this hands back (and every `entry_count`
+        // derived from it) is the deduped one. Consult the raw index before
+        // returning it. Ordered after the budget check on purpose: an
+        // over-budget archive must be refused without walking its directory
+        // a second time.
+        self.reject_if_unlocalizable(crate::error::ops::LIST_FILES)?;
+        Ok(entries)
+    }
+
+    /// The one raw central-directory index, built on first use and shared
+    /// by every operation that consults it (OI-0001-003).
+    fn raw_central_directory(&self) -> Result<&RawCentralDirectory> {
+        self.raw_directory
+            .get_or_try_init(|| self.scan_raw_central_directory())
     }
 
     /// Refuse a by-name single-entry extraction when the requested
@@ -564,11 +790,14 @@ impl ZipArchive {
     /// distinct raw names that normalize to one path (they survive as
     /// separate listing entries), and this catches byte-identical names the
     /// `zip` crate collapsed into a single deduped record.
+    ///
+    /// The refusal stays **per name** (plus the unattributable-collapse
+    /// case): an archive that carries one ambiguous name must keep serving
+    /// its unambiguous entries, which is the contract the cross-backend
+    /// single-entry parity suite pins.
     fn reject_if_duplicate(&self, validated_path: &str, op: &'static str) -> Result<()> {
-        let guard = self
-            .duplicate_guard
-            .get_or_try_init(|| self.scan_duplicate_names())?;
-        if guard.any_undetected || guard.names.contains(validated_path) {
+        let raw = self.raw_central_directory()?;
+        if raw.any_undetected || raw.duplicate_names.contains(validated_path) {
             return Err(ArchiveError::OperationBlocked {
                 operation: op.to_string(),
                 reason: multiple_entries_reason(validated_path),
@@ -577,12 +806,67 @@ impl ZipArchive {
         Ok(())
     }
 
-    /// Walk the RAW central directory and collect the listed paths that are
-    /// backed by more than one record (R0079-0026 / DCR-009).
+    /// Refuse an operation that consumes the archive's WHOLE collapsed view
+    /// when the raw directory carried records the `zip` crate collapsed
+    /// (OI-0001-003 / R0001-0030).
+    ///
+    /// Bulk extraction, the integrity walk and an id-addressed stream all
+    /// iterate `zip.len()` — the deduped view — so on an ambiguous archive
+    /// they used to report success over a *subset* of the records that exist:
+    /// a complete-looking extraction that quietly dropped a shadowed payload,
+    /// an integrity pass that never verified it, a content digest that never
+    /// folded it in. A shadowed record has no listing id, so there is nothing
+    /// to extract it *with*; the honest answer is to refuse the whole-view
+    /// operation and let the caller address the unambiguous entries by name.
+    fn reject_if_collapsed(&self, op: &'static str) -> Result<()> {
+        let raw = self.raw_central_directory()?;
+        if raw.is_collapsed() {
+            return Err(ArchiveError::OperationBlocked {
+                operation: op.to_string(),
+                reason: raw.collapsed_reason(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Refuse a listing (and therefore every entry count derived from it)
+    /// when the collapse cannot be localized to specific names
+    /// (OI-0001-003).
+    ///
+    /// Listing is deliberately the *narrow* gate. When attribution succeeds,
+    /// the ambiguity is confined to named entries and every read of those
+    /// names is refused, so a caller cannot be silently handed the wrong
+    /// payload — and the refusal text's own advice ("address the entry by
+    /// id from `list_files()`") stays reachable, as does the cross-backend
+    /// parity contract that an archive carrying one ambiguous name still
+    /// lists. When attribution fails there is no name to attach the refusal
+    /// to, so no downstream guard can protect the caller and the listing
+    /// itself must fail closed.
+    fn reject_if_unlocalizable(&self, op: &'static str) -> Result<()> {
+        let raw = self.raw_central_directory()?;
+        if raw.any_undetected {
+            return Err(ArchiveError::OperationBlocked {
+                operation: op.to_string(),
+                reason: raw.collapsed_reason(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Walk the RAW central directory once and build the index every
+    /// operation consults (R0079-0026 / DCR-009 / OI-0001-003).
     ///
     /// The `zip` crate exposes only its name-deduped central-directory map,
-    /// so this re-reads the directory from `central_directory_start()`
-    /// (already absolute — it folds in any SFX/prepended-data offset).
+    /// so the records it collapsed have to be counted from the file itself,
+    /// starting at `central_directory_start()` (already absolute — it folds
+    /// in any SFX/prepended-data offset).
+    ///
+    /// **One source (R0001-0026).** The walk reads through
+    /// [`Self::with_cached_file`], i.e. the descriptor the cached
+    /// `RawZipArchive` already owns, so the index and every later extraction
+    /// see the same bytes. It performs no `File::open` of its own; replacing
+    /// the file at `self.path` mid-flight can no longer make the guard bless
+    /// one archive while the extractor reads another.
     ///
     /// **Tallying (R0001-0029).** Records are tallied by their RAW name
     /// bytes and then joined against the crate's own listing through
@@ -598,9 +882,9 @@ impl ZipArchive {
     /// **Accounting (R0001-0028).** `raw_records - deduped_len` is how many
     /// records the crate collapsed away; `attributed` is how many of those
     /// collapses this scan pinned to listed names. Any shortfall means a
-    /// collapse escaped attribution, and `any_undetected` then refuses the
-    /// archive's whole by-name single-entry surface.
-    fn scan_duplicate_names(&self) -> Result<DuplicateGuard> {
+    /// collapse escaped attribution, and `any_undetected` then refuses even
+    /// the archive's by-name single-entry surface.
+    fn scan_raw_central_directory(&self) -> Result<RawCentralDirectory> {
         const CD_HEADER_SIGNATURE: u32 = 0x0201_4b50;
         const EOCD_SIGNATURE: u32 = 0x0605_4b50;
         const ZIP64_EOCD_SIGNATURE: u32 = 0x0606_4b50;
@@ -609,14 +893,15 @@ impl ZipArchive {
         const CD_SIGNATURE_LEN: usize = 4;
         const CD_FIXED_HEADER_LEN: usize = 46;
 
-        // R0001-0029: raw name bytes -> the normalized path(s) the public
-        // listing exposes for them. `by_index_raw` reads only the already
-        // parsed central-directory metadata, so this is an in-memory walk.
-        // One raw spelling can back several listed names when two records
-        // share their bytes but disagree on the UTF-8 flag; keeping all of
-        // them means every ambiguous listed path is refused.
+        // R0001-0029: raw name bytes -> the listing index/normalized path
+        // pairs the public listing exposes for them. `by_index_raw` reads
+        // only the already parsed central-directory metadata, so this is an
+        // in-memory walk. One raw spelling can back several listed names
+        // when two records share their bytes but disagree on the UTF-8 flag;
+        // keeping all of them means every ambiguous listed path is refused.
+        type ListedByRawName = HashMap<Vec<u8>, Vec<(usize, String)>>;
         let (cd_start, deduped_len, listed_by_raw_name) = self.with_zip(|zip| {
-            let mut listed_by_raw_name: HashMap<Vec<u8>, HashSet<String>> = HashMap::new();
+            let mut listed_by_raw_name: ListedByRawName = HashMap::new();
             for i in 0..zip.len() {
                 let raw = zip.by_index_raw(i).map_err(|e| {
                     ArchiveError::format(
@@ -624,83 +909,97 @@ impl ZipArchive {
                         format!("Read entry {}: {}", i, e),
                     )
                 })?;
-                listed_by_raw_name
+                let normalized = normalize_path(raw.name());
+                let slot = listed_by_raw_name
                     .entry(raw.name_raw().to_vec())
-                    .or_default()
-                    .insert(normalize_path(raw.name()));
+                    .or_default();
+                if !slot.iter().any(|(_, name)| name == &normalized) {
+                    slot.push((i, normalized));
+                }
             }
             Ok((zip.central_directory_start(), zip.len(), listed_by_raw_name))
         })?;
 
-        let mut file =
-            File::open(&self.path).map_err(|e| ArchiveError::io("open", self.path.clone(), e))?;
-        file.seek(SeekFrom::Start(cd_start))
-            .map_err(|e| ArchiveError::io("seek", self.path.clone(), e))?;
-
-        let mut counts: HashMap<Vec<u8>, u32> = HashMap::new();
-        let mut raw_records: u64 = 0;
-
-        loop {
-            // R0001-0027: dispatch on the record signature, read on its own
-            // first. Only a recognised terminator ends the walk; a truncated
-            // record or an OS read error is a typed failure, never a quiet
-            // `break` that would leave duplicate detection half-done.
-            let mut signature = [0u8; CD_SIGNATURE_LEN];
-            read_central_directory_exact(
-                &mut file,
-                &mut signature,
-                &self.path,
-                "record signature",
-            )?;
-            match u32::from_le_bytes(signature) {
-                CD_HEADER_SIGNATURE => {}
-                // The directory is terminated by the EOCD, optionally
-                // preceded by an archive digital-signature record and/or the
-                // ZIP64 EOCD record + its locator. All are legitimate ends.
-                EOCD_SIGNATURE
-                | ZIP64_EOCD_SIGNATURE
-                | ZIP64_EOCD_LOCATOR_SIGNATURE
-                | DIGITAL_SIGNATURE => break,
-                other => {
-                    return Err(ArchiveError::corruption(
-                        self.path.display().to_string(),
-                        format!(
-                            "central directory: unexpected record signature {:#010x} after {} record(s)",
-                            other, raw_records
-                        ),
-                    ));
-                }
-            }
-
-            // Offsets are the fixed header's, less the 4 signature bytes
-            // already consumed: name/extra/comment lengths live at 28/30/32.
-            let mut rest = [0u8; CD_FIXED_HEADER_LEN - CD_SIGNATURE_LEN];
-            read_central_directory_exact(&mut file, &mut rest, &self.path, "record header")?;
-            let name_len = u16::from_le_bytes([rest[24], rest[25]]) as usize;
-            let extra_len = u16::from_le_bytes([rest[26], rest[27]]) as usize;
-            let comment_len = u16::from_le_bytes([rest[28], rest[29]]) as usize;
-
-            let mut name_bytes = vec![0u8; name_len];
-            read_central_directory_exact(&mut file, &mut name_bytes, &self.path, "entry name")?;
-            file.seek(SeekFrom::Current((extra_len + comment_len) as i64))
+        // R0001-0026: the same descriptor the cached handle reads through —
+        // never a second open of `self.path`.
+        let raw_names = self.with_cached_file(|file| {
+            file.seek(SeekFrom::Start(cd_start))
                 .map_err(|e| ArchiveError::io("seek", self.path.clone(), e))?;
 
-            *counts.entry(name_bytes).or_insert(0) += 1;
-            raw_records += 1;
+            let mut raw_names: Vec<Vec<u8>> = Vec::new();
+
+            loop {
+                // R0001-0027: dispatch on the record signature, read on its
+                // own first. Only a recognised terminator ends the walk; a
+                // truncated record or an OS read error is a typed failure,
+                // never a quiet `break` that would leave duplicate detection
+                // half-done.
+                let mut signature = [0u8; CD_SIGNATURE_LEN];
+                read_central_directory_exact(
+                    file,
+                    &mut signature,
+                    &self.path,
+                    "record signature",
+                )?;
+                match u32::from_le_bytes(signature) {
+                    CD_HEADER_SIGNATURE => {}
+                    // The directory is terminated by the EOCD, optionally
+                    // preceded by an archive digital-signature record and/or
+                    // the ZIP64 EOCD record + its locator. All are
+                    // legitimate ends.
+                    EOCD_SIGNATURE
+                    | ZIP64_EOCD_SIGNATURE
+                    | ZIP64_EOCD_LOCATOR_SIGNATURE
+                    | DIGITAL_SIGNATURE => break,
+                    other => {
+                        return Err(ArchiveError::corruption(
+                            self.path.display().to_string(),
+                            format!(
+                                "central directory: unexpected record signature {:#010x} after {} record(s)",
+                                other,
+                                raw_names.len()
+                            ),
+                        ));
+                    }
+                }
+
+                // Offsets are the fixed header's, less the 4 signature bytes
+                // already consumed: name/extra/comment lengths live at
+                // 28/30/32.
+                let mut rest = [0u8; CD_FIXED_HEADER_LEN - CD_SIGNATURE_LEN];
+                read_central_directory_exact(file, &mut rest, &self.path, "record header")?;
+                let name_len = u16::from_le_bytes([rest[24], rest[25]]) as usize;
+                let extra_len = u16::from_le_bytes([rest[26], rest[27]]) as usize;
+                let comment_len = u16::from_le_bytes([rest[28], rest[29]]) as usize;
+
+                let mut name_bytes = vec![0u8; name_len];
+                read_central_directory_exact(file, &mut name_bytes, &self.path, "entry name")?;
+                file.seek(SeekFrom::Current((extra_len + comment_len) as i64))
+                    .map_err(|e| ArchiveError::io("seek", self.path.clone(), e))?;
+
+                raw_names.push(name_bytes);
+            }
+
+            Ok(raw_names)
+        })?;
+
+        let mut counts: HashMap<&[u8], u32> = HashMap::new();
+        for name in &raw_names {
+            *counts.entry(name.as_slice()).or_insert(0) += 1;
         }
 
-        let mut names: HashSet<String> = HashSet::new();
+        let mut duplicate_names: HashSet<String> = HashSet::new();
         let mut attributed: u64 = 0;
-        for (raw_name, count) in counts {
-            if count <= 1 {
+        for (raw_name, count) in &counts {
+            if *count <= 1 {
                 continue;
             }
             // Only a duplicate whose raw bytes map onto listed paths is
             // rejectable by name; anything else falls through to the global
             // refusal below (R0001-0028 / R0001-0029).
-            if let Some(listed) = listed_by_raw_name.get(&raw_name) {
-                attributed += u64::from(count).saturating_sub(listed.len() as u64);
-                names.extend(listed.iter().cloned());
+            if let Some(listed) = listed_by_raw_name.get(*raw_name) {
+                attributed += u64::from(*count).saturating_sub(listed.len() as u64);
+                duplicate_names.extend(listed.iter().map(|(_, name)| name.clone()));
             }
         }
 
@@ -710,11 +1009,31 @@ impl ZipArchive {
         // count *below* the crate's own is equally unexplained (the EOCD
         // undercounts the directory, or the two views disagree about where
         // it starts), so treat that as ambiguous too.
+        let raw_records = raw_names.len() as u64;
         let collapsed = raw_records.saturating_sub(deduped_len as u64);
         let any_undetected = attributed < collapsed || raw_records < deduped_len as u64;
 
-        Ok(DuplicateGuard {
-            names,
+        // OI-0001-003 asks the index to carry the per-record name bytes and
+        // the crate index each maps to, so the whole-view guards can explain
+        // *which* records are unaddressable rather than only that some are.
+        let records = raw_names
+            .into_iter()
+            .map(|name| {
+                let listed_indices = listed_by_raw_name
+                    .get(&name)
+                    .map(|listed| listed.iter().map(|(index, _)| *index).collect())
+                    .unwrap_or_default();
+                RawRecord {
+                    name,
+                    listed_indices,
+                }
+            })
+            .collect();
+
+        Ok(RawCentralDirectory {
+            records,
+            deduped_len,
+            duplicate_names,
             any_undetected,
         })
     }
@@ -861,6 +1180,17 @@ impl ZipArchive {
     /// (matching `list_files()` order) is in the set are materialized — other
     /// entries are skipped without warnings. The archive is traversed once
     /// per AD 0029.
+    ///
+    /// **Collapsed records (OI-0001-003).** The walk iterates the `zip`
+    /// crate's deduped view, so on an archive whose raw central directory
+    /// carries duplicate names it would report a complete extraction while
+    /// silently dropping every shadowed payload. It therefore consults the
+    /// raw index first and refuses the archive
+    /// ([`ArchiveError::OperationBlocked`]) instead. Refusal rather than a
+    /// warning because no `ArchiveWarning` variant describes an
+    /// unaddressable central-directory record, and a shadowed record has no
+    /// listing id, so there is no selection the caller could pass to reach
+    /// it.
     #[allow(clippy::too_many_arguments)]
     pub fn extract_all_with_options(
         &self,
@@ -872,6 +1202,10 @@ impl ZipArchive {
         verify_crc32: bool,
         selection: Option<&std::collections::HashSet<usize>>,
     ) -> Result<Vec<ArchiveWarning>> {
+        // OI-0001-003: before touching the filesystem — a refused archive
+        // must leave the destination untouched.
+        self.reject_if_collapsed(crate::error::ops::EXTRACT_ALL)?;
+
         std::fs::create_dir_all(dest_path)
             .map_err(|e| ArchiveError::io("create_dir", dest_path.to_path_buf(), e))?;
 
@@ -1167,7 +1501,17 @@ impl ZipArchive {
     /// decode-class read error — is recorded as a failed path; a genuine
     /// archive-file I/O error (open/read on the archive itself) propagates
     /// as `Err` (R0080-0030).
+    ///
+    /// **Collapsed records (OI-0001-003).** The walk iterates the `zip`
+    /// crate's deduped view, so a shadowed duplicate record's payload is
+    /// never verified at all — an "all entries pass" answer over a subset of
+    /// the records the file carries. An ambiguous central directory is an
+    /// archive-level defect, not a per-entry one, so it propagates as `Err`
+    /// ([`ArchiveError::OperationBlocked`]) rather than being reported as a
+    /// failed entry path.
     pub fn test_integrity(&self) -> Result<Vec<String>> {
+        self.reject_if_collapsed(crate::error::ops::VALIDATE_INTEGRITY)?;
+
         let password = self.password.as_ref().map(Password::as_str);
         self.with_zip(|zip| {
             let mut failed = Vec::new();
@@ -1305,6 +1649,17 @@ impl ZipArchive {
     /// skipped is only the *uniqueness* half of the single-entry gate — which
     /// is the entire reason an id-addressed seek exists.
     ///
+    /// **Collapsed records (OI-0001-003).** Skipping uniqueness is not the
+    /// same as ignoring the raw directory. A byte-identical duplicate name is
+    /// a *collapse*: the shadowed record has no id, so a digest built from
+    /// this path would silently omit a payload and two archives with
+    /// different contents could agree. That case is refused here through
+    /// [`Self::reject_if_collapsed`]. Duplicate-*after-normalization* names
+    /// — distinct raw spellings such as `a/b` and `a\b` — are not a collapse:
+    /// both records keep their own id, both stream, and this path stays the
+    /// reason they can (the OI-0076-002 defect the by-name route would
+    /// reintroduce).
+    ///
     /// AE-2 entries stay exempt from the CRC compare here for the same
     /// R0079-0007 reason the other read paths do: comparing decrypted bytes
     /// against the placeholder 0 would flag every non-empty entry corrupt.
@@ -1319,6 +1674,8 @@ impl ZipArchive {
         id: usize,
         validated_path: &str,
     ) -> Result<crate::streaming::StreamingExtractor> {
+        self.reject_if_collapsed(crate::error::ops::EXTRACT_TO_STREAM)?;
+
         let password = self.password.as_ref().map(Password::as_str);
         let data = self.with_zip(|zip| {
             check_listing_drift(zip, id, validated_path)?;
@@ -1394,11 +1751,21 @@ mod tests {
             "the entry must be listed and flagged encrypted"
         );
 
-        // No password at all: the zip crate refuses to build a reader.
+        // No password at all: a missing credential, not a malformed
+        // archive (ticgit `9bdf2c`). This must be `Password` so a caller can
+        // tell "ask the user for a password" from "this archive is broken"
+        // without string-matching, and so ZIP answers the way RAR
+        // (`ERAR_MISSING_PASSWORD`) and 7z (`Error::PasswordRequired`)
+        // already do.
         let no_password = ZipArchive::open(&path).unwrap();
         match no_password.extract_to_memory("test_file.txt") {
-            Err(ArchiveError::Format { .. }) | Err(ArchiveError::Password { .. }) => {}
-            other => panic!("missing password must not yield plaintext, got {other:?}"),
+            Err(ArchiveError::Password { message }) => assert!(
+                message.contains("Password required"),
+                "the missing-credential message must say so: {message}"
+            ),
+            other => {
+                panic!("a missing password must surface as ArchiveError::Password, got {other:?}")
+            }
         }
 
         // Wrong password: ZipCrypto's check byte rejects nearly every wrong
@@ -1864,10 +2231,11 @@ mod tests {
     /// id-addressed stream the digest walk uses must fail rather than
     /// substitute a value. Listing itself keeps working (AD 0014).
     ///
-    /// Only `is_err()` is asserted: TicGit `9bdf2c` owns tightening the ZIP
-    /// no-password read path from `ArchiveError::Format` to
-    /// `ArchiveError::Password`, and that ticket should be free to sharpen
-    /// this assertion without reopening DCR-012.
+    /// The variant is asserted: TicGit `9bdf2c` moved the ZIP no-password
+    /// read path from `ArchiveError::Format` to `ArchiveError::Password`, and
+    /// this is the path DCR-012 made user-visible — the content digest
+    /// streams AE-2 entries, so a digest call on a password-protected ZIP
+    /// lands here.
     #[test]
     fn test_zip_wrapper_ae2_stream_by_id_without_password_errors() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1882,12 +2250,16 @@ mod tests {
             .expect("listing an encrypted ZIP needs no password (AD 0014)");
         assert_eq!(entry.crc32, None);
 
-        assert!(
-            archive
-                .extract_to_stream_by_listing_id(entry.id, &entry.path)
-                .is_err(),
-            "an AE-2 entry cannot be digested without the password"
-        );
+        match archive.extract_to_stream_by_listing_id(entry.id, &entry.path) {
+            Err(ArchiveError::Password { message }) => assert!(
+                message.contains("Password required"),
+                "the missing-credential message must say so: {message}"
+            ),
+            Ok(_) => panic!("an AE-2 entry must not be digested without the password"),
+            Err(e) => {
+                panic!("the refusal must be a missing credential, not a format fault; got {e:?}")
+            }
+        }
     }
 
     /// R0079-0019: `preserve_permissions` / `preserve_times` must be
@@ -2285,6 +2657,146 @@ mod tests {
         match archive.extract_to_memory("a.txt") {
             Err(ArchiveError::Corruption { .. }) => {}
             other => panic!("a record running past EOF must fail closed, got {other:?}"),
+        }
+    }
+
+    /// OI-0001-003 half one (R0001-0026): the raw index must be read
+    /// through the descriptor the cached handle already owns, never by
+    /// re-opening `self.path`.
+    ///
+    /// The fixture makes the two sources disagree on purpose: a CLEAN
+    /// archive is opened and its handle materialised, then a genuinely
+    /// AMBIGUOUS archive is moved onto the same path (a new inode, so the
+    /// open descriptor keeps pointing at the clean bytes). A path-based
+    /// re-scan would read the ambiguous replacement and refuse operations on
+    /// the archive the extractor is actually reading — the "guard blesses one
+    /// file while extraction reads another" defect, observed from its safe
+    /// side. Reading one source means the verdict follows the descriptor.
+    #[test]
+    fn test_zip_raw_index_reads_the_cached_handle_not_the_path() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // The replacement, and proof that it really is ambiguous when a scan
+        // reads *it* — otherwise this test could pass vacuously.
+        let ambiguous = tmp.path().join("ambiguous.zip");
+        build_stored_zip(&ambiguous, &["a.txt", "b.txt"]);
+        let mut bytes = std::fs::read(&ambiguous).unwrap();
+        rename_entry_bytes(&mut bytes, b"b.txt", b"a.txt");
+        std::fs::write(&ambiguous, &bytes).unwrap();
+        match ZipArchive::open(&ambiguous).unwrap().test_integrity() {
+            Err(ArchiveError::OperationBlocked { .. }) => {}
+            other => panic!("the replacement fixture must be ambiguous, got {other:?}"),
+        }
+
+        let path = tmp.path().join("live.zip");
+        build_stored_zip(&path, &["a.txt", "b.txt"]);
+        let archive = ZipArchive::open(&path).unwrap();
+        // Materialise the cached handle WITHOUT building the index — every
+        // public entry point now consults the index, so warming it here
+        // would memoise the verdict before the swap and prove nothing.
+        archive.with_zip(|_| Ok(())).unwrap();
+
+        // Swap in a new inode at the same path.
+        let staged = tmp.path().join("staged.zip");
+        std::fs::copy(&ambiguous, &staged).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&staged, &path).unwrap();
+
+        let raw = archive
+            .raw_central_directory()
+            .expect("the index must come from the open descriptor");
+        assert_eq!(
+            raw.raw_len(),
+            2,
+            "the scan must see the clean archive's two records, not the replacement's"
+        );
+        assert!(
+            !raw.is_collapsed(),
+            "the descriptor's archive is unambiguous: {}",
+            raw.collapsed_reason()
+        );
+        assert!(
+            archive.test_integrity().unwrap().is_empty(),
+            "the archive the extractor reads is healthy, so integrity must pass"
+        );
+        assert_eq!(
+            archive.extract_to_memory("a.txt").unwrap(),
+            b"payload-0",
+            "the guard and the payload must come from the same source"
+        );
+    }
+
+    /// OI-0001-003 half two (R0001-0030): a collapsed duplicate must be
+    /// refused through the paths that consume the whole archive, not only
+    /// through the by-name single-entry route.
+    ///
+    /// Bulk extraction, the integrity walk and the id-addressed stream all
+    /// iterate the `zip` crate's deduped view, so before this they reported
+    /// success over a subset of the records the file carries: a
+    /// complete-looking extraction that dropped the shadowed payload, an
+    /// "all entries pass" integrity answer that never read it, and a content
+    /// digest that never folded it in. None of them takes a name, so none of
+    /// them could reach `reject_if_duplicate`.
+    #[test]
+    fn test_zip_collapsed_duplicate_refused_outside_the_by_name_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("dup_bulk.zip");
+        build_stored_zip(&path, &["a.txt", "dup0.txt", "dup1.txt"]);
+        let mut bytes = std::fs::read(&path).unwrap();
+        rename_entry_bytes(&mut bytes, b"dup1.txt", b"dup0.txt");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let archive = ZipArchive::open(&path).unwrap();
+        // The listing is the crate's deduped view — three raw records, two
+        // addressable entries. It still lists: the ambiguity is attributable
+        // to `dup0.txt`, so it is localizable by name.
+        let entries = archive.list_files().unwrap();
+        assert_eq!(entries.len(), 2, "the zip crate collapses the duplicate");
+
+        let out = tmp.path().join("out");
+        match archive.extract_all_with_options(&out, None, true, false, false, false, None) {
+            Err(ArchiveError::OperationBlocked { operation, reason }) => {
+                assert_eq!(operation, crate::error::ops::EXTRACT_ALL);
+                assert!(
+                    reason.contains("dup0.txt") && reason.contains("3 raw record(s)"),
+                    "the refusal must name the ambiguity: {reason}"
+                );
+            }
+            other => panic!("bulk extraction must refuse a collapsed archive, got {other:?}"),
+        }
+        assert!(
+            !out.exists(),
+            "a refused bulk extraction must not touch the destination"
+        );
+
+        match archive.test_integrity() {
+            Err(ArchiveError::OperationBlocked { operation, .. }) => {
+                assert_eq!(operation, crate::error::ops::VALIDATE_INTEGRITY);
+            }
+            other => panic!("the integrity walk must refuse a collapsed archive, got {other:?}"),
+        }
+
+        let unique = entries
+            .iter()
+            .find(|e| e.path == "a.txt")
+            .expect("the unambiguous entry must be listed");
+        match archive.extract_to_stream_by_listing_id(unique.id, &unique.path) {
+            Err(ArchiveError::OperationBlocked { operation, .. }) => {
+                assert_eq!(operation, crate::error::ops::EXTRACT_TO_STREAM);
+            }
+            Ok(_) => panic!("the id-addressed stream must refuse a collapsed archive"),
+            Err(e) => panic!("the id-addressed stream must refuse a collapse, got {e:?}"),
+        }
+
+        // The by-name surface keeps its per-name behaviour: the unambiguous
+        // entry still extracts, the ambiguous name is still refused.
+        assert_eq!(archive.extract_to_memory("a.txt").unwrap(), b"payload-0");
+        match archive.extract_to_memory("dup0.txt") {
+            Err(ArchiveError::OperationBlocked { reason, .. }) => assert!(
+                reason.contains("Multiple entries match"),
+                "the by-name refusal keeps its own wording: {reason}"
+            ),
+            other => panic!("the duplicated name must stay refused, got {other:?}"),
         }
     }
 

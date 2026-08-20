@@ -133,6 +133,14 @@ impl ArchiveFormat {
     /// [`Self::detect_from_bytes`] with the full buffer to bypass the
     /// extension hint. Raw LZMA streams do not have a stable short magic
     /// marker, so `.lzma` / `.tar.lzma` / `.tlz` use an extension fallback.
+    ///
+    /// The 512-byte window also bounds how far the zstd probe can walk a
+    /// leading skippable-frame prefix (see `zstd_frame_offset`): a `.zst`
+    /// whose first skippable frame carries a payload long enough to push
+    /// the standard frame magic past the window detects as
+    /// `Unknown archive format` from-file (false negative — accepted;
+    /// callers holding the bytes can pass a wider buffer to
+    /// [`Self::detect_from_bytes`]).
     pub fn detect(path: &Path) -> Result<Self> {
         let mut file =
             File::open(path).map_err(|e| ArchiveError::io("open", path.to_path_buf(), e))?;
@@ -269,12 +277,24 @@ impl ArchiveFormat {
             return Ok(ArchiveFormat::Xz);
         }
 
-        // Zstandard: 0x28 0xB5 0x2F 0xFD (the standard zstd frame magic).
-        // Skippable-frame magic numbers (0x184D2A50–0x184D2A5F) are not
-        // checked separately — a real zstd stream begins with a standard
-        // frame; a leading skippable frame would instead be a custom
-        // wrapper not produced by mainstream encoders.
-        if magic.starts_with(&[0x28, 0xB5, 0x2F, 0xFD]) {
+        // Zstandard: 0x28 0xB5 0x2F 0xFD (the standard zstd frame magic),
+        // optionally preceded by skippable frames. RFC 8878 §3.1.2 places
+        // skippable frames (magic 0x184D2A50–0x184D2A5F) anywhere between
+        // frames — the first position included — so a conforming `.zst`
+        // need not open with the standard magic, and `Zst` is deliberately
+        // absent from the extension fallback set, which left such a file
+        // undetectable by every path (OI-0080-008). `zstd_frame_offset`
+        // walks the skippable prefix by its stored length (an exact jump,
+        // not a scan) and returns `None` when the probe window ends inside
+        // the prefix or the skip budget is exhausted, so a short buffer or
+        // a crafted frame chain falls through to "undetected" rather than
+        // being guessed. Verified against the linked libarchive (3.8.9):
+        // its zstd read filter bids on the skippable magic and extracts
+        // such a stream, so detection does not promise an extraction the
+        // decompressor would refuse.
+        if let Some(offset) = zstd_frame_offset(magic)
+            && magic[offset..].starts_with(&[0x28, 0xB5, 0x2F, 0xFD])
+        {
             return Ok(ArchiveFormat::Zst);
         }
 
@@ -741,6 +761,53 @@ pub(crate) fn promote_to_compound_tar(detected: ArchiveFormat, path: &Path) -> A
     }
 }
 
+/// How many leading zstd skippable frames the magic probe will walk past
+/// before giving up (OI-0080-008).
+///
+/// Each hop is an exact jump over a stored length, so the walk already
+/// terminates; the budget additionally keeps a crafted file (a long chain
+/// of empty skippable frames) from making detection walk the whole probe
+/// window one 8-byte header at a time. Mainstream encoders emit at most a
+/// single leading skippable frame (dictionary/metadata wrappers), so the
+/// budget is generous in practice. A conforming stream carrying more than
+/// this many leading skippable frames stays undetected even though
+/// libarchive would read it — an accepted false negative, chosen over an
+/// unbounded prefix walk.
+const MAX_LEADING_SKIPPABLE_FRAMES: usize = 8;
+
+/// Offset within `magic` of the first frame that is not a zstd skippable
+/// frame, or `None` when the buffer ends inside the skippable prefix or
+/// the prefix is longer than [`MAX_LEADING_SKIPPABLE_FRAMES`].
+///
+/// A skippable frame is a 4-byte magic in 0x184D2A50–0x184D2A5F followed
+/// by a 4-byte little-endian payload length (RFC 8878 §3.1.2), so the
+/// header size is known and the hop is exact. `None` deliberately covers
+/// "cannot tell yet": returning an offset the caller could not read past
+/// would turn a truncated probe into a guess.
+fn zstd_frame_offset(magic: &[u8]) -> Option<usize> {
+    /// 4-byte magic + 4-byte little-endian frame size.
+    const SKIPPABLE_HEADER_LEN: usize = 8;
+    const SKIPPABLE_MAGIC_BASE: u32 = 0x184D_2A50;
+    /// The low nibble of the magic is the frame's user-chosen variant.
+    const SKIPPABLE_MAGIC_MASK: u32 = 0xFFFF_FFF0;
+
+    let mut offset = 0usize;
+    // One more pass than the budget: the final pass is what reports the
+    // frame that follows the last tolerated skippable frame.
+    for _ in 0..=MAX_LEADING_SKIPPABLE_FRAMES {
+        let rest = magic.get(offset..)?;
+        let head = u32::from_le_bytes(rest.get(..4)?.try_into().ok()?);
+        if head & SKIPPABLE_MAGIC_MASK != SKIPPABLE_MAGIC_BASE {
+            return Some(offset);
+        }
+        let frame_size = u32::from_le_bytes(rest.get(4..SKIPPABLE_HEADER_LEN)?.try_into().ok()?);
+        offset = offset
+            .checked_add(SKIPPABLE_HEADER_LEN)?
+            .checked_add(frame_size as usize)?;
+    }
+    None
+}
+
 /// Validate the 22-byte end-of-central-directory record that an empty ZIP
 /// carries at offset zero.
 ///
@@ -1184,6 +1251,102 @@ mod tests {
         );
     }
 
+    /// Build a zstd skippable frame (RFC 8878 §3.1.2): a magic in
+    /// 0x184D2A50–0x184D2A5F, a 4-byte little-endian payload length, then
+    /// that many payload bytes.
+    fn zstd_skippable_frame(variant: u8, payload_len: usize) -> Vec<u8> {
+        let magic = 0x184D_2A50u32 | u32::from(variant & 0x0F);
+        let mut frame = Vec::with_capacity(8 + payload_len);
+        frame.extend_from_slice(&magic.to_le_bytes());
+        frame.extend_from_slice(&(payload_len as u32).to_le_bytes());
+        frame.extend(std::iter::repeat_n(0xA5u8, payload_len));
+        frame
+    }
+
+    const ZSTD_FRAME_MAGIC: &[u8] = &[0x28, 0xB5, 0x2F, 0xFD];
+
+    #[test]
+    fn test_detect_zst_behind_leading_skippable_frame() {
+        // RFC 8878 §3.1.2 allows a skippable frame in the first position,
+        // so the standard frame magic may sit past offset zero. Such a
+        // file used to reach neither the magic branch nor the extension
+        // fallback (`Zst` is not in it) and was reported as an unknown
+        // format, leaving it unopenable by any path.
+        let mut bytes = zstd_skippable_frame(0x00, 9);
+        bytes.extend_from_slice(ZSTD_FRAME_MAGIC);
+        bytes.extend_from_slice(&[0x00, 0x00]);
+        assert_eq!(
+            ArchiveFormat::detect_from_bytes(&bytes).unwrap(),
+            ArchiveFormat::Zst
+        );
+    }
+
+    #[test]
+    fn test_detect_zst_behind_zero_length_and_high_variant_skippable_frames() {
+        // A zero-length payload and the top variant nibble (0x5F) are both
+        // legal; neither may stall or divert the walk.
+        let mut bytes = zstd_skippable_frame(0x0F, 0);
+        bytes.extend_from_slice(&zstd_skippable_frame(0x07, 3));
+        bytes.extend_from_slice(ZSTD_FRAME_MAGIC);
+        assert_eq!(
+            ArchiveFormat::detect_from_bytes(&bytes).unwrap(),
+            ArchiveFormat::Zst
+        );
+    }
+
+    #[test]
+    fn test_detect_zst_skippable_frame_budget_boundary() {
+        // Exactly the budget is still detected; one frame more falls
+        // through to "undetected" rather than walking an unbounded chain.
+        let at_budget: Vec<u8> = (0..MAX_LEADING_SKIPPABLE_FRAMES)
+            .flat_map(|_| zstd_skippable_frame(0x00, 0))
+            .chain(ZSTD_FRAME_MAGIC.iter().copied())
+            .collect();
+        assert_eq!(
+            ArchiveFormat::detect_from_bytes(&at_budget).unwrap(),
+            ArchiveFormat::Zst
+        );
+
+        let over_budget: Vec<u8> = (0..MAX_LEADING_SKIPPABLE_FRAMES + 1)
+            .flat_map(|_| zstd_skippable_frame(0x00, 0))
+            .chain(ZSTD_FRAME_MAGIC.iter().copied())
+            .collect();
+        assert!(ArchiveFormat::detect_from_bytes(&over_budget).is_err());
+    }
+
+    #[test]
+    fn test_detect_zst_skippable_prefix_truncated_probe_is_undetected() {
+        // Ends inside the skippable header (no length field yet).
+        let short_header = &zstd_skippable_frame(0x00, 0)[..6];
+        assert!(ArchiveFormat::detect_from_bytes(short_header).is_err());
+
+        // Header complete, but the declared payload runs past the probe
+        // window, so the following frame magic is not visible.
+        let mut truncated_payload = zstd_skippable_frame(0x00, 64);
+        truncated_payload.truncate(20);
+        assert!(ArchiveFormat::detect_from_bytes(&truncated_payload).is_err());
+
+        // Prefix consumed exactly, nothing after it: still undetected
+        // (a lone skippable frame is not evidence of a zstd stream).
+        let prefix_only = zstd_skippable_frame(0x00, 4);
+        assert!(ArchiveFormat::detect_from_bytes(&prefix_only).is_err());
+    }
+
+    #[test]
+    fn test_detect_zst_skippable_prefix_does_not_widen_the_zst_claim() {
+        // The walk must not turn "skippable frame followed by something
+        // that is not the zstd frame magic" into a zstd claim. Neither a
+        // foreign archive magic (which the other branches only accept at
+        // offset zero) nor noise may come back as `Zst`.
+        let mut zip_after = zstd_skippable_frame(0x00, 0);
+        zip_after.extend_from_slice(b"PK\x03\x04");
+        assert!(ArchiveFormat::detect_from_bytes(&zip_after).is_err());
+
+        let mut noise = zstd_skippable_frame(0x00, 0);
+        noise.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        assert!(ArchiveFormat::detect_from_bytes(&noise).is_err());
+    }
+
     #[test]
     fn test_detect_lz4_magic() {
         let magic: &[u8] = &[0x04, 0x22, 0x4D, 0x18, 0x00, 0x00];
@@ -1443,6 +1606,39 @@ mod tests {
             ArchiveFormat::detect(&path).unwrap(),
             ArchiveFormat::TarGzip
         );
+    }
+
+    #[test]
+    fn test_detect_tar_zst_behind_leading_skippable_frame() {
+        // The compound-tar promotion runs on whatever `detect_from_bytes`
+        // returned, so a `.tar.zst` opening with a skippable frame must
+        // reach `TarZst` and not the "unknown format" error.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut bytes = zstd_skippable_frame(0x00, 12);
+        bytes.extend_from_slice(&[0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x00]);
+        let path = temp_file_with_bytes(tmp.path(), "test_detect.tar.zst", &bytes);
+        assert_eq!(ArchiveFormat::detect(&path).unwrap(), ArchiveFormat::TarZst);
+
+        let plain = temp_file_with_bytes(tmp.path(), "skipped.zst", &bytes);
+        assert_eq!(ArchiveFormat::detect(&plain).unwrap(), ArchiveFormat::Zst);
+    }
+
+    #[test]
+    fn test_detect_zst_extension_alone_is_still_not_enough() {
+        // Content-based detection stays the policy: `Zst` is deliberately
+        // absent from the extension-fallback set, so a garbage `.zst`
+        // (or a truncated skippable prefix) must fail detection rather
+        // than be accepted on its name and fail later with a worse error.
+        let tmp = tempfile::tempdir().unwrap();
+        let garbage = temp_file_with_bytes(tmp.path(), "junk.zst", &[0xDE, 0xAD, 0xBE, 0xEF, 0x01]);
+        assert!(ArchiveFormat::detect(&garbage).is_err());
+
+        let truncated_prefix = temp_file_with_bytes(
+            tmp.path(),
+            "truncated.tar.zst",
+            &zstd_skippable_frame(0x00, 0),
+        );
+        assert!(ArchiveFormat::detect(&truncated_prefix).is_err());
     }
 
     // ── detect (file-based): tiny-file extension fallback (R0076-0093) ──

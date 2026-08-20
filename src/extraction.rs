@@ -78,6 +78,34 @@ fn effective_entry_cap(limits: &ExtractionLimits) -> Option<u64> {
     }
 }
 
+/// Report one extraction-progress sample for the single-entry disk
+/// path and map a `ControlFlow::Break` vote onto
+/// [`ArchiveError::Cancelled`] labelled [`ops::EXTRACT_FILE`].
+///
+/// The bulk paths poll through
+/// `crate::ffi::common::check_extraction_cancelled`, which owns the
+/// same `(processed, Some(total)) -> Cancelled` contract inside the
+/// backend loops. `extract_file` cannot reach that helper: it
+/// dispatches to the per-backend single-entry writers, none of which
+/// take a progress hook, so the polling lives at the facade instead.
+/// The `(processed, Some(total))` shape and the `Cancelled` mapping are
+/// deliberately identical, so a callback written for `extract_all`
+/// works here unchanged.
+fn notify_extract_file_progress(
+    progress: &mut Option<Box<dyn crate::options::ProgressCallback>>,
+    processed: u64,
+    total: u64,
+) -> Result<()> {
+    if let Some(cb) = progress.as_mut()
+        && cb.on_progress(processed, Some(total)).is_break()
+    {
+        return Err(ArchiveError::Cancelled {
+            operation: ops::EXTRACT_FILE,
+        });
+    }
+    Ok(())
+}
+
 /// The byte ceiling handed to the backend *materialization* step for a
 /// streaming read (R0001-0011 / DEF-004 first step).
 ///
@@ -585,7 +613,30 @@ impl Archive {
     /// [`Archive::extract_some`] / [`Archive::extract_files`] /
     /// [`Archive::extract_all`] for archives whose selection includes
     /// directories.
-    pub fn extract_file(&self, file_path: &str, options: ExtractionOptions) -> Result<()> {
+    ///
+    /// # Progress and cancellation
+    ///
+    /// [`ExtractionOptions::progress`] is honoured, at **entry
+    /// granularity**: the callback is invoked once at `0` before the
+    /// payload is written and once at the entry's declared size after
+    /// it is, both against a total of that same declared size (`0` when
+    /// the format declares none — the same denominator convention the
+    /// bulk paths use, where an undeclared size contributes nothing).
+    /// A [`ControlFlow::Break`](std::ops::ControlFlow::Break) vote
+    /// surfaces [`ArchiveError::Cancelled`] with
+    /// `operation == "extract_file"`; from the first sample that aborts
+    /// before anything is written, from the second it reports a
+    /// completed write the same way `extract_all`'s 100% notification
+    /// does.
+    ///
+    /// Mid-payload samples are what this path does *not* give you: the
+    /// per-backend single-entry writers take no chunk hook, so a
+    /// multi-GiB single entry reports twice and not per chunk. Use
+    /// [`Archive::extract_by_ids`] with the entry's id (or
+    /// [`Archive::extract_files`] with its path) when a byte-granular
+    /// bar over one entry matters — those route through the bulk core,
+    /// which polls inside the copy loop.
+    pub fn extract_file(&self, file_path: &str, mut options: ExtractionOptions) -> Result<()> {
         assert_verify_crc32_supported(self, options.verify_crc32, ops::EXTRACT_FILE)?;
         let extraction_archive =
             reopen_with_password_if_set(self.source_path_for_reopen(), &options.password)?;
@@ -681,8 +732,19 @@ impl Archive {
             ops::EXTRACT_FILE,
         )?;
 
+        // Honour `ExtractionOptions::progress`: the field used to be
+        // consumed only by `dispatch_extract_core`, so this — the one
+        // disk-writing entry point that does not route through it —
+        // silently dropped the callback. The pre-write sample runs
+        // after every gate has passed and before the backend writes a
+        // byte, so a `Break` here cancels a write that has not started;
+        // the denominator is the listing's declared size, which is the
+        // same authority the bulk paths sum for theirs.
+        let declared_size = entry.size.unwrap_or(0);
+        notify_extract_file_progress(&mut options.progress, 0, declared_size)?;
+
         // Use the current archive handle for extraction
-        match &archive.backend {
+        let extracted = match &archive.backend {
             // R0081-0067: forward the metadata-preservation opt-outs to the
             // single-file path too. UnRAR stamps the archive's mode/times on
             // the file it writes, so honouring `preserve_* == false` means
@@ -730,7 +792,15 @@ impl Archive {
                 // up to the looser `max_file_size`.
                 effective_entry_cap(&options.limits),
             ),
-        }
+        };
+        extracted?;
+
+        // Completion sample, mirroring the bulk paths' 100%
+        // notification (R0070-0035): a `Break` here still surfaces
+        // `Cancelled` even though the payload is already on disk, so a
+        // callback cannot silently swallow its own last vote.
+        notify_extract_file_progress(&mut options.progress, declared_size, declared_size)?;
+        Ok(())
     }
 
     /// Extract a single file to memory.
@@ -1564,3 +1634,135 @@ impl ValidatedSource<'_> {
 
 #[cfg(test)]
 mod tests;
+
+/// `Archive::extract_file` honours `ExtractionOptions::progress`.
+///
+/// The field used to be read only by `dispatch_extract_core`, which
+/// `extract_file` does not go through, so a callback handed to the one
+/// disk-writing single-entry API was silently discarded. These tests
+/// pin the sample shape (entry granularity, declared-size denominator)
+/// and both cancellation points.
+#[cfg(test)]
+mod extract_file_progress_tests {
+    use super::{Archive, ArchiveError, ExtractionOptions};
+    use crate::error::ops;
+    use crate::test_utils::fixture;
+    use std::ops::ControlFlow;
+    use std::sync::{Arc, Mutex};
+
+    type Samples = Arc<Mutex<Vec<(u64, Option<u64>)>>>;
+
+    /// Open `test.zip`, pick its first regular file, and extract it into
+    /// a fresh directory with a callback that records every sample and
+    /// votes `Break` on the 1-based call numbers in `break_on`.
+    fn extract_first_file_with_progress(
+        break_on: &'static [usize],
+    ) -> (
+        crate::error::Result<()>,
+        Samples,
+        tempfile::TempDir,
+        std::path::PathBuf,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = Archive::open(fixture("test.zip")).unwrap();
+        let entries = archive.list_files().unwrap();
+        let entry = entries
+            .iter()
+            .find(|e| e.is_file() && e.size.unwrap_or(0) > 0)
+            .expect("test.zip must carry a non-empty regular file")
+            .clone();
+
+        let samples: Samples = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&samples);
+        let mut calls = 0usize;
+        let options = ExtractionOptions {
+            destination: temp.path().to_path_buf(),
+            overwrite: true,
+            progress: Some(Box::new(move |processed: u64, total: Option<u64>| {
+                calls += 1;
+                recorder.lock().unwrap().push((processed, total));
+                if break_on.contains(&calls) {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })),
+            ..Default::default()
+        };
+
+        let result = archive.extract_file(&entry.path, options);
+        let written = temp.path().join(&entry.path);
+        (result, samples, temp, written)
+    }
+
+    #[test]
+    fn extract_file_reports_declared_size_samples() {
+        let (result, samples, _temp, written) = extract_first_file_with_progress(&[]);
+        result.expect("extraction must succeed");
+        assert!(written.is_file(), "the payload must be on disk");
+
+        let samples = samples.lock().unwrap().clone();
+        assert_eq!(
+            samples.len(),
+            2,
+            "entry granularity: one pre-write sample and one completion sample, got {samples:?}",
+        );
+        let total = samples[0].1.expect("the denominator is always reported");
+        assert_eq!(
+            samples[0],
+            (0, Some(total)),
+            "the first sample reports nothing processed yet, got {samples:?}",
+        );
+        assert_eq!(
+            samples[1],
+            (total, Some(total)),
+            "the last sample reports 100%, got {samples:?}",
+        );
+        assert_eq!(
+            total,
+            written.metadata().unwrap().len(),
+            "the denominator is the entry's declared size, which for this \
+             fixture is what actually landed on disk",
+        );
+    }
+
+    #[test]
+    fn break_before_the_write_cancels_without_writing() {
+        let (result, samples, _temp, written) = extract_first_file_with_progress(&[1]);
+        match result {
+            Err(ArchiveError::Cancelled { operation }) => {
+                assert_eq!(operation, ops::EXTRACT_FILE);
+            }
+            other => panic!("expected Cancelled, got {other:?}"),
+        }
+        assert_eq!(
+            samples.lock().unwrap().len(),
+            1,
+            "the cancellation must abort before the completion sample",
+        );
+        assert!(
+            !written.exists(),
+            "a pre-write cancellation must leave no payload behind",
+        );
+    }
+
+    #[test]
+    fn break_at_completion_still_cancels() {
+        // R0070-0035 parity: the bulk paths surface a `Break` from the
+        // 100% notification too, even though the bytes are already
+        // written. `extract_file` reports it the same way rather than
+        // swallowing the vote.
+        let (result, samples, _temp, written) = extract_first_file_with_progress(&[2]);
+        match result {
+            Err(ArchiveError::Cancelled { operation }) => {
+                assert_eq!(operation, ops::EXTRACT_FILE);
+            }
+            other => panic!("expected Cancelled, got {other:?}"),
+        }
+        assert_eq!(samples.lock().unwrap().len(), 2);
+        assert!(
+            written.is_file(),
+            "the completion vote arrives after the write, which the rustdoc says",
+        );
+    }
+}

@@ -1063,6 +1063,97 @@ mod tests {
         );
     }
 
+    /// A recursive add must carry directory metadata for *every*
+    /// directory in the tree, not only for empty leaves.
+    ///
+    /// **Known-red, and it cannot be made green from this file.** Both
+    /// creation backends emit a directory entry only when the walker
+    /// reports `DirWalkEntry::is_leaf_dir`, so a *non-empty* directory
+    /// contributes no entry at all and its mtime/mode are lost — the
+    /// directory is recreated on extraction with whatever defaults the
+    /// extractor picks. Making this pass needs two changes outside
+    /// `src/creation.rs`:
+    ///
+    /// * `src/ffi/libarchive_wrapper/writer.rs` —
+    ///   `add_directory_recursive` must emit every `DirWalkKind::Dir`
+    ///   through `add_directory_entry_with_metadata`, not just the
+    ///   `is_leaf_dir` ones (the metadata plumbing itself already
+    ///   exists, per R0080-0070).
+    /// * `src/ffi/zip_writer.rs` — same `is_leaf_dir` gate, plus the ZIP
+    ///   writer has no metadata-carrying directory emit at all
+    ///   (`add_directory_entry` writes the entry with the default
+    ///   `FileOptions`, dropping mtime and mode even for the leaf
+    ///   directories it does emit). It needs an
+    ///   `add_directory_entry_with_metadata` counterpart mirroring
+    ///   `add_file_from_path`'s `last_modified_time` /
+    ///   `unix_permissions` handling.
+    ///
+    /// Lift the `#[ignore]` — and extend the assertions to ZIP — once
+    /// those land. The facade cannot compensate: emitting the missing
+    /// directory entries from here would duplicate whatever the backend
+    /// walk emits and would still leave ZIP metadata-less.
+    #[test]
+    #[ignore = "red until both creation backends emit non-leaf directory entries with metadata; \
+                see src/ffi/libarchive_wrapper/writer.rs and src/ffi/zip_writer.rs"]
+    fn test_add_directory_recursive_preserves_nonempty_directory_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let src_dir = temp.path().join("src_dir");
+        let nonempty = src_dir.join("nonempty");
+        std::fs::create_dir_all(&nonempty).unwrap();
+        std::fs::write(nonempty.join("child.txt"), b"child payload").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&nonempty, std::fs::Permissions::from_mode(0o750)).unwrap();
+        }
+        let source_meta = std::fs::metadata(&nonempty).unwrap();
+
+        let archive_path = temp.path().join("dir_metadata.tar");
+        let options = CompressionOptions::new(ArchiveFormat::Tar);
+        let mut archive = Archive::create(&archive_path, options).unwrap();
+        archive.add_directory_recursive(&src_dir).unwrap();
+        archive.finish().unwrap();
+
+        let reader = Archive::open(&archive_path).unwrap();
+        let entries = reader.list_files().unwrap();
+        let dir_entry = entries
+            .iter()
+            .find(|e| {
+                e.entry_type == EntryType::Directory
+                    && e.path.trim_end_matches('/') == "src_dir/nonempty"
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "non-empty directory 'src_dir/nonempty' has no entry, so it carries no \
+                     metadata; entries: {:?}",
+                    entries.iter().map(|e| &e.path).collect::<Vec<_>>()
+                )
+            });
+
+        // tar stores whole-second mtimes, so compare with a tolerance
+        // instead of demanding bit equality with the filesystem stamp.
+        let stored = dir_entry
+            .modified
+            .expect("directory entry carries no mtime");
+        let source_mtime = source_meta.modified().unwrap();
+        let drift = stored
+            .duration_since(source_mtime)
+            .or_else(|_| source_mtime.duration_since(stored))
+            .unwrap();
+        assert!(
+            drift.as_secs() <= 1,
+            "directory mtime drifted by {drift:?}: stored {stored:?} vs source {source_mtime:?}"
+        );
+
+        #[cfg(unix)]
+        assert_eq!(
+            dir_entry.permissions,
+            Some(0o750),
+            "directory mode was not preserved"
+        );
+    }
+
     // ── finish tests ──
 
     #[test]

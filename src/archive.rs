@@ -9,6 +9,7 @@ use crate::ffi::wrapper::UnrarArchive;
 use crate::ffi::zip_wrapper::ZipArchive;
 use crate::ffi::zip_writer::ZipWriter;
 use crate::format::ArchiveFormat;
+use crate::security::{Cap, ExtractionLimits};
 use once_cell::sync::OnceCell;
 use std::path::{Path, PathBuf};
 
@@ -200,13 +201,40 @@ const _: fn() = || {
 // Archive is NOT Sync - it cannot be safely shared between threads via &Archive
 // because the underlying FFI operations are not reentrant.
 
+/// AD 0040 staging ceiling for the SFX entry points that accept no
+/// [`ExtractionLimits`] — [`Archive::open_sfx`],
+/// [`Archive::open_with_sfx_progress`], [`Archive::open_at_offset`],
+/// and the encrypted-SFX staging path behind
+/// [`Archive::open_encrypted`].
+///
+/// This is the *default* of
+/// [`ExtractionLimits::max_sfx_payload_size`], read through the
+/// `crate::sfx::limits` alias so the SFX size-relationship
+/// documentation keeps one home. It is **not** the gate: the gate is
+/// the `max_payload` argument [`stage_sfx_payload`] receives, which
+/// the `*_with_limits` entry points source from the caller's limits.
+/// `default_sfx_cap_matches_extraction_limits_default` pins the two
+/// values together.
+const DEFAULT_SFX_PAYLOAD_CAP: Cap = Cap::Limited(crate::sfx::limits::MAX_SFX_PAYLOAD_SIZE);
+
 /// Stage `payload_size = file_len - offset` bytes from `path_ref` into
 /// a tempfile so the returned [`tempfile::TempPath`] can be re-opened
-/// by a backend that expects offset-zero input. Caps the payload at
-/// [`crate::sfx::limits::MAX_SFX_PAYLOAD_SIZE`] (AD 0040). Shared by
+/// by a backend that expects offset-zero input. Shared by
 /// [`Archive::open_at_offset_with_format_hint`] and
 /// [`Archive::open_sfx_payload_for_encrypted`] so the staging policy
 /// lives in one place.
+///
+/// `max_payload` is the AD 0040 staging ceiling **as the caller
+/// configured it** — [`ExtractionLimits::max_sfx_payload_size`], which
+/// defaults to [`crate::security::DEFAULT_MAX_SFX_PAYLOAD_SIZE`] (the
+/// value `crate::sfx::limits::MAX_SFX_PAYLOAD_SIZE` aliases). This
+/// parameter exists because reading that constant here ignored a
+/// caller who *lowered* the cap: the limits-free entry points
+/// ([`Archive::open_sfx`], [`Archive::open_with_sfx_progress`],
+/// [`Archive::open_at_offset`]) pass the default, while their
+/// `*_with_limits` siblings pass the caller's value. Compared with
+/// [`Cap::exceeded_by`] so [`Cap::Unlimited`] means "no ceiling"
+/// rather than `u64::MAX`.
 ///
 /// When `expected_identity` is `Some`, the copy-source open is
 /// revalidated against that detection-time [`ReadFileIdentity`] before
@@ -224,6 +252,7 @@ const _: fn() = || {
 fn stage_sfx_payload(
     path_ref: &Path,
     offset: u64,
+    max_payload: Cap,
     format_hint: Option<ArchiveFormat>,
     expected_identity: Option<ReadFileIdentity>,
     prefix: &str,
@@ -268,12 +297,14 @@ fn stage_sfx_payload(
             format!("offset {offset} is at or beyond end of file ({file_len} bytes)"),
         ));
     }
-    let max_payload = crate::sfx::limits::MAX_SFX_PAYLOAD_SIZE;
     let payload_size = file_len - offset;
-    if payload_size > max_payload {
+    if max_payload.exceeded_by(payload_size) {
         return Err(ArchiveError::format(
             None,
-            format!("payload size {payload_size} bytes exceeds maximum {max_payload} bytes"),
+            format!(
+                "payload size {payload_size} bytes exceeds maximum {} bytes",
+                max_payload.get()
+            ),
         ));
     }
     source
@@ -760,8 +791,38 @@ impl Archive {
     /// println!("Embedded entries: {}", archive.entry_count()?);
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
+    ///
+    /// # Staging ceiling
+    ///
+    /// The payload copy is capped at
+    /// [`ExtractionLimits::default`]'s
+    /// [`max_sfx_payload_size`](ExtractionLimits::max_sfx_payload_size)
+    /// (AD 0040). Use [`Archive::open_sfx_with_limits`] to supply your
+    /// own ceiling.
     pub fn open_sfx(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_sfx_progress(path, None)
+    }
+
+    /// [`Archive::open_sfx`] with a caller-supplied staging ceiling.
+    ///
+    /// Only [`ExtractionLimits::max_sfx_payload_size`] participates —
+    /// it is the one limit the staging copy can honour, because staging
+    /// happens before any listing exists to apply the entry-count,
+    /// size, or ratio gates to. Those still apply later, on the
+    /// extraction call made against the returned handle.
+    ///
+    /// ```no_run
+    /// use unified_archive::{Archive, Cap, ExtractionLimits};
+    ///
+    /// // Refuse to stage more than 256 MiB of embedded payload.
+    /// let limits = ExtractionLimits::builder()
+    ///     .max_sfx_payload_size(Cap::Limited(256 * 1024 * 1024))
+    ///     .build();
+    /// let archive = Archive::open_sfx_with_limits("installer.exe", &limits)?;
+    /// # Ok::<(), unified_archive::ArchiveError>(())
+    /// ```
+    pub fn open_sfx_with_limits(path: impl AsRef<Path>, limits: &ExtractionLimits) -> Result<Self> {
+        Self::open_sfx_staged(path.as_ref(), None, limits.max_sfx_payload_size())
     }
 
     /// Open a self-extracting archive while observing or cancelling
@@ -780,11 +841,44 @@ impl Archive {
     ///
     /// `path` must be an SFX. Non-SFX inputs surface the same error
     /// as [`Archive::open_sfx`].
+    ///
+    /// The staging copy is capped at [`ExtractionLimits::default`]'s
+    /// [`max_sfx_payload_size`](ExtractionLimits::max_sfx_payload_size);
+    /// [`Archive::open_with_sfx_progress_and_limits`] takes the
+    /// caller's ceiling instead.
     pub fn open_with_sfx_progress(
         path: impl AsRef<Path>,
         progress: Option<crate::options::SfxStagingProgress>,
     ) -> Result<Self> {
-        let path_ref = path.as_ref();
+        Self::open_sfx_staged(path.as_ref(), progress, DEFAULT_SFX_PAYLOAD_CAP)
+    }
+
+    /// [`Archive::open_with_sfx_progress`] with a caller-supplied
+    /// staging ceiling.
+    ///
+    /// The progress hook observes (and may cancel) the same copy the
+    /// ceiling bounds: the cap is checked against the payload's size
+    /// *before* the first byte is copied, so an over-cap payload fails
+    /// without the callback ever firing. Only
+    /// [`ExtractionLimits::max_sfx_payload_size`] participates — see
+    /// [`Archive::open_sfx_with_limits`].
+    pub fn open_with_sfx_progress_and_limits(
+        path: impl AsRef<Path>,
+        progress: Option<crate::options::SfxStagingProgress>,
+        limits: &ExtractionLimits,
+    ) -> Result<Self> {
+        Self::open_sfx_staged(path.as_ref(), progress, limits.max_sfx_payload_size())
+    }
+
+    /// Single implementation behind every SFX open: detect, bind the
+    /// staging copy to the detection open's identity, then stage the
+    /// payload under `max_payload`. The public entry points differ only
+    /// in where that ceiling and the progress hook come from.
+    fn open_sfx_staged(
+        path_ref: &Path,
+        progress: Option<crate::options::SfxStagingProgress>,
+        max_payload: Cap,
+    ) -> Result<Self> {
         let detection = Self::detect_sfx(path_ref)?;
 
         if !detection.is_sfx {
@@ -831,6 +925,7 @@ impl Archive {
         Self::open_at_offset_with_format_hint_and_progress(
             path_ref,
             offset,
+            max_payload,
             detection.archive_format,
             Some(identity),
             progress.as_mut(),
@@ -860,8 +955,52 @@ impl Archive {
     /// let entries = archive.list_files()?;
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
+    ///
+    /// # Staging ceiling
+    ///
+    /// `file_len - offset` bytes are copied, capped at
+    /// [`ExtractionLimits::default`]'s
+    /// [`max_sfx_payload_size`](ExtractionLimits::max_sfx_payload_size)
+    /// (AD 0040). Use [`Archive::open_at_offset_with_limits`] to
+    /// tighten (or lift) that ceiling.
     pub fn open_at_offset(path: impl AsRef<Path>, offset: u64) -> Result<Self> {
-        Self::open_at_offset_with_format_hint(path.as_ref(), offset, None)
+        Self::open_at_offset_with_format_hint(path.as_ref(), offset, DEFAULT_SFX_PAYLOAD_CAP, None)
+    }
+
+    /// [`Archive::open_at_offset`] with a caller-supplied staging
+    /// ceiling.
+    ///
+    /// Only [`ExtractionLimits::max_sfx_payload_size`] participates:
+    /// the offset payload is staged before any listing exists, so the
+    /// entry-count, size and ratio gates have nothing to run against
+    /// yet — they apply to the extraction calls made against the
+    /// returned handle.
+    ///
+    /// `offset == 0` short-circuits to [`Archive::open`] and copies
+    /// nothing, so the ceiling is not consulted there.
+    ///
+    /// ```no_run
+    /// use unified_archive::{Archive, Cap, ExtractionLimits};
+    ///
+    /// let limits = ExtractionLimits::builder()
+    ///     .max_sfx_payload_size(Cap::Limited(64 * 1024 * 1024))
+    ///     .build();
+    /// // Fails with `ArchiveError::Format` when the payload after the
+    /// // offset is larger than 64 MiB, instead of staging it.
+    /// let archive = Archive::open_at_offset_with_limits("file.bin", 65536, &limits)?;
+    /// # Ok::<(), unified_archive::ArchiveError>(())
+    /// ```
+    pub fn open_at_offset_with_limits(
+        path: impl AsRef<Path>,
+        offset: u64,
+        limits: &ExtractionLimits,
+    ) -> Result<Self> {
+        Self::open_at_offset_with_format_hint(
+            path.as_ref(),
+            offset,
+            limits.max_sfx_payload_size(),
+            None,
+        )
     }
 
     /// Internal variant of [`Self::open_at_offset`] that takes an
@@ -880,6 +1019,7 @@ impl Archive {
     pub(crate) fn open_at_offset_with_format_hint(
         path_ref: &Path,
         offset: u64,
+        max_payload: Cap,
         format_hint: Option<ArchiveFormat>,
     ) -> Result<Self> {
         // OI-0081-001: the public `open_at_offset` path takes a raw
@@ -889,6 +1029,7 @@ impl Archive {
         Self::open_at_offset_with_format_hint_and_progress(
             path_ref,
             offset,
+            max_payload,
             format_hint,
             None,
             None,
@@ -896,10 +1037,12 @@ impl Archive {
     }
 
     /// Internal variant that threads an optional staging progress hook
-    /// (R0075-0003) through to [`stage_sfx_payload`].
+    /// (R0075-0003) and the caller's staging ceiling (`max_payload`)
+    /// through to [`stage_sfx_payload`].
     pub(crate) fn open_at_offset_with_format_hint_and_progress(
         path_ref: &Path,
         offset: u64,
+        max_payload: Cap,
         format_hint: Option<ArchiveFormat>,
         expected_identity: Option<ReadFileIdentity>,
         progress: Option<&mut crate::options::SfxStagingProgress>,
@@ -914,6 +1057,7 @@ impl Archive {
         let temp_path = stage_sfx_payload(
             path_ref,
             offset,
+            max_payload,
             format_hint,
             expected_identity,
             "unified-archive-sfx-",
@@ -948,9 +1092,15 @@ impl Archive {
                 ),
             )
         })?;
+        // `open_encrypted` takes no `ExtractionLimits` (it predates the
+        // limits-accepting SFX opens and adding one would change a
+        // public signature), so the staging ceiling is the AD 0040
+        // default here — the same value this path used before the cap
+        // became caller-configurable.
         let temp_path = stage_sfx_payload(
             path_ref,
             offset,
+            DEFAULT_SFX_PAYLOAD_CAP,
             Some(format),
             Some(identity),
             "unified-archive-sfx-enc-",
@@ -1596,7 +1746,9 @@ mod sfx_fallback_error_tests {
 /// non-Unix fallback is length-only and cannot see a same-size swap.
 #[cfg(all(test, unix))]
 mod read_identity_tests {
-    use super::{Archive, capture_read_identity, revalidate_read_identity};
+    use super::{
+        Archive, DEFAULT_SFX_PAYLOAD_CAP, capture_read_identity, revalidate_read_identity,
+    };
     use crate::error::ArchiveError;
     use crate::format::ArchiveFormat;
     use crate::test_utils::fixture;
@@ -1697,6 +1849,7 @@ mod read_identity_tests {
         let err = match Archive::open_at_offset_with_format_hint_and_progress(
             &path,
             offset,
+            DEFAULT_SFX_PAYLOAD_CAP,
             detection.archive_format(),
             Some(detected_id),
             None,
@@ -1726,5 +1879,142 @@ mod read_identity_tests {
 
         let archive = Archive::open(&path).expect("stable archive must open");
         assert_eq!(archive.format(), ArchiveFormat::Zip);
+    }
+}
+
+/// `ExtractionLimits::max_sfx_payload_size` is enforced by the staging
+/// copy (AD 0040), and the limits-free entry points still stage under
+/// the documented default.
+///
+/// The fixtures are deliberately not archives: the ceiling is checked
+/// before a single byte is copied, so "blocked by the cap" is
+/// distinguishable from "staged, then rejected as a non-archive" by the
+/// error text alone — which is exactly the difference a caller who
+/// lowered the cap is asking about.
+#[cfg(test)]
+mod sfx_payload_cap_tests {
+    use super::{Archive, DEFAULT_SFX_PAYLOAD_CAP};
+    use crate::error::ArchiveError;
+    use crate::security::{Cap, ExtractionLimits};
+
+    const OVER_CAP: &str = "exceeds maximum";
+
+    fn staging_fixture(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = dir.join("payload.bin");
+        std::fs::write(&path, vec![0x5Au8; 4096]).unwrap();
+        path
+    }
+
+    fn limits_with_sfx_cap(cap: Cap) -> ExtractionLimits {
+        ExtractionLimits::builder()
+            .max_sfx_payload_size(cap)
+            .build()
+    }
+
+    /// The constant the limits-free entry points pass is the field's
+    /// default — so wiring the caller's cap did not move the default.
+    #[test]
+    fn default_sfx_cap_matches_extraction_limits_default() {
+        assert_eq!(
+            DEFAULT_SFX_PAYLOAD_CAP,
+            ExtractionLimits::default().max_sfx_payload_size(),
+        );
+    }
+
+    #[test]
+    fn lowered_cap_blocks_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = staging_fixture(dir.path());
+        // 4096 - 1024 = 3072 bytes of payload against a 1 KiB ceiling.
+        let limits = limits_with_sfx_cap(Cap::Limited(1024));
+        let err = match Archive::open_at_offset_with_limits(&path, 1024, &limits) {
+            Ok(_) => panic!("a lowered max_sfx_payload_size must block staging"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, ArchiveError::Format { .. }),
+            "expected Format, got: {err:?}",
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains(OVER_CAP) && message.contains("3072"),
+            "message must name the payload size and the ceiling, got: {message}",
+        );
+        assert!(
+            message.contains("1024"),
+            "message must report the caller's ceiling, not the default, got: {message}",
+        );
+    }
+
+    #[test]
+    fn default_cap_still_stages_the_same_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = staging_fixture(dir.path());
+        // Same payload, no caller limits: the copy runs and the staged
+        // tempfile is then rejected as a non-archive — a different error
+        // than the ceiling's, which is the point.
+        let err = match Archive::open_at_offset(&path, 1024) {
+            Ok(_) => panic!("a non-archive payload cannot open"),
+            Err(e) => e,
+        };
+        assert!(
+            !err.to_string().contains(OVER_CAP),
+            "the default ceiling must not reject a 3 KiB payload, got: {err}",
+        );
+    }
+
+    #[test]
+    fn unlimited_cap_never_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = staging_fixture(dir.path());
+        let limits = limits_with_sfx_cap(Cap::Unlimited);
+        let err = match Archive::open_at_offset_with_limits(&path, 1024, &limits) {
+            Ok(_) => panic!("a non-archive payload cannot open"),
+            Err(e) => e,
+        };
+        assert!(
+            !err.to_string().contains(OVER_CAP),
+            "Cap::Unlimited means no ceiling, not u64::MAX-as-ceiling, got: {err}",
+        );
+    }
+
+    /// The SFX-detecting entry points thread the caller's cap too, not
+    /// only the raw-offset one.
+    #[test]
+    fn lowered_cap_blocks_sfx_entry_points() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installer.sh");
+        let mut sfx = b"#!/bin/sh\n".to_vec();
+        sfx.extend(vec![0u8; 100]);
+        let mut zip_header = [0u8; 30];
+        zip_header[..4].copy_from_slice(b"PK\x03\x04");
+        zip_header[8] = 8; // deflate
+        sfx.extend_from_slice(&zip_header);
+        sfx.extend(vec![0u8; 4096]);
+        std::fs::write(&path, &sfx).unwrap();
+
+        let detection = Archive::detect_sfx(&path).expect("detect");
+        assert!(detection.is_sfx(), "fixture must screen as a probable SFX");
+
+        let limits = limits_with_sfx_cap(Cap::Limited(16));
+        for (label, result) in [
+            (
+                "open_sfx_with_limits",
+                Archive::open_sfx_with_limits(&path, &limits),
+            ),
+            (
+                "open_with_sfx_progress_and_limits",
+                Archive::open_with_sfx_progress_and_limits(&path, None, &limits),
+            ),
+        ] {
+            let err = match result {
+                Ok(_) => panic!("{label} must honour the lowered ceiling"),
+                Err(e) => e,
+            };
+            assert!(
+                err.to_string().contains(OVER_CAP),
+                "{label} must fail on the ceiling, got: {err}",
+            );
+        }
     }
 }

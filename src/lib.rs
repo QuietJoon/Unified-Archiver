@@ -280,14 +280,19 @@ pub mod v2 {
     pub use crate::archive::mode_split::{ModifyArchive, ReadArchive, WriteArchive};
 }
 pub use entry::{ArchiveEntry, ArchiveEntryBuilder, EntryType, FileAttributes};
-pub use error::{ArchiveError, Operation, Result};
+// `ArchiveWarning` and `ResultWithWarnings` are re-exported because the
+// facade hands them back directly: `Archive::extract_all` returns
+// `Result<ResultWithWarnings<()>>` and `Archive::check_symlinks` returns
+// `Result<Vec<ArchiveWarning>>`. Without these, a caller has to reach into
+// `unified_archive::error` to name types the curated facade produced.
+pub use error::{ArchiveError, ArchiveWarning, Operation, Result, ResultWithWarnings};
 pub use format::{ArchiveFormat, FormatCapabilities, Support};
 pub use inspection::{MultipartLayout, ValidationReport};
 pub use modification::ModificationOptions; // Phase 6: Archive modification
 pub use options::{
     CompressionLevel, CompressionOptions, EntryFilter, ExtractionOptions,
-    LibarchiveCompressionOptions, ProgressCallback, SevenZCompressionOptions, SfxStagingProgress,
-    ZipCompressionOptions, entry_filter_from_fn,
+    LibarchiveCompressionOptions, ProgressCallback, RateLimiter, SevenZCompressionOptions,
+    SfxStagingProgress, ZipCompressionOptions, entry_filter_from_fn,
 };
 pub use password::Password;
 // Narrow the public surface to what callers reasonably
