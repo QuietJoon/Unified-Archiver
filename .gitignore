@@ -56,6 +56,10 @@ unrar-src.tar.gz
 
 # Translation
 *.ko.md
+# Korean translation mirror of the manual bundle. Owned by an external pipeline; this
+# repository never tracks, edits or regenerates it. The `*.ko.md` rule above does not
+# cover these, because the mirror uses plain filenames inside a `ko/` directory.
+**/ko/
 *.ko.txt
 
 # Review/issue indexer pipeline output
