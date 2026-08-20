@@ -1,33 +1,31 @@
 // Additional edge case tests for integrity validation
 // Critical scenarios that could break in production
 //
-// Fixture-building tests shell out to the `zip` CLI. They skip loudly
-// (eprintln + return) when the CLI is missing and otherwise assert
-// every step, so a broken prerequisite cannot silently no-op the
-// assertions (R0079-0032).
+// OI-0056-010: the fixture-building tests here used to shell out to the
+// `zip` CLI and `eprintln!`-skip when it was absent, so nine lanes reported
+// success having validated nothing on a host without the CLI. Fixtures are
+// now built in-process through `common::build_zip`, which means there is no
+// external prerequisite left to be missing and no lane that can skip. The
+// R0079-0032 rule that every step must assert still holds.
 
 #[path = "common/mod.rs"]
 mod common;
 
+use common::ZipMember;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use unified_archive::Archive;
 
-/// Run the `zip` CLI with `args`, panicking on spawn failure or
-/// non-zero exit so fixture-creation problems fail the test instead
-/// of skipping its assertions.
-fn run_zip(args: &[&str], current_dir: Option<&Path>) {
-    let mut cmd = Command::new("zip");
-    cmd.args(args);
-    if let Some(dir) = current_dir {
-        cmd.current_dir(dir);
-    }
-    let output = cmd.output().expect("run zip CLI");
+/// Build a DEFLATE-compressed ZIP holding `members`, then assert it opens.
+///
+/// Replaces the old `run_zip` CLI wrapper. Entry names are the flat,
+/// basename-only shape the CLI's `-j` produced.
+fn build_zip(path: &Path, members: &[ZipMember<'_>]) {
+    common::build_zip(path, members, false);
     assert!(
-        output.status.success(),
-        "zip CLI should create the archive: {}",
-        String::from_utf8_lossy(&output.stderr)
+        path.is_file(),
+        "fixture zip {} was not written",
+        path.display()
     );
 }
 
@@ -38,32 +36,19 @@ fn run_zip(args: &[&str], current_dir: Option<&Path>) {
 #[test]
 fn test_validation_binary_files() {
     // Test validation of archives containing binary data
-    if !common::command_exists("zip") {
-        eprintln!("Skipping test: zip command not available");
-        return;
-    }
     let temp_dir = common::temp_test_dir();
 
-    // Create binary file with various byte patterns
-    let binary_data: Vec<u8> = (0..=255).cycle().take(1024).collect();
-    fs::write(temp_dir.join("binary.bin"), &binary_data).expect("Create binary file");
+    // Binary payload with every byte value represented.
+    let binary_data: Vec<u8> = (0..=255u8).cycle().take(1024).collect();
 
-    // Create ZIP
     let zip_path = temp_dir.join("binary.zip");
-    run_zip(
-        &[
-            "-j",
-            zip_path.to_str().unwrap(),
-            temp_dir.join("binary.bin").to_str().unwrap(),
-        ],
-        None,
-    );
+    build_zip(&zip_path, &[ZipMember::File("binary.bin", &binary_data)]);
 
     let archive = Archive::open(&zip_path).expect("Open binary ZIP");
     let report = archive.validate_integrity().expect("Validate binary ZIP");
 
     assert_eq!(report.failed.len(), 0, "Binary files should validate");
-    println!("✓ Binary file validation: {} files", report.validated);
+    assert_eq!(report.validated, 1, "Should validate the one binary member");
 
     common::cleanup(&temp_dir);
 }
@@ -71,37 +56,19 @@ fn test_validation_binary_files() {
 #[test]
 fn test_validation_text_files_various_encodings() {
     // Test text files with different line endings and content
-    if !common::command_exists("zip") {
-        eprintln!("Skipping test: zip command not available");
-        return;
-    }
     let temp_dir = common::temp_test_dir();
 
-    // Unix line endings
-    fs::write(temp_dir.join("unix.txt"), b"Line 1\nLine 2\nLine 3\n").expect("write unix.txt");
-    // Windows line endings
-    fs::write(
-        temp_dir.join("windows.txt"),
-        b"Line 1\r\nLine 2\r\nLine 3\r\n",
-    )
-    .expect("write windows.txt");
-    // Mixed content
-    fs::write(
-        temp_dir.join("mixed.txt"),
-        b"Text\n\x00Binary\xFF\nMore text\n",
-    )
-    .expect("write mixed.txt");
-
     let zip_path = temp_dir.join("text.zip");
-    run_zip(
+    build_zip(
+        &zip_path,
         &[
-            "-j",
-            zip_path.to_str().unwrap(),
-            temp_dir.join("unix.txt").to_str().unwrap(),
-            temp_dir.join("windows.txt").to_str().unwrap(),
-            temp_dir.join("mixed.txt").to_str().unwrap(),
+            // Unix line endings
+            ZipMember::File("unix.txt", b"Line 1\nLine 2\nLine 3\n"),
+            // Windows line endings
+            ZipMember::File("windows.txt", b"Line 1\r\nLine 2\r\nLine 3\r\n"),
+            // Mixed content, including a NUL and a non-UTF-8 byte
+            ZipMember::File("mixed.txt", b"Text\n\x00Binary\xFF\nMore text\n"),
         ],
-        None,
     );
 
     let archive = Archive::open(&zip_path).expect("Open text ZIP");
@@ -109,38 +76,25 @@ fn test_validation_text_files_various_encodings() {
 
     assert_eq!(report.failed.len(), 0, "Text files should validate");
     assert_eq!(report.validated, 3, "Should validate 3 text files");
-    println!("✓ Text file validation: {} files", report.validated);
 
     common::cleanup(&temp_dir);
 }
 
 #[test]
 fn test_validation_mixed_file_types() {
-    // Test archive with mixed binary and text files
-    if !common::command_exists("zip") {
-        eprintln!("Skipping test: zip command not available");
-        return;
-    }
+    // Test archive with mixed binary, text and empty members
     let temp_dir = common::temp_test_dir();
 
-    // Text file
-    fs::write(temp_dir.join("readme.txt"), b"This is a text file\n").expect("write readme.txt");
-    // Binary file
     let binary: Vec<u8> = (0..256).map(|i| i as u8).collect();
-    fs::write(temp_dir.join("data.bin"), &binary).expect("write data.bin");
-    // Empty file
-    fs::write(temp_dir.join("empty.dat"), b"").expect("write empty.dat");
 
     let zip_path = temp_dir.join("mixed.zip");
-    run_zip(
+    build_zip(
+        &zip_path,
         &[
-            "-j",
-            zip_path.to_str().unwrap(),
-            temp_dir.join("readme.txt").to_str().unwrap(),
-            temp_dir.join("data.bin").to_str().unwrap(),
-            temp_dir.join("empty.dat").to_str().unwrap(),
+            ZipMember::File("readme.txt", b"This is a text file\n"),
+            ZipMember::File("data.bin", &binary),
+            ZipMember::File("empty.dat", b""),
         ],
-        None,
     );
 
     let archive = Archive::open(&zip_path).expect("Open mixed ZIP");
@@ -148,7 +102,6 @@ fn test_validation_mixed_file_types() {
 
     assert_eq!(report.failed.len(), 0, "Mixed files should all validate");
     assert_eq!(report.validated, 3, "Should validate all 3 files");
-    println!("✓ Mixed file types validation: {} files", report.validated);
 
     common::cleanup(&temp_dir);
 }
@@ -160,30 +113,18 @@ fn test_validation_mixed_file_types() {
 #[test]
 fn test_validation_nested_directories() {
     // Test validation with deeply nested directory structures
-    if !common::command_exists("zip") {
-        eprintln!("Skipping test: zip command not available");
-        return;
-    }
     let temp_dir = common::temp_test_dir();
 
-    // Create nested structure: dir1/dir2/dir3/file.txt
-    let nested_path = temp_dir.join("dir1/dir2/dir3");
-    fs::create_dir_all(&nested_path).expect("create nested dirs");
-    fs::write(nested_path.join("deep_file.txt"), b"Deeply nested file\n")
-        .expect("write deep_file.txt");
-
-    // Create file at root level too
-    fs::write(temp_dir.join("root_file.txt"), b"Root level file\n").expect("write root_file.txt");
-
     let zip_path = temp_dir.join("nested.zip");
-    run_zip(
+    build_zip(
+        &zip_path,
         &[
-            "-r",
-            zip_path.to_str().unwrap(),
-            temp_dir.join("dir1").to_str().unwrap(),
-            temp_dir.join("root_file.txt").to_str().unwrap(),
+            ZipMember::Dir("dir1/"),
+            ZipMember::Dir("dir1/dir2/"),
+            ZipMember::Dir("dir1/dir2/dir3/"),
+            ZipMember::File("dir1/dir2/dir3/deep_file.txt", b"Deeply nested file\n"),
+            ZipMember::File("root_file.txt", b"Root level file\n"),
         ],
-        Some(&temp_dir),
     );
 
     let archive = Archive::open(&zip_path).expect("Open nested ZIP");
@@ -192,9 +133,19 @@ fn test_validation_nested_directories() {
     assert_eq!(report.failed.len(), 0, "Nested files should validate");
     assert!(
         report.validated >= 2,
-        "Should validate files in nested structure"
+        "Should validate files in nested structure, got {}",
+        report.validated
     );
-    println!("✓ Nested directory validation: {} files", report.validated);
+    // The nested member really is present under its full path, so the
+    // "nested" in this lane's name is load-bearing.
+    let listed = archive.list_files().expect("list nested ZIP");
+    assert!(
+        listed
+            .iter()
+            .any(|e| e.path == "dir1/dir2/dir3/deep_file.txt"),
+        "nested member missing from the listing: {:?}",
+        listed.iter().map(|e| &e.path).collect::<Vec<_>>()
+    );
 
     common::cleanup(&temp_dir);
 }
@@ -206,24 +157,15 @@ fn test_validation_nested_directories() {
 #[test]
 fn test_validation_long_filename() {
     // Test validation with very long filenames (near system limits)
-    if !common::command_exists("zip") {
-        eprintln!("Skipping test: zip command not available");
-        return;
-    }
     let temp_dir = common::temp_test_dir();
 
-    // Create file with long name (200 characters, below 255 limit)
+    // 200 characters, below the 255-byte per-component limit.
     let long_name = "a".repeat(200) + ".txt";
-    fs::write(temp_dir.join(&long_name), b"File with long name\n").expect("write long-named file");
 
     let zip_path = temp_dir.join("longname.zip");
-    run_zip(
-        &[
-            "-j",
-            zip_path.to_str().unwrap(),
-            temp_dir.join(&long_name).to_str().unwrap(),
-        ],
-        None,
+    build_zip(
+        &zip_path,
+        &[ZipMember::File(&long_name, b"File with long name\n")],
     );
 
     let archive = Archive::open(&zip_path).expect("Open long filename ZIP");
@@ -232,7 +174,15 @@ fn test_validation_long_filename() {
         .expect("Validate long filename ZIP");
 
     assert_eq!(report.failed.len(), 0, "Long filename should validate");
-    println!("✓ Long filename (200 chars) validation passed");
+    assert_eq!(report.validated, 1, "the long-named member must validate");
+    assert!(
+        archive
+            .list_files()
+            .expect("list long filename ZIP")
+            .iter()
+            .any(|e| e.path == long_name),
+        "the 200-character name must survive the round trip intact"
+    );
 
     common::cleanup(&temp_dir);
 }
@@ -240,14 +190,9 @@ fn test_validation_long_filename() {
 #[test]
 fn test_validation_unicode_filename() {
     // Test validation with Unicode/UTF-8 filenames
-    if !common::command_exists("zip") {
-        eprintln!("Skipping test: zip command not available");
-        return;
-    }
     let temp_dir = common::temp_test_dir();
 
-    // Create files with various Unicode characters
-    let unicode_names = vec![
+    let unicode_names = [
         "文件.txt",          // Chinese
         "файл.txt",          // Cyrillic
         "αρχείο.txt",        // Greek
@@ -255,24 +200,33 @@ fn test_validation_unicode_filename() {
         "emoji_😀_test.txt", // Emoji
     ];
 
-    for name in &unicode_names {
-        fs::write(temp_dir.join(name), b"Unicode filename test\n").expect("write unicode file");
-    }
+    let members: Vec<ZipMember<'_>> = unicode_names
+        .iter()
+        .map(|n| ZipMember::File(n, b"Unicode filename test\n"))
+        .collect();
 
     let zip_path = temp_dir.join("unicode.zip");
-    let mut args = vec!["-j", zip_path.to_str().unwrap()];
-    let unicode_paths: Vec<_> = unicode_names
-        .iter()
-        .map(|name| temp_dir.join(name))
-        .collect();
-    args.extend(unicode_paths.iter().map(|p| p.to_str().unwrap()));
-    run_zip(&args, None);
+    build_zip(&zip_path, &members);
 
     let archive = Archive::open(&zip_path).expect("Open Unicode ZIP");
     let report = archive.validate_integrity().expect("Validate Unicode ZIP");
 
     assert_eq!(report.failed.len(), 0, "Unicode filenames should validate");
-    println!("✓ Unicode filenames validation: {} files", report.validated);
+    assert_eq!(
+        report.validated,
+        unicode_names.len(),
+        "every Unicode-named member must validate"
+    );
+    // The names themselves must survive, not just the payloads — the old
+    // lane asserted nothing about them.
+    let listed = archive.list_files().expect("list Unicode ZIP");
+    for name in &unicode_names {
+        assert!(
+            listed.iter().any(|e| e.path == *name),
+            "{name} missing from the listing: {:?}",
+            listed.iter().map(|e| &e.path).collect::<Vec<_>>()
+        );
+    }
 
     common::cleanup(&temp_dir);
 }
@@ -330,31 +284,28 @@ fn test_validation_repeated_on_corrupted() {
 #[test]
 fn test_validation_large_file_stress() {
     // Test validation of archive with larger file (5MB)
-    if !common::command_exists("zip") {
-        eprintln!("Skipping test: zip command not available");
-        return;
-    }
     let temp_dir = common::temp_test_dir();
 
-    // Create 5MB file
     let large_data: Vec<u8> = (0..5_000_000).map(|i| (i % 256) as u8).collect();
-    fs::write(temp_dir.join("large_5mb.bin"), &large_data).expect("write 5MB file");
 
     let zip_path = temp_dir.join("large_5mb.zip");
-    run_zip(
-        &[
-            "-j",
-            zip_path.to_str().unwrap(),
-            temp_dir.join("large_5mb.bin").to_str().unwrap(),
-        ],
-        None,
-    );
+    build_zip(&zip_path, &[ZipMember::File("large_5mb.bin", &large_data)]);
 
     let archive = Archive::open(&zip_path).expect("Open large ZIP");
     let report = archive.validate_integrity().expect("Validate large ZIP");
 
     assert_eq!(report.failed.len(), 0, "Large file (5MB) should validate");
-    println!("✓ Large file (5MB) stress test passed");
+    assert_eq!(report.validated, 1, "the 5 MB member must validate");
+    assert_eq!(
+        archive
+            .list_files()
+            .expect("list large ZIP")
+            .iter()
+            .find(|e| e.path == "large_5mb.bin")
+            .and_then(|e| e.size),
+        Some(large_data.len() as u64),
+        "the declared size must match the payload actually stored"
+    );
 
     common::cleanup(&temp_dir);
 }
@@ -362,34 +313,21 @@ fn test_validation_large_file_stress() {
 #[test]
 fn test_validation_many_small_files_stress() {
     // Test validation with many small files (stress file count)
-    if !common::command_exists("zip") {
-        eprintln!("Skipping test: zip command not available");
-        return;
-    }
     let temp_dir = common::temp_test_dir();
 
-    // Create 50 small files
-    for i in 0..50 {
-        fs::write(
-            temp_dir.join(format!("file_{:03}.txt", i)),
-            format!("Content of file {}\n", i).as_bytes(),
-        )
-        .expect("write small file");
-    }
+    const COUNT: usize = 50;
+    let names: Vec<String> = (0..COUNT).map(|i| format!("file_{:03}.txt", i)).collect();
+    let payloads: Vec<String> = (0..COUNT)
+        .map(|i| format!("Content of file {}\n", i))
+        .collect();
+    let members: Vec<ZipMember<'_>> = names
+        .iter()
+        .zip(payloads.iter())
+        .map(|(n, p)| ZipMember::File(n.as_str(), p.as_bytes()))
+        .collect();
 
     let zip_path = temp_dir.join("many_files.zip");
-    let mut args = vec!["-j".to_string(), zip_path.to_str().unwrap().to_string()];
-    for i in 0..50 {
-        args.push(
-            temp_dir
-                .join(format!("file_{:03}.txt", i))
-                .to_str()
-                .unwrap()
-                .to_string(),
-        );
-    }
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_zip(&arg_refs, None);
+    build_zip(&zip_path, &members);
 
     let archive = Archive::open(&zip_path).expect("Open many files ZIP");
     let report = archive
@@ -397,11 +335,7 @@ fn test_validation_many_small_files_stress() {
         .expect("Validate many files ZIP");
 
     assert_eq!(report.failed.len(), 0, "All 50 files should validate");
-    assert_eq!(report.validated, 50, "Should validate exactly 50 files");
-    println!(
-        "✓ Many files stress test: {} files validated",
-        report.validated
-    );
+    assert_eq!(report.validated, COUNT, "Should validate exactly 50 files");
 
     common::cleanup(&temp_dir);
 }
@@ -413,47 +347,54 @@ fn test_validation_many_small_files_stress() {
 #[test]
 fn test_validation_zip_compression_methods() {
     // Test ZIP archives with different compression methods (store, deflate)
-    if !common::command_exists("zip") {
-        eprintln!("Skipping test: zip command not available");
-        return;
-    }
     let temp_dir = common::temp_test_dir();
 
-    fs::write(temp_dir.join("test.txt"), b"Test data for compression\n").expect("write test.txt");
+    // Compressible enough that DEFLATE genuinely differs from STORE, so the
+    // two arms below are not the same archive under two names.
+    let payload = b"Test data for compression\n".repeat(64);
 
-    // Create ZIP with no compression (store)
+    // STORE (the old `-0`).
     let zip_store = temp_dir.join("stored.zip");
-    run_zip(
-        &[
-            "-0", // No compression
-            "-j",
-            zip_store.to_str().unwrap(),
-            temp_dir.join("test.txt").to_str().unwrap(),
-        ],
-        None,
-    );
-
-    let archive = Archive::open(&zip_store).expect("Open stored ZIP");
-    let report = archive.validate_integrity().expect("Validate stored ZIP");
+    common::build_zip(&zip_store, &[ZipMember::File("test.txt", &payload)], true);
+    let stored = Archive::open(&zip_store).expect("Open stored ZIP");
+    let report = stored.validate_integrity().expect("Validate stored ZIP");
     assert_eq!(report.failed.len(), 0, "Stored ZIP should validate");
-    println!("✓ ZIP with STORE compression validated");
+    assert_eq!(report.validated, 1, "stored member must validate");
 
-    // Create ZIP with maximum compression (deflate)
+    // DEFLATE (the old `-9`).
     let zip_deflate = temp_dir.join("deflated.zip");
-    run_zip(
-        &[
-            "-9", // Maximum compression
-            "-j",
-            zip_deflate.to_str().unwrap(),
-            temp_dir.join("test.txt").to_str().unwrap(),
-        ],
-        None,
+    common::build_zip(
+        &zip_deflate,
+        &[ZipMember::File("test.txt", &payload)],
+        false,
+    );
+    let deflated = Archive::open(&zip_deflate).expect("Open deflated ZIP");
+    let report = deflated
+        .validate_integrity()
+        .expect("Validate deflated ZIP");
+    assert_eq!(report.failed.len(), 0, "Deflated ZIP should validate");
+    assert_eq!(report.validated, 1, "deflated member must validate");
+
+    // The two really are different methods, not one method twice: the
+    // DEFLATE archive must be the smaller file on this payload.
+    let stored_len = fs::metadata(&zip_store).expect("stat stored").len();
+    let deflated_len = fs::metadata(&zip_deflate).expect("stat deflated").len();
+    assert!(
+        deflated_len < stored_len,
+        "DEFLATE ({deflated_len} bytes) should beat STORE ({stored_len} bytes) on a repetitive \
+         payload; if it does not, both arms are exercising the same method"
     );
 
-    let archive = Archive::open(&zip_deflate).expect("Open deflated ZIP");
-    let report = archive.validate_integrity().expect("Validate deflated ZIP");
-    assert_eq!(report.failed.len(), 0, "Deflated ZIP should validate");
-    println!("✓ ZIP with DEFLATE (max) compression validated");
+    // Both round-trip to the same bytes.
+    for archive in [&stored, &deflated] {
+        assert_eq!(
+            archive
+                .extract_to_memory("test.txt")
+                .expect("extract test.txt"),
+            payload,
+            "payload must survive both compression methods"
+        );
+    }
 
     common::cleanup(&temp_dir);
 }

@@ -48,14 +48,9 @@ fn assert_hardlink_warning(warnings: &[ArchiveWarning], expected_path: &str) {
 #[test]
 fn extract_filtered_propagates_symlink_warning() {
     let tmp = common::temp_test_dir();
-    let staging = tmp.join("staging");
     let archive = tmp.join("filtered.tar");
     let out_dir = tmp.join("out");
-    if !common::build_tar_with_symlink(&archive, &staging) {
-        eprintln!("skipping: tar CLI not available");
-        common::cleanup(&tmp);
-        return;
-    }
+    common::build_tar_with_symlink(&archive);
     fs::create_dir_all(&out_dir).unwrap();
 
     let opened = Archive::open(&archive).expect("open tar");
@@ -81,14 +76,9 @@ fn extract_filtered_propagates_symlink_warning() {
 #[test]
 fn extract_files_propagates_symlink_warning() {
     let tmp = common::temp_test_dir();
-    let staging = tmp.join("staging");
     let archive = tmp.join("files.tar");
     let out_dir = tmp.join("out");
-    if !common::build_tar_with_symlink(&archive, &staging) {
-        eprintln!("skipping: tar CLI not available");
-        common::cleanup(&tmp);
-        return;
-    }
+    common::build_tar_with_symlink(&archive);
     fs::create_dir_all(&out_dir).unwrap();
 
     let opened = Archive::open(&archive).expect("open tar");
@@ -117,14 +107,9 @@ fn extract_files_propagates_symlink_warning() {
 #[test]
 fn extract_files_all_links_returns_only_warnings() {
     let tmp = common::temp_test_dir();
-    let staging = tmp.join("staging");
     let archive = tmp.join("only_link.tar");
     let out_dir = tmp.join("out");
-    if !common::build_tar_with_symlink(&archive, &staging) {
-        eprintln!("skipping: tar CLI not available");
-        common::cleanup(&tmp);
-        return;
-    }
+    common::build_tar_with_symlink(&archive);
     fs::create_dir_all(&out_dir).unwrap();
 
     let opened = Archive::open(&archive).expect("open tar");
@@ -146,14 +131,9 @@ fn extract_files_all_links_returns_only_warnings() {
 #[test]
 fn extract_by_ids_propagates_symlink_warning() {
     let tmp = common::temp_test_dir();
-    let staging = tmp.join("staging");
     let archive = tmp.join("ids.tar");
     let out_dir = tmp.join("out");
-    if !common::build_tar_with_symlink(&archive, &staging) {
-        eprintln!("skipping: tar CLI not available");
-        common::cleanup(&tmp);
-        return;
-    }
+    common::build_tar_with_symlink(&archive);
     fs::create_dir_all(&out_dir).unwrap();
 
     let opened = Archive::open(&archive).expect("open tar");
@@ -188,14 +168,9 @@ fn extract_by_ids_propagates_symlink_warning() {
 #[test]
 fn extract_files_propagates_hardlink_warning() {
     let tmp = common::temp_test_dir();
-    let staging = tmp.join("staging");
     let archive = tmp.join("hardlink.tar");
     let out_dir = tmp.join("out");
-    if !common::build_tar_with_hardlink(&archive, &staging) {
-        eprintln!("skipping: tar CLI not available");
-        common::cleanup(&tmp);
-        return;
-    }
+    common::build_tar_with_hardlink(&archive);
     fs::create_dir_all(&out_dir).unwrap();
 
     let opened = Archive::open(&archive).expect("open tar");

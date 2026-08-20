@@ -125,9 +125,16 @@ const MAX_EXEMPTIONS: usize = 12;
 
 fn load_exemptions() -> Vec<Exemption> {
     let path = repo_root().join(EXEMPT_FILE);
-    let Ok(text) = fs::read_to_string(&path) else {
-        return Vec::new();
-    };
+    // OI-0056-010: an unreadable table used to become an empty one, so
+    // `exemption_table_hygiene` and both consuming checks passed over
+    // nothing. The file is tracked, so a read failure is a broken checkout.
+    let text = fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "cannot read the tracked exemption table {}: {e}. An empty table would silently \
+             re-arm every exempted candidate, so this is a failure rather than a default.",
+            path.display()
+        )
+    });
     let mut out = Vec::new();
     for (n, line) in text.lines().enumerate() {
         let line = line.trim_end();
@@ -165,12 +172,21 @@ fn exempt(list: &[Exemption], page: &str, candidate: &str) -> bool {
 // Small shared helpers
 // ---------------------------------------------------------------------------
 
-fn skip_if_no_bundle() -> bool {
-    if bundle_root().is_none() {
-        eprintln!("skipped: manual/ is not present in this checkout");
-        return true;
-    }
-    false
+/// Assert the bundle is present.
+///
+/// OI-0056-010: this was `skip_if_no_bundle() -> bool`, and eleven lanes
+/// began with `if skip_if_no_bundle() { return; }` — so a checkout without
+/// `manual/` reported all eleven as passed. `manual/` is tracked in this
+/// repository, so its absence is a broken checkout rather than a supported
+/// configuration, and the honest response is a failure naming the missing
+/// directory.
+fn require_bundle() {
+    assert!(
+        bundle_root().is_some(),
+        "manual/ is not present in this checkout, so every check in this file would be vacuous. \
+         The bundle is tracked in-repo — restore it (`git checkout -- manual`) before running \
+         this suite."
+    );
 }
 
 fn stripped(page: &Page) -> String {
@@ -405,9 +421,7 @@ fn last_commit_times(since: &str) -> Option<BTreeMap<String, String>> {
 
 #[test]
 fn extractor_finds_the_expected_corpus() {
-    if skip_if_no_bundle() {
-        return;
-    }
+    require_bundle();
     let pages = concept_pages();
     assert!(
         pages.len() >= MIN_CONCEPT_PAGES,
@@ -527,9 +541,7 @@ fn canonical_body_hash_matches_the_awk_definition() {
     // A file with no frontmatter hashes the empty string rather than its body.
     assert_eq!(canonical_body("no frontmatter here\n").0, "");
 
-    if skip_if_no_bundle() {
-        return;
-    }
+    require_bundle();
     // At least one live page must reproduce its stored hash, or the pipeline
     // reproduction is wrong rather than the bundle being stale.
     let matching = concept_pages()
@@ -545,9 +557,7 @@ fn canonical_body_hash_matches_the_awk_definition() {
 
 #[test]
 fn korean_mirrors_are_never_read() {
-    if skip_if_no_bundle() {
-        return;
-    }
+    require_bundle();
     for p in manual_pages::walk_manual() {
         let r = manual_pages::rel(&p);
         assert!(
@@ -567,9 +577,7 @@ fn korean_mirrors_are_never_read() {
 
 #[test]
 fn reserved_files_are_excluded() {
-    if skip_if_no_bundle() {
-        return;
-    }
+    require_bundle();
     let reserved: Vec<String> = reserved_pages().iter().map(|p| p.rel.clone()).collect();
     assert!(
         reserved.contains(&"manual/log.md".to_string()),
@@ -590,9 +598,7 @@ fn reserved_files_are_excluded() {
 
 #[test]
 fn quoted_strings_resolve_in_source() {
-    if skip_if_no_bundle() {
-        return;
-    }
+    require_bundle();
     let exemptions = load_exemptions();
     let corpus = source_text();
     let mut findings = Vec::new();
@@ -694,9 +700,7 @@ fn message_anchor_detects_a_seeded_defect() {
 
 #[test]
 fn cited_paths_exist() {
-    if skip_if_no_bundle() {
-        return;
-    }
+    require_bundle();
     let exemptions = load_exemptions();
     let root = repo_root();
     let mut findings = Vec::new();
@@ -802,9 +806,7 @@ fn file_scoped_claim_findings(pages: &[Page]) -> (usize, Vec<String>) {
 
 #[test]
 fn file_scoped_claims_quote_their_file() {
-    if skip_if_no_bundle() {
-        return;
-    }
+    require_bundle();
     let (_, findings) = file_scoped_claim_findings(&concept_pages());
     assert!(
         findings.is_empty(),
@@ -903,9 +905,7 @@ fn unresolved_ids(page: &Page) -> Vec<String> {
 
 #[test]
 fn record_ids_resolve() {
-    if skip_if_no_bundle() {
-        return;
-    }
+    require_bundle();
     let mut findings = Vec::new();
     for page in concept_pages() {
         findings.extend(unresolved_ids(&page));
@@ -974,9 +974,7 @@ fn double_quoted_ids_are_mentions_not_citations() {
 
 #[test]
 fn rust_fences_carry_a_known_marker() {
-    if skip_if_no_bundle() {
-        return;
-    }
+    require_bundle();
     let mut findings = Vec::new();
     let mut total = 0usize;
     for page in concept_pages() {
@@ -1010,9 +1008,7 @@ fn rust_fences_carry_a_known_marker() {
 
 #[test]
 fn page_frontmatter_and_sources_are_structurally_sound() {
-    if skip_if_no_bundle() {
-        return;
-    }
+    require_bundle();
     let root = repo_root();
     let mut problems = Vec::new();
     for page in concept_pages() {
@@ -1197,9 +1193,7 @@ fn drift_classification_prefers_unknown_over_a_guess() {
 
 #[test]
 fn source_drift_census() {
-    if skip_if_no_bundle() {
-        return;
-    }
+    require_bundle();
     let c = census();
     let total: usize = c.counts.values().sum();
     eprintln!(
@@ -1214,13 +1208,23 @@ fn source_drift_census() {
     for line in &c.lines {
         eprintln!("  {line}");
     }
-    if c.reason.is_none() {
-        assert_eq!(
-            total,
-            concept_pages().len(),
-            "every concept page must be classified exactly once"
-        );
-    }
+    // OI-0056-010: `if c.reason.is_none()` used to be the only thing
+    // standing between this lane and asserting nothing — outside a git
+    // worktree the census is undecidable and every assertion below was
+    // skipped. Tests run from the repository, so "not a git worktree" is a
+    // broken environment, and the classification assertion is now
+    // unconditional.
+    assert!(
+        c.reason.is_none(),
+        "the drift census could not be computed ({}), so it would classify nothing: {}",
+        c.reason.as_deref().unwrap_or("unknown reason"),
+        c.lines.join("\n  ")
+    );
+    assert_eq!(
+        total,
+        concept_pages().len(),
+        "every concept page must be classified exactly once"
+    );
     if std::env::var("UA_MANUAL_STRICT").as_deref() == Ok("1") {
         assert_eq!(
             c.stale_or_worse, 0,
@@ -1230,12 +1234,27 @@ fn source_drift_census() {
     }
 }
 
+/// Strict enforcement of the same census `source_drift_census` reports.
+///
+/// Kept `#[ignore]`d because it is genuinely red today — the bundle drifted
+/// through 0.3.1 and the StreamBound work (see this module's "Why (d) is
+/// report-only by default"), and repairing it belongs to the manual sync
+/// ritual, not to this suite. OI-0056-010 only added the command, because an
+/// `#[ignore]` nobody can run is indistinguishable from a deleted test:
+///
+/// ```text
+/// TMPDIR=/Volumes/Temp/claude cargo test --test manual_conformance --all-features \
+///     -- --ignored --test-threads=4 strict_bundle_is_in_sync
+/// ```
+///
+/// `UA_MANUAL_STRICT=1` on `source_drift_census` enforces the same
+/// `stale_or_worse == 0` half without the per-page hash check.
 #[test]
-#[ignore = "red until the next write-diataxis-manual sync run; see manual/log.md"]
+#[ignore = "red until the next write-diataxis-manual sync run (see manual/log.md); run with \
+            `TMPDIR=/Volumes/Temp/claude cargo test --test manual_conformance --all-features \
+            -- --ignored --test-threads=4 strict_bundle_is_in_sync`"]
 fn strict_bundle_is_in_sync() {
-    if skip_if_no_bundle() {
-        return;
-    }
+    require_bundle();
     let c = census();
     let mut problems = Vec::new();
     for page in concept_pages() {
@@ -1264,9 +1283,7 @@ fn strict_bundle_is_in_sync() {
 
 #[test]
 fn exemption_table_hygiene() {
-    if skip_if_no_bundle() {
-        return;
-    }
+    require_bundle();
     let exemptions = load_exemptions();
     assert!(
         exemptions.len() <= MAX_EXEMPTIONS,

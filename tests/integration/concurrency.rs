@@ -264,16 +264,24 @@ fn test_concurrent_rar_open_and_list() {
     // concurrent open/list across different RAR archives corrupts results.
     // After Phase A.2 (process-wide UNRAR_LOCK), zero CRC mismatches are expected.
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let rar_paths: Vec<_> = ["test.rar", "test_rar5.rar"]
-        .iter()
-        .map(|n| fixtures.join(n))
-        .filter(|p| p.exists())
-        .collect();
-
-    if rar_paths.is_empty() {
-        eprintln!("Skipping test: no RAR fixtures available");
-        return;
+    // OI-0056-010: both names are tracked fixtures, so an absent one is a
+    // broken checkout, not a reason to skip. `.filter(exists)` followed by
+    // an `is_empty()` skip let this lane pass having opened nothing — and
+    // silently degrade to a single-fixture run if only one was missing.
+    let names = ["test.rar", "test_rar5.rar"];
+    let rar_paths: Vec<_> = names.iter().map(|n| fixtures.join(n)).collect();
+    for p in &rar_paths {
+        assert!(
+            p.exists(),
+            "tracked RAR fixture {} is missing; this lane cannot run without it",
+            p.display()
+        );
     }
+    assert_eq!(
+        rar_paths.len(),
+        names.len(),
+        "the fixture set must be non-empty and complete before anything below is asserted"
+    );
 
     // Capture expected entry counts sequentially first.
     let expected: Vec<usize> = rar_paths

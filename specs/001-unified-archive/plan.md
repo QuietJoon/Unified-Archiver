@@ -156,7 +156,8 @@ src/
 ├── error.rs                  # Error types (ArchiveError)
 ├── format.rs                 # ArchiveFormat enum, detection logic
 ├── options.rs                # ExtractionOptions, CompressionOptions, CompressionLevel
-├── stream_crc.rs             # CRC32 streaming validation
+├── stream_crc.rs             # CRC32 streaming validation (root; split into
+│                             #   stream_crc/{digest,codec,detect}.rs — AD 0010 amendment 2026-08-21)
 ├── streaming.rs              # Streaming extraction APIs
 ├── extraction.rs             # Extraction APIs
 ├── creation.rs               # Creation APIs

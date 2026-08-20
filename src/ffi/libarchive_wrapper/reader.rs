@@ -893,22 +893,30 @@ impl LibarchiveArchive {
 
     /// Open an archive with libarchive.
     ///
-    /// **Validation timing (AD 0052):** unlike the other backends,
-    /// libarchive eagerly validates at open-time — `open_read_handle`
-    /// opens the source and this constructor then probes the first
-    /// entry header, which is what actually drives libarchive's format
-    /// bidding (R0001-0012: `archive_read_open_filename` alone bids no
-    /// format, so the documented eager validation used to happen only
-    /// for compressed-tar filenames). The handle is freed afterwards. A
-    /// corrupt or unsupported input therefore fails here rather than at
-    /// first use. Each subsequent operation reopens the file because
-    /// libarchive's read handle is iterator-shaped and cannot be
+    /// **Validation timing (AD 0052):** the crate-wide contract is
+    /// first-operation validation, and libarchive is its one documented
+    /// eager exception. `open_read_handle` opens the source and this
+    /// constructor then probes the first entry header, which is what
+    /// actually drives libarchive's format bidding (R0001-0012:
+    /// `archive_read_open_filename` alone bids no format, so the
+    /// documented eager validation used to happen only for
+    /// compressed-tar filenames). The handle is freed afterwards. A
+    /// corrupt or unsupported *container* therefore fails here rather
+    /// than at first use. Each subsequent operation reopens the file
+    /// because libarchive's read handle is iterator-shaped and cannot be
     /// rewound.
+    ///
+    /// The exception is only about the *first* header. Damage in a later
+    /// header still surfaces from the first full walk, so
+    /// [`crate::Archive::validate`] — which forces that walk and leaves
+    /// it memoised in `cached_listing` (AD 0065) — remains meaningful
+    /// here and is strictly stronger than this open-time probe. It is
+    /// still not `validate_integrity`: no payload byte is decoded.
     ///
     /// Future work (Group D D4 / R0068-0035) will memoise the validated
     /// handle so the parse cost is paid once instead of twice; this
-    /// constructor's public contract stays "validates eagerly" through
-    /// that change.
+    /// constructor's public contract stays "validates the first header
+    /// eagerly" through that change.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
         let path_display = path_buf.display().to_string();

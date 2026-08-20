@@ -2,11 +2,14 @@
 //!
 //! This module provides methods for creating new archives and adding files to them.
 
+mod manifest;
+
 use crate::archive::{Archive, ArchiveBackend, ArchiveMode};
 use crate::error::{ArchiveError, Result};
 use crate::ffi::libarchive_wrapper::LibarchiveArchive;
 use crate::ffi::zip_writer::ZipWriter;
 use crate::format::ArchiveFormat;
+use manifest::{ManifestKind, SourceManifest};
 use once_cell::sync::OnceCell;
 use std::path::Path;
 
@@ -359,39 +362,67 @@ impl Archive {
     ///
     /// All files within the directory tree are added to the archive.
     ///
-    /// R0075-0006: the recursive walk now flows through the facade's
-    /// `write_namespace` tracker before reaching the backend. A
-    /// directory tree that contains a path which collides with an
-    /// earlier `add_file_*` / `add_directory*` entry — or a tree that
-    /// itself contains a file at `a` and a directory at `a/` — is
-    /// rejected with `OperationBlocked` *before* the backend writes
-    /// any entry. The writer backends still walk the tree themselves
-    /// for I/O; the facade pre-walk is paths-only and pays one
-    /// `WalkDir` traversal up front.
+    /// # One observation of the source tree (OI-0080-005)
+    ///
+    /// The tree is walked **once**. That single walk builds a
+    /// [`SourceManifest`] — every entry with its path, kind, size,
+    /// mtime, unix mode and (on Unix) inode identity — reserves each
+    /// archive path in the facade's `write_namespace` tracker as it
+    /// goes, and rejects symlinks / special files (R0080-0033) and the
+    /// writer's own output archive found inside the tree (R0080-0036)
+    /// before any byte is written. The write phase then emits *exactly*
+    /// what the manifest holds, in walk order.
+    ///
+    /// Previously the facade pre-walked for path reservations and each
+    /// backend walked the tree again to do the I/O, so the archived set
+    /// came from the *second* observation: a file removed in between
+    /// disappeared from the archive with no diagnostic, and a file
+    /// created in between was written without ever being reserved.
+    ///
+    /// Each source is re-checked against its recorded observation
+    /// immediately before it is handed to the backend, and the drift
+    /// classes are reported separately so a caller restoring a backup
+    /// can tell them apart:
+    ///
+    /// * gone — `Io` error with [`std::io::ErrorKind::NotFound`];
+    /// * different size — `Corruption`, naming both byte counts and
+    ///   whether the source grew or shrank;
+    /// * different object at the path (kind or inode changed) —
+    ///   `OperationBlocked` "was replaced";
+    /// * rewritten in place at the same size — `OperationBlocked`
+    ///   "was modified in place".
+    ///
+    /// A file that *appears* after the walk is excluded by design: the
+    /// manifest is the pinned snapshot, and noticing an addition would
+    /// need the second walk this design removes.
+    ///
+    /// # Failure atomicity
+    ///
+    /// R0075-0006 / R0080-0032 / R0001-0042: the reservations live in a
+    /// namespace transaction, so a rejection during the walk (namespace
+    /// conflict with an earlier `add_file_*` / `add_directory*` entry, a
+    /// tree holding both a file at `a` and a directory at `a/`, a
+    /// symlink, or the output archive) leaves the live tracker exactly
+    /// as the previous adds left it. A failure *during* the write phase
+    /// likewise releases the reservations, but entries already emitted
+    /// stay in the output stream — as before, a partway recursive add
+    /// leaves a partial archive that the caller should discard.
     pub fn add_directory_recursive(&mut self, path: impl AsRef<Path>) -> Result<()> {
         const OP: &str = crate::error::ops::ADD_DIRECTORY_RECURSIVE;
         self.require_write_mode(OP)?;
         let dir_path = path.as_ref();
         validate_directory_path(dir_path, OP)?;
 
-        // Validate the entire tree through a namespace transaction whose
-        // reservations are undone unless the backend emits successfully
-        // (R0080-0032 / R0001-0042). A mid-walk rejection (namespace
-        // conflict, symlink/special file, or the writer's own output
-        // archive found inside the tree) or a partway backend failure
-        // therefore leaves the live tracker as it was before the call and
-        // the writer usable for a corrected retry.
-        // Special-file and self-ingestion rejection happen here in
-        // preflight rather than mid-emission (R0080-0033 / R0080-0036);
-        // the backends keep equivalent checks as defense in depth.
         let output_path = self.path.clone();
-        self.staged_add(
+        self.staged_add_planned(
             OP,
-            |ns| prewalk_into_tracker(ns, dir_path, &output_path, OP),
-            |backend| match backend {
-                WriteBackend::Zip(w) => w.add_directory_recursive(dir_path),
-                WriteBackend::Libarchive(b) => b.add_directory_recursive(dir_path),
+            |ns| {
+                SourceManifest::build(dir_path, &output_path, OP, |entry| match entry.kind {
+                    ManifestKind::Dir => ns.record_dir(OP, &entry.archive_path),
+                    ManifestKind::File => ns.record_file(OP, &entry.archive_path),
+                })
             },
+            |backend, manifest| manifest.write_into(backend, OP),
         )
     }
 
@@ -418,25 +449,56 @@ impl Archive {
         record: impl FnOnce(&mut NamespaceTxn) -> Result<()>,
         write: impl FnOnce(WriteBackend<'_>) -> Result<()>,
     ) -> Result<()> {
-        let undo = match self.write_namespace.take() {
+        self.staged_add_planned(op, record, |backend, ()| write(backend))
+    }
+
+    /// [`Self::staged_add`] for an add whose reservation step also
+    /// *produces* the plan the write step executes — the recursive add,
+    /// whose one source walk both reserves the archive paths and builds
+    /// the [`SourceManifest`] that is then written (OI-0080-005).
+    ///
+    /// Keeping the two steps in one transaction is what makes the walk
+    /// single: `plan` observes the tree while it reserves, and `write`
+    /// receives that observation instead of re-deriving it. The
+    /// reservation and undo semantics are exactly
+    /// [`Self::staged_add`]'s; that method is this one with `T = ()`.
+    fn staged_add_planned<T>(
+        &mut self,
+        op: &'static str,
+        plan: impl FnOnce(&mut NamespaceTxn) -> Result<T>,
+        write: impl FnOnce(WriteBackend<'_>, T) -> Result<()>,
+    ) -> Result<()> {
+        let (planned, undo) = match self.write_namespace.take() {
             Some(live) => {
                 let mut txn = NamespaceTxn::new(live);
-                let staged = record(&mut txn);
+                let staged = plan(&mut txn);
                 let (mut live, undo) = txn.finish();
-                if let Err(e) = staged {
-                    // A rejected reservation must leave the live tracker
-                    // exactly as the previous adds left it, so a corrected
-                    // retry is not blocked by a phantom entry.
-                    undo.apply(&mut live);
-                    self.write_namespace = Some(live);
-                    return Err(e);
+                match staged {
+                    Err(e) => {
+                        // A rejected reservation must leave the live tracker
+                        // exactly as the previous adds left it, so a corrected
+                        // retry is not blocked by a phantom entry.
+                        undo.apply(&mut live);
+                        self.write_namespace = Some(live);
+                        return Err(e);
+                    }
+                    Ok(planned) => {
+                        self.write_namespace = Some(live);
+                        (planned, Some(undo))
+                    }
                 }
-                self.write_namespace = Some(live);
-                Some(undo)
             }
-            None => None,
+            None => {
+                // Unreachable through the public surface: every caller
+                // passes `require_write_mode` first, and a Write-mode
+                // handle always carries a tracker. Plan against a
+                // throwaway tracker so the step still runs — and still
+                // rejects — rather than skipping validation.
+                let mut txn = NamespaceTxn::new(crate::modification::NamespaceTracker::default());
+                (plan(&mut txn)?, None)
+            }
         };
-        let result = write(self.as_write(op)?);
+        let result = write(self.as_write(op)?, planned);
         if result.is_err()
             && let Some(undo) = undo
             && let Some(live) = self.write_namespace.as_mut()
@@ -533,47 +595,6 @@ impl NamespaceUndo {
             live.dir_paths.remove(key);
         }
     }
-}
-
-/// Preflight a recursive add into `ns`: record every planned entry so
-/// namespace conflicts fail before emission, reject symlink / socket /
-/// FIFO / device entries here in preflight rather than mid-emission
-/// (R0080-0033), and reject the writer's own output archive if it
-/// appears anywhere inside the source tree (R0080-0036). The walker
-/// runs with `follow_links(false)`, so a symlink surfaces as
-/// `Special { is_symlink: true }` and is rejected before its target is
-/// ever read.
-///
-/// `op` is the originating public method label so diagnostics point at
-/// `add_directory_recursive` rather than an internal name.
-fn prewalk_into_tracker(
-    ns: &mut NamespaceTxn,
-    dir_path: &Path,
-    output_path: &Path,
-    op: &'static str,
-) -> Result<()> {
-    use crate::ffi::common::{DirWalkKind, normalize_path, walk_directory_tree};
-    walk_directory_tree(dir_path, op, |item| {
-        let archive_path = normalize_path(&item.archive_path);
-        match item.kind {
-            DirWalkKind::Dir => ns.record_dir(op, &archive_path),
-            DirWalkKind::File => {
-                if same_file_as_output(output_path, item.fs_path) {
-                    return Err(ArchiveError::operation_blocked(
-                        op,
-                        format!(
-                            "Refusing to archive the destination archive '{}' found inside the source tree (self-ingestion)",
-                            item.fs_path.display()
-                        ),
-                    ));
-                }
-                ns.record_file(op, &archive_path)
-            }
-            DirWalkKind::Special { is_symlink } => {
-                Err(reject_special_entry(op, item.fs_path, is_symlink))
-            }
-        }
-    })
 }
 
 /// Build the preflight rejection for a symlink / socket / FIFO / device
@@ -1066,35 +1087,24 @@ mod tests {
     /// A recursive add must carry directory metadata for *every*
     /// directory in the tree, not only for empty leaves.
     ///
-    /// **Known-red, and it cannot be made green from this file.** Both
-    /// creation backends emit a directory entry only when the walker
-    /// reports `DirWalkEntry::is_leaf_dir`, so a *non-empty* directory
-    /// contributes no entry at all and its mtime/mode are lost — the
-    /// directory is recreated on extraction with whatever defaults the
-    /// extractor picks. Making this pass needs two changes outside
-    /// `src/creation.rs`:
+    /// This used to be unreachable from the facade: both backends walked
+    /// the tree themselves and emitted a directory entry only where the
+    /// walker reported `DirWalkEntry::is_leaf_dir`, so a *non-empty*
+    /// directory contributed no entry at all and its mtime/mode were
+    /// lost — extraction recreated it with whatever defaults the
+    /// extractor picked. Under the single-walk manifest (OI-0080-005)
+    /// the facade emits every recorded directory, carrying the mtime and
+    /// mode the one walk observed, so the libarchive backends preserve
+    /// them.
     ///
-    /// * `src/ffi/libarchive_wrapper/writer.rs` —
-    ///   `add_directory_recursive` must emit every `DirWalkKind::Dir`
-    ///   through `add_directory_entry_with_metadata`, not just the
-    ///   `is_leaf_dir` ones (the metadata plumbing itself already
-    ///   exists, per R0080-0070).
-    /// * `src/ffi/zip_writer.rs` — same `is_leaf_dir` gate, plus the ZIP
-    ///   writer has no metadata-carrying directory emit at all
-    ///   (`add_directory_entry` writes the entry with the default
-    ///   `FileOptions`, dropping mtime and mode even for the leaf
-    ///   directories it does emit). It needs an
-    ///   `add_directory_entry_with_metadata` counterpart mirroring
-    ///   `add_file_from_path`'s `last_modified_time` /
-    ///   `unix_permissions` handling.
-    ///
-    /// Lift the `#[ignore]` — and extend the assertions to ZIP — once
-    /// those land. The facade cannot compensate: emitting the missing
-    /// directory entries from here would duplicate whatever the backend
-    /// walk emits and would still leave ZIP metadata-less.
+    /// ZIP is still metadata-less for directories: `ZipWriter` has no
+    /// `add_directory_entry_with_metadata` counterpart to
+    /// `add_file_from_path`'s `last_modified_time` / `unix_permissions`
+    /// handling, so its directory entries land with the default
+    /// `FileOptions`. `test_add_directory_recursive_emits_nonleaf_zip_directory`
+    /// pins what ZIP does deliver today; extend the assertions here to
+    /// ZIP once that writer gains a metadata-carrying directory emit.
     #[test]
-    #[ignore = "red until both creation backends emit non-leaf directory entries with metadata; \
-                see src/ffi/libarchive_wrapper/writer.rs and src/ffi/zip_writer.rs"]
     fn test_add_directory_recursive_preserves_nonempty_directory_metadata() {
         let temp = tempfile::tempdir().unwrap();
 
@@ -1501,5 +1511,158 @@ mod tests {
         let entries = reader.list_files().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path, "only.txt");
+    }
+
+    // ── OI-0080-005: single-walk manifest pinning ──
+
+    /// ZIP emits an entry for a *non-empty* directory too, so the
+    /// directory survives a round-trip even when every child is
+    /// filtered out on extraction. The entry carries no mtime/mode yet —
+    /// see the note on
+    /// `test_add_directory_recursive_preserves_nonempty_directory_metadata`.
+    #[test]
+    fn test_add_directory_recursive_emits_nonleaf_zip_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = temp.path().join("src_dir");
+        std::fs::create_dir_all(src_dir.join("nonempty")).unwrap();
+        std::fs::write(src_dir.join("nonempty/child.txt"), b"child").unwrap();
+
+        let archive_path = temp.path().join("nonleaf.zip");
+        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut archive = Archive::create(&archive_path, options).unwrap();
+        archive.add_directory_recursive(&src_dir).unwrap();
+        archive.finish().unwrap();
+
+        let reader = Archive::open(&archive_path).unwrap();
+        let entries = reader.list_files().unwrap();
+        let dirs: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.entry_type == EntryType::Directory)
+            .map(|e| e.path.trim_end_matches('/'))
+            .collect();
+        assert!(
+            dirs.contains(&"src_dir/nonempty"),
+            "expected an entry for the non-empty directory, got dirs: {dirs:?}"
+        );
+        assert!(
+            dirs.contains(&"src_dir"),
+            "expected an entry for the source root, got dirs: {dirs:?}"
+        );
+    }
+
+    /// Removing a recorded source *after* the walk and *before* its
+    /// write is reported as a disappearance, not silently dropped.
+    ///
+    /// The progress callback is the hook: it fires per emitted entry, so
+    /// deleting `z.txt` from it lands strictly between the manifest walk
+    /// (which already recorded `z.txt`) and the write of that entry.
+    #[test]
+    fn test_recursive_add_reports_source_removed_mid_write() {
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = temp.path().join("tree");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("a.txt"), b"alpha").unwrap();
+        std::fs::write(src_dir.join("z.txt"), b"zulu").unwrap();
+
+        let doomed = src_dir.join("z.txt");
+        let mut options = CompressionOptions::new(ArchiveFormat::Zip);
+        options.progress = Some(Box::new(move |_processed: u64, _total: Option<u64>| {
+            let _ = std::fs::remove_file(&doomed);
+            std::ops::ControlFlow::Continue(())
+        }));
+
+        let archive_path = temp.path().join("removed_mid_write.zip");
+        let mut archive = Archive::create(&archive_path, options).unwrap();
+        let err = archive.add_directory_recursive(&src_dir).unwrap_err();
+
+        match &err {
+            ArchiveError::Io { source, .. } => assert_eq!(
+                source.kind(),
+                std::io::ErrorKind::NotFound,
+                "a vanished source must stay matchable as NotFound, got: {err}"
+            ),
+            other => panic!("expected Io/NotFound for a removed source, got: {other:?}"),
+        }
+        assert!(err.to_string().contains("disappeared"), "got: {err}");
+    }
+
+    /// A recorded source that *grows* before its write is reported as a
+    /// size change — a different event from the disappearance above, so
+    /// a caller restoring a backup can tell them apart.
+    #[test]
+    fn test_recursive_add_reports_source_growth_mid_write() {
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = temp.path().join("tree");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("a.txt"), b"alpha").unwrap();
+        std::fs::write(src_dir.join("z.txt"), b"zulu").unwrap();
+
+        let growing = src_dir.join("z.txt");
+        let mut options = CompressionOptions::new(ArchiveFormat::Zip);
+        options.progress = Some(Box::new(move |_processed: u64, _total: Option<u64>| {
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&growing) {
+                let _ = f.write_all(b"more");
+            }
+            std::ops::ControlFlow::Continue(())
+        }));
+
+        let archive_path = temp.path().join("grew_mid_write.zip");
+        let mut archive = Archive::create(&archive_path, options).unwrap();
+        let err = archive.add_directory_recursive(&src_dir).unwrap_err();
+
+        match &err {
+            ArchiveError::Corruption { details, .. } => assert!(
+                details.contains("grew"),
+                "expected the growth to be named, got: {details}"
+            ),
+            other => panic!("expected Corruption for a grown source, got: {other:?}"),
+        }
+    }
+
+    /// The manifest pins the archived *set*: a file created after the
+    /// walk is not archived, and its appearance is not an error. The
+    /// parent directory's mtime moves when it is created, which is why
+    /// directory mtime is deliberately not part of the drift check.
+    #[test]
+    fn test_recursive_add_ignores_sources_created_after_the_walk() {
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = temp.path().join("tree");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("a.txt"), b"alpha").unwrap();
+
+        let latecomer = src_dir.join("zz_late.txt");
+        let mut options = CompressionOptions::new(ArchiveFormat::Zip);
+        options.progress = Some(Box::new(move |_processed: u64, _total: Option<u64>| {
+            let _ = std::fs::write(&latecomer, b"created mid-write");
+            std::ops::ControlFlow::Continue(())
+        }));
+
+        let archive_path = temp.path().join("late_arrival.zip");
+        let mut archive = Archive::create(&archive_path, options).unwrap();
+        archive
+            .add_directory_recursive(&src_dir)
+            .expect("a source appearing after the walk must not fail the add");
+        archive.finish().unwrap();
+
+        assert!(
+            src_dir.join("zz_late.txt").exists(),
+            "the test's own hook did not run — it proves nothing"
+        );
+        let reader = Archive::open(&archive_path).unwrap();
+        let paths: Vec<String> = reader
+            .list_files()
+            .unwrap()
+            .iter()
+            .map(|e| e.path.clone())
+            .collect();
+        assert!(
+            paths.iter().any(|p| p == "tree/a.txt"),
+            "expected the recorded file, got: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains("zz_late")),
+            "a file created after the manifest walk must not enter the archive, got: {paths:?}"
+        );
     }
 }

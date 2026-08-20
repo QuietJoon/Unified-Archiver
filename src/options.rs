@@ -6,6 +6,10 @@ use crate::password::Password;
 use crate::security::ExtractionLimits;
 use std::path::PathBuf;
 
+mod writable_format;
+
+pub use writable_format::WritableFormat;
+
 /// Entry filter type alias for filtering archive entries.
 ///
 /// Filters are invoked synchronously during selective extraction, so the
@@ -162,14 +166,25 @@ pub enum CompressionLevel {
 /// [`CompressionOptions::strip_progress`] to obtain a fresh value
 /// without progress reporting (R0070-0068).
 ///
-/// **Field-vs-format compatibility.** The struct is a
-/// flat bag of fields shared across formats. Not every combination
-/// is honoured — for example `password` is rejected at
-/// [`crate::Archive::create`] for every format (MADR-0027) and
-/// `split_size` is currently unused (DEF-002). Callers can sanity-check
-/// their configuration with [`CompressionOptions::validate_for_format`]
-/// before invoking `Archive::create`; see that method for the exact
-/// per-format compatibility rules.
+/// **This is the loose path (OI-0081-002).** The struct is a flat bag of
+/// fields shared across formats, so it can hold combinations no backend
+/// honours: `password` is rejected at [`crate::Archive::create`] for
+/// every format (MADR-0027), `split_size` is rejected for every format
+/// (DEF-002), and `format` may name a read-only format
+/// ([`ArchiveFormat::can_create`]). None of those are caught until
+/// create time.
+///
+/// Prefer the typed builders, which do not have the fields that would
+/// make them wrong: [`ZipCompressionOptions`],
+/// [`SevenZCompressionOptions`], and [`LibarchiveCompressionOptions`]
+/// (the last constructed from a [`WritableFormat`], so a read-only
+/// format cannot be selected). When the format is only known at
+/// runtime, [`CompressionOptions::try_new`] moves the creatability
+/// check to construction and
+/// [`CompressionOptions::for_writable`] skips it entirely.
+/// [`CompressionOptions::validate_for_format`] remains available to
+/// preflight a value built the loose way; see that method for which
+/// invariants stay runtime checks and why.
 ///
 /// R0076-0095: NOT marked `#[non_exhaustive]` because R0075-0081 explicitly
 /// preserves struct-literal source-compat for v0.3 — examples and v0.3
@@ -189,12 +204,23 @@ pub struct CompressionOptions {
     /// **Currently always rejected by [`crate::Archive::create`]** (per
     /// MADR-0027 / R0070-0069 — encrypted archive creation is deferred
     /// behind an explicit opt-in that has not shipped). Setting this
-    /// field has no effect today; it is kept on the type so callers
-    /// building `CompressionOptions` from a struct literal don't have to
-    /// learn a new shape when encrypted creation lands.
+    /// field to `Some(_)` therefore makes the value unusable; there is
+    /// no format for which it is accepted.
+    ///
+    /// The field is kept (rather than removed) only because struct-literal
+    /// source-compat is preserved for the 0.3 shape — see the type-level
+    /// docs. The typed builders expose no password setter at all, so an
+    /// encrypted-creation request is unrepresentable there (R0081-0005).
+    /// The field returns to being meaningful when the opt-in lands
+    /// (OI-0081-006).
     pub password: Option<Password>,
 
-    /// Split archive into parts (bytes per part)
+    /// Split archive into parts (bytes per part).
+    ///
+    /// **Currently always rejected by [`crate::Archive::create`]** — no
+    /// backend implements end-to-end split-volume creation (DEF-002), so
+    /// `Some(_)` is wrong for every format, not just some of them. The
+    /// typed builders omit the field entirely.
     pub split_size: Option<u64>,
 
     /// Progress callback
@@ -249,17 +275,49 @@ impl CompressionOptions {
     /// that want to validate the configuration without touching the
     /// filesystem).
     ///
-    /// **Prefer per-format builders for new code.** When the target
-    /// format is known up front, the typed builders
-    /// [`ZipCompressionOptions`], [`SevenZCompressionOptions`], and
-    /// [`LibarchiveCompressionOptions`] narrow the surface by exposing
-    /// only the fields that apply to that format (e.g. no `password`
-    /// on 7-Zip, no `split_size` anywhere), so those combinations are
-    /// unrepresentable. Constraints the type system cannot express —
-    /// notably *which* formats a backend can actually write — are
-    /// still validated at create time, so a typed builder can
-    /// construct options that `Archive::create_*` later rejects
-    /// (R0075-0081, R0081-0005, R0081-0006).
+    /// # Why these are runtime checks (OI-0081-002)
+    ///
+    /// An unexplained runtime check reads like a redundant one, so each
+    /// rule below states what keeps it out of the type system. On the
+    /// typed builders — [`ZipCompressionOptions`],
+    /// [`SevenZCompressionOptions`],
+    /// [`LibarchiveCompressionOptions`] — every rule marked *encodable*
+    /// **is** encoded: those types have no `password` field, no
+    /// `split_size` field, and the libarchive builder's primary
+    /// constructor takes a [`WritableFormat`]. This method exists for
+    /// values built the loose way (public fields / [`Self::new`]), where
+    /// nothing has checked them yet.
+    ///
+    /// - **`password` — encodable, and encoded on the typed builders.**
+    ///   It survives as a runtime check here only because
+    ///   `CompressionOptions` keeps its 0.3 public-field shape, so the
+    ///   field cannot be removed without a source break. It is not a
+    ///   permanent runtime rule: when the encrypted-creation opt-in
+    ///   lands (OI-0081-006) the accepted set becomes build- and
+    ///   format-dependent, and the check becomes genuinely dynamic.
+    /// - **`split_size` — encodable, and encoded on the typed builders**
+    ///   (the field does not exist there). Same reason as `password`
+    ///   for why the loose path still needs the check.
+    /// - **`format` vs [`ArchiveFormat::can_create`] — encodable, and
+    ///   encoded as [`WritableFormat`].** Use
+    ///   [`Self::for_writable`] or [`Self::try_new`] to have this
+    ///   rejected at construction instead. The check stays here because
+    ///   [`Self::new`] and the public `format` field accept any
+    ///   `ArchiveFormat`.
+    /// - **Codec availability — *not* encodable.** TAR.ZST / TAR.LZ4 /
+    ///   TAR.LZMA creation needs a libarchive built with the matching
+    ///   write filter. That is a property of the linked C library
+    ///   discovered by asking it, not of the Rust type, so it cannot be
+    ///   proven at compile time and is not checked here either — it
+    ///   surfaces at writer construction (R0070-0041). A
+    ///   `WritableFormat` therefore still admits a create call that
+    ///   fails on a build lacking the codec.
+    /// - **Output path state — *not* encodable.** Pre-existence,
+    ///   permissions, and free space are decided by the filesystem at
+    ///   open time; the writers use `create_new(true)` so there is no
+    ///   preflight to hoist.
+    ///
+    /// See R0075-0081, R0081-0005, R0081-0006 for the review history.
     pub fn validate_for_format(&self) -> crate::error::Result<()> {
         use crate::error::{ArchiveError, ops};
         if !self.format.can_create() {
@@ -303,7 +361,14 @@ impl std::fmt::Debug for CompressionOptions {
 }
 
 impl CompressionOptions {
-    /// Create new compression options with defaults
+    /// Create new compression options with defaults.
+    ///
+    /// Accepts any [`ArchiveFormat`], including read-only ones — the
+    /// creatability check is deferred to
+    /// [`Self::validate_for_format`] / [`crate::Archive::create`]. Use
+    /// [`Self::for_writable`] (format known at compile time) or
+    /// [`Self::try_new`] (format known at runtime) to have that
+    /// rejected at construction instead (OI-0081-002).
     pub fn new(format: ArchiveFormat) -> Self {
         Self {
             format,
@@ -314,6 +379,44 @@ impl CompressionOptions {
         }
     }
 
+    /// Create new compression options for a format that is creatable by
+    /// construction (OI-0081-002).
+    ///
+    /// Because [`WritableFormat`] carries the
+    /// [`ArchiveFormat::can_create`] invariant, the resulting value can
+    /// never fail the creatability arm of
+    /// [`Self::validate_for_format`]. The remaining fields default to
+    /// the same values [`Self::new`] uses, so the value also passes the
+    /// `password` and `split_size` arms unless the caller sets them.
+    ///
+    /// ```
+    /// use unified_archive::options::{CompressionOptions, WritableFormat};
+    ///
+    /// let opts = CompressionOptions::for_writable(WritableFormat::TAR_GZIP);
+    /// assert!(opts.validate_for_format().is_ok());
+    /// ```
+    #[must_use]
+    pub fn for_writable(format: WritableFormat) -> Self {
+        Self::new(format.format())
+    }
+
+    /// Create new compression options, rejecting a non-creatable format
+    /// at construction time (OI-0081-002).
+    ///
+    /// The runtime-format counterpart to [`Self::for_writable`]: use it
+    /// when the format comes from a CLI argument, config file, or
+    /// extension sniff and you want the rejection at the point the
+    /// value is built rather than at the create call.
+    ///
+    /// # Errors
+    ///
+    /// The same
+    /// [`ArchiveError::OperationBlocked`](crate::ArchiveError::OperationBlocked)
+    /// [`crate::Archive::create`] would report for that format.
+    pub fn try_new(format: ArchiveFormat) -> crate::error::Result<Self> {
+        Ok(Self::for_writable(WritableFormat::new(format)?))
+    }
+
     /// Get the archive format
     pub fn format(&self) -> ArchiveFormat {
         self.format
@@ -322,12 +425,25 @@ impl CompressionOptions {
     /// Set the encryption password, consuming and returning `self`.
     ///
     /// The password is stored as a [`Password`], which is UTF-8 by
-    /// construction and redacts itself in `Debug`/`Display`. Prefer this
-    /// over assigning the public `password` field directly.
+    /// construction and redacts itself in `Debug`/`Display`.
     ///
-    /// Note: [`Archive::create`](crate::Archive::create) currently
-    /// rejects any password for every format (MADR-0027); see the
-    /// `password` field docs for the full rationale.
+    /// # Deprecated because it can only build an invalid value
+    ///
+    /// [`Archive::create`](crate::Archive::create) rejects a password
+    /// for **every** format (MADR-0027), so every value this setter
+    /// produces fails [`Self::validate_for_format`]. There is no
+    /// argument that makes it work today, which is why it is deprecated
+    /// rather than merely documented (OI-0081-002). The typed builders
+    /// have no password setter at all.
+    ///
+    /// This is not a removal notice: encrypted creation is deferred, not
+    /// refused (MADR-0027 as amended 2026-07-20), and the setter becomes
+    /// meaningful again — with the deprecation lifted — when the
+    /// explicit opt-in tracked as OI-0081-006 ships.
+    #[deprecated(
+        since = "0.4.0",
+        note = "encrypted creation is not supported (MADR-0027): every value this produces is rejected by Archive::create. The deprecation lifts when the opt-in of OI-0081-006 ships."
+    )]
     pub fn password(mut self, password: impl Into<String>) -> Self {
         self.password = Some(Password::new(password));
         self
@@ -356,6 +472,7 @@ pub struct ZipCompressionOptions {
 
 impl ZipCompressionOptions {
     /// Create options with defaults (Normal level, no progress).
+    #[must_use]
     pub fn new() -> Self {
         Self {
             level: CompressionLevel::Normal,
@@ -364,12 +481,14 @@ impl ZipCompressionOptions {
     }
 
     /// Set the compression level.
+    #[must_use]
     pub fn level(mut self, l: CompressionLevel) -> Self {
         self.level = l;
         self
     }
 
     /// Set a progress callback.
+    #[must_use]
     pub fn progress(mut self, p: Box<dyn ProgressCallback>) -> Self {
         self.progress = Some(p);
         self
@@ -379,6 +498,15 @@ impl ZipCompressionOptions {
 impl Default for ZipCompressionOptions {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl std::fmt::Debug for ZipCompressionOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ZipCompressionOptions")
+            .field("level", &self.level)
+            .field("progress", &self.progress.is_some())
+            .finish()
     }
 }
 
@@ -411,6 +539,7 @@ pub struct SevenZCompressionOptions {
 
 impl SevenZCompressionOptions {
     /// Create options with defaults.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             level: CompressionLevel::Normal,
@@ -419,12 +548,14 @@ impl SevenZCompressionOptions {
     }
 
     /// Set the compression level.
+    #[must_use]
     pub fn level(mut self, l: CompressionLevel) -> Self {
         self.level = l;
         self
     }
 
     /// Set a progress callback.
+    #[must_use]
     pub fn progress(mut self, p: Box<dyn ProgressCallback>) -> Self {
         self.progress = Some(p);
         self
@@ -434,6 +565,15 @@ impl SevenZCompressionOptions {
 impl Default for SevenZCompressionOptions {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl std::fmt::Debug for SevenZCompressionOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SevenZCompressionOptions")
+            .field("level", &self.level)
+            .field("progress", &self.progress.is_some())
+            .finish()
     }
 }
 
@@ -456,8 +596,22 @@ impl From<SevenZCompressionOptions> for CompressionOptions {
 ///
 /// Use for libarchive-backed creation formats that are not ZIP.
 /// Constructed with the target format up front so the call site
-/// documents what's being created. See
-/// [`ArchiveFormat::can_create`] for the accepted set.
+/// documents what's being created.
+///
+/// **Construct with [`WritableFormat`]** —
+/// [`Self::for_writable`] (compile-time format) or [`Self::try_new`]
+/// (runtime format). Both refuse a format
+/// [`ArchiveFormat::can_create`] rejects, so the "options that
+/// `Archive::create_libarchive` is guaranteed to reject" state of
+/// OI-0081-002 is no longer reachable through them.
+///
+/// Two rejections survive as runtime checks and are *not* encoded here:
+/// ZIP is diverted to [`crate::Archive::create_zip`] by
+/// [`crate::Archive::create_libarchive`] (ZIP is creatable, just not by
+/// this backend), and codec availability for TAR.ZST / TAR.LZ4 /
+/// TAR.LZMA depends on how the linked libarchive was built. See
+/// [`CompressionOptions::validate_for_format`] for why each stays
+/// dynamic.
 ///
 /// Pair with [`crate::Archive::create_libarchive`].
 pub struct LibarchiveCompressionOptions {
@@ -471,6 +625,19 @@ impl LibarchiveCompressionOptions {
     /// is validated at `Archive::create_libarchive` time; passing a
     /// non-libarchive-creatable format here defers the rejection to
     /// the call.
+    ///
+    /// # Deprecated in favour of the checked constructors
+    ///
+    /// This is the loose path OI-0081-002 was filed against: it accepts
+    /// any [`ArchiveFormat`], so `new(ArchiveFormat::Rar)` builds an
+    /// options value whose only possible outcome is an error at the
+    /// create call. Migrate to [`Self::for_writable`] when the format is
+    /// a literal, or [`Self::try_new`] when it is computed. Behaviour is
+    /// unchanged for callers that keep using it.
+    #[deprecated(
+        since = "0.4.0",
+        note = "accepts non-creatable formats and defers the rejection to Archive::create_libarchive; use LibarchiveCompressionOptions::for_writable or ::try_new (OI-0081-002)"
+    )]
     pub fn new(format: ArchiveFormat) -> Self {
         Self {
             format,
@@ -479,16 +646,71 @@ impl LibarchiveCompressionOptions {
         }
     }
 
+    /// Create options for a format that is creatable by construction
+    /// (OI-0081-002).
+    ///
+    /// ```
+    /// use unified_archive::options::{LibarchiveCompressionOptions, WritableFormat};
+    ///
+    /// let opts = LibarchiveCompressionOptions::for_writable(WritableFormat::TAR);
+    /// assert_eq!(opts.format(), unified_archive::ArchiveFormat::Tar);
+    /// ```
+    #[must_use]
+    pub fn for_writable(format: WritableFormat) -> Self {
+        Self {
+            format: format.format(),
+            level: CompressionLevel::Normal,
+            progress: None,
+        }
+    }
+
+    /// Create options for a runtime-supplied format, rejecting
+    /// non-creatable formats at construction time (OI-0081-002).
+    ///
+    /// # Errors
+    ///
+    /// The same
+    /// [`ArchiveError::OperationBlocked`](crate::ArchiveError::OperationBlocked)
+    /// [`crate::Archive::create_libarchive`] would report for that
+    /// format.
+    pub fn try_new(format: ArchiveFormat) -> crate::error::Result<Self> {
+        Ok(Self::for_writable(WritableFormat::new(format)?))
+    }
+
+    /// The target format these options were built for.
+    pub fn format(&self) -> ArchiveFormat {
+        self.format
+    }
+
     /// Set the compression level.
+    ///
+    /// Applies to the compression filter wrapping the tar stream. For
+    /// uncompressed [`ArchiveFormat::Tar`] there is no filter, so the
+    /// level has nothing to act on and is not applied — that is inherent
+    /// to the format rather than a per-backend quirk, so the level knob
+    /// is kept on the shared builder instead of being split away into a
+    /// levelless tar-only type.
+    #[must_use]
     pub fn level(mut self, l: CompressionLevel) -> Self {
         self.level = l;
         self
     }
 
     /// Set a progress callback.
+    #[must_use]
     pub fn progress(mut self, p: Box<dyn ProgressCallback>) -> Self {
         self.progress = Some(p);
         self
+    }
+}
+
+impl std::fmt::Debug for LibarchiveCompressionOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LibarchiveCompressionOptions")
+            .field("format", &self.format)
+            .field("level", &self.level)
+            .field("progress", &self.progress.is_some())
+            .finish()
     }
 }
 
@@ -729,6 +951,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // exercising the deprecated loose path on purpose
     fn test_compression_options_password_builder() {
         // R0081 I5: the builder-setter stores a `Password` and the
         // infallible accessor reads it back. Non-UTF-8 is unrepresentable
@@ -755,6 +978,142 @@ mod tests {
         let mut opts = CompressionOptions::new(ArchiveFormat::SevenZip);
         opts.split_size = Some(1024 * 1024); // 1MB
         assert_eq!(opts.split_size, Some(1_048_576));
+    }
+
+    // ── OI-0081-002: typed builder invariants ──
+
+    #[test]
+    fn compression_options_for_writable_passes_validation() {
+        for &writable in WritableFormat::ALL {
+            let opts = CompressionOptions::for_writable(writable);
+            assert_eq!(opts.format(), writable.format());
+            assert!(
+                opts.validate_for_format().is_ok(),
+                "{:?} built from a WritableFormat must validate",
+                writable.format()
+            );
+        }
+    }
+
+    #[test]
+    fn compression_options_try_new_rejects_read_only_formats() {
+        for format in [
+            ArchiveFormat::Rar,
+            ArchiveFormat::Rar5,
+            ArchiveFormat::Iso,
+            ArchiveFormat::Gzip,
+            ArchiveFormat::Bzip2,
+            ArchiveFormat::Xz,
+            ArchiveFormat::Zst,
+            ArchiveFormat::Lz4,
+            ArchiveFormat::Lzma,
+        ] {
+            assert!(
+                CompressionOptions::try_new(format).is_err(),
+                "{format:?} is not creatable and must be rejected at construction"
+            );
+            // The loose constructor still builds it — that is precisely
+            // the gap the checked constructor closes.
+            assert!(
+                CompressionOptions::new(format)
+                    .validate_for_format()
+                    .is_err(),
+                "{format:?} must still be rejected on the loose path"
+            );
+        }
+        assert!(CompressionOptions::try_new(ArchiveFormat::Zip).is_ok());
+    }
+
+    #[test]
+    fn libarchive_options_checked_constructors() {
+        let opts = LibarchiveCompressionOptions::for_writable(WritableFormat::TAR_GZIP)
+            .level(CompressionLevel::Fast);
+        assert_eq!(opts.format(), ArchiveFormat::TarGzip);
+        assert_eq!(opts.level, CompressionLevel::Fast);
+
+        assert!(LibarchiveCompressionOptions::try_new(ArchiveFormat::Tar).is_ok());
+        assert!(LibarchiveCompressionOptions::try_new(ArchiveFormat::Rar).is_err());
+        assert!(LibarchiveCompressionOptions::try_new(ArchiveFormat::Iso).is_err());
+    }
+
+    #[test]
+    fn typed_builders_lower_to_valid_compression_options() {
+        // Nothing a typed builder can express violates the runtime
+        // gates: no password field, no split_size field, and the
+        // libarchive builder's checked constructors only accept
+        // creatable formats.
+        let zip: CompressionOptions = ZipCompressionOptions::new()
+            .level(CompressionLevel::Maximum)
+            .into();
+        assert!(zip.validate_for_format().is_ok());
+        assert!(zip.password.is_none() && zip.split_size.is_none());
+
+        let seven: CompressionOptions = SevenZCompressionOptions::new().into();
+        assert!(seven.validate_for_format().is_ok());
+        assert!(seven.password.is_none() && seven.split_size.is_none());
+
+        for &writable in WritableFormat::ALL {
+            let lowered: CompressionOptions =
+                LibarchiveCompressionOptions::for_writable(writable).into();
+            assert!(
+                lowered.validate_for_format().is_ok(),
+                "libarchive builder for {:?} must lower to a valid value",
+                writable.format()
+            );
+        }
+    }
+
+    #[test]
+    #[allow(deprecated)] // the deprecated paths must keep behaving until removal
+    fn deprecated_loose_paths_still_behave() {
+        // `#[deprecated]` is a migration signal, not a behaviour change:
+        // both loose paths must keep producing exactly what they did.
+        let opts = CompressionOptions::new(ArchiveFormat::Zip).password("pw");
+        assert_eq!(opts.password.as_ref().map(Password::as_str), Some("pw"));
+        assert!(
+            opts.validate_for_format().is_err(),
+            "a password is rejected for every format (MADR-0027)"
+        );
+
+        // Deliberately the deprecated path: this assertion is the
+        // back-compat guarantee that the loose constructor keeps
+        // accepting a non-creatable format instead of failing early.
+        #[allow(deprecated)]
+        let loose = LibarchiveCompressionOptions::new(ArchiveFormat::Rar);
+        assert_eq!(loose.format(), ArchiveFormat::Rar);
+    }
+
+    #[test]
+    fn split_size_is_rejected_for_every_writable_format() {
+        for &writable in WritableFormat::ALL {
+            let mut opts = CompressionOptions::for_writable(writable);
+            opts.split_size = Some(1_048_576);
+            assert!(
+                opts.validate_for_format().is_err(),
+                "split_size must be rejected for {:?} (DEF-002)",
+                writable.format()
+            );
+        }
+    }
+
+    #[test]
+    fn typed_builder_debug_reports_progress_presence_only() {
+        let zip = format!("{:?}", ZipCompressionOptions::new());
+        assert!(zip.contains("progress: false"), "{zip}");
+
+        let seven = format!(
+            "{:?}",
+            SevenZCompressionOptions::new().progress(Box::new(|_p: u64, _t: Option<u64>| {
+                std::ops::ControlFlow::Continue(())
+            }))
+        );
+        assert!(seven.contains("progress: true"), "{seven}");
+
+        let libarchive = format!(
+            "{:?}",
+            LibarchiveCompressionOptions::for_writable(WritableFormat::TAR_XZ)
+        );
+        assert!(libarchive.contains("TarXz"), "{libarchive}");
     }
 
     // ── CompressionLevel ──

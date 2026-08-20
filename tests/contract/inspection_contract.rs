@@ -121,6 +121,12 @@ fn contract_metadata_modified_time_present() {
 fn contract_metadata_entry_ids_sequential() {
     let archive = Archive::open(fixture("test.zip")).unwrap();
     let entries = archive.list_files().unwrap();
+    // OI-0056-010 vacuity floor: an empty listing satisfies the loop below
+    // without executing it once.
+    assert!(
+        !entries.is_empty(),
+        "test.zip must list entries before their ids are asserted"
+    );
     for (i, entry) in entries.iter().enumerate() {
         assert_eq!(
             entry.id, i,
@@ -160,22 +166,43 @@ fn contract_metadata_consistent_across_formats() {
 
 #[test]
 fn contract_enhanced_metadata_entry_type() {
+    use unified_archive::EntryType;
+
     let archive = Archive::open(fixture("test.zip")).unwrap();
     let entries = archive.list_files().unwrap();
-    // All entries should have a valid entry_type
+
+    // OI-0056-010: this lane used to be a `match` in which every arm —
+    // including a `_ => {}` wildcard — did nothing, over a collection that
+    // was never asserted non-empty. It could not fail for any input, so it
+    // was a green light with no bulb behind it.
+    //
+    // The R0076-0079 intent it was defending (`EntryType` is
+    // `#[non_exhaustive]`; adding a variant must not force a same-PR
+    // contract edit) is preserved by scoping the claim to this fixture: a
+    // plain ZIP of regular files and directories. A new `EntryType` variant
+    // still compiles and still passes here; a ZIP backend that starts
+    // reporting `test.zip`'s members as links, or as an unknown category,
+    // does not.
+    assert!(
+        !entries.is_empty(),
+        "test.zip must list entries before their types are asserted"
+    );
     for entry in entries {
-        match entry.entry_type {
-            unified_archive::EntryType::File
-            | unified_archive::EntryType::Directory
-            | unified_archive::EntryType::Symlink
-            | unified_archive::EntryType::HardLink
-            | unified_archive::EntryType::Other => {}
-            // R0076-0079: `EntryType` is `#[non_exhaustive]`; the wildcard
-            // arm means the contract test stays green when a new entry
-            // category is added without forcing a same-PR contract update.
-            _ => {}
-        }
+        assert!(
+            matches!(entry.entry_type, EntryType::File | EntryType::Directory),
+            "test.zip carries only regular files and directories; '{}' came back as {:?}",
+            entry.path,
+            entry.entry_type
+        );
     }
+    assert!(
+        entries.iter().any(|e| e.entry_type == EntryType::File),
+        "at least one member must classify as a regular file: {:?}",
+        entries
+            .iter()
+            .map(|e| (&e.path, e.entry_type))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -183,6 +210,11 @@ fn contract_enhanced_metadata_is_encrypted_field() {
     // Non-encrypted archive should report is_encrypted = false
     let archive = Archive::open(fixture("test.zip")).unwrap();
     let entries = archive.list_files().unwrap();
+    // OI-0056-010 vacuity floor.
+    assert!(
+        !entries.is_empty(),
+        "test.zip must list entries before their encryption flag is asserted"
+    );
     for entry in entries {
         assert!(
             !entry.is_encrypted,
@@ -201,6 +233,13 @@ fn contract_list_files_caching_stable() {
         .iter()
         .map(|e| (e.path.clone(), e.size, e.crc32))
         .collect();
+
+    // OI-0056-010 vacuity floor: two empty listings are trivially "stable",
+    // and the `zip()` below would iterate zero times.
+    assert!(
+        !first_snapshot.is_empty(),
+        "test.zip must list entries before cache stability is asserted"
+    );
 
     let entries2 = archive.list_files().unwrap();
     assert_eq!(
@@ -221,6 +260,11 @@ fn contract_list_files_caching_same_length() {
     let entries1 = archive.list_files().unwrap();
     let entries2 = archive.list_files().unwrap();
 
+    // OI-0056-010 vacuity floor: `0 == 0` would satisfy this too.
+    assert!(
+        !entries1.is_empty(),
+        "test.7z must list entries for the length comparison to mean anything"
+    );
     assert_eq!(entries1.len(), entries2.len());
 }
 
@@ -288,27 +332,32 @@ fn contract_validate_integrity_valid_7z() {
 // ── Contract 6: Performance ──
 
 // R0074-0071: contract suites should encode behavioral compatibility
-// only. The previous performance assertion (`elapsed.as_secs() < 1`)
-// was timing-dependent and belonged in a benchmark profile, not a
-// contract suite. Gated behind the `UA_RUN_PERF_CONTRACT_TEST` env
-// var so the timing check is still available as an opt-in spot-check
-// without coupling normal test runs to machine load.
+// only. The performance assertion (`elapsed.as_secs() < 1`) is
+// timing-dependent and belongs in a benchmark profile, not a contract
+// suite, so it stays opt-in.
+//
+// OI-0056-010: the opt-in used to be an `UA_RUN_PERF_CONTRACT_TEST` env
+// check with an early `return`, which reported the lane as *passed* on
+// every default run — a green result for a check nobody performed.
+// `#[ignore]` says the same thing honestly: the harness prints it as
+// ignored, and the reason carries the command.
 #[test]
+#[ignore = "timing-dependent spot-check, not a behavioural contract (R0074-0071); run with \
+            `TMPDIR=/Volumes/Temp/claude cargo test --test contract_tests --all-features -- \
+            --ignored --test-threads=1 contract_list_files_performance`"]
 fn contract_list_files_performance() {
     use std::time::Instant;
 
-    if std::env::var_os("UA_RUN_PERF_CONTRACT_TEST").is_none() {
-        eprintln!(
-            "skipping contract_list_files_performance — set UA_RUN_PERF_CONTRACT_TEST=1 to run (R0074-0071)",
-        );
-        return;
-    }
-
     let archive = Archive::open(fixture("test.zip")).unwrap();
     let start = Instant::now();
-    let _entries = archive.list_files().unwrap();
+    let entries = archive.list_files().unwrap();
     let elapsed = start.elapsed();
 
+    // Vacuity floor: timing an empty listing measures nothing.
+    assert!(
+        !entries.is_empty(),
+        "test.zip must list entries for the timing below to mean anything"
+    );
     assert!(
         elapsed.as_secs() < 1,
         "Listing files should complete in <1s, took: {:?}",

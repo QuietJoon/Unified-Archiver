@@ -12,43 +12,33 @@ use super::common;
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use unified_archive::{Archive, ArchiveError};
 
-/// Build a ZIP with a symlink entry via the `zip --symlinks` CLI. Writing a
-/// real ZIP symlink from pure Rust is fragile because many zip writers mask
-/// file-type bits out of `unix_permissions`; the CLI is the authoritative
-/// reference for the S_IFLNK-on-external-attributes layout the ZIP reader reads.
-fn build_zip_with_symlink(archive_path: &Path, staging: &Path) -> bool {
-    if !common::command_exists("zip") || !common::command_exists("ln") {
-        return false;
-    }
-    fs::create_dir_all(staging).expect("staging dir");
-    fs::write(staging.join("regular.txt"), b"hello from a regular file\n").expect("write regular");
+/// Build a ZIP carrying `regular.txt` and a `link.txt -> regular.txt`
+/// symlink entry, then prove the fixture really is symlink-flagged.
+///
+/// OI-0056-010: this used to shell out to `zip --symlinks` and return
+/// `false` when the CLI was missing, so both consuming lanes reported
+/// success on a host without the CLI having asserted nothing. The builder
+/// is now in-process (`ZipWriter::add_symlink`), and the S_IFLNK worry that
+/// motivated the CLI is settled by assertion instead of avoidance: if the
+/// writer ever stops setting the file-type bits, the fixture check below
+/// fails loudly rather than the lane skipping.
+fn build_zip_with_symlink(archive_path: &Path) {
+    common::build_zip_with_symlink(archive_path);
 
-    let link_path = staging.join("link.txt");
-    #[cfg(unix)]
-    {
-        let _ = fs::remove_file(&link_path);
-        std::os::unix::fs::symlink("regular.txt", &link_path).expect("symlink");
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = link_path;
-        return false;
-    }
-
-    let status = Command::new("zip")
-        .args([
-            "--symlinks",
-            archive_path.to_str().unwrap(),
-            "regular.txt",
-            "link.txt",
-        ])
-        .current_dir(staging)
-        .status();
-    status.map(|s| s.success()).unwrap_or(false)
+    let probe = Archive::open(archive_path).expect("fixture zip must open");
+    let listed = probe.list_files().expect("fixture zip must list");
+    assert!(
+        listed.iter().any(|e| e.is_symlink()),
+        "the zip writer stopped emitting an S_IFLNK-flagged entry, so this lane would test \
+         nothing: {:?}",
+        listed
+            .iter()
+            .map(|e| (&e.path, e.entry_type))
+            .collect::<Vec<_>>()
+    );
 }
 
 fn assert_link_blocked(err: ArchiveError, entry_hint: &str) {
@@ -76,14 +66,9 @@ fn assert_link_blocked(err: ArchiveError, entry_hint: &str) {
 fn single_file_extract_rejects_zip_symlink() {
     // Every ZIP routes through the sole `zip`-crate backend (DCR-009).
     let tmp = common::temp_test_dir();
-    let staging = tmp.join("staging_zip");
     let archive = tmp.join("symlink_zip.zip");
     let out_dir = tmp.join("out");
-    if !build_zip_with_symlink(&archive, &staging) {
-        eprintln!("skipping: zip --symlinks not available");
-        common::cleanup(&tmp);
-        return;
-    }
+    build_zip_with_symlink(&archive);
     fs::create_dir_all(&out_dir).unwrap();
 
     let opened = Archive::open(&archive).expect("open zip");
@@ -114,14 +99,9 @@ fn single_file_extract_rejects_zip_symlink_zip_backend() {
     use unified_archive::ffi::zip_wrapper::ZipArchive as ZipBackend;
 
     let tmp = common::temp_test_dir();
-    let staging = tmp.join("staging_zip");
     let archive = tmp.join("symlink_zip.zip");
     let out_dir = tmp.join("out");
-    if !build_zip_with_symlink(&archive, &staging) {
-        eprintln!("skipping: zip --symlinks not available");
-        common::cleanup(&tmp);
-        return;
-    }
+    build_zip_with_symlink(&archive);
     fs::create_dir_all(&out_dir).unwrap();
 
     let backend = ZipBackend::open(&archive).expect("open zip via zip-crate backend");
@@ -138,15 +118,10 @@ fn single_file_extract_rejects_zip_symlink_zip_backend() {
 #[cfg(unix)]
 fn single_file_extract_rejects_tar_symlink_libarchive() {
     let tmp = common::temp_test_dir();
-    let staging = tmp.join("staging");
     let archive = tmp.join("symlink.tar");
     let out_dir = tmp.join("out");
 
-    if !common::build_tar_with_symlink(&archive, &staging) {
-        eprintln!("skipping: failed to build tar fixture");
-        common::cleanup(&tmp);
-        return;
-    }
+    common::build_tar_with_symlink(&archive);
 
     fs::create_dir_all(&out_dir).unwrap();
 
@@ -169,34 +144,29 @@ fn single_file_extract_rejects_tar_symlink_libarchive() {
 #[cfg(unix)]
 fn single_file_extract_rejects_tar_hardlink_libarchive() {
     let tmp = common::temp_test_dir();
-    let staging = tmp.join("staging");
     let archive = tmp.join("hardlink.tar");
     let out_dir = tmp.join("out");
 
-    if !common::build_tar_with_hardlink(&archive, &staging) {
-        eprintln!("skipping: failed to build tar hardlink fixture");
-        common::cleanup(&tmp);
-        return;
-    }
+    common::build_tar_with_hardlink(&archive);
     fs::create_dir_all(&out_dir).unwrap();
 
     let opened = Archive::open(&archive).expect("open tar");
-    // Whichever member tar emitted as the hard-link reference is the one
-    // that must be blocked. tar on macOS writes the second occurrence as a
-    // hardlink record, so try "hardlink.txt" first and fall through to the
-    // other name.
-    let err =
-        match opened.extract_file("hardlink.txt", common::default_extraction_options(&out_dir)) {
-            Err(e) => e,
-            Ok(()) => opened
-                .extract_file("regular.txt", common::default_extraction_options(&out_dir))
-                .expect_err("hardlink must be rejected from one of the two names"),
-        };
+    // The in-process ustar writer always emits `hardlink.txt` as the link
+    // record, so the name that must be blocked is fixed. The old
+    // CLI-built fixture left it up to whichever tar the host had, which is
+    // why this used to accept a rejection from either name.
+    let err = opened
+        .extract_file("hardlink.txt", common::default_extraction_options(&out_dir))
+        .expect_err("hardlink.txt must be rejected");
     assert!(
         matches!(&err, ArchiveError::OperationBlocked { reason, .. } if reason.contains("FR-022")),
         "expected FR-022 OperationBlocked, got {:?}",
         err
     );
+    // The regular member is unaffected by the link policy.
+    opened
+        .extract_file("regular.txt", common::default_extraction_options(&out_dir))
+        .expect("regular extraction");
 
     common::cleanup(&tmp);
 }

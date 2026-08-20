@@ -248,6 +248,15 @@ impl UnrarArchive {
     ///
     /// Uses RAR_OM_EXTRACT mode to support both listing headers and extracting files.
     /// This mode allows iteration through entries and extraction operations.
+    ///
+    /// **Validation timing (AD 0052):** `RAROpenArchiveEx` reads and
+    /// validates the archive's *main* header here, so a non-RAR or
+    /// header-damaged input fails at `open`. Per-entry headers are not
+    /// read until the first walk, so the crate-wide first-operation
+    /// contract still applies to everything past the main header —
+    /// [`crate::Archive::validate`] forces that walk (memoised per
+    /// AD 0065) and is strictly stronger than this open-time check,
+    /// while still decoding no payload (unlike `validate_integrity`).
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_mode(path, RAR_OM_EXTRACT)
     }

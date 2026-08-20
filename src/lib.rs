@@ -292,7 +292,7 @@ pub use modification::ModificationOptions; // Phase 6: Archive modification
 pub use options::{
     CompressionLevel, CompressionOptions, EntryFilter, ExtractionOptions,
     LibarchiveCompressionOptions, ProgressCallback, RateLimiter, SevenZCompressionOptions,
-    SfxStagingProgress, ZipCompressionOptions, entry_filter_from_fn,
+    SfxStagingProgress, WritableFormat, ZipCompressionOptions, entry_filter_from_fn,
 };
 pub use password::Password;
 // Narrow the public surface to what callers reasonably

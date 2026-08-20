@@ -10,34 +10,28 @@ use std::fs;
 #[cfg(unix)]
 fn test_hardlink_skip_during_extraction() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-    let source_dir = temp_dir.path().join("source");
     let archive_path = temp_dir.path().join("test_hardlink.tar");
     let extract_dir = temp_dir.path().join("extracted");
 
     fs::create_dir_all(&extract_dir).expect("Failed to create extract dir");
 
     // Shared fixture builder: `regular.txt` + `hardlink.txt` hard-linked
-    // to it. Skips gracefully when the environment can't produce it.
-    if !common::build_tar_with_hardlink(&archive_path, &source_dir) {
-        eprintln!("Skipping test: cannot build hardlink tar fixture");
-        return;
-    }
+    // to it. OI-0056-010: infallible and host-independent, so neither the
+    // fixture nor the open below can turn this lane into a silent pass.
+    common::build_tar_with_hardlink(&archive_path);
 
-    // Extract using unified-archive
-    let result = unified_archive::Archive::open(&archive_path);
-    if result.is_err() {
-        eprintln!("Skipping test: Could not open tar archive");
-        return;
-    }
+    let archive =
+        unified_archive::Archive::open(&archive_path).expect("hardlink tar fixture must open");
 
-    let archive = result.unwrap();
-
-    // List files to verify structure
+    // The writer emits exactly the two members, so the count is pinned
+    // rather than merely non-empty.
     let entries = archive.list_files().expect("Failed to list files");
-
-    // Should have 2 entries (original + hardlink)
-    // Note: The actual count may vary based on how tar stores hard links
-    assert!(!entries.is_empty(), "Archive should contain entries");
+    assert_eq!(
+        entries.len(),
+        2,
+        "fixture must list regular.txt + hardlink.txt, got {:?}",
+        entries.iter().map(|e| &e.path).collect::<Vec<_>>()
+    );
 
     // Extract - hard links should be silently skipped
     let options = common::default_extraction_options(extract_dir.clone());
@@ -75,13 +69,9 @@ fn test_hardlink_entry_detection() {
     use unified_archive::entry::EntryType;
 
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-    let source_dir = temp_dir.path().join("source");
     let archive_path = temp_dir.path().join("test_hardlink.tar");
 
-    if !common::build_tar_with_hardlink(&archive_path, &source_dir) {
-        eprintln!("Skipping test: cannot build hardlink tar fixture");
-        return;
-    }
+    common::build_tar_with_hardlink(&archive_path);
 
     let archive = unified_archive::Archive::open(&archive_path).expect("Failed to open archive");
     let entries = archive.list_files().expect("Failed to list files");

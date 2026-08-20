@@ -2,53 +2,45 @@
 //!
 //! Verifies that extraction uses bounded memory even for moderately large archives.
 //! Target: <20MB memory delta for extracting a 10MB archive.
+//!
+//! OI-0056-010: the fixtures here used to be built by the external `zip`
+//! CLI, and both lanes `eprintln!`-skipped when it was absent — so a host
+//! without `zip` produced a green run indistinguishable from a covered one.
+//! Fixture creation is now in-process (`common::build_zip`, STORE method,
+//! matching the old `-0`), so neither lane can skip and every step asserts.
 
 use super::common;
-use super::common::command_exists;
 
-use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::fs;
 use std::path::Path;
-use std::process::Command;
 
-/// Create a test archive with specified total uncompressed size
-fn create_test_archive(archive_path: &Path, total_size_bytes: usize) -> std::io::Result<bool> {
-    let temp_dir = tempfile::tempdir()?;
-    let source_dir = temp_dir.path();
+/// Number of 1 MiB members `create_test_archive` writes for `total_size_bytes`.
+fn member_count(total_size_bytes: usize) -> usize {
+    total_size_bytes.div_ceil(1024 * 1024)
+}
 
-    // Create files totaling approximately total_size_bytes
+/// Create a STORE-method ZIP holding `total_size_bytes` of 1 MiB members.
+///
+/// Infallible by design: no host binary is consulted, so a fixture problem
+/// surfaces as a panic inside the builder rather than as a skipped lane.
+fn create_test_archive(archive_path: &Path, total_size_bytes: usize) {
     let file_size = 1024 * 1024; // 1MB per file
-    let num_files = total_size_bytes.div_ceil(file_size);
+    let num_files = member_count(total_size_bytes);
+    // Repeating pattern, same bytes the CLI fixture carried.
+    let pattern: Vec<u8> = (0..=255u8).cycle().take(file_size).collect();
 
-    for i in 0..num_files {
-        let file_path = source_dir.join(format!("file_{:04}.bin", i));
-        let mut file = BufWriter::new(File::create(&file_path)?);
-
-        // Write 1MB of data (repeating pattern for compressibility)
-        let pattern: Vec<u8> = (0..=255u8).cycle().take(file_size).collect();
-        file.write_all(&pattern)?;
-        file.flush()?;
-    }
-
-    // Create ZIP archive
-    let output = Command::new("zip")
-        .args(["-r", "-0"]) // -0 = store without compression for predictable size
-        .arg(archive_path)
-        .arg(".")
-        .current_dir(source_dir)
-        .output()?;
-
-    Ok(output.status.success())
+    let names: Vec<String> = (0..num_files)
+        .map(|i| format!("file_{:04}.bin", i))
+        .collect();
+    let members: Vec<common::ZipMember<'_>> = names
+        .iter()
+        .map(|n| common::ZipMember::File(n.as_str(), &pattern))
+        .collect();
+    common::build_zip(archive_path, &members, true);
 }
 
 #[test]
 fn test_streaming_memory_bounded() {
-    // Skip if zip command not available
-    if !command_exists("zip") {
-        eprintln!("Skipping test: zip command not available");
-        return;
-    }
-
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let archive_path = temp_dir.path().join("test_10mb.zip");
     let extract_dir = temp_dir.path().join("extracted");
@@ -57,34 +49,24 @@ fn test_streaming_memory_bounded() {
 
     // Create a 10MB archive
     let archive_size = 10 * 1024 * 1024; // 10MB
-    match create_test_archive(&archive_path, archive_size) {
-        Ok(true) => {}
-        Ok(false) => {
-            eprintln!("Skipping test: Failed to create test archive");
-            return;
-        }
-        Err(e) => {
-            eprintln!("Skipping test: Error creating archive: {}", e);
-            return;
-        }
-    }
+    create_test_archive(&archive_path, archive_size);
 
     // Verify archive was created
     let archive_metadata = fs::metadata(&archive_path).expect("Archive should exist");
     assert!(archive_metadata.len() > 0, "Archive should not be empty");
 
     // Open and extract using unified-archive
-    let archive = match unified_archive::Archive::open(&archive_path) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("Skipping test: Could not open archive: {}", e);
-            return;
-        }
-    };
+    let archive =
+        unified_archive::Archive::open(&archive_path).expect("streaming fixture must open");
 
-    // List files to verify structure
+    // List files to verify structure. The count is pinned, not merely
+    // non-zero, so a fixture that silently lost members cannot pass.
     let entries = archive.list_files().expect("Failed to list files");
-    assert!(!entries.is_empty(), "Archive should contain entries");
+    assert_eq!(
+        entries.len(),
+        member_count(archive_size),
+        "fixture must list every member it was built with"
+    );
 
     // Extract all files
     // Note: We can't directly measure memory here without external tools,
@@ -113,12 +95,6 @@ fn test_streaming_memory_bounded() {
 
 #[test]
 fn test_streaming_extraction_single_file() {
-    // Skip if zip command not available
-    if !command_exists("zip") {
-        eprintln!("Skipping test: zip command not available");
-        return;
-    }
-
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let archive_path = temp_dir.path().join("test_single.zip");
     let extract_dir = temp_dir.path().join("extracted");
@@ -127,30 +103,19 @@ fn test_streaming_extraction_single_file() {
 
     // Create a small archive for basic streaming test
     let archive_size = 1024 * 1024; // 1MB
-    match create_test_archive(&archive_path, archive_size) {
-        Ok(true) => {}
-        Ok(false) => {
-            eprintln!("Skipping test: Failed to create test archive");
-            return;
-        }
-        Err(e) => {
-            eprintln!("Skipping test: Error creating archive: {}", e);
-            return;
-        }
-    }
+    create_test_archive(&archive_path, archive_size);
 
-    let archive = match unified_archive::Archive::open(&archive_path) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("Skipping test: Could not open archive: {}", e);
-            return;
-        }
-    };
+    let archive =
+        unified_archive::Archive::open(&archive_path).expect("streaming fixture must open");
 
     // Extract using streaming
     let options = common::default_extraction_options(extract_dir.clone());
     let result = archive.extract_all(options);
     assert!(result.is_ok(), "Streaming extraction should succeed");
+    assert!(
+        extract_dir.join("file_0000.bin").is_file(),
+        "the single member must land on disk"
+    );
 }
 
 // R0079-0046: the former `test_memory_efficiency_claim` (comment-only)

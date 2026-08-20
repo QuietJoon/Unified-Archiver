@@ -80,6 +80,23 @@ use manual_pages::{Page, bundle_root, concept_pages, fences, load_page, repo_roo
 
 const SCRATCH: &str = "/Volumes/Temp/claude/ua-manual-snippets";
 
+/// Assert the manual bundle is present.
+///
+/// OI-0056-010: four lanes here opened with
+/// `if bundle_root().is_none() { eprintln!(…); return; }`, so a checkout
+/// without `manual/` reported all four as passed — including
+/// [`collection_is_not_vacuous`], whose entire job is to notice that the
+/// collection is empty. `manual/` is tracked in this repository, so its
+/// absence is a broken checkout, not a supported configuration.
+fn require_bundle() {
+    assert!(
+        bundle_root().is_some(),
+        "manual/ is not present in this checkout, so the snippet collection would be empty and \
+         every check here vacuous. The bundle is tracked in-repo — restore it \
+         (`git checkout -- manual`) before running this suite."
+    );
+}
+
 struct Snippet {
     page: String,
     body_line: usize,
@@ -370,7 +387,9 @@ fn positive_control(profile: &Path, lib: &Path) {
 }
 
 #[test]
-#[ignore = "shells out to rustc; run with --ignored after `cargo build`"]
+#[ignore = "shells out to rustc, which is far too expensive for the default gate; run with \
+            `cargo build && TMPDIR=/Volumes/Temp/claude cargo test --test manual_snippets \
+            --all-features -- --ignored --test-threads=4`"]
 fn checked_snippets_type_check() {
     let (profile, lib) = prepare();
     // Prove the compile step can still go red before believing anything it
@@ -378,10 +397,7 @@ fn checked_snippets_type_check() {
     // runs even in a checkout that has no `manual/`.
     positive_control(&profile, &lib);
 
-    if bundle_root().is_none() {
-        eprintln!("skipped: manual/ is not present in this checkout");
-        return;
-    }
+    require_bundle();
     let pages = concept_pages();
     let c = collect(&pages);
     assert_collection_floors(&c);
@@ -491,7 +507,9 @@ fn checked_snippets_type_check() {
 }
 
 #[test]
-#[ignore = "shells out to rustc; run with --ignored after `cargo build`"]
+#[ignore = "shells out to rustc, which is far too expensive for the default gate; run with \
+            `cargo build && TMPDIR=/Volumes/Temp/claude cargo test --test manual_snippets \
+            --all-features -- --ignored --test-threads=4`"]
 fn broken_snippet_fixture_is_rejected() {
     // The positive control, as its own named test so a failure here reads as
     // "the control is broken" rather than "a manual snippet is broken".
@@ -507,10 +525,7 @@ fn broken_snippet_fixture_is_rejected() {
 /// either compiled or named in the allowlist, with no third bucket to hide in.
 #[test]
 fn fragment_blocks_are_not_compiled() {
-    if bundle_root().is_none() {
-        eprintln!("skipped: manual/ is not present in this checkout");
-        return;
-    }
+    require_bundle();
     let pages = concept_pages();
     let c = collect(&pages);
     let snippets = &c.checked;
@@ -545,10 +560,7 @@ fn fragment_blocks_are_not_compiled() {
 
 #[test]
 fn fragment_allowlist_is_not_stale() {
-    if bundle_root().is_none() {
-        eprintln!("skipped: manual/ is not present in this checkout");
-        return;
-    }
+    require_bundle();
     let allow = load_allowlist();
     assert!(
         allow.len() <= MAX_UNMARKED_FRAGMENTS,
@@ -585,10 +597,7 @@ fn fragment_allowlist_is_not_stale() {
 /// runs cannot disagree about how much work the bundle is carrying.
 #[test]
 fn collection_is_not_vacuous() {
-    if bundle_root().is_none() {
-        eprintln!("skipped: manual/ is not present in this checkout");
-        return;
-    }
+    require_bundle();
     assert_collection_floors(&collect(&concept_pages()));
 }
 

@@ -58,13 +58,15 @@ fn test_extract_files_by_path_array_rar() {
 
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open test RAR");
 
-    // List files to get actual file name
+    // List files to get actual file name. OI-0056-010: this used to
+    // `return` on an empty listing, which is precisely the case where the
+    // extraction assertions below prove nothing — an empty tracked fixture
+    // is a defect, not a skip.
     let entries = archive.list_files().expect("Failed to list files");
-
-    if entries.is_empty() {
-        cleanup_temp_dir(&temp_dir);
-        return;
-    }
+    assert!(
+        !entries.is_empty(),
+        "tests/fixtures/test.rar must list at least one entry before anything below is asserted"
+    );
 
     // Extract first file by its actual path
     let file_path = &entries[0].path;

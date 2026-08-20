@@ -127,7 +127,32 @@ impl ReadArchive {
         self.inner.extract_to_stream(file_path, bound)
     }
 
+    /// Cheap probe: parse the archive's directory / TOC and report
+    /// whether this handle points at a usable archive (mirrors
+    /// [`Archive::validate`]).
+    ///
+    /// [`ReadArchive::open`] builds a handle without parsing, so `open`
+    /// returning `Ok` does not mean the input is a valid archive —
+    /// parsing happens on the first content-touching call (AD 0052,
+    /// first-operation validation; libarchive-backed formats are the
+    /// eager exception). This forces that parse now.
+    ///
+    /// **Not** [`ReadArchive::validate_integrity`]: that one decodes and
+    /// checksums every entry's payload (`O(uncompressed bytes)`, returns
+    /// a [`ValidationReport`]), whereas this reads metadata only
+    /// (`O(entries)`, returns `Ok(())`). The names are distinct because
+    /// the costs differ by orders of magnitude. Also cheap in the
+    /// absolute sense: the parse is memoised (AD 0065), so a following
+    /// [`ReadArchive::list_files`] is served from the cache instead of
+    /// parsing a second time.
+    pub fn validate(&self) -> Result<()> {
+        self.inner.validate()
+    }
+
     /// Walk every file entry and report integrity failures.
+    ///
+    /// Decodes **every payload** — see [`ReadArchive::validate`] for the
+    /// cheap metadata-only well-formedness probe.
     pub fn validate_integrity(&self) -> Result<ValidationReport> {
         self.inner.validate_integrity()
     }
@@ -720,6 +745,10 @@ impl ModifyArchive {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the tests construct write options here, so this import
+    // lives in the test module rather than at module scope, where it
+    // would be dead in the lib build.
+    use crate::options::WritableFormat;
 
     fn unique_dest(prefix: &str, ext: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()
@@ -1044,7 +1073,7 @@ mod tests {
         {
             let mut w = WriteArchive::create_libarchive(
                 &path,
-                LibarchiveCompressionOptions::new(ArchiveFormat::Tar),
+                LibarchiveCompressionOptions::for_writable(WritableFormat::TAR),
             )
             .unwrap();
             w.add_file_from_data("t.txt", b"tar-dropped").unwrap();

@@ -34,12 +34,18 @@ pub struct SevenZArchive {
 impl SevenZArchive {
     /// Open 7z archive for reading.
     ///
-    /// **Validation timing (AD 0052):** only the path is stored. The 7z
-    /// header signature, table of contents, and any LZMA/LZMA2 codec
-    /// requirements are not parsed until the caller invokes
-    /// `list_files`, `extract_*`, or `test_integrity`. Corrupt or non-7z
-    /// inputs surface their error from the first real operation, not
-    /// from `open()`.
+    /// **Validation timing (AD 0052):** first-operation validation — the
+    /// crate-wide contract, not a per-backend quirk. Only the path is
+    /// stored; the 7z header signature, table of contents, and any
+    /// LZMA/LZMA2 codec requirements are not parsed until the caller
+    /// invokes `list_files`, `extract_*`, or `test_integrity`, so corrupt
+    /// or non-7z inputs surface their error from that first operation
+    /// rather than from `open()`. The TOC parse is memoised in `listing`
+    /// (AD 0065), so it is paid once per handle. Callers who want the
+    /// check *now* call [`crate::Archive::validate`] (or
+    /// [`crate::backend::ReadBackend::validate`]), which forces exactly
+    /// this parse and leaves it cached — it is not `validate_integrity`,
+    /// which decodes every payload.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
 
@@ -52,9 +58,11 @@ impl SevenZArchive {
 
     /// Open encrypted 7z archive with password.
     ///
-    /// Same lazy-validation semantics as [`SevenZArchive::open`]. Password
-    /// correctness is verified at extraction time; a wrong password
-    /// surfaces as `ArchiveError::Password` from the `extract_*` paths.
+    /// Same first-operation validation as [`SevenZArchive::open`].
+    /// Password correctness is verified at extraction time; a wrong
+    /// password surfaces as `ArchiveError::Password` from the `extract_*`
+    /// paths. [`crate::Archive::validate`] parses metadata only, so it
+    /// does **not** report a bad password.
     pub fn open_with_password(path: impl AsRef<Path>, password: &str) -> Result<Self> {
         let mut archive = Self::open(path)?;
         archive.password = Some(crate::Password::new(password));

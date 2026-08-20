@@ -1,80 +1,101 @@
 //! Performance baseline comparison tests (SC-010, T127b)
 //!
-//! Compares unified-archive extraction throughput vs native 7z CLI.
-//! Target: Within 20% of native 7zip performance (SC-010).
+//! SC-010 asks that extraction land within 20% of a native archiver, i.e.
+//! `unified / native <= 1.2`.
 //!
-//! **Opt-in (R0074-0080).** This suite shells out to the system
-//! `7z` / `unzip` binaries for the comparison and adds wall-clock
-//! variance to the default test run, so each timing-comparison test
-//! short-circuits unless `UA_PRINT_PERF_BASELINE` is set
-//! (see `R0074-0078`). Suites that build the test fixture but do not
-//! compare against the external CLI run as normal integration tests.
+//! ## Why this file is split in two (OI-0056-010)
+//!
+//! It used to hold one lane that short-circuited unless
+//! `UA_PRINT_PERF_BASELINE` was set and, when it did run, `println!`ed
+//! `✓ PASS` / `△ ACCEPTABLE` / `✗ NEEDS IMPROVEMENT` without asserting
+//! anything — so a real regression could never turn the suite red, and on a
+//! default run the lane passed having measured nothing at all. It also built
+//! its fixture with the external `zip` CLI and skipped when that was
+//! missing.
+//!
+//! The split settles both halves of OI-0056-010:
+//!
+//! * [`perf_baseline_fixture_extracts_completely`] runs in the default lane.
+//!   The fixture is built in-process, so there is no CLI to be missing, and
+//!   it asserts the extraction is complete and byte-exact. No wall clock is
+//!   involved, so it cannot flake.
+//! * [`perf_baseline_ratio_meets_sc010`] is the controlled comparison lane.
+//!   It is `#[ignore]`d because it shells out to a native archiver and is
+//!   wall-clock sensitive, but when it runs it **asserts** the SC-010 ratio
+//!   and fails loudly if no native archiver is installed. It never prints a
+//!   verdict for a human to ignore.
+//!
+//! Run the comparison lane with:
+//!
+//! ```text
+//! TMPDIR=/Volumes/Temp/claude cargo test --test integration_tests --all-features \
+//!     -- --ignored --test-threads=1 integration::performance_baseline
+//! ```
+//!
 //! Long-term destination is `benches/` (R0074-0070).
 
 use super::common;
 use super::common::command_exists;
 
-use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-/// Create a test archive with specified size for performance testing
-fn create_performance_test_archive(
-    archive_path: &Path,
-    total_size_mb: usize,
-) -> std::io::Result<()> {
-    let temp_dir = tempfile::tempdir()?;
-    let source_dir = temp_dir.path();
+/// SC-010's stated ceiling: unified-archive within 20% of native.
+const SC010_MAX_RATIO: f64 = 1.2;
 
-    // Create files totaling approximately total_size_mb
-    let file_size = 1024 * 1024; // 1MB per file
-    let num_files = total_size_mb;
+/// Members in the perf fixture, one per MiB.
+const FIXTURE_MEMBERS: usize = 10;
 
-    for i in 0..num_files {
-        let file_path = source_dir.join(format!("perf_test_{:04}.bin", i));
-        let mut file = BufWriter::new(File::create(&file_path)?);
-
-        // Write 1MB of varied data (not too compressible, not random)
-        let pattern: Vec<u8> = (0..=255u8)
-            .cycle()
-            .enumerate()
-            .map(|(idx, b)| b.wrapping_add((idx % 17) as u8))
-            .take(file_size)
-            .collect();
-        file.write_all(&pattern)?;
-        file.flush()?;
-    }
-
-    // Create ZIP archive with moderate compression
-    let output = Command::new("zip")
-        .args(["-r", "-5"]) // -5 = moderate compression
-        .arg(archive_path)
-        .arg(".")
-        .current_dir(source_dir)
-        .output()?;
-
-    if !output.status.success() {
-        return Err(std::io::Error::other(format!(
-            "zip failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-
-    Ok(())
+/// One 1 MiB member payload: varied enough not to be trivially
+/// compressible, deterministic so the fixture is reproducible.
+fn member_payload() -> Vec<u8> {
+    (0..=255u8)
+        .cycle()
+        .enumerate()
+        .map(|(idx, b)| b.wrapping_add((idx % 17) as u8))
+        .take(1024 * 1024)
+        .collect()
 }
 
-/// Measure extraction time using native 7z CLI
+fn member_name(i: usize) -> String {
+    format!("perf_test_{:04}.bin", i)
+}
+
+/// Build the DEFLATE-compressed perf fixture in-process.
+///
+/// OI-0056-010: replaces `Command::new("zip").args(["-r", "-5"])`. The old
+/// builder returned an `io::Error` the caller turned into a skip; this one
+/// cannot fail without panicking, so the lane can never quietly vanish.
+fn create_performance_test_archive(archive_path: &Path) {
+    let payload = member_payload();
+    let names: Vec<String> = (0..FIXTURE_MEMBERS).map(member_name).collect();
+    let members: Vec<common::ZipMember<'_>> = names
+        .iter()
+        .map(|n| common::ZipMember::File(n.as_str(), &payload))
+        .collect();
+    common::build_zip(archive_path, &members, false);
+}
+
+/// Measure extraction time using a native archiver CLI.
+///
+/// Returns `None` only when the tool is absent or refuses the archive; the
+/// caller decides whether that is a skip or a failure, and in this file it
+/// is always a failure.
 fn measure_7z_extraction(archive_path: &Path, output_dir: &Path) -> Option<Duration> {
-    if !command_exists("7z") {
+    let cli = if command_exists("7zz") {
+        "7zz"
+    } else if command_exists("7z") {
+        "7z"
+    } else {
         return None;
-    }
+    };
 
     fs::create_dir_all(output_dir).ok()?;
 
     let start = Instant::now();
-    let output = Command::new("7z")
+    let output = Command::new(cli)
         .args(["x", "-y", "-o"])
         .arg(output_dir)
         .arg(archive_path)
@@ -112,124 +133,111 @@ fn measure_unzip_extraction(archive_path: &Path, output_dir: &Path) -> Option<Du
     }
 }
 
-/// Measure extraction time using unified-archive
-fn measure_unified_archive_extraction(archive_path: &Path, output_dir: &Path) -> Option<Duration> {
-    fs::create_dir_all(output_dir).ok()?;
+/// Measure extraction time using unified-archive. Panics rather than
+/// returning `None` on failure: a failed extraction is a defect, not a
+/// reason to stop measuring.
+fn measure_unified_archive_extraction(archive_path: &Path, output_dir: &Path) -> Duration {
+    fs::create_dir_all(output_dir).expect("create unified output dir");
 
-    let archive = unified_archive::Archive::open(archive_path).ok()?;
+    let archive = unified_archive::Archive::open(archive_path).expect("open perf fixture");
 
     let start = Instant::now();
     let options = common::default_extraction_options(output_dir.to_path_buf());
-    let result = archive.extract_all(options);
-
-    if result.is_ok() {
-        Some(start.elapsed())
-    } else {
-        eprintln!("unified-archive extraction failed: {:?}", result);
-        None
-    }
+    archive
+        .extract_all(options)
+        .expect("unified-archive must extract the perf fixture");
+    start.elapsed()
 }
 
+/// Default-lane half: the perf fixture extracts completely and byte-exactly.
+///
+/// No wall clock, no external process — this is the part of the old lane
+/// that was worth keeping every run, made unconditional.
 #[test]
-fn test_performance_baseline_small_archive() {
-    // R0074-0080: timing comparison against the external 7z/unzip CLI
-    // runs only under the opt-in profile (see module doc).
-    if std::env::var_os("UA_PRINT_PERF_BASELINE").is_none() {
-        return;
-    }
-
-    // Test with a small archive (10MB) for quick feedback
-    if !command_exists("zip") {
-        eprintln!("Skipping test: zip command not available");
-        return;
-    }
-
+fn perf_baseline_fixture_extracts_completely() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let archive_path = temp_dir.path().join("perf_test_10mb.zip");
+    create_performance_test_archive(&archive_path);
 
-    // Create 10MB test archive
-    if let Err(e) = create_performance_test_archive(&archive_path, 10) {
-        eprintln!("Skipping test: Failed to create archive: {}", e);
-        return;
+    let out = temp_dir.path().join("ua_output");
+    measure_unified_archive_extraction(&archive_path, &out);
+
+    let expected = member_payload();
+    for i in 0..FIXTURE_MEMBERS {
+        let path = out.join(member_name(i));
+        let got = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        assert_eq!(
+            got.len(),
+            expected.len(),
+            "{} extracted at the wrong length",
+            path.display()
+        );
+        assert!(
+            got == expected,
+            "{} extracted with the wrong bytes",
+            path.display()
+        );
     }
 
-    let archive_size = fs::metadata(&archive_path).map(|m| m.len()).unwrap_or(0);
-    println!("Archive size: {} bytes", archive_size);
+    // Vacuity floor: the loop above proves nothing if the fixture is empty.
+    assert_eq!(
+        fs::read_dir(&out)
+            .expect("read unified output dir")
+            .filter_map(|e| e.ok())
+            .count(),
+        FIXTURE_MEMBERS,
+        "the extraction must produce exactly the members the fixture carries"
+    );
+}
 
-    // Measure unified-archive extraction
-    let ua_output = temp_dir.path().join("ua_output");
-    let ua_time = measure_unified_archive_extraction(&archive_path, &ua_output);
+/// Controlled-lane half: the SC-010 ratio is **asserted**, not printed.
+///
+/// `#[ignore]`d because it shells out to a native archiver and is
+/// wall-clock sensitive. Run it with:
+///
+/// ```text
+/// TMPDIR=/Volumes/Temp/claude cargo test --test integration_tests --all-features \
+///     -- --ignored --test-threads=1 integration::performance_baseline
+/// ```
+///
+/// A missing native archiver fails this lane rather than skipping it: the
+/// whole point of the lane is the comparison, so having nothing to compare
+/// against is a setup error, not a pass.
+#[test]
+#[ignore = "wall-clock comparison against a native archiver CLI; run with \
+            `TMPDIR=/Volumes/Temp/claude cargo test --test integration_tests --all-features \
+            -- --ignored --test-threads=1 integration::performance_baseline`"]
+fn perf_baseline_ratio_meets_sc010() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let archive_path = temp_dir.path().join("perf_test_10mb.zip");
+    create_performance_test_archive(&archive_path);
 
-    // Measure native tool extraction (7z or unzip)
+    let ua_time =
+        measure_unified_archive_extraction(&archive_path, &temp_dir.path().join("ua_output"));
+
     let native_output = temp_dir.path().join("native_output");
     let native_time = measure_7z_extraction(&archive_path, &native_output)
-        .or_else(|| measure_unzip_extraction(&archive_path, &native_output));
+        .or_else(|| measure_unzip_extraction(&archive_path, &native_output))
+        .expect(
+            "no native archiver available to compare against — install `7zz`/`7z` \
+             (`brew install sevenzip`, `apt install p7zip-full`) or `unzip`. This lane exists \
+             only for the comparison, so an absent baseline is a setup error, not a pass.",
+        );
 
-    // Report results
-    println!("\n=== Performance Baseline Results ===");
-    println!("Archive: 10MB test archive");
-
-    if let Some(ua_duration) = ua_time {
-        println!("unified-archive: {:?}", ua_duration);
-
-        if let Some(native_duration) = native_time {
-            println!("Native tool: {:?}", native_duration);
-
-            let ratio = ua_duration.as_secs_f64() / native_duration.as_secs_f64();
-            println!("Ratio (unified/native): {:.2}x", ratio);
-
-            // SC-010 target: within 20% of native (ratio <= 1.2)
-            if ratio <= 1.2 {
-                println!("✓ PASS: Within 20% of native performance");
-            } else if ratio <= 2.0 {
-                println!(
-                    "△ ACCEPTABLE: {:.0}% slower than native (target: ≤20%)",
-                    (ratio - 1.0) * 100.0
-                );
-            } else {
-                println!(
-                    "✗ NEEDS IMPROVEMENT: {:.0}% slower than native",
-                    (ratio - 1.0) * 100.0
-                );
-            }
-        } else {
-            println!("Native tool not available for comparison");
-        }
-    } else {
-        println!("unified-archive extraction failed");
-    }
-
-    // Verify extracted files
-    if ua_output.exists() {
-        let extracted_files = fs::read_dir(&ua_output)
-            .map(|rd| rd.filter_map(|e| e.ok()).count())
-            .unwrap_or(0);
-        println!("Extracted files: {}", extracted_files);
-        assert!(extracted_files > 0, "Should extract some files");
-    }
+    let ratio = ua_time.as_secs_f64() / native_time.as_secs_f64();
+    assert!(
+        ratio <= SC010_MAX_RATIO,
+        "SC-010 regression: unified-archive took {ua_time:?} against the native archiver's \
+         {native_time:?}, a ratio of {ratio:.2}x (ceiling {SC010_MAX_RATIO}x)"
+    );
 }
 
-#[test]
-fn test_performance_baseline_documentation() {
-    // R0074-0078: gate the documentation print behind opt-in env var
-    // so default test runs stay quiet.
-    if std::env::var_os("UA_PRINT_PERF_BASELINE").is_none() {
-        return;
-    }
-    // Document the performance requirements from SC-010
-    println!("=== SC-010 Performance Requirement ===");
-    println!("Target: Extraction within 20% of native 7zip performance");
-    println!("Measurement: Extraction throughput (MB/s) on identical hardware");
-    println!();
-    println!("Factors affecting performance:");
-    println!("- Archive format (ZIP, 7z, RAR have different backends)");
-    println!("- Compression level (higher compression = more CPU)");
-    println!("- I/O subsystem (SSD vs HDD)");
-    println!("- File sizes (many small files vs few large files)");
-    println!();
-    println!("Note: Full benchmark suite available in benches/extraction.rs");
-    println!("Run with: cargo bench --bench extraction");
-}
+// R0074-0078 gated `test_performance_baseline_documentation` behind
+// `UA_PRINT_PERF_BASELINE`; OI-0056-010 removed it. It only `println!`ed
+// prose about SC-010 and asserted nothing, so it could not fail in either
+// configuration — the same class R0079-0046 removed from
+// `streaming_memory.rs`. The prose it printed now lives in this module's
+// own documentation, where it cannot masquerade as coverage.
 
 #[test]
 fn test_throughput_calculation() {
@@ -261,6 +269,11 @@ fn test_performance_ratio_calculation() {
         ratio
     );
 
-    // This is exactly at the SC-010 threshold (within 20%)
-    assert!(ratio <= 1.2, "Ratio {} exceeds 20% threshold", ratio);
+    // This is exactly at the SC-010 threshold, and it is the same constant
+    // `perf_baseline_ratio_meets_sc010` compares against — so a silent edit
+    // to the ceiling shows up here too.
+    assert!(
+        ratio <= SC010_MAX_RATIO,
+        "Ratio {ratio} exceeds the SC-010 threshold {SC010_MAX_RATIO}"
+    );
 }

@@ -1,7 +1,7 @@
 ---
 type: ADR
 title: "AD 0052: Codify lazy-validation semantics for backend `open()` (Review 0068 D8)"
-description: "Active — lazy-by-default codified in per-backend rustdoc; the promised D1 validate() hook never shipped (orphaned deferral, owner question open; see 2026-08-04 amendment)."
+description: "Active — first-operation validation is the official contract (libarchive/UnRAR check their first header eagerly); the deferral is retired and the cheap validate() probe landed on ReadBackend, Archive and ReadArchive, distinct from the full-decode validate_integrity() (see 2026-08-21 amendment)."
 tags: [decision, ADR-0052, R0068-0024, R0068-0025, R0068-0026, R0068-0035]
 timestamp: 2026-04-25T00:00:00Z
 status: active
@@ -193,3 +193,76 @@ contract a caller reads is the contract they get. No DCR: the code moved to matc
 the other way round.
 
 The open owner question above is unaffected and still unresolved.
+
+## Amendment (2026-08-21, owner decision — deferral retired, first-operation validation is the contract, `validate()` landed)
+
+The open owner question recorded in the 2026-08-04 amendment is **resolved**. The owner ruled:
+retire the deferral, promote what actually shipped to the official documented contract, **and**
+still provide the cheap probe — under the name `validate()`, explicitly **not**
+`validate_integrity()`.
+
+**The contract, stated.** `Archive::open` does not parse the archive on most backends; it detects
+the format and builds a handle. `open()` returning `Ok` therefore does **not** mean the input is a
+valid archive. Parsing happens on the first call that needs the contents (`list_files`,
+`entry_count`, an extraction), so a corrupt ZIP succeeds at `open()` and fails at `list_files()`.
+This is **first-operation validation**, and it is now the crate-wide contract rather than "the
+current mixed shape, codified pending harmonisation". Two backends check more at open-time and
+remain documented exceptions to *when the first failure lands*, not to the contract itself:
+libarchive probes the first entry header inside `open` (made real by R0001-0012, see the 2026-08-09
+amendment), and UnRAR's `RAROpenArchiveEx` reads the archive's main header. Neither reads past that
+point, so damage in a later header still surfaces from the first full walk.
+
+**Why the deferral could be retired rather than paid off.** The driver for deferring eager
+validation was the redundant parse: validating at `open()` and then parsing again in the caller's
+next operation. AD 0065's frozen listing cache dissolved it. Every read backend memoises its first
+parsed listing as `Arc<Vec<ArchiveEntry>>` (`ReadBackend::list_files_budgeted`, OI-0065-003), and
+the facade's `entry_cache` holds a clone of that same `Arc`, so the first validating parse is paid
+once per handle no matter who forces it. "Validate first, then list" costs exactly what "list"
+costs.
+
+**What landed.**
+
+* `ReadBackend::validate(&self) -> Result<()>` (`src/backend.rs`) — a *provided* method, one
+  default body for every backend, so the per-backend timing differences are expressed in one place
+  instead of per call site. It forces the same parse the next real operation would have run and
+  reports its outcome; it reads metadata only and decodes no payload byte. Unbudgeted on purpose,
+  matching plain `list_files` (the probe is policy-free per OI-0080-003). A failed probe does not
+  poison the listing cache — `get_or_try_init` stores only on `Ok`.
+* `Archive::validate()` (`src/archive.rs`) — public facade entry point, routed through the
+  mode-aware `dispatch_read_archive` so a Libarchive-backed *write* handle surfaces
+  `WriteModeOnly` instead of reopening the in-progress output (R0070-0001). Modify-mode handles
+  validate normally. Residual: it reports under the existing `list_files` operation label, because
+  that is literally the parse it forces and `src/error.rs` (home of `Operation`) was outside this
+  change's file ownership; a dedicated `Operation::Validate` label would read better in the
+  `WriteModeOnly` diagnostic and is the one follow-up this amendment leaves open.
+* `ReadArchive::validate()` (`src/archive/mode_split.rs`, `v2-api`) — same probe on the D2 typed
+  read handle, so the surface is reachable from both the legacy facade and the typed handle.
+
+**`validate()` vs `validate_integrity()` — why two names.** The two differ by orders of magnitude
+and the rustdoc on both sides now says so explicitly. `validate()` reads the directory / TOC /
+header stream only: one metadata parse, `O(entries)`, no payload decoded, returns `Ok(())`.
+`validate_integrity()` decodes and checksums **every entry's payload**: `O(uncompressed bytes)`,
+returns a per-entry `ValidationReport`. `validate()` answers "can this archive be read at all?";
+`validate_integrity()` answers "is every stored byte intact?". Answering the first question with
+the second method pays a full decompression pass for a well-formedness check, which is precisely
+the confusion a shared name would have invited.
+
+**The cheapness claim is proven, not asserted.** `validate()` is only worth having if the parse it
+forces is absorbed by the AD 0065 cache; otherwise it is a hidden second cost and a trap.
+`ffi::zip_wrapper::tests::validate_then_list_files_serves_the_cached_listing` proves it by
+allocation identity rather than timing: a re-parse necessarily builds a new `Vec<ArchiveEntry>`, so
+the test asserts that both cache layers are empty after `open` (the first-operation contract
+itself), that `validate()` populates the backend's listing cell, and that the `Vec` the facade
+hands back from the following `list_files()` is the *same allocation* — and the same `Arc` — that
+`validate()` cached. The test's teeth were verified by mutation: bypassing the backend's listing
+`OnceCell` so each call re-parses makes it fail. A companion test
+(`validate_reports_a_corrupt_archive_that_open_accepted`) covers the other half of the contract —
+a corrupt ZIP that `open()` accepts, which `validate()` rejects with the same failure class the
+first operation would have produced.
+
+**Record status.** The per-backend "Validation timing (AD 0052)" rustdoc on `ZipArchive::open` /
+`open_with_password`, `SevenZArchive::open` / `open_with_password`, `LibarchiveArchive::open` and
+`UnrarArchive::open` now states this official contract instead of describing a codified mixed shape
+pending harmonisation. Nothing in the original ruling is reversed — lazy-by-default *is*
+first-operation validation — but its deferral clause is spent: there is no longer a promised hook
+awaiting a future refactor. The record stays **active** as the statement of the contract.

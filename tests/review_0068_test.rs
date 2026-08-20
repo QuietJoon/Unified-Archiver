@@ -244,12 +244,19 @@ fn r0068_0082_multipart_detection_surfaces_dir_io_error() {
 
     let opened = Archive::open(&archive_path).expect("open archive before lockdown");
 
-    // Strip read+exec on the parent so `read_dir` fails. Skip if running
-    // as root (where the bit is ignored).
-    if nix_uid_is_root() {
-        common::cleanup(&temp);
-        return;
-    }
+    // Strip read+exec on the parent so `read_dir` fails.
+    //
+    // OI-0056-010: this used to `return` when running as root, where the
+    // permission bit is ignored — so a root test run reported success
+    // having asserted nothing. Root is a property of how the suite was
+    // invoked, not of the host, so it now fails with the fix rather than
+    // passing quietly.
+    assert!(
+        !nix_uid_is_root(),
+        "this lane needs an unprivileged uid: root ignores the 0o000 mode bit, so `read_dir` \
+         would succeed and the I/O-error assertion below would be vacuous. Re-run the suite as \
+         a non-root user."
+    );
     fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o000)).unwrap();
 
     let err = opened.detect_multipart().err();

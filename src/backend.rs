@@ -18,9 +18,11 @@
 //! 2. A drop-in `&dyn ReadBackend` view that
 //!    [`crate::extraction::dispatch_read_backend`] can hand off to
 //!    callers, eliminating the per-call-site match.
-//! 3. A natural home for the future `validate(&self) -> Result<()>`
-//!    method (AD 0052, D8) that callers will opt into for eager
-//!    well-formedness checks.
+//! 3. The home of [`ReadBackend::validate`] (AD 0052, D8 — landed
+//!    2026-08-21 when the deferral was retired): the cheap
+//!    "is this a usable archive?" probe callers opt into, with the
+//!    per-backend timing differences expressed once, in the trait's
+//!    default body, instead of per call site.
 //!
 //! Mode-specific surfaces are not yet trait-shaped: write support is a
 //! local enum in `creation.rs` and modify routing remains on `Archive`.
@@ -240,6 +242,82 @@ pub(crate) trait ReadBackend {
     /// are applied by the extraction gate, not here.
     fn list_files(&self) -> Result<Arc<Vec<ArchiveEntry>>> {
         self.list_files_budgeted(None)
+    }
+
+    /// Force the archive's first-operation parse and report whether the
+    /// input is a usable archive (AD 0052 / D8).
+    ///
+    /// # Why this exists
+    ///
+    /// A backend's `open()` does not parse the archive — it sets up a
+    /// handle. `open()` returning `Ok` therefore does **not** mean the
+    /// input is a valid archive: a corrupt ZIP opens fine and fails at
+    /// `list_files`. That is the official contract (AD 0052, deferral
+    /// retired 2026-08-21), not an accident. Two backends fail earlier
+    /// because they read a little at open-time: libarchive probes the
+    /// first entry header (R0001-0012) and UnRAR reads the archive's
+    /// main header. Neither looks past that point.
+    ///
+    /// `validate` is the explicit way to ask the question `open()` does
+    /// not answer: it runs exactly the parse the *next* real operation
+    /// would have run, and reports its outcome. It never reports
+    /// anything about payload bytes.
+    ///
+    /// # Cost — and how it differs from `validate_integrity`
+    ///
+    /// The two are deliberately *not* the same name because they are
+    /// orders of magnitude apart:
+    ///
+    /// | | what it reads | cost |
+    /// |---|---|---|
+    /// | `validate` (this) | the directory / TOC / header stream only | one metadata parse, `O(entries)` |
+    /// | [`crate::Archive::validate_integrity`] | **every entry's payload**, decoded and checksummed | full decode of the archive, `O(uncompressed bytes)` |
+    ///
+    /// So `validate` answers "can this archive be read at all?" and
+    /// `validate_integrity` answers "is every stored byte intact?". A
+    /// call site that wants the first and reaches for the second pays a
+    /// full decompression pass for a well-formedness check.
+    ///
+    /// # It is paid at most once (AD 0065)
+    ///
+    /// The parse `validate` forces is the *same* parse the first
+    /// `list_files` would have forced, and every backend memoises it as
+    /// `Arc<Vec<ArchiveEntry>>` in its listing cache (OI-0065-003 — see
+    /// [`Self::list_files_budgeted`]). A `list_files` after a `validate`
+    /// therefore hits that cache and returns the very `Arc` the
+    /// `validate` populated: **no second parse**. That memoisation is
+    /// what makes this probe cheap enough to be worth having (it is
+    /// also what dissolved the "redundant parse" cost that originally
+    /// motivated deferring eager validation), and it is proven — not
+    /// assumed — by
+    /// `ffi::zip_wrapper::tests::validate_then_list_files_serves_the_cached_listing`,
+    /// which fails if the listing is parsed twice.
+    ///
+    /// A failed `validate` does not poison the cache: `get_or_try_init`
+    /// stores only on `Ok`, so a later call can still succeed if the
+    /// cause was transient.
+    ///
+    /// # Per-backend timing
+    ///
+    /// One default body covers every backend, so the timing differences
+    /// live here rather than in per-backend overrides:
+    ///
+    /// - **zip crate, sevenz-rust2** — nothing has been read yet at
+    ///   `open`; this call is the first read, and it is where a corrupt
+    ///   central directory / TOC surfaces.
+    /// - **libarchive, UnRAR** — streaming header walks; this call reads
+    ///   every header. For libarchive it is strictly more than `open`'s
+    ///   first-header probe already did, so it can still fail here on an
+    ///   archive whose *later* headers are damaged.
+    ///
+    /// Write-mode handles never reach this method: the facade gates on
+    /// [`ArchiveMode`] first (see [`dispatch_read_archive`]).
+    fn validate(&self) -> Result<()> {
+        // Unbudgeted on purpose: the probe is policy-free, exactly like
+        // plain `list_files` (OI-0080-003). A caller that wants an
+        // entry-count cap enforced during the parse asks for the
+        // budgeted listing instead.
+        self.list_files().map(|_| ())
     }
 
     /// Decode `file_path` into an in-memory `Vec<u8>` and return it.

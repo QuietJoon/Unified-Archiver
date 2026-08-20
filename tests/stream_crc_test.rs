@@ -156,17 +156,15 @@ fn test_auto_detect_bzip2() {
 fn test_verify_crc32_values() {
     // Independent oracle: a freshly gzip'd file (not the embedded
     // bytes) must report the crc32fast checksum of its input.
+    //
+    // OI-0056-010: this used to probe with `which gzip` and `eprintln!`-skip
+    // when the probe failed, which self-disabled twice over — once on a host
+    // without `gzip`, and once on any host without `which` (the same
+    // R0001-0086 defect `common::command_exists` was written to fix). The
+    // external oracle is the whole point of the lane, so its absence is now
+    // a hard failure: the `gzip` invocation below is unguarded and reports
+    // the dependency in its own panic message.
     use std::process::Command;
-
-    let gzip_available = Command::new("which")
-        .arg("gzip")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !gzip_available {
-        eprintln!("Skipping test: gzip command not available");
-        return;
-    }
 
     let dir = tempfile::tempdir().expect("create tempdir");
     let test_path = dir.path().join("test_known_crc.txt");
@@ -179,7 +177,11 @@ fn test_verify_crc32_values() {
         .arg("-k")
         .arg(&test_path)
         .status()
-        .expect("run gzip");
+        .expect(
+            "this lane needs the `gzip` CLI as an independent CRC32 oracle (the embedded-bytes \
+         lanes above cover the parser against hard-coded values; this one deliberately does \
+         not compute the reference itself). Install gzip and re-run.",
+        );
     assert!(status.success(), "gzip should compress the test file");
 
     let checksum = extract_gzip_stream_crc(&gz_path).expect("Should extract GZIP stream CRC");

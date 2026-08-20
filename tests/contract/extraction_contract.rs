@@ -257,6 +257,16 @@ fn contract_extract_to_memory_returns_correct_size() {
     let archive = Archive::open(fixture("test.zip")).unwrap();
     let entries = archive.list_files().unwrap();
 
+    // OI-0056-010 vacuity floor: a listing with no sized entries would make
+    // the loop below assert nothing at all.
+    assert!(
+        entries.iter().any(|e| e.size.is_some()),
+        "test.zip must list at least one entry carrying a declared size: {:?}",
+        entries
+            .iter()
+            .map(|e| (&e.path, e.size))
+            .collect::<Vec<_>>()
+    );
     for entry in entries.iter().filter(|e| e.size.is_some()) {
         let data = archive.extract_to_memory(&entry.path).unwrap();
         if let Some(expected_size) = entry.size {

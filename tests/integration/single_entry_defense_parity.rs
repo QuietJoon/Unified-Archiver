@@ -75,18 +75,29 @@ fn build_parity_zip(path: &Path) {
     fs::write(path, &bytes).unwrap();
 }
 
-/// Directory-carrying 7z via the CLI (`7zz`/`7z`); false = skip.
-fn build_7z_with_dir(archive_path: &Path, staging: &Path) -> bool {
+/// Directory-carrying 7z via the CLI (`7zz`/`7z`).
+///
+/// OI-0056-010: the 7z **writer** is a library dependency, not a
+/// dev-dependency, so an integration test cannot build a
+/// directory-carrying 7z in-process — this is the one fixture here that
+/// genuinely needs an external binary. It therefore panics with the
+/// install hint instead of returning `false` and letting the caller skip.
+fn build_7z_with_dir(archive_path: &Path, staging: &Path) {
     let cli = if command_exists("7zz") {
         "7zz"
     } else if command_exists("7z") {
         "7z"
     } else {
-        return false;
+        panic!(
+            "this lane needs the 7-Zip CLI to build a directory-carrying 7z (the 7z writer is a \
+             library dependency, not a dev-dependency, so the fixture cannot be built \
+             in-process). Install it with `brew install sevenzip` (provides `7zz`) or \
+             `apt install p7zip-full` (provides `7z`)."
+        )
     };
     fs::create_dir_all(staging.join("subdir")).expect("staging dir");
     fs::write(staging.join("regular.txt"), b"hello\n").expect("write regular");
-    Command::new(cli)
+    let status = Command::new(cli)
         .args([
             "a",
             "-y",
@@ -96,47 +107,28 @@ fn build_7z_with_dir(archive_path: &Path, staging: &Path) -> bool {
         ])
         .current_dir(staging)
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .expect("spawn the 7-Zip CLI");
+    assert!(status.success(), "{cli} failed to build the 7z fixture");
 }
 
-/// TAR with a directory entry plus a duplicated member name
-/// (`tar -rf` append — the legal way duplicates arise in real tars);
-/// false = skip.
-fn build_tar_with_dir_and_dup(archive_path: &Path, staging: &Path) -> bool {
-    if !command_exists("tar") {
-        return false;
-    }
-    fs::create_dir_all(staging.join("subdir")).expect("staging dir");
-    fs::write(staging.join("regular.txt"), b"hello\n").expect("write regular");
-    let created = Command::new("tar")
-        .args([
-            "cf",
-            archive_path.to_str().unwrap(),
-            "-C",
-            staging.to_str().unwrap(),
-            "regular.txt",
-            "subdir",
-        ])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !created {
-        return false;
-    }
-    // Append the same member again — duplicate path, distinct payload.
-    fs::write(staging.join("regular.txt"), b"world\n").expect("rewrite regular");
-    Command::new("tar")
-        .args([
-            "rf",
-            archive_path.to_str().unwrap(),
-            "-C",
-            staging.to_str().unwrap(),
-            "regular.txt",
-        ])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+/// TAR with a directory entry plus a duplicated member name — the shape a
+/// `tar -rf` append produces, and the legal way duplicates arise in real
+/// tars.
+///
+/// OI-0056-010: built in-process by the shared ustar writer, so it can no
+/// longer skip on a host without the `tar` CLI. Writing the duplicate
+/// directly is also stricter than the two-CLI-call dance it replaces: the
+/// second `regular.txt` record is guaranteed present rather than dependent
+/// on the local tar's append behaviour.
+fn build_tar_with_dir_and_dup(archive_path: &Path) {
+    common::write_tar(
+        archive_path,
+        &[
+            common::TarMember::dir("subdir/"),
+            common::TarMember::file("regular.txt", b"hello\n"),
+            common::TarMember::file("regular.txt", b"world\n"),
+        ],
+    );
 }
 
 // ── ZIP (sole `zip`-crate backend after the AD 0007 collapse) ──
@@ -191,12 +183,26 @@ fn zip_backend_rejects_symlink_entries() {
 
     let zipb = ZipArchive::open(&archive).unwrap();
     let entries = zipb.list_files().unwrap();
-    let Some(link) = entries.iter().find(|e| e.is_symlink()) else {
-        eprintln!("skipping: zip writer did not produce a symlink-flagged entry");
-        common::cleanup(&tmp);
-        return;
-    };
-    let link_path = link.path.clone();
+    // OI-0056-010: this used to `eprintln!` and return when the writer
+    // produced no symlink-flagged entry, which is exactly the condition
+    // that makes the rest of the lane meaningless. A fixture the reader
+    // does not classify as a symlink is a defect in the fixture or the
+    // reader, not a reason to pass.
+    let link_path = entries
+        .iter()
+        .find(|e| e.is_symlink())
+        .unwrap_or_else(|| {
+            panic!(
+                "the zip writer produced no S_IFLNK-flagged entry, so the symlink rejection \
+                 below would test nothing: {:?}",
+                entries
+                    .iter()
+                    .map(|e| (&e.path, e.entry_type))
+                    .collect::<Vec<_>>()
+            )
+        })
+        .path
+        .clone();
 
     let msg = rejection_text(zipb.extract_to_memory(&link_path), "zip memory symlink");
     assert_contains(&msg, "symbolic link", "zip memory symlink");
@@ -277,11 +283,7 @@ fn sevenz_backend_rejects_directory_entries() {
     let tmp = common::temp_test_dir();
     let staging = tmp.join("staging");
     let archive = tmp.join("parity.7z");
-    if !build_7z_with_dir(&archive, &staging) {
-        eprintln!("skipping: 7z/7zz CLI not available");
-        common::cleanup(&tmp);
-        return;
-    }
+    build_7z_with_dir(&archive, &staging);
 
     let sz = SevenZArchive::open(&archive).unwrap();
     let dir_path = sz
@@ -313,11 +315,7 @@ fn sevenz_backend_not_found_uses_gate_shape() {
     let tmp = common::temp_test_dir();
     let staging = tmp.join("staging");
     let archive = tmp.join("parity.7z");
-    if !build_7z_with_dir(&archive, &staging) {
-        eprintln!("skipping: 7z/7zz CLI not available");
-        common::cleanup(&tmp);
-        return;
-    }
+    build_7z_with_dir(&archive, &staging);
 
     let sz = SevenZArchive::open(&archive).unwrap();
     let msg = rejection_text(sz.extract_to_memory("nope.txt"), "7z not-found");
@@ -332,13 +330,8 @@ fn sevenz_backend_not_found_uses_gate_shape() {
 #[cfg(unix)]
 fn libarchive_backend_rejects_directory_and_duplicate_entries() {
     let tmp = common::temp_test_dir();
-    let staging = tmp.join("staging");
     let archive = tmp.join("parity.tar");
-    if !build_tar_with_dir_and_dup(&archive, &staging) {
-        eprintln!("skipping: tar CLI not available");
-        common::cleanup(&tmp);
-        return;
-    }
+    build_tar_with_dir_and_dup(&archive);
 
     let la = LibarchiveArchive::open(&archive).unwrap();
     let entries = la.list_files_metadata_only().unwrap();
@@ -380,11 +373,7 @@ fn libarchive_backend_rejects_link_entries() {
 
     // Symlink tar via the shared builder (regular.txt + link.txt).
     let sym_tar = tmp.join("symlink.tar");
-    if !common::build_tar_with_symlink(&sym_tar, &tmp.join("sym_staging")) {
-        eprintln!("skipping: cannot build symlink tar fixture");
-        common::cleanup(&tmp);
-        return;
-    }
+    common::build_tar_with_symlink(&sym_tar);
     let la = LibarchiveArchive::open(&sym_tar).unwrap();
     let msg = rejection_text(la.extract_to_memory("link.txt"), "tar memory symlink");
     assert_contains(&msg, "symbolic link", "tar memory symlink");
@@ -396,11 +385,7 @@ fn libarchive_backend_rejects_link_entries() {
 
     // Hardlink tar via the shared builder (regular.txt + hardlink.txt).
     let hard_tar = tmp.join("hardlink.tar");
-    if !common::build_tar_with_hardlink(&hard_tar, &tmp.join("hard_staging")) {
-        eprintln!("skipping: cannot build hardlink tar fixture");
-        common::cleanup(&tmp);
-        return;
-    }
+    common::build_tar_with_hardlink(&hard_tar);
     let la = LibarchiveArchive::open(&hard_tar).unwrap();
     let msg = rejection_text(la.extract_to_memory("hardlink.txt"), "tar memory hardlink");
     assert_contains(&msg, "hard link", "tar memory hardlink");

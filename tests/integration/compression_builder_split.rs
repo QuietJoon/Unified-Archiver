@@ -9,7 +9,7 @@
 
 use unified_archive::{
     Archive, ArchiveFormat, CompressionLevel, LibarchiveCompressionOptions,
-    SevenZCompressionOptions, ZipCompressionOptions,
+    SevenZCompressionOptions, WritableFormat, ZipCompressionOptions,
 };
 
 fn unique_dest(prefix: &str, ext: &str) -> std::path::PathBuf {
@@ -64,7 +64,7 @@ fn seven_zip_compression_options_round_trips() {
 
 #[test]
 fn libarchive_compression_options_round_trips_tar() {
-    let opts = LibarchiveCompressionOptions::new(ArchiveFormat::Tar);
+    let opts = LibarchiveCompressionOptions::for_writable(WritableFormat::TAR);
     let archive_path = unique_dest("split_libarchive", "tar");
     let _ = std::fs::remove_file(&archive_path);
 
@@ -83,8 +83,8 @@ fn libarchive_compression_options_round_trips_tar() {
 
 #[test]
 fn libarchive_compression_options_round_trips_tar_gz() {
-    let opts =
-        LibarchiveCompressionOptions::new(ArchiveFormat::TarGzip).level(CompressionLevel::Fast);
+    let opts = LibarchiveCompressionOptions::for_writable(WritableFormat::TAR_GZIP)
+        .level(CompressionLevel::Fast);
     let archive_path = unique_dest("split_libarchive_gz", "tar.gz");
     let _ = std::fs::remove_file(&archive_path);
 
@@ -101,6 +101,11 @@ fn libarchive_compression_options_round_trips_tar_gz() {
 }
 
 #[test]
+// The deprecated loose constructor is this test's SUBJECT, not an oversight:
+// it is the only path that can hold a non-creatable format long enough to
+// reach `create_libarchive`. `for_writable` cannot express Rar at all, and
+// `try_new` fails at construction — either would delete what is under test.
+#[allow(deprecated)]
 fn libarchive_options_with_uncreatable_format_fails_at_create_time() {
     // Formats that aren't libarchive-creatable surface the same
     // `OperationBlocked` as the legacy `Archive::create` path.

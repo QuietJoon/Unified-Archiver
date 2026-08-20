@@ -20,36 +20,51 @@ use std::process::Command;
 
 use unified_archive::Archive;
 
-/// Build a ZIP containing both a directory entry and a regular file using
-/// the `zip` CLI. The CLI writes trailing-slash directory entries with the
-/// MS-DOS directory attribute bit set — the canonical format the `zip`
-/// crate recognizes as `is_dir()`.
-fn build_zip_with_dir(archive_path: &Path, staging: &Path) -> bool {
-    if !command_exists("zip") {
-        return false;
-    }
-    fs::create_dir_all(staging.join("subdir")).expect("staging dir");
-    fs::write(staging.join("regular.txt"), b"hello\n").expect("write regular");
+/// Build a ZIP containing both a directory entry and a regular file.
+///
+/// `ZipWriter::add_directory` writes the trailing-slash name with the
+/// MS-DOS directory attribute bit set — the same shape the `zip` CLI
+/// produced and the one the `zip` crate recognizes as `is_dir()`.
+///
+/// OI-0056-010: this used to shell out to `zip -r` and return `false` when
+/// the CLI was missing, so both consuming lanes reported success having
+/// asserted nothing. The fixture check below proves the directory entry is
+/// actually classified as one, so a writer regression fails rather than
+/// skips.
+fn build_zip_with_dir(archive_path: &Path) {
+    common::build_zip_with_dir(archive_path);
 
-    let status = Command::new("zip")
-        .args([
-            "-r",
-            archive_path.to_str().unwrap(),
-            "regular.txt",
-            "subdir",
-        ])
-        .current_dir(staging)
-        .status();
-    status.map(|s| s.success()).unwrap_or(false)
+    let probe = Archive::open(archive_path).expect("fixture zip must open");
+    let listed = probe.list_files().expect("fixture zip must list");
+    assert!(
+        listed.iter().any(|e| e.is_directory()),
+        "the zip writer stopped flagging `subdir/` as a directory, so these lanes would test \
+         nothing: {:?}",
+        listed
+            .iter()
+            .map(|e| (&e.path, e.entry_type))
+            .collect::<Vec<_>>()
+    );
 }
 
-fn build_7z_with_dir(archive_path: &Path, staging: &Path) -> bool {
+/// Directory-carrying 7z via the CLI (`7zz`/`7z`).
+///
+/// OI-0056-010: the 7z writer is a library dependency rather than a
+/// dev-dependency, so this fixture genuinely cannot be built in-process
+/// from an integration test. A missing CLI is therefore a hard failure
+/// with the install hint, not a silent skip.
+fn build_7z_with_dir(archive_path: &Path, staging: &Path) {
     let cli = if command_exists("7zz") {
         "7zz"
     } else if command_exists("7z") {
         "7z"
     } else {
-        return false;
+        panic!(
+            "this lane needs the 7-Zip CLI to build a directory-carrying 7z (the 7z writer is a \
+             library dependency, not a dev-dependency, so the fixture cannot be built \
+             in-process). Install it with `brew install sevenzip` (provides `7zz`) or \
+             `apt install p7zip-full` (provides `7z`)."
+        )
     };
     fs::create_dir_all(staging.join("subdir")).expect("staging dir");
     fs::write(staging.join("regular.txt"), b"hello\n").expect("write regular");
@@ -63,21 +78,17 @@ fn build_7z_with_dir(archive_path: &Path, staging: &Path) -> bool {
             "subdir",
         ])
         .current_dir(staging)
-        .status();
-    status.map(|s| s.success()).unwrap_or(false)
+        .status()
+        .expect("spawn the 7-Zip CLI");
+    assert!(status.success(), "{cli} failed to build the 7z fixture");
 }
 
 #[test]
 fn single_file_extract_creates_directory_zip() {
     let tmp = common::temp_test_dir();
-    let staging = tmp.join("staging");
     let archive = tmp.join("dir.zip");
     let out_dir = tmp.join("out");
-    if !build_zip_with_dir(&archive, &staging) {
-        eprintln!("skipping: zip CLI not available");
-        common::cleanup(&tmp);
-        return;
-    }
+    build_zip_with_dir(&archive);
     fs::create_dir_all(&out_dir).unwrap();
 
     let opened = Archive::open(&archive).expect("open zip");
@@ -117,14 +128,9 @@ fn single_file_extract_creates_directory_zip_backend() {
     use unified_archive::ffi::zip_wrapper::ZipArchive as ZipBackend;
 
     let tmp = common::temp_test_dir();
-    let staging = tmp.join("staging");
     let archive = tmp.join("dir_zipbe.zip");
     let out_dir = tmp.join("out");
-    if !build_zip_with_dir(&archive, &staging) {
-        eprintln!("skipping: zip CLI not available");
-        common::cleanup(&tmp);
-        return;
-    }
+    build_zip_with_dir(&archive);
     fs::create_dir_all(&out_dir).unwrap();
 
     let backend = ZipBackend::open(&archive).expect("open via zip-crate backend");
@@ -156,11 +162,7 @@ fn single_file_extract_creates_directory_sevenz() {
     let staging = tmp.join("staging");
     let archive = tmp.join("dir.7z");
     let out_dir = tmp.join("out");
-    if !build_7z_with_dir(&archive, &staging) {
-        eprintln!("skipping: 7z/7zz CLI not available");
-        common::cleanup(&tmp);
-        return;
-    }
+    build_7z_with_dir(&archive, &staging);
     fs::create_dir_all(&out_dir).unwrap();
 
     let opened = Archive::open(&archive).expect("open 7z");

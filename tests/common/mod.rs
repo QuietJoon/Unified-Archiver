@@ -10,7 +10,6 @@ pub mod config;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -174,81 +173,238 @@ fn is_executable_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Build a TAR archive at `archive_path` containing `regular.txt` and a
-/// `link.txt -> regular.txt` symlink, using the system `tar` CLI. Returns
-/// false when the environment cannot produce the fixture (non-Unix host or
-/// missing `tar`/`ln`). Tests that require the fixture skip on `false`.
+// ---------------------------------------------------------------------------
+// Library-native fixture builders (OI-0056-010)
+//
+// These used to shell out to the `tar`, `ln` and `zip` CLIs and return
+// `false` when a binary was missing, which let every consuming lane report
+// success having asserted nothing. The TAR side is now a ~40-line ustar
+// writer and the ZIP side goes through the `zip` dev-dependency, so no lane
+// depends on a host binary any more and none of them can skip.
+// ---------------------------------------------------------------------------
+
+/// One member of a hand-assembled ustar archive.
+///
+/// `typeflag` follows POSIX.1-1988: `b'0'` regular file, `b'1'` hard link,
+/// `b'2'` symbolic link, `b'5'` directory. `link` is the `linkname` field
+/// and is only meaningful for the two link types.
 #[allow(dead_code)]
-pub fn build_tar_with_symlink(archive_path: &Path, staging: &Path) -> bool {
-    if !command_exists("tar") || !command_exists("ln") {
-        return false;
-    }
-
-    fs::create_dir_all(staging).expect("staging dir");
-    fs::write(staging.join("regular.txt"), b"hello from a regular file\n").expect("write regular");
-
-    let link_path = staging.join("link.txt");
-    #[cfg(unix)]
-    {
-        let _ = fs::remove_file(&link_path);
-        std::os::unix::fs::symlink("regular.txt", &link_path).expect("symlink");
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = link_path;
-        return false;
-    }
-
-    let status = Command::new("tar")
-        .args([
-            "cf",
-            archive_path.to_str().unwrap(),
-            "-C",
-            staging.to_str().unwrap(),
-            "regular.txt",
-            "link.txt",
-        ])
-        .status();
-
-    status.map(|s| s.success()).unwrap_or(false)
+pub struct TarMember<'a> {
+    pub name: &'a str,
+    pub typeflag: u8,
+    pub link: &'a str,
+    pub data: &'a [u8],
+    pub mode: u32,
 }
 
-/// Build a TAR archive at `archive_path` containing `regular.txt` and a
-/// `hardlink.txt` hard-linked to it. Returns false on non-Unix or when
-/// `tar`/`ln` are missing from PATH.
 #[allow(dead_code)]
-pub fn build_tar_with_hardlink(archive_path: &Path, staging: &Path) -> bool {
-    if !command_exists("tar") || !command_exists("ln") {
-        return false;
+impl<'a> TarMember<'a> {
+    pub fn file(name: &'a str, data: &'a [u8]) -> Self {
+        Self {
+            name,
+            typeflag: b'0',
+            link: "",
+            data,
+            mode: 0o644,
+        }
     }
 
-    fs::create_dir_all(staging).expect("staging dir");
-    fs::write(staging.join("regular.txt"), b"hello from a regular file\n").expect("write regular");
-
-    let hardlink_path = staging.join("hardlink.txt");
-    #[cfg(unix)]
-    {
-        let _ = fs::remove_file(&hardlink_path);
-        fs::hard_link(staging.join("regular.txt"), &hardlink_path).expect("hardlink");
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = hardlink_path;
-        return false;
+    pub fn dir(name: &'a str) -> Self {
+        Self {
+            name,
+            typeflag: b'5',
+            link: "",
+            data: &[],
+            mode: 0o755,
+        }
     }
 
-    let status = Command::new("tar")
-        .args([
-            "cf",
-            archive_path.to_str().unwrap(),
-            "-C",
-            staging.to_str().unwrap(),
-            "regular.txt",
-            "hardlink.txt",
-        ])
-        .status();
+    pub fn symlink(name: &'a str, target: &'a str) -> Self {
+        Self {
+            name,
+            typeflag: b'2',
+            link: target,
+            data: &[],
+            mode: 0o777,
+        }
+    }
 
-    status.map(|s| s.success()).unwrap_or(false)
+    pub fn hardlink(name: &'a str, target: &'a str) -> Self {
+        Self {
+            name,
+            typeflag: b'1',
+            link: target,
+            data: &[],
+            mode: 0o644,
+        }
+    }
+}
+
+/// Write a ustar archive containing `members`, in order, to `path`.
+///
+/// Deliberately byte-level rather than CLI-driven: it works on every host,
+/// it can emit shapes no portable CLI invocation reaches (a duplicated
+/// member name, a link record with no filesystem link behind it), and the
+/// resulting fixture is identical everywhere, so a lane that depends on it
+/// can neither skip nor drift between hosts.
+#[allow(dead_code)]
+pub fn write_tar(path: &Path, members: &[TarMember<'_>]) {
+    fn octal(buf: &mut [u8], value: u64) {
+        // POSIX wants `width - 1` octal digits followed by NUL.
+        let digits = buf.len() - 1;
+        let text = format!("{value:0digits$o}");
+        assert!(
+            text.len() == digits,
+            "value {value} does not fit in {digits} octal digits"
+        );
+        buf[..digits].copy_from_slice(text.as_bytes());
+        buf[digits] = 0;
+    }
+
+    let mut out: Vec<u8> = Vec::new();
+    for m in members {
+        assert!(m.name.len() < 100, "fixture name too long: {}", m.name);
+        assert!(m.link.len() < 100, "fixture link too long: {}", m.link);
+
+        let mut header = [0u8; 512];
+        header[..m.name.len()].copy_from_slice(m.name.as_bytes());
+        octal(&mut header[100..108], m.mode as u64);
+        octal(&mut header[108..116], 0); // uid
+        octal(&mut header[116..124], 0); // gid
+        octal(&mut header[124..136], m.data.len() as u64);
+        octal(&mut header[136..148], 0); // mtime — fixed, so fixtures are reproducible
+        header[148..156].fill(b' '); // checksum placeholder
+        header[156] = m.typeflag;
+        header[157..157 + m.link.len()].copy_from_slice(m.link.as_bytes());
+        header[257..262].copy_from_slice(b"ustar");
+        header[262] = 0;
+        header[263..265].copy_from_slice(b"00");
+
+        let sum: u64 = header.iter().map(|b| u64::from(*b)).sum();
+        // The checksum field is 6 octal digits, NUL, space.
+        let text = format!("{sum:06o}");
+        header[148..154].copy_from_slice(text.as_bytes());
+        header[154] = 0;
+        header[155] = b' ';
+
+        out.extend_from_slice(&header);
+        out.extend_from_slice(m.data);
+        let rem = m.data.len() % 512;
+        if rem != 0 {
+            out.extend(std::iter::repeat_n(0u8, 512 - rem));
+        }
+    }
+    // Two zero blocks close the archive.
+    out.extend(std::iter::repeat_n(0u8, 1024));
+    fs::write(path, &out).expect("write tar fixture");
+}
+
+/// TAR carrying `regular.txt` plus a `link.txt -> regular.txt` symlink
+/// record. Infallible: no host binary is involved.
+#[allow(dead_code)]
+pub fn build_tar_with_symlink(archive_path: &Path) {
+    write_tar(
+        archive_path,
+        &[
+            TarMember::file("regular.txt", b"hello from a regular file\n"),
+            TarMember::symlink("link.txt", "regular.txt"),
+        ],
+    );
+}
+
+/// TAR carrying `regular.txt` plus a `hardlink.txt` hard-link record
+/// pointing at it. Infallible: no host binary is involved.
+#[allow(dead_code)]
+pub fn build_tar_with_hardlink(archive_path: &Path) {
+    write_tar(
+        archive_path,
+        &[
+            TarMember::file("regular.txt", b"hello from a regular file\n"),
+            TarMember::hardlink("hardlink.txt", "regular.txt"),
+        ],
+    );
+}
+
+/// One member of a ZIP fixture built through the `zip` dev-dependency.
+#[allow(dead_code)]
+pub enum ZipMember<'a> {
+    /// A regular file entry.
+    File(&'a str, &'a [u8]),
+    /// A trailing-slash directory entry carrying the MS-DOS directory
+    /// attribute — the shape the `zip` crate reports as `is_dir()`.
+    Dir(&'a str),
+    /// An S_IFLNK-flagged entry whose payload is the link target.
+    Symlink(&'a str, &'a str),
+}
+
+/// Build a ZIP at `path` from `members`.
+///
+/// `stored` selects STORE over DEFLATE, which is how the CLI's `-0` used to
+/// be expressed. Replaces the `zip`/`zip --symlinks` CLI calls the fixture
+/// lanes used to skip on (OI-0056-010).
+#[allow(dead_code)]
+pub fn build_zip(path: &Path, members: &[ZipMember<'_>], stored: bool) {
+    use std::io::Write as _;
+
+    let file = fs::File::create(path).expect("create zip fixture");
+    let mut writer = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default().compression_method(if stored {
+        zip::CompressionMethod::Stored
+    } else {
+        zip::CompressionMethod::Deflated
+    });
+
+    for m in members {
+        match m {
+            ZipMember::File(name, data) => {
+                writer.start_file(*name, options).expect("start zip entry");
+                writer.write_all(data).expect("write zip entry");
+            }
+            ZipMember::Dir(name) => {
+                writer.add_directory(*name, options).expect("zip directory");
+            }
+            ZipMember::Symlink(name, target) => {
+                writer
+                    .add_symlink(*name, *target, options)
+                    .expect("zip symlink");
+            }
+        }
+    }
+    writer.finish().expect("finish zip fixture");
+}
+
+/// ZIP carrying `regular.txt` plus a `link.txt -> regular.txt` symlink
+/// entry, built in-process.
+///
+/// The old CLI-backed builder warned that "writing a real ZIP symlink from
+/// pure Rust is fragile because many zip writers mask file-type bits out of
+/// `unix_permissions`". `ZipWriter::add_symlink` does set S_IFLNK, and
+/// `build_zip_with_symlink_checked` proves it against this crate's own
+/// reader rather than trusting it, so the fragility is now asserted instead
+/// of routed around.
+#[allow(dead_code)]
+pub fn build_zip_with_symlink(archive_path: &Path) {
+    build_zip(
+        archive_path,
+        &[
+            ZipMember::File("regular.txt", b"hello from a regular file\n"),
+            ZipMember::Symlink("link.txt", "regular.txt"),
+        ],
+        true,
+    );
+}
+
+/// ZIP carrying `regular.txt` plus a `subdir/` directory entry.
+#[allow(dead_code)]
+pub fn build_zip_with_dir(archive_path: &Path) {
+    build_zip(
+        archive_path,
+        &[
+            ZipMember::File("regular.txt", b"hello\n"),
+            ZipMember::Dir("subdir/"),
+        ],
+        true,
+    );
 }
 
 /// Build a single-entry ZIP carrying a 0x5455 ExtendedTimestamp extra

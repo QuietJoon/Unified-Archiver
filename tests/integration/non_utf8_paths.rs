@@ -36,24 +36,47 @@ fn fs_supports_non_utf8_names() -> bool {
     })
 }
 
-/// `eprintln!` and early-return when the filesystem rejects the
-/// fixtures these tests need. Without this guard the suite panics
-/// on macOS APFS/HFS+ (R0077-0097).
-macro_rules! skip_if_unsupported_fs {
+/// Fail loudly when the temp filesystem rejects the fixtures these tests
+/// need.
+///
+/// OI-0056-010: this used to `eprintln!` and return, so on macOS (APFS/HFS+
+/// reject `\xff\xfe` with `EILSEQ`, R0077-0097) all four lanes reported
+/// success having created nothing — indistinguishable from a covered run.
+/// The host dependency is now declared two ways instead: the lanes are
+/// `#[ignore]`d on macOS, where the filesystem genuinely cannot hold the
+/// fixture, and on every other host this macro turns a rejecting filesystem
+/// into a failure rather than a pass.
+///
+/// To run them on macOS anyway (they are expected to fail — that is the
+/// point, the fixture cannot exist there):
+///
+/// ```text
+/// TMPDIR=/Volumes/Temp/claude cargo test --test integration_tests --all-features \
+///     -- --ignored --test-threads=4 integration::non_utf8_paths
+/// ```
+macro_rules! require_non_utf8_fs {
     () => {
-        if !fs_supports_non_utf8_names() {
-            eprintln!(
-                "skipping {}: temp filesystem rejects non-UTF-8 filenames (Illegal byte sequence)",
-                std::any::type_name_of_val(&|| {})
-            );
-            return;
-        }
+        assert!(
+            fs_supports_non_utf8_names(),
+            "the temp filesystem at {:?} rejects non-UTF-8 filenames (Illegal byte sequence), so \
+             this lane cannot build its fixture. On macOS that is expected and the lane is \
+             `#[ignore]`d; anywhere else it is a real environment problem — point TMPDIR at a \
+             filesystem that stores raw bytes (ext4/xfs/btrfs/tmpfs).",
+            temp_dir()
+        );
     };
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "macOS APFS/HFS+ reject non-UTF-8 filenames (EILSEQ), so the fixture cannot exist \
+              here; run on Linux, or force it with `TMPDIR=/Volumes/Temp/claude cargo test \
+              --test integration_tests --all-features -- --ignored --test-threads=4 \
+              integration::non_utf8_paths`"
+)]
 fn libarchive_path_roundtrips_through_non_utf8_archive_name() {
-    skip_if_unsupported_fs!();
+    require_non_utf8_fs!();
     // The archive's filesystem path itself contains \xff\xfe — invalid
     // UTF-8 on Unix. Before AD 0064 the libarchive wrapper stored the
     // path as `String` via `to_string_lossy()` so a downstream reopen
@@ -109,10 +132,14 @@ fn unrar_archive_path_preserves_pathbuf_through_open() {
     // via a UTF-8 path round-trips the PathBuf bytes through
     // `Archive::path()` exactly.
 
+    // OI-0056-010: `tests/fixtures/test.rar` is a tracked fixture, so an
+    // `if !exists { return }` here made a broken checkout look like a pass.
     let src = PathBuf::from("tests/fixtures/test.rar");
-    if !src.exists() {
-        return; // RAR fixtures may be absent in some configurations
-    }
+    assert!(
+        src.exists(),
+        "tracked RAR fixture {} is missing; this lane cannot run without it",
+        src.display()
+    );
 
     let opened = Archive::open(&src).unwrap();
     assert_eq!(
@@ -125,8 +152,15 @@ fn unrar_archive_path_preserves_pathbuf_through_open() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "macOS APFS/HFS+ reject non-UTF-8 filenames (EILSEQ), so the fixture cannot exist \
+              here; run on Linux, or force it with `TMPDIR=/Volumes/Temp/claude cargo test \
+              --test integration_tests --all-features -- --ignored --test-threads=4 \
+              integration::non_utf8_paths`"
+)]
 fn add_file_from_path_rejects_non_utf8_filename_loudly() {
-    skip_if_unsupported_fs!();
+    require_non_utf8_fs!();
     // AD 0064 / R0075-0007: silent to_string_lossy at this boundary is
     // rejected so a non-UTF-8 source filename doesn't get truncated to
     // a different archive entry name. Callers route through
@@ -160,8 +194,15 @@ fn add_file_from_path_rejects_non_utf8_filename_loudly() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "macOS APFS/HFS+ reject non-UTF-8 filenames (EILSEQ), so the fixture cannot exist \
+              here; run on Linux, or force it with `TMPDIR=/Volumes/Temp/claude cargo test \
+              --test integration_tests --all-features -- --ignored --test-threads=4 \
+              integration::non_utf8_paths`"
+)]
 fn add_file_from_path_as_accepts_non_utf8_source_with_explicit_name() {
-    skip_if_unsupported_fs!();
+    require_non_utf8_fs!();
     // The escape hatch: callers with a non-UTF-8 source can still add
     // it under an explicit UTF-8 archive entry name.
 
@@ -190,8 +231,15 @@ fn add_file_from_path_as_accepts_non_utf8_source_with_explicit_name() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "macOS APFS/HFS+ reject non-UTF-8 filenames (EILSEQ), so the fixture cannot exist \
+              here; run on Linux, or force it with `TMPDIR=/Volumes/Temp/claude cargo test \
+              --test integration_tests --all-features -- --ignored --test-threads=4 \
+              integration::non_utf8_paths`"
+)]
 fn libarchive_extract_to_memory_works_through_non_utf8_archive_name() {
-    skip_if_unsupported_fs!();
+    require_non_utf8_fs!();
     let mut archive_name = std::ffi::OsString::from("");
     archive_name.push(OsStr::from_bytes(b"extract-\xa0\xa1.tar"));
     let archive_path = temp_dir().join(&archive_name);

@@ -1,5 +1,7 @@
 //! Archive format detection and capabilities
 
+pub mod multipart;
+
 use crate::error::{ArchiveError, Result};
 use std::fs::File;
 use std::io::Read;

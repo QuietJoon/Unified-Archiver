@@ -558,12 +558,19 @@ impl RawCentralDirectory {
 impl ZipArchive {
     /// Open ZIP archive for reading.
     ///
-    /// **Validation timing (AD 0052):** the constructor only stores the
-    /// path; the file is not even opened. Central-directory parsing and
-    /// any other format-level validation happens lazily on the first call
-    /// to `list_files`, `extract_*`, or `test_integrity`. A corrupt,
-    /// truncated, or non-ZIP file therefore surfaces its error at first
-    /// use, not at `open()` time.
+    /// **Validation timing (AD 0052):** first-operation validation — the
+    /// crate-wide contract, not a per-backend quirk. The constructor only
+    /// stores the path; the file is not even opened. Central-directory
+    /// parsing and every other format-level check happens on the first
+    /// call that needs the contents (`list_files`, `extract_*`,
+    /// `test_integrity`), so a corrupt, truncated, or non-ZIP file
+    /// surfaces its error there rather than from `open()`. That first
+    /// parse is memoised in `listing` (AD 0065), so it is paid once per
+    /// handle. Callers who want the check *now* call
+    /// [`crate::Archive::validate`] (or
+    /// [`crate::backend::ReadBackend::validate`]), which forces exactly
+    /// this parse and leaves it cached — it is not
+    /// `validate_integrity`, which decodes every payload.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
 
@@ -650,11 +657,13 @@ impl ZipArchive {
 
     /// Open encrypted ZIP archive with password.
     ///
-    /// Same lazy-validation semantics as [`ZipArchive::open`] — the
+    /// Same first-operation validation as [`ZipArchive::open`] — the
     /// password is stored alongside the path, but neither the archive
     /// shape nor the password's correctness is checked until the caller
     /// requests entry data. A wrong password surfaces from the
-    /// `extract_*` paths via `ArchiveError::Password`.
+    /// `extract_*` paths via `ArchiveError::Password`; note that
+    /// [`crate::Archive::validate`] parses metadata only, so it does
+    /// **not** report a bad password.
     pub fn open_with_password(path: impl AsRef<Path>, password: &str) -> Result<Self> {
         let mut archive = Self::open(path)?;
         archive.password = Some(Password::new(password));
@@ -1711,6 +1720,103 @@ mod tests {
         let archive = ZipArchive::open(&path);
         assert!(archive.is_ok());
         assert_eq!(archive.unwrap().path(), path);
+    }
+
+    /// AD 0052 (deferral retired 2026-08-21): `validate()` is only worth
+    /// having if it is *cheap*, and "cheap" rests entirely on the AD 0065
+    /// frozen listing cache absorbing the parse it forces. This proves the
+    /// second call does not parse again — without it, `validate()` would be
+    /// a hidden second cost and a trap at every call site.
+    ///
+    /// The proof is allocation identity rather than a timing measurement: a
+    /// re-parse necessarily builds a *new* `Vec<ArchiveEntry>`, so if the
+    /// listing the facade hands out after `validate()` is the very
+    /// allocation `validate()` populated in the backend's cache, no second
+    /// parse happened. `test.zip` holds one entry, so the `Vec` is a real
+    /// allocation and not the shared dangling pointer every empty `Vec`
+    /// reports.
+    #[test]
+    fn validate_then_list_files_serves_the_cached_listing() {
+        use crate::archive::{Archive, ArchiveBackend};
+        use std::sync::Arc;
+
+        let archive = Archive::open(fixture("test.zip")).unwrap();
+        let ArchiveBackend::ZipReader(zip) = &archive.backend else {
+            panic!("a .zip must open on the ZipReader backend");
+        };
+
+        // First-operation validation: `open` parsed nothing, so both cache
+        // layers are still empty. If this ever fails, `open` grew an eager
+        // parse and the AD 0052 contract changed.
+        assert!(
+            zip.listing.get().is_none(),
+            "Archive::open must not parse the central directory (AD 0052 first-operation validation)"
+        );
+        assert!(
+            archive.entry_cache.get().is_none(),
+            "Archive::open must not populate the facade listing cache"
+        );
+
+        archive.validate().expect("test.zip is a valid archive");
+
+        let parsed = zip
+            .listing
+            .get()
+            .expect("validate() must force the first parse and memoise it (AD 0065)");
+        let parsed_arc = Arc::as_ptr(parsed);
+        let parsed_entries = parsed.as_ptr();
+        assert!(!parsed.is_empty(), "fixture must have at least one entry");
+
+        let listed = archive.list_files().unwrap();
+
+        // Same `Vec` allocation ⇒ the listing was not rebuilt.
+        assert!(
+            std::ptr::eq(listed.as_ptr(), parsed_entries),
+            "list_files() after validate() re-parsed the archive: it returned a different \
+             Vec<ArchiveEntry> allocation than the one validate() cached"
+        );
+        // Same `Arc` allocation ⇒ not even a fresh Arc was wrapped around a
+        // fresh Vec; the facade cache is a clone of the backend's.
+        assert_eq!(
+            Arc::as_ptr(archive.entry_cache.get().expect("facade cache populated")),
+            parsed_arc,
+            "the facade listing cache must share the backend's Arc, not a second snapshot"
+        );
+        // And the backend's own cell was never re-initialised.
+        assert_eq!(
+            Arc::as_ptr(zip.listing.get().unwrap()),
+            parsed_arc,
+            "the backend listing cache changed identity across list_files()"
+        );
+    }
+
+    /// The other half of the `validate()` contract: it must actually
+    /// *report* an unusable input. A corrupt ZIP opens fine (AD 0052) — the
+    /// probe is what turns that into an error.
+    #[test]
+    fn validate_reports_a_corrupt_archive_that_open_accepted() {
+        use crate::archive::Archive;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt.zip");
+        // Valid local-file-header magic so format detection says ZIP, then
+        // garbage where the rest of the archive should be.
+        let mut bytes = b"PK\x03\x04".to_vec();
+        bytes.extend_from_slice(&[0xAB; 256]);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let archive =
+            Archive::open(&path).expect("open must succeed: validation is first-operation");
+        let err = archive
+            .validate()
+            .expect_err("validate() must surface the corruption open() skipped");
+        // Same error the first real operation would have produced.
+        let from_list = archive.list_files().expect_err("listing must fail too");
+        assert_eq!(
+            std::mem::discriminant(&err),
+            std::mem::discriminant(&from_list),
+            "validate() must report the same failure class as the first operation"
+        );
     }
 
     #[test]

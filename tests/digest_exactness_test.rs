@@ -146,18 +146,40 @@ fn unknown_size_entry_still_digests() {
 /// blocks are shorter than its declared size would otherwise read as a
 /// truncation and produce a false `Corruption`.
 ///
-/// Skipped when the local `tar` cannot build a sparse archive.
+/// ## Why this lane is `#[ignore]`d (OI-0056-010)
+///
+/// It needs a `tar` that actually sparse-**encodes** a member. bsdtar — the
+/// `tar` on macOS, this project's primary dev platform — accepts `-cSf` and
+/// exits 0 but documents `-S` as extract-mode-only, so it writes a dense
+/// ~1 MiB archive and the hole-materialisation tripwire cannot fire.
+///
+/// It used to `eprintln!` and return in that case, i.e. report success
+/// having proved nothing, on every default run on the primary dev platform.
+/// It is now `#[ignore]`d and every former skip is a hard failure, so the
+/// lane is either genuinely exercised or visibly absent — never a false
+/// green. DCR-011's Known Risk therefore stays *declared* unexercised
+/// rather than silently unexercised.
+///
+/// On a GNU-tar host:
+///
+/// ```text
+/// TMPDIR=/Volumes/Temp/claude cargo test --test digest_exactness_test --all-features \
+///     -- --ignored --test-threads=4 sparse_tar_entry_digests_and_streams_to_clean_eof
+/// ```
 #[test]
+#[ignore = "needs a GNU-tar host that sparse-encodes `tar -cSf`; bsdtar (macOS) writes a dense \
+            archive and the tripwire cannot fire. Run with `TMPDIR=/Volumes/Temp/claude cargo \
+            test --test digest_exactness_test --all-features -- --ignored --test-threads=4 \
+            sparse_tar_entry_digests_and_streams_to_clean_eof`"]
 fn sparse_tar_entry_digests_and_streams_to_clean_eof() {
     let temp = common::temp_test_dir();
     let staging = temp.join("staging");
     std::fs::create_dir_all(&staging).expect("staging dir");
 
-    if !common::command_exists("tar") {
-        eprintln!("skipping: tar CLI not available");
-        common::cleanup(&temp);
-        return;
-    }
+    assert!(
+        common::command_exists("tar"),
+        "this lane needs a GNU `tar` on PATH to build a sparse-encoded archive"
+    );
 
     // A 1 MiB file that is one byte of data at the end and a hole before it.
     let sparse_file = staging.join("sparse.bin");
@@ -180,31 +202,22 @@ fn sparse_tar_entry_digests_and_streams_to_clean_eof() {
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
-    if !built {
-        eprintln!("skipping: tar could not build a sparse archive");
-        common::cleanup(&temp);
-        return;
-    }
+    assert!(built, "tar could not build the sparse archive");
 
     // The tripwire only means anything if `tar` actually sparse-ENCODED the
-    // member. bsdtar — the `tar` on macOS, the primary dev platform — accepts
-    // `-cSf` and exits 0, but documents `-S` as extract-mode-only, so it
-    // writes a dense ~1 MiB archive and this test would silently degrade to
-    // "a mostly-zero member digests exactly", proving nothing about hole
-    // materialisation. Detect that from the archive size rather than from the
-    // exit status, and skip loudly instead of passing vacuously.
+    // member; a dense archive would degrade this lane to "a mostly-zero
+    // member digests exactly", proving nothing about hole materialisation.
+    // Detect that from the archive size rather than from the exit status,
+    // and fail rather than pass vacuously.
     let archive_bytes = std::fs::metadata(&archive_path)
         .expect("stat sparse.tar")
         .len();
-    if archive_bytes >= 1024 * 1024 {
-        eprintln!(
-            "skipping: this tar wrote a DENSE {archive_bytes}-byte archive, so the member is not \
-             sparse-encoded and the hole-materialisation tripwire cannot fire (expected on bsdtar; \
-             needs a GNU-tar host). DCR-011's Known Risk stays unexercised here."
-        );
-        common::cleanup(&temp);
-        return;
-    }
+    assert!(
+        archive_bytes < 1024 * 1024,
+        "this tar wrote a DENSE {archive_bytes}-byte archive, so the member is not \
+         sparse-encoded and the hole-materialisation tripwire cannot fire. This is expected on \
+         bsdtar (macOS) and is why the lane is `#[ignore]`d there; it needs a GNU-tar host."
+    );
 
     let archive = Archive::open(&archive_path).expect("open sparse tar");
     let entries = archive.list_files().expect("list");

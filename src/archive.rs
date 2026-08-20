@@ -1487,6 +1487,87 @@ impl Archive {
         }
     }
 
+    /// Check that this handle actually points at a usable archive.
+    ///
+    /// [`Archive::open`] does not parse the archive — it detects the
+    /// format and builds a handle. `open` returning `Ok` therefore does
+    /// **not** mean the file is a valid archive; parsing happens on the
+    /// first call that needs the contents, so a corrupt ZIP opens
+    /// successfully and fails at [`Archive::list_files`]. That
+    /// first-operation timing is the documented contract (AD 0052). Two
+    /// backends check a little more at open-time and so fail earlier:
+    /// libarchive-backed formats probe the first entry header inside
+    /// `open`, and RAR reads the archive's main header. Neither looks
+    /// past that point, so damage further in still surfaces here.
+    ///
+    /// `validate` is the explicit way to ask the question `open` leaves
+    /// open. It forces that first parse now and reports its outcome:
+    /// `Ok(())` means the directory / TOC / header stream parsed and the
+    /// archive is readable; an `Err` is the same error the next real
+    /// operation would have returned.
+    ///
+    /// # `validate` vs [`Archive::validate_integrity`]
+    ///
+    /// Two similar names, two very different costs — pick deliberately:
+    ///
+    /// - **`validate`** reads *metadata only*: one central-directory /
+    ///   TOC / header-stream parse, `O(entries)`. No payload byte is
+    ///   decoded. Answers **"can this archive be read at all?"**
+    /// - **[`Archive::validate_integrity`]** decodes and checksums
+    ///   **every entry's payload**, `O(uncompressed bytes)`, and returns
+    ///   a per-entry [`crate::ValidationReport`]. Answers **"is every
+    ///   stored byte intact?"**
+    ///
+    /// The gap between them is orders of magnitude on any real archive.
+    /// Reaching for `validate_integrity` to answer a well-formedness
+    /// question pays a full decompression pass for it.
+    ///
+    /// # Cost is paid once, not twice
+    ///
+    /// The parse `validate` forces is the very parse
+    /// [`Archive::list_files`] would have forced, and it is memoised for
+    /// the lifetime of the handle (AD 0065 frozen listing cache), so a
+    /// later `list_files` is served from that cache rather than parsing
+    /// again. Calling `validate` before working with an archive costs
+    /// nothing beyond what the first operation was going to cost anyway.
+    ///
+    /// # Errors
+    ///
+    /// - the format error the first parse produces for a corrupt,
+    ///   truncated, misdetected, or missing input;
+    /// - [`ArchiveError::WriteModeOnly`] for a write-mode handle — there
+    ///   is no archive to validate until [`Archive::finish`] has run.
+    ///   Modify-mode handles validate normally.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use unified_archive::Archive;
+    ///
+    /// let archive = Archive::open("maybe-corrupt.zip")?;
+    /// // `open` succeeded, which says nothing about the contents:
+    /// match archive.validate() {
+    ///     Ok(()) => println!("readable; listing is already parsed and cached"),
+    ///     Err(e) => println!("not a usable archive: {e}"),
+    /// }
+    /// # Ok::<(), unified_archive::ArchiveError>(())
+    /// ```
+    pub fn validate(&self) -> Result<()> {
+        // The probe is supplied by the backend
+        // ([`crate::backend::ReadBackend::validate`]) so the per-backend
+        // timing differences live in one place, and it goes through the
+        // mode-aware dispatcher so a Libarchive-backed *write* handle
+        // surfaces `WriteModeOnly` instead of reopening the in-progress
+        // output file (R0070-0001).
+        //
+        // Op label: `list_files` because that is literally the parse this
+        // forces, so a failure names the operation that produced it. A
+        // dedicated `Operation::Validate` label would read better in the
+        // `WriteModeOnly` case but lives in `src/error.rs`, outside this
+        // change's ownership.
+        crate::backend::dispatch_read_archive(self, crate::error::ops::LIST_FILES, |b| b.validate())
+    }
+
     /// Get the archive file path
     pub fn path(&self) -> &Path {
         &self.path
