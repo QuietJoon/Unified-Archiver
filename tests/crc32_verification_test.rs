@@ -22,7 +22,7 @@ mod common;
 
 use std::fs;
 use std::path::PathBuf;
-use unified_archive::{Archive, ExtractionOptions};
+use unified_archive::{Archive, ArchiveError, ExtractionOptions};
 
 /// Helper to get test fixtures directory
 fn fixtures_dir() -> PathBuf {
@@ -30,26 +30,41 @@ fn fixtures_dir() -> PathBuf {
 }
 
 #[test]
-fn test_crc32_error_mapping_unrar() {
-    // Verify that UnRAR's ERAR_BAD_DATA is properly mapped to ArchiveError::Corruption
-    // This tests the error handling path in wrapper.rs:457-460
+fn test_crc32_error_mapping_corrupted_zip() {
+    // R0079-0046: the earlier UnRAR/libarchive "mapping" tests here were
+    // comment-only and could not fail. This exercises the mapping end to
+    // end: corrupted_crc.zip stores a CRC32 that does not match its
+    // data, so extraction with `verify_crc32: true` must surface
+    // ArchiveError::Corruption (mapped via security::verify_crc32 in the
+    // ZIP backend).
+    let archive = Archive::open(fixtures_dir().join("corrupted_crc.zip"))
+        .expect("corrupted-CRC fixture should open (central directory is intact)");
 
-    // Note: Creating a truly corrupted RAR archive that triggers CRC32 failure is complex.
-    // This test documents that the error mapping is in place.
-    // Real-world CRC32 failures will be caught by UnRAR and properly reported.
+    let temp_dir = tempfile::tempdir().expect("create tempdir");
+    let options = ExtractionOptions {
+        verify_crc32: true,
+        overwrite: true,
+        ..common::default_extraction_options(temp_dir.path().to_path_buf())
+    };
 
-    // Test passes if the mapping code compiles and is accessible
-}
-
-#[test]
-fn test_crc32_error_mapping_libarchive() {
-    // Verify that libarchive checksum errors are properly mapped to ArchiveError::Corruption
-    // This tests the error handling path in libarchive_wrapper.rs:407-412
-
-    // Note: The wrapper detects checksum errors by searching for "checksum" or "CRC"
-    // in libarchive error messages and maps them to ArchiveError::Corruption.
-
-    // Test passes if the mapping code compiles and is accessible
+    let err = archive
+        .extract_all(options)
+        .expect_err("CRC32 mismatch must fail extraction");
+    match err {
+        ArchiveError::Corruption { path, details } => {
+            assert!(
+                path.contains("corrupt_test.txt"),
+                "Corruption should name the corrupt entry, got: {}",
+                path
+            );
+            assert!(
+                details.contains("CRC32 mismatch"),
+                "Corruption details should report the CRC32 mismatch, got: {}",
+                details
+            );
+        }
+        other => panic!("Expected ArchiveError::Corruption, got: {:?}", other),
+    }
 }
 
 #[cfg(feature = "rar-support")]

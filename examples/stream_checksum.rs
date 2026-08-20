@@ -7,12 +7,12 @@
 //! uncompressed data stream stored in the format's own metadata.
 //!
 //! Usage:
-//!   cargo run --example stream_checksum <compressed_file>
+//!   cargo run --example stream_checksum -- <compressed_file>
 //!
 //! Example:
-//!   cargo run --example stream_checksum file.gz
-//!   cargo run --example stream_checksum file.bz2
-//!   cargo run --example stream_checksum file.xz
+//!   cargo run --example stream_checksum -- file.gz
+//!   cargo run --example stream_checksum -- file.bz2
+//!   cargo run --example stream_checksum -- file.xz
 
 use std::env;
 use unified_archive::stream_crc::{CheckType, extract_stream_checksum};
@@ -100,7 +100,8 @@ fn main() {
             eprintln!("\nMake sure the file:");
             eprintln!("  1. Exists");
             eprintln!("  2. Is a valid GZIP, BZIP2, or XZ compressed file");
-            eprintln!("  3. Has the correct extension (.gz, .bz2, .xz)");
+            eprintln!("  3. Is not truncated — the checksum lives in the stream header/trailer");
+            eprintln!("     (the format is detected from magic bytes; the extension is ignored)");
             std::process::exit(1);
         }
     }

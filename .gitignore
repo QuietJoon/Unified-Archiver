@@ -46,9 +46,17 @@ GEMINI.md
 # Scratch / temporary files
 extracted/
 test_file.txt
-architecture_investigation.md
-codebase_investigation.md
+# Regenerable investigation snapshot (code-investigation / architecture-investigation).
+# Superseded the monolithic architecture_investigation.md / codebase_investigation.md on 2026-08-04.
+docs/investigation/
 Refactor.md
 issues/
 reviews/
 unrar-src.tar.gz
+
+# Translation
+*.ko.md
+*.ko.txt
+
+# Review/issue indexer pipeline output
+issues_blocks.json

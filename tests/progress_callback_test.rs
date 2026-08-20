@@ -18,7 +18,7 @@ fn test_progress_callback_called() {
     let progress_calls = Arc::new(Mutex::new(Vec::new()));
     let progress_calls_clone = Arc::clone(&progress_calls);
 
-    let dest = std::env::temp_dir().join("unified_archive_test_progress");
+    let dest = common::temp_test_dir();
 
     let options = ExtractionOptions {
         progress: Some(Box::new(move |current, total| {
@@ -70,10 +70,7 @@ fn test_progress_callback_cancellation() {
     let calls = Arc::new(Mutex::new(0usize));
     let calls_clone = Arc::clone(&calls);
 
-    let dest = std::env::temp_dir().join(format!(
-        "unified_archive_test_cancel_{}",
-        std::process::id()
-    ));
+    let dest = common::temp_test_dir();
 
     let options = ExtractionOptions {
         progress: Some(Box::new(move |_current, _total| {
@@ -115,7 +112,7 @@ fn test_progress_callback_zip() {
     let progress_calls = Arc::new(Mutex::new(Vec::new()));
     let progress_calls_clone = Arc::clone(&progress_calls);
 
-    let dest = std::env::temp_dir().join("unified_archive_test_zip");
+    let dest = common::temp_test_dir();
 
     let options = ExtractionOptions {
         progress: Some(Box::new(move |current, total| {
@@ -155,7 +152,7 @@ fn test_progress_callback_7z() {
     let progress_calls = Arc::new(Mutex::new(Vec::new()));
     let progress_calls_clone = Arc::clone(&progress_calls);
 
-    let dest = std::env::temp_dir().join("unified_archive_test_7z");
+    let dest = common::temp_test_dir();
 
     let options = ExtractionOptions {
         progress: Some(Box::new(move |current, total| {
@@ -194,7 +191,7 @@ fn test_progress_callback_7z() {
 fn test_progress_without_callback() {
     let archive = Archive::open("tests/fixtures/test.rar").expect("Failed to open RAR archive");
 
-    let dest = std::env::temp_dir().join("unified_archive_test_no_callback");
+    let dest = common::temp_test_dir();
 
     let options = ExtractionOptions {
         progress: None, // No callback

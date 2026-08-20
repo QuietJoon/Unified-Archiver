@@ -72,7 +72,7 @@ impl std::fmt::Display for ArchiveError {
                 }
             }
             ArchiveError::Corruption { path, details } => {
-                write!(f, "Corrupted entry '{}': {}", path, details)
+                write!(f, "Corruption detected in '{}': {}", path, details)
             }
             ArchiveError::Password { message } => {
                 write!(f, "Password error: {}", message)

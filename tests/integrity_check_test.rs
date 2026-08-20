@@ -1,6 +1,6 @@
 // Test archive integrity checking with validate_integrity()
 
-use unified_archive::Archive;
+use unified_archive::{Archive, ArchiveError};
 
 #[test]
 fn test_integrity_check_valid_zip() {
@@ -190,24 +190,33 @@ fn test_integrity_check_encrypted_archive() {
 
     match archive {
         Ok(arc) => {
-            // Try to validate without password
+            // Validate without a password. test_encrypted.rar has data-only
+            // encryption (headers readable), so the listing succeeds but the
+            // first per-entry RAR_TEST needs the password.
             let result = arc.validate_integrity();
 
-            // Should either fail or detect all files as failed
-            if let Ok(report) = result {
-                // If validation succeeds, encrypted files should be in failed list
-                println!("Encrypted archive validation report:");
-                println!("  Validated: {}", report.validated);
-                println!("  Failed: {}", report.failed.len());
-
-                // At least some validation should happen (even if files fail)
-                assert!(report.total_entries > 0);
-            } else {
-                // Validation might fail entirely, which is also acceptable
-                println!("Validation failed for encrypted archive (expected)");
+            // R0080-0021: a missing/wrong password on a per-entry RAR_TEST is
+            // no longer collapsed into the damaged-file list — it surfaces as
+            // ArchiveError::Password so callers can distinguish it from CRC
+            // corruption and retry with a password.
+            match result {
+                Err(ArchiveError::Password { .. }) => {
+                    println!(
+                        "Encrypted archive without password yielded Password error (expected)"
+                    );
+                }
+                Err(other) => panic!("expected ArchiveError::Password, got {:?}", other),
+                Ok(report) => panic!(
+                    "expected a password error validating an encrypted archive without a \
+                     password, got a report ({} failed of {} entries)",
+                    report.failed.len(),
+                    report.total_entries
+                ),
             }
         }
         Err(_) => {
+            // Encrypted-header archives (or a build without rar-support) may
+            // fail to open without a password; nothing to validate then.
             println!("Skipping encrypted archive test - file not available");
         }
     }

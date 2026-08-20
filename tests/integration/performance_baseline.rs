@@ -2,23 +2,23 @@
 //!
 //! Compares unified-archive extraction throughput vs native 7z CLI.
 //! Target: Within 20% of native 7zip performance (SC-010).
+//!
+//! **Opt-in (R0074-0080).** This suite shells out to the system
+//! `7z` / `unzip` binaries for the comparison and adds wall-clock
+//! variance to the default test run, so each timing-comparison test
+//! short-circuits unless `UA_PRINT_PERF_BASELINE` is set
+//! (see `R0074-0078`). Suites that build the test fixture but do not
+//! compare against the external CLI run as normal integration tests.
+//! Long-term destination is `benches/` (R0074-0070).
 
 use super::common;
+use super::common::command_exists;
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
-
-/// Check if a command is available
-fn command_exists(cmd: &str) -> bool {
-    Command::new("which")
-        .arg(cmd)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
 
 /// Create a test archive with specified size for performance testing
 fn create_performance_test_archive(
@@ -132,6 +132,12 @@ fn measure_unified_archive_extraction(archive_path: &Path, output_dir: &Path) ->
 
 #[test]
 fn test_performance_baseline_small_archive() {
+    // R0074-0080: timing comparison against the external 7z/unzip CLI
+    // runs only under the opt-in profile (see module doc).
+    if std::env::var_os("UA_PRINT_PERF_BASELINE").is_none() {
+        return;
+    }
+
     // Test with a small archive (10MB) for quick feedback
     if !command_exists("zip") {
         eprintln!("Skipping test: zip command not available");
@@ -205,6 +211,11 @@ fn test_performance_baseline_small_archive() {
 
 #[test]
 fn test_performance_baseline_documentation() {
+    // R0074-0078: gate the documentation print behind opt-in env var
+    // so default test runs stay quiet.
+    if std::env::var_os("UA_PRINT_PERF_BASELINE").is_none() {
+        return;
+    }
     // Document the performance requirements from SC-010
     println!("=== SC-010 Performance Requirement ===");
     println!("Target: Extraction within 20% of native 7zip performance");

@@ -40,7 +40,6 @@ fn main() {
 
     let options = ExtractionOptions {
         destination,
-        verify_crc32: true,
         progress: Some(Box::new(|current: u64, total: Option<u64>| {
             if let Some(t) = total {
                 if t > 0 {
@@ -52,10 +51,14 @@ fn main() {
         ..Default::default()
     };
 
-    archive.extract_all(options).unwrap_or_else(|e| {
+    let result = archive.extract_all(options).unwrap_or_else(|e| {
         eprintln!("\nExtraction failed: {}", e);
         std::process::exit(1);
     });
+
+    for warning in &result.warnings {
+        eprintln!("\nwarning: {warning}");
+    }
 
     println!("\nDone.");
 }

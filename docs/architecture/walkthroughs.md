@@ -1,3 +1,12 @@
+---
+type: Walkthroughs
+title: "Walkthroughs"
+description: "End-to-end architectural walkthroughs for mandatory scenarios."
+tags: [architecture, scenarios, ADR-0015, ADR-0033, ADR-0060]
+timestamp: 2026-08-09T00:00:00Z
+status: active
+---
+
 # Walkthroughs
 
 End-to-end architectural walkthroughs for mandatory scenarios.
@@ -10,15 +19,15 @@ End-to-end architectural walkthroughs for mandatory scenarios.
 
 1. `Archive::open` reads first 512 bytes for magic byte detection (ordinary format detection; SFX detection uses a separate two-stage read pattern — see SCN-SFX-01)
 2. `ArchiveFormat::detect` matches `PK\x03\x04` -> `ArchiveFormat::Zip`
-3. Backend selection: ZIP + unencrypted -> `ArchiveBackend::Piz`
-4. `PizArchive` stores path only (stateless reopen per operation)
+3. Backend selection: ZIP -> `ArchiveBackend::ZipReader` (the sole ZIP backend since DCR-009)
+4. `ZipArchive` stores path only (stateless reopen per operation)
 5. `list_files()` checks `entry_cache` (OnceCell) — empty on first call
-6. `PizArchive::list_files` mmaps the ZIP file, iterates entries, reads CRC32 from ZIP central directory
+6. `ZipArchive::list_files` opens the file with `std::fs::File`, iterates the central directory, reads each entry's stored CRC32, and memoises the listing
 7. Returns `&[ArchiveEntry]` with normalized paths (forward slashes), sizes, timestamps, CRC32
 8. Result cached in `entry_cache` for subsequent calls
 9. Caller iterates entries — same struct fields regardless of format
 
-**Ownership transitions:** Caller -> Archive (path) -> Piz (mmap) -> ArchiveEntry vec -> entry_cache (owned by Archive) -> caller (&[ArchiveEntry])
+**Ownership transitions:** Caller -> Archive (path) -> ZipReader (`File`) -> ArchiveEntry vec -> backend listing cell + entry_cache (both hold the same `Arc`, owned by Archive) -> caller (&[ArchiveEntry])
 
 ### 2. Archive Extraction (SCN-EXT-01)
 
@@ -33,11 +42,12 @@ End-to-end architectural walkthroughs for mandatory scenarios.
    - Overwrite policy: if `overwrite=false`, scan for existing destination files and fail early
 6. **Backend dispatch:** `ArchiveBackend::extract_all_with_options` routes to correct backend
 7. Backend iterates entries, sanitizes each path via `security::sanitize_entry_path`, writes to destination
-8. Progress callbacks fire (rate-limited to ~60 Hz via `RateLimiter`)
-9. CRC32 verification varies by backend: UnRAR uses native test mode; ZIP, 7z, and Piz extract to memory and verify CRC32; libarchive streams entries and checks read errors
-10. Returns `Ok(())` on success
+8. Progress callbacks fire (rate-limited to ~60 Hz via `RateLimiter` on libarchive and UnRAR; ZIP and SevenZ invoke the callback per entry or chunk without throttling)
+9. CRC32 verification varies by backend: UnRAR uses native test mode; ZIP and 7z extract to memory and verify CRC32; libarchive streams entries and checks read errors
+10. **Warning collection:** non-fatal outcomes accumulate in a `Vec<ArchiveWarning>` instead of aborting the run — the overwrite/conflict preflight contributes `OutputPathCaseCollision`, and every backend contributes `SkippedSymlink` / `SkippedHardLink` at each link entry it refuses to materialise (FR-022 — link skips are a deliberate safety gate, not a failure)
+11. Returns `Result<ResultWithWarnings<()>>`, **not** `Ok(())` (R0001-0095). Success carries the accumulated warnings, so callers must inspect `result.warnings`; an empty vector is the only signal that nothing was skipped. The warning channel is the settled contract per `docs/records/MADR-0010-r052-extraction-warnings-result-with-warnings.md` and `docs/records/AD-0033-restore-result-with-warnings-dispatch.md`, which restored it after the signature had silently collapsed back to `Result<()>`. The same shape applies to `extract_some` / `extract_files` / `extract_by_ids`; single-entry `extract_file` has no warning channel because it rejects link and directory entries outright
 
-**Ownership transitions:** Caller -> extraction orchestrator (options owned) -> security layer (path validation) -> backend (file writes) -> filesystem
+**Ownership transitions:** Caller -> extraction orchestrator (options owned) -> security layer (path validation) -> backend (file writes) -> filesystem. Warnings travel the reverse path: backend skip sites -> extraction orchestrator (`Vec<ArchiveWarning>`, merged with the preflight's own) -> caller, wrapped in `ResultWithWarnings<()>`.
 
 ### 3. Archive Creation (SCN-CRE-01)
 
@@ -78,13 +88,14 @@ End-to-end architectural walkthroughs for mandatory scenarios.
 
 **Trigger:** `Archive::detect_sfx("installer.exe")`
 
-1. **Stage 1 — Stub type detection:** Read file header; goblin identifies PE/ELF/Mach-O binaries; shebang (`#!`) detection identifies ScriptInterpreter stubs
-2. **Stage 2 — Signature scan (heuristic):** Scan first 1MB iterating all candidates for archive magic bytes:
-   - `PK\x03\x04` (ZIP), `Rar!\x1a\x07\x00` (RAR), `Rar!\x1a\x07\x01\x00` (RAR5), `7z\xbc\xaf\x27\x1c` (7z)
-   - Note: gzip, bzip2, and xz signatures were removed from the active SFX signature set (AD 0015)
+1. **Stage 1 — Stub type detection:** A single read pulls the first 1 MiB (plus a small probe tail) into one buffer; `StubType::detect` classifies the first 4 KiB of it. Classification is done **in-crate from header fields only** — a newline-terminated shebang (`#!`) line yields `ScriptInterpreter`, and prefix/header-field checks over the ELF, PE, and Mach-O identification structures yield `LinuxELF` / `WindowsPE` / `MacOSMachO`. There is **no binary-parsing dependency**: `goblin` was named here in error and is not in `Cargo.toml` at all (R0001-0080). Its whole-file parsers chase section/import tables that sit far past a 4 KiB window, so every real stub classified as `Unknown`; the header-field checks replaced them (R0079-0010). See `src/sfx/stub_types.rs` for the current field set.
+   - Anything unrecognised is `StubType::Unknown`, and detection **stops here** with `is_sfx = false` — a real SFX must carry a recognised executable stub ahead of its payload (R0070-0076, `docs/records/AD-0060-r0070-broad-modular-triage-closure.md`). Stage 2 is never reached for unknown stubs; see SCN-SFX-08.
+2. **Stage 2 — Signature scan (heuristic):** Scan the first 1MB, collecting every candidate offset for the active signature table (`src/sfx/signatures.rs`):
+   - `PK\x03\x04` (ZIP), `Rar!\x1a\x07\x00` (RAR), `Rar!\x1a\x07\x01\x00` (RAR5), `7z\xbc\xaf\x27\x1c` (7z), `\x1f\x8b` (gzip), `BZh` (bzip2), `\xfd7zXZ\x00` (xz)
+   - Correction (R0001-0080): AD 0015 removed the ZIP **central-directory** signature (`PK\x01\x02`) and TAR's fixed-offset `ustar` from this table. gzip, bzip2, and xz were never removed and are still scanned for.
    - This is a heuristic search with known limitations (e.g., signatures embedded in data sections may produce false positives; archives beyond the 1MB window are missed). It is not exhaustive validation.
-3. **Stage 3 — Validation:** If signature found, attempt lightweight archive header parse at detected offset. All current matches produce `probable()` results; the detector currently assigns 0.9 confidence (a policy choice, not a type-level contract). The public result model distinguishes `probable` and `confirmed` semantics, but no code path currently reaches confirmed (1.0) — that would require full backend validation, which is not implemented.
-4. Returns `SfxDetectionResult { is_sfx: true, archive_format: Some(Zip), data_offset: Some(offset), stub_type: WindowsPE, confidence: 0.9 }` (confidence value reflects current detector policy)
+3. **Stage 3 — Heuristic offset screening:** Each candidate offset gets a cheap per-format structural probe over the bytes at that offset — a recognised header shape plus a minimum-length gate scaled to the bytes actually remaining in the file. Each format enforces its own minimum instead of a blanket trailing-byte gate (R0070-0075). Candidates are screened in offset order, but a passing strong-magic candidate (a multi-byte signature with a structural probe) outranks the weak 2-byte gzip signature regardless of position, so an incidental gzip resource in the stub region cannot shadow the real payload behind it (R0079-0031). A passing candidate yields `probable()`: the detector returns `SfxConfidence::Probable` with an evidence list naming the matched stub and signature (I3 — there is no longer a confidence float; the "~0.9" figure some older docs quote no longer exists in the code). The `SfxConfidence` tri-state distinguishes `NotSfx`/`Probable`/`Confirmed`, but no production code path reaches `Confirmed` — that would require full backend validation, which runs later via `Archive::open_sfx()` and is not part of `detect_sfx()`'s contract.
+4. Returns `SfxDetectionResult { is_sfx: true, archive_format: Some(Zip), data_offset: Some(offset), stub_type: WindowsPE, confidence: SfxConfidence::Probable, evidence: [..] }`
 5. If no signature found within 1MB -> `SfxDetectionResult { is_sfx: false, .. }`
 
 **Design-goal note:** The target latency is <100ms for files up to 10MB (1MB scan limit). No benchmark artifact currently validates this target; treat it as a design goal, not a contractual guarantee.

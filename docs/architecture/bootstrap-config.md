@@ -1,3 +1,12 @@
+---
+type: Bootstrap Config
+title: "Bootstrap Config"
+description: "This document describes how the project is run locally, how processes are started, and where environment / configuration is sourced from."
+tags: [architecture, config, ADR-0020]
+timestamp: 2026-04-30T00:00:00Z
+status: active
+---
+
 # Bootstrap Config
 
 This document describes how the project is run locally, how processes are started, and where environment / configuration is sourced from. For multi-binary systems this is where per-binary bootstrap sequencing is described.
@@ -30,7 +39,7 @@ The library depends on native FFI. Local execution requires:
 - **libarchive:** required for TAR and ISO read, and TAR/7z creation. Expected to be discoverable by `pkg-config`.
 - **Optional CLI tooling for fixtures / examples:**
   - `zip` and `7z` command-line tools may be used by some test fixtures and examples.
-  - `rar` CLI is not used; external WinRAR integration is feature-gated behind `external-rar-create` and is a deferred item.
+  - `rar` CLI is not used by the in-process backends; external WinRAR integration is feature-gated behind `external-rar-create` and is implemented in `src/external/rar.rs` (`RarCreator`). It is Windows-only and needs a licensed `rar.exe`.
 
 See `Cargo.toml` for the authoritative feature and dependency list and `build.rs` for native linking logic.
 
@@ -51,11 +60,12 @@ See `docs/architecture/config-surface.md` for the complete configuration catalog
 | Feature | Default | Effect |
 |---|---|---|
 | `rar-support` | enabled | Links the UnRAR C/C++ SDK and compiles the UnRAR backend. |
-| `external-rar-create` | disabled | Enables an out-of-process WinRAR CLI bridge for RAR creation. Deferred; Windows-only. |
+| `external-rar-create` | disabled | Enables the out-of-process WinRAR CLI bridge for RAR creation (`src/external/rar.rs`, `RarCreator`). Windows-only; requires a licensed `rar.exe`. |
+| `v2-api` | disabled | Exposes the D2 typed-handle split as `unified_archive::v2::{ReadArchive, WriteArchive, ModifyArchive}`. Additive in v0.3; enabled by default in v0.4. |
 
 ## Temp/scratch storage
 
-When running locally, the crate uses `/Volumes/Temp/claude/7zip/` (per the project CLAUDE.md) for temporary fixture storage during development. Inside library code, temp files are created via `tempfile::TempDir` under `std::env::temp_dir()` and cleaned up through RAII guards (`TempDirGuard`). See `docs/architecture/persistence-and-files.md` for file lifecycle detail.
+When running locally, the crate uses `/Volumes/Temp/claude/7zip/` (per the project CLAUDE.md) for temporary fixture storage during development. Inside library code the crate stages temp artifacts via `tempfile` in two shapes: `tempfile::TempDir` under `std::env::temp_dir()` for batch scratch (the whole tree is removed by `TempDir`'s own `Drop`) and `tempfile::Builder::new().tempfile()` for single-file staging in `Archive::open_at_offset` (released when the returned handle drops). Cleanup is owned by those concrete `tempfile` types — the in-crate `TempDirGuard` named here previously was removed (`docs/records/AD-0059-r0069-wide-modular-design-closure.md`, R0001-0094). See `docs/architecture/persistence-and-files.md` for file lifecycle detail.
 
 ## Smoke path
 
@@ -63,12 +73,12 @@ When running locally, the crate uses `/Volumes/Temp/claude/7zip/` (per the proje
 
 ```sh
 cargo run --example inspect_archive -- path/to/archive.zip
-cargo run --example extract_all -- path/to/archive.zip /tmp/out
+cargo run --example extract_archive -- path/to/archive.zip /tmp/out
 ```
 
-See `examples/` for the full list (9 examples as of BL-001-retroactive).
+See `examples/` for the full list (8 examples as of 2026-04).
 
 ## Notes for implementers
 
-- Because this is a library crate, there is no "service start order" or "daemon bootstrap". Callers embed the crate and drive `Archive::open(...)` / `create_archive(...)` directly.
+- Because this is a library crate, there is no "service start order" or "daemon bootstrap". Callers embed the crate and drive `Archive::open(...)` / `Archive::create(...)` directly.
 - If a future change introduces a binary wrapper (CLI or daemon), this document must be expanded and a `source-of-truth-table.md` must be added per the artifact lifecycle rules.

@@ -1,8 +1,19 @@
 // Build script for FFI linking configuration
-// This configures pkg-config to link against libarchive
+// This configures pkg-config to link against libarchive and compiles the
+// vendored UnRAR C++ sources with the `cc` crate.
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+
+    // Env tracking for pkg-config discovery (R0076-0023): `probe_library`
+    // runs with `env_metadata` enabled, so the pkg-config crate itself emits
+    // `cargo:rerun-if-env-changed` for every variable it actually consults
+    // (PKG_CONFIG, PKG_CONFIG_PATH/LIBDIR/SYSROOT_DIR, LIBARCHIVE_* overrides,
+    // and their target-suffixed variants). This script reads no discovery env
+    // vars directly. The UnRAR build (see build_unrar) is driven by the `cc`
+    // crate, which emits its own `cargo:rerun-if-env-changed` for the toolchain
+    // vars it consults (CC/CXX/AR/CFLAGS/CXXFLAGS and target-suffixed variants),
+    // so no directive is duplicated here.
 
     // Link to libarchive using pkg-config
     // This will automatically handle platform-specific linking
@@ -16,18 +27,24 @@ fn main() {
                 std::path::PathBuf::from("/opt/homebrew/opt/libarchive"),
                 std::path::PathBuf::from("/usr/local/opt/libarchive"),
             ];
-            let homebrew_prefix = candidates.iter().find(|p| p.exists());
+            // A prefix only counts when it actually carries the libarchive
+            // dylib we link against (`cargo:rustc-link-lib=dylib=archive`
+            // resolves to `{prefix}/lib/libarchive.dylib`). A bare directory
+            // (a stale keg or partial install) must fall through to pkg-config
+            // rather than emit a link search path that defers to a cryptic
+            // linker error (R0081-0087).
+            let homebrew_prefix = candidates
+                .iter()
+                .find(|p| p.join("lib/libarchive.dylib").exists());
             if let Some(prefix) = homebrew_prefix {
                 println!("cargo:rustc-link-search=native={}/lib", prefix.display());
                 println!("cargo:rustc-link-lib=dylib=archive");
-                println!(
-                    "cargo:warning=Using Homebrew libarchive from {}",
+                eprintln!(
+                    "unified-archive: using Homebrew libarchive from {}",
                     prefix.display()
                 );
             } else if pkg_config::probe_library("libarchive").is_err() {
-                println!("cargo:warning=libarchive not found");
-                println!("cargo:warning=Please install: brew install libarchive");
-                std::process::exit(1);
+                panic!("libarchive not found. Install it with: brew install libarchive");
             }
         }
 
@@ -35,11 +52,11 @@ fn main() {
         #[cfg(not(target_os = "macos"))]
         {
             if pkg_config::probe_library("libarchive").is_err() {
-                println!("cargo:warning=libarchive not found via pkg-config");
-                println!("cargo:warning=Please install libarchive development files:");
-                println!("cargo:warning=  Ubuntu/Debian: sudo apt-get install libarchive-dev");
-                println!("cargo:warning=  Fedora/RHEL: sudo dnf install libarchive-devel");
-                std::process::exit(1);
+                panic!(
+                    "libarchive not found via pkg-config. Install libarchive development files: \
+                     `sudo apt-get install libarchive-dev` (Ubuntu/Debian) or \
+                     `sudo dnf install libarchive-devel` (Fedora/RHEL)."
+                );
             }
         }
     }
@@ -53,140 +70,266 @@ fn main() {
         );
     }
 
-    // Build and link UnRAR library (only when rar-support feature is enabled)
+    // Build and link the UnRAR library from the vendored C++ sources. Gated on
+    // the `rar-support` feature only — not on the build host — because the
+    // `cc`-crate builder honours Cargo's TARGET/CC/CXX/AR and picks MSVC on
+    // Windows, so the same code path produces a native Windows, macOS, or Linux
+    // static library (and cross builds), replacing the former `make`-only Unix
+    // build that panicked on Windows (MADR-0020 — the record older documents
+    // cite as "AD 0020" — plus AD 0039; OI-0080-001 vendored half).
     #[cfg(feature = "rar-support")]
     build_unrar();
 }
 
+// UNIX (`make lib` target) curated object set. Many vendored `.cpp` files are
+// `#include`d by others (unpack15/20/30/50, crypt1..5, recvol3/5, blake2s_sse,
+// win32*, ulinks, uowners, hardlinks, …) and must NOT be compiled standalone,
+// or the link fails on duplicate symbols. This mirrors OBJECTS + LIB_OBJ from
+// the vendored makefile's `lib` target exactly.
+#[cfg(feature = "rar-support")]
+const UNIX_SOURCES: [&str; 48] = [
+    "rar.cpp",
+    "strlist.cpp",
+    "strfn.cpp",
+    "pathfn.cpp",
+    "smallfn.cpp",
+    "global.cpp",
+    "file.cpp",
+    "filefn.cpp",
+    "filcreat.cpp",
+    "archive.cpp",
+    "arcread.cpp",
+    "unicode.cpp",
+    "system.cpp",
+    "crypt.cpp",
+    "crc.cpp",
+    "rawread.cpp",
+    "encname.cpp",
+    "resource.cpp",
+    "match.cpp",
+    "timefn.cpp",
+    "rdwrfn.cpp",
+    "consio.cpp",
+    "options.cpp",
+    "errhnd.cpp",
+    "rarvm.cpp",
+    "secpassword.cpp",
+    "rijndael.cpp",
+    "getbits.cpp",
+    "sha1.cpp",
+    "sha256.cpp",
+    "blake2s.cpp",
+    "hash.cpp",
+    "extinfo.cpp",
+    "extract.cpp",
+    "volume.cpp",
+    "list.cpp",
+    "find.cpp",
+    "unpack.cpp",
+    "headers.cpp",
+    "threadpool.cpp",
+    "rs16.cpp",
+    "cmddata.cpp",
+    "ui.cpp",
+    "largepage.cpp",
+    "filestr.cpp",
+    "scantree.cpp",
+    "dll.cpp",
+    "qopen.cpp",
+];
+
+// Windows (`UnRARDll.vcxproj`) curated `<ClCompile>` set. Differs from the UNIX
+// set: adds the Windows-only `isnt`/`motw`/`rarpch` and Reed-Solomon `rs`, drops
+// the UNIX `resource` and `list` stubs. Kept faithful to the upstream project so
+// the same set of translation units compiles under MSVC.
+#[cfg(feature = "rar-support")]
+const WINDOWS_SOURCES: [&str; 50] = [
+    "archive.cpp",
+    "arcread.cpp",
+    "blake2s.cpp",
+    "cmddata.cpp",
+    "consio.cpp",
+    "crc.cpp",
+    "crypt.cpp",
+    "dll.cpp",
+    "encname.cpp",
+    "errhnd.cpp",
+    "extinfo.cpp",
+    "extract.cpp",
+    "filcreat.cpp",
+    "file.cpp",
+    "filefn.cpp",
+    "filestr.cpp",
+    "find.cpp",
+    "getbits.cpp",
+    "global.cpp",
+    "hash.cpp",
+    "headers.cpp",
+    "isnt.cpp",
+    "largepage.cpp",
+    "match.cpp",
+    "motw.cpp",
+    "options.cpp",
+    "pathfn.cpp",
+    "qopen.cpp",
+    "rar.cpp",
+    "rarpch.cpp",
+    "rarvm.cpp",
+    "rawread.cpp",
+    "rdwrfn.cpp",
+    "rijndael.cpp",
+    "rs.cpp",
+    "rs16.cpp",
+    "scantree.cpp",
+    "secpassword.cpp",
+    "sha1.cpp",
+    "sha256.cpp",
+    "smallfn.cpp",
+    "strfn.cpp",
+    "strlist.cpp",
+    "system.cpp",
+    "threadpool.cpp",
+    "timefn.cpp",
+    "ui.cpp",
+    "unicode.cpp",
+    "unpack.cpp",
+    "volume.cpp",
+];
+
+/// Compile the vendored UnRAR C++ sources into a static `libunrar.a` with the
+/// `cc` crate and emit the link directives.
+///
+/// The `cc` builder writes all objects and the archive under `OUT_DIR`, so the
+/// vendored source tree is never mutated (the hermeticity guarantee of AD 0039,
+/// now delivered without the previous staging/artifact-purge machinery). The
+/// source list and preprocessor defines are selected from Cargo's *target* OS,
+/// not the build host, and `cc` forwards TARGET/CC/CXX/AR and picks MSVC on
+/// Windows — so this one code path serves native Windows/macOS/Linux and cross
+/// builds (the vendored-UnRAR half of OI-0080-001).
 #[cfg(feature = "rar-support")]
 fn build_unrar() {
     use std::path::PathBuf;
-    use std::process::Command;
-
-    println!("cargo:warning=Building UnRAR library for RAR/RAR5 support");
 
     let src_dir = PathBuf::from("src/ffi/native/unrar");
-    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is set by cargo"));
-    let build_dir = out_dir.join("unrar-build");
 
-    // Stage the UnRAR source tree into OUT_DIR. The vendored makefile writes
-    // object files and libraries alongside its sources, so building in-place
-    // would pollute the tracked source tree. Staging keeps the repo clean and
-    // makes the build hermetic per-target.
-    if let Err(e) = stage_unrar_sources(&src_dir, &build_dir) {
-        println!("cargo:warning=Failed to stage UnRAR sources: {e}");
-        std::process::exit(1);
-    }
+    // Cargo target selection (build scripts must key native compilation on the
+    // target, not on host `cfg`, which evaluates for the build machine).
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let is_windows = target_os == "windows";
 
-    let status = match Command::new("make")
-        .current_dir(&build_dir)
-        .arg("lib")
-        .status()
-    {
-        Ok(s) => s,
-        Err(e) => {
-            println!("cargo:warning=Failed to execute make: {e}");
-            println!("cargo:warning=Install 'make' or disable the rar-support feature");
-            std::process::exit(1);
-        }
+    eprintln!("unified-archive: building vendored UnRAR (cc) for target_os={target_os}");
+
+    let mut build = cc::Build::new();
+    build.cpp(true);
+    // Third-party C++: don't turn on cc's extra warnings for it. The specific
+    // upstream suppressors are still applied below.
+    build.warnings(false);
+
+    let sources: &[&str] = if is_windows {
+        &WINDOWS_SOURCES
+    } else {
+        &UNIX_SOURCES
     };
-
-    if !status.success() {
-        println!("cargo:warning=Failed to build UnRAR library (make returned {status})");
-        std::process::exit(1);
+    for name in sources {
+        build.file(src_dir.join(name));
     }
 
-    println!("cargo:rustc-link-search=native={}", build_dir.display());
-    println!("cargo:rustc-link-lib=static=unrar");
-
-    // Link C++ standard library (CRITICAL for UnRAR C++ code)
-    #[cfg(target_os = "macos")]
-    {
-        // macOS uses libc++ (C++11+) with modern clang
-        println!("cargo:rustc-link-lib=dylib=c++");
-        println!("cargo:rustc-link-search=native=/usr/lib");
+    // Preprocessor macros — mirror the upstream builds.
+    if is_windows {
+        // UnRARDll.vcxproj: RARDLL;UNRAR;SILENT (the full-crypto DLL variant,
+        // not the RAR_NOCRYPT one).
+        build.define("RARDLL", None);
+        build.define("UNRAR", None);
+        build.define("SILENT", None);
+    } else {
+        // makefile `lib`: WHAT=RARDLL (=> -DRARDLL) plus the shared DEFINES.
+        // os.hpp auto-defines SILENT whenever RARDLL is set. RAR_SMP enables the
+        // pthread threadpool used by the multi-threaded unpacker.
+        build.define("RARDLL", None);
+        build.define("_FILE_OFFSET_BITS", "64");
+        build.define("_LARGEFILE_SOURCE", None);
+        build.define("RAR_SMP", None);
     }
 
-    #[cfg(target_os = "linux")]
-    {
-        // Linux typically uses libstdc++
-        println!("cargo:rustc-link-lib=dylib=stdc++");
+    // Compiler flags. `flag_if_supported` keeps the clang-specific warning
+    // suppressors from breaking GCC/MSVC, which don't recognise them.
+    if target_env != "msvc" {
+        build.flag_if_supported("-std=c++11");
+        build.flag_if_supported("-Wno-logical-op-parentheses");
+        build.flag_if_supported("-Wno-switch");
+        build.flag_if_supported("-Wno-dangling-else");
+    }
+    if !is_windows {
+        build.pic(true); // matches the makefile's LIBFLAGS=-fPIC for `lib`
+        build.flag_if_supported("-pthread"); // RAR_SMP threadpool
     }
 
-    #[cfg(target_os = "windows")]
-    {
-        // Windows uses MSVCRT
-        println!("cargo:rustc-link-lib=dylib=msvcrt");
+    // Compiles every source, archives them, and emits both
+    // `cargo:rustc-link-search=native=<OUT_DIR>` and
+    // `cargo:rustc-link-lib=static=unrar`. The C++ standard library link
+    // directive (libc++ on macOS, libstdc++ on Linux, none needed for MSVC) is
+    // emitted automatically by `cc` because `cpp(true)` is set — so the manual
+    // stdlib linking the make-based build carried is no longer needed.
+    build.compile("unrar");
+
+    // RAR_SMP uses pthreads on Unix. Rust's std already links pthread on Linux,
+    // but declare it explicitly for the vendored objects' benefit. macOS ships
+    // pthread in libSystem (linked by default), so no directive is needed there.
+    if target_os == "linux" || target_os == "android" {
+        println!("cargo:rustc-link-lib=dylib=pthread");
     }
 
-    // Re-run only when a vendored input actually changes. Watching the whole
-    // directory would retrigger whenever stray build artifacts land in it.
     emit_unrar_rerun(&src_dir);
 }
 
-#[cfg(feature = "rar-support")]
-fn stage_unrar_sources(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    use std::fs;
-
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if is_unrar_artifact(&name.to_string_lossy()) {
-            continue;
-        }
-        let from = entry.path();
-        let to = dst.join(&name);
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            copy_dir_recursive(&from, &to)?;
-        } else {
-            // fs::copy overwrites so re-staging keeps the build dir in sync.
-            fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
-}
-
-#[cfg(feature = "rar-support")]
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    use std::fs;
-
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir_recursive(&from, &to)?;
-        } else {
-            fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
-}
-
-#[cfg(feature = "rar-support")]
-fn is_unrar_artifact(name: &str) -> bool {
-    name.ends_with(".o")
-        || name.ends_with(".a")
-        || name.ends_with(".so")
-        || name.ends_with(".dylib")
-        || name == "unrar"
-        || name == "default.sfx"
-}
-
+/// Re-run only when a vendored input actually changes. `cc` tracks the compiled
+/// `.cpp` files it is handed, but not the `.hpp`/`.h` headers they `#include`
+/// (nor the sibling `.cpp` files that are `#include`d rather than compiled), so
+/// walk the whole vendored tree and emit `rerun-if-changed` for every source and
+/// header. The vendored `makefile` is no longer a build input, so it is not
+/// watched.
 #[cfg(feature = "rar-support")]
 fn emit_unrar_rerun(src: &std::path::Path) {
-    println!("cargo:rerun-if-changed={}/makefile", src.display());
-    let Ok(entries) = std::fs::read_dir(src) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    emit_unrar_rerun_sources(src);
+}
+
+/// Emit `rerun-if-changed` for every vendored source/header file, recursing into
+/// subdirectories — a top-level-only walk would miss nested sources (R0076-0025).
+#[cfg(feature = "rar-support")]
+fn emit_unrar_rerun_sources(dir: &std::path::Path) {
+    // Propagate filesystem errors instead of swallowing them: a missed
+    // `rerun-if-changed` lets cargo reuse stale native output when a vendored
+    // source actually changed. Panic with path-specific context so an
+    // incomplete enumeration fails the build loudly (R0081-0085).
+    let entries = std::fs::read_dir(dir).unwrap_or_else(|e| {
+        panic!(
+            "Failed to enumerate vendored UnRAR sources in {}: {e}",
+            dir.display()
+        )
+    });
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|e| {
+            panic!(
+                "Failed to read a directory entry in vendored UnRAR sources {}: {e}",
+                dir.display()
+            )
+        });
+        let path = entry.path();
+        let file_type = entry.file_type().unwrap_or_else(|e| {
+            panic!(
+                "Failed to stat vendored UnRAR source {}: {e}",
+                path.display()
+            )
+        });
+        if file_type.is_dir() {
+            emit_unrar_rerun_sources(&path);
+            continue;
+        }
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.ends_with(".cpp") || name.ends_with(".hpp") || name.ends_with(".h") {
-            println!("cargo:rerun-if-changed={}/{}", src.display(), name);
+            println!("cargo:rerun-if-changed={}", path.display());
         }
     }
 }

@@ -39,10 +39,27 @@
 
 use crate::error::{ArchiveError, Result};
 use crate::options::CompressionLevel;
-use secstr::SecStr;
+use crate::password::Password;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Map a library [`CompressionLevel`] to the WinRAR `-mN` CLI flag.
+///
+/// WinRAR accepts `-m0` (store) through `-m5` (best). Pulled into a
+/// dedicated helper so the codec mapping is one named table instead of
+/// an inline `match` mid-`create_archive`, and so docs/tests can refer
+/// to the policy in one place.
+fn rar_compression_flag(level: CompressionLevel) -> &'static str {
+    match level {
+        CompressionLevel::Store => "-m0",
+        CompressionLevel::Fastest => "-m1",
+        CompressionLevel::Fast => "-m2",
+        CompressionLevel::Normal => "-m3",
+        CompressionLevel::Maximum => "-m4",
+        CompressionLevel::Ultra => "-m5",
+    }
+}
 
 /// RAR archive creator using external WinRAR CLI
 pub struct RarCreator {
@@ -51,7 +68,7 @@ pub struct RarCreator {
     /// Compression level
     compression_level: CompressionLevel,
     /// Optional password
-    password: Option<SecStr>,
+    password: Option<Password>,
     /// Files and directories to add
     entries: Vec<PathBuf>,
     /// Path to rar.exe
@@ -71,9 +88,38 @@ impl RarCreator {
     /// - Output file already exists
     /// - rar.exe cannot be found
     pub fn new<P: AsRef<Path>>(output_path: P) -> Result<Self> {
-        let output_path = output_path.as_ref().to_path_buf();
+        Self::assemble(output_path.as_ref().to_path_buf(), Self::find_rar_exe()?)
+    }
 
-        // Check if output already exists
+    /// Construct a [`RarCreator`] with an explicit `rar.exe` path.
+    ///
+    /// Bypasses the `PATH` / Program-Files discovery in
+    /// [`Self::new`]. Use this for portable installs, deterministic
+    /// tests, and custom WinRAR locations the default discovery
+    /// cannot find. Verifies the path exists and points at a regular
+    /// file before returning.
+    pub fn with_rar_exe_path<P, R>(output_path: P, rar_exe_path: R) -> Result<Self>
+    where
+        P: AsRef<Path>,
+        R: AsRef<Path>,
+    {
+        let rar_exe = rar_exe_path.as_ref().to_path_buf();
+        if !rar_exe.is_file() {
+            return Err(ArchiveError::unsupported(
+                "create_rar",
+                crate::format::ArchiveFormat::Rar,
+                Some(format!(
+                    "rar.exe path '{}' does not exist or is not a regular file",
+                    rar_exe.display()
+                )),
+            ));
+        }
+        Self::assemble(output_path.as_ref().to_path_buf(), rar_exe)
+    }
+
+    /// Shared post-construction step for the public constructors:
+    /// rejects existing output paths and stamps the defaults.
+    fn assemble(output_path: PathBuf, rar_exe_path: PathBuf) -> Result<Self> {
         if output_path.exists() {
             return Err(ArchiveError::io(
                 "create_rar",
@@ -84,24 +130,30 @@ impl RarCreator {
                 ),
             ));
         }
-
-        // Find rar.exe
-        let rar_exe = Self::find_rar_exe()?;
-
         Ok(Self {
             output_path,
             compression_level: CompressionLevel::Normal,
             password: None,
             entries: Vec::new(),
-            rar_exe_path: rar_exe,
+            rar_exe_path,
         })
     }
 
-    /// Find rar.exe on the system
+    /// Find `rar.exe` on the system.
     ///
-    /// Searches in:
-    /// 1. PATH environment variable
-    /// 2. Common WinRAR installation directories
+    /// Discovery is intentionally narrow:
+    /// 1. `where rar.exe` against the current `PATH`.
+    /// 2. The two stock WinRAR install paths
+    ///    (`C:\Program Files\WinRAR\rar.exe`,
+    ///    `C:\Program Files (x86)\WinRAR\rar.exe`).
+    ///
+    /// **Limitation:** custom or portable WinRAR installs (e.g. on a
+    /// non-system drive, or extracted into a per-user directory) are not
+    /// auto-detected by `find_rar_exe`. If your install lives elsewhere
+    /// either add its directory to `PATH`, or construct [`RarCreator`] via
+    /// [`RarCreator::with_rar_exe_path`] which bypasses discovery
+    /// entirely. Registry-based auto-discovery is tracked as a future
+    /// improvement.
     fn find_rar_exe() -> Result<PathBuf> {
         // Try PATH first
         if let Ok(output) = Command::new("where").arg("rar.exe").output() {
@@ -143,9 +195,26 @@ impl RarCreator {
         self.compression_level = level;
     }
 
-    /// Set password for encryption
+    /// Set password for encryption.
+    ///
+    /// **Security limitation:** the external WinRAR CLI accepts the
+    /// password through the `-hp{password}` switch, which becomes part of
+    /// `rar.exe`'s command-line argument vector. While the rar process is
+    /// alive the password is therefore visible to anything that can list
+    /// running processes (`tasklist`, `Get-Process`, telemetry agents,
+    /// crash reporters, parental-control software, …). The local
+    /// [`Password`](crate::Password) (backed by `secstr`) only protects
+    /// the value inside this process's address space; it cannot mask
+    /// argv on Windows.
+    ///
+    /// For workloads where password leakage to the local process listing
+    /// is unacceptable, prefer the in-process `rar-support` Cargo feature
+    /// (UnRAR for read; native RAR creation is not currently shipped) or
+    /// use a non-CLI archiver. This module exists to make the WinRAR
+    /// integration path explicit and convenient on Windows, not to keep
+    /// secrets opaque from the OS.
     pub fn set_password(&mut self, password: impl Into<String>) {
-        self.password = Some(SecStr::from(password.into()));
+        self.password = Some(Password::new(password));
     }
 
     /// Add a file to the archive
@@ -191,6 +260,14 @@ impl RarCreator {
     /// - No entries have been added
     /// - rar.exe execution fails
     /// - Archive creation fails
+    ///
+    /// # Security
+    ///
+    /// When a password is set, `-hp{password}` is appended to `rar.exe`'s
+    /// argument vector. That makes the password observable in OS-level
+    /// process listings while the worker runs. See
+    /// [`RarCreator::set_password`] for the full caveat and recommended
+    /// alternatives.
     pub fn create(self) -> Result<()> {
         if self.entries.is_empty() {
             return Err(ArchiveError::format(
@@ -201,42 +278,7 @@ impl RarCreator {
 
         // Build rar.exe command
         let mut cmd = Command::new(&self.rar_exe_path);
-
-        // Command: a = add files to archive
-        cmd.arg("a");
-
-        // Compression level mapping:
-        // -m0 = store (no compression)
-        // -m1 = fastest
-        // -m2 = fast
-        // -m3 = normal (default)
-        // -m4 = good
-        // -m5 = best
-        let compression_arg = match self.compression_level {
-            CompressionLevel::Store => "-m0",
-            CompressionLevel::Fastest => "-m1",
-            CompressionLevel::Fast => "-m2",
-            CompressionLevel::Normal => "-m3",
-            CompressionLevel::Maximum => "-m4",
-            CompressionLevel::Ultra => "-m5",
-        };
-        cmd.arg(compression_arg);
-
-        // Password encryption
-        if let Some(pwd_str) = crate::options::password_as_str(&self.password)? {
-            cmd.arg(format!("-hp{}", pwd_str));
-        }
-
-        // Recursive mode for directories
-        cmd.arg("-r");
-
-        // Output archive path
-        cmd.arg(&self.output_path);
-
-        // Add all entries
-        for entry in &self.entries {
-            cmd.arg(entry);
-        }
+        cmd.args(self.build_create_args()?);
 
         // Execute command
         let output = cmd
@@ -263,6 +305,52 @@ impl RarCreator {
         Ok(())
     }
 
+    /// Build the argument vector (everything after the program name)
+    /// for the `rar a` invocation. Factored out of [`Self::create`] so
+    /// the switch/path ordering — the `--` end-of-switches sentinel and
+    /// the `./` re-rooting of leading-dash entry paths (R0079-0039) —
+    /// is unit-testable without spawning `rar.exe`.
+    fn build_create_args(&self) -> Result<Vec<std::ffi::OsString>> {
+        let mut args: Vec<std::ffi::OsString> = Vec::new();
+
+        // Command: a = add files to archive
+        args.push("a".into());
+
+        // Codec mapping lives in `rar_compression_flag`
+        // so the CLI policy is one named helper instead of an inline
+        // table tangled with process-spawning.
+        args.push(rar_compression_flag(self.compression_level).into());
+
+        // Password encryption
+        if let Some(pw) = self.password.as_ref() {
+            args.push(format!("-hp{}", pw.as_str()).into());
+        }
+
+        // Recursive mode for directories
+        args.push("-r".into());
+
+        // End-of-switches sentinel: everything after "--" is treated as
+        // a path, so an output or entry path beginning with '-' cannot
+        // be parsed as a WinRAR switch (R0079-0039).
+        args.push("--".into());
+
+        // Output archive path
+        args.push(self.output_path.clone().into());
+
+        // Add all entries. Belt and suspenders for rar builds that do
+        // not honor "--": re-root a leading-dash entry under "." so it
+        // can never scan as a switch.
+        for entry in &self.entries {
+            if entry.to_string_lossy().starts_with('-') {
+                args.push(Path::new(".").join(entry).into());
+            } else {
+                args.push(entry.clone().into());
+            }
+        }
+
+        Ok(args)
+    }
+
     /// Get the path where rar.exe was found
     pub fn rar_exe_path(&self) -> &Path {
         &self.rar_exe_path
@@ -285,6 +373,50 @@ mod tests {
         } else {
             println!("rar.exe not found (expected if WinRAR not installed)");
         }
+    }
+
+    /// R0079-0039: the argv must carry a `--` end-of-switches sentinel
+    /// before any path, and leading-dash entry paths must be re-rooted
+    /// under `.` so they cannot be parsed as switches by rar builds
+    /// that ignore `--`.
+    #[test]
+    fn create_args_protect_leading_dash_entries() {
+        use std::ffi::{OsStr, OsString};
+
+        let creator = RarCreator {
+            output_path: PathBuf::from("out.rar"),
+            compression_level: CompressionLevel::Normal,
+            password: None,
+            entries: vec![PathBuf::from("-sw.txt"), PathBuf::from("normal.txt")],
+            rar_exe_path: PathBuf::from("rar.exe"),
+        };
+        let args = creator.build_create_args().expect("argv builds");
+
+        let sep = args
+            .iter()
+            .position(|a| a.as_os_str() == OsStr::new("--"))
+            .expect("'--' sentinel present");
+        let out = args
+            .iter()
+            .position(|a| a.as_os_str() == OsStr::new("out.rar"))
+            .expect("output path present");
+        assert!(sep < out, "'--' must precede the output path: {:?}", args);
+
+        let rerooted: OsString = Path::new(".").join("-sw.txt").into();
+        assert!(
+            args.contains(&rerooted),
+            "leading-dash entry must be re-rooted: {:?}",
+            args
+        );
+        assert!(args.contains(&OsString::from("normal.txt")));
+        assert!(
+            !args
+                .iter()
+                .skip(sep + 1)
+                .any(|a| a.to_string_lossy().starts_with('-')),
+            "no post-sentinel argument may begin with '-': {:?}",
+            args
+        );
     }
 
     #[test]

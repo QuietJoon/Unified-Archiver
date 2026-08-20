@@ -1,3 +1,12 @@
+---
+type: MVP Scope
+title: "MVP Scope: unified-archive v0.1.0"
+description: "List archive contents with metadata via unified API (ZIP, RAR/RAR5, 7z, TAR variants, ISO)"
+tags: [architecture, ADR-0021, ADR-0040, ADR-0053, R0071-0020, R0070-0001, R0070-0002, OI-0057-003]
+timestamp: 2026-04-30T00:00:00Z
+status: active
+---
+
 # MVP Scope: unified-archive v0.1.0
 
 ## In-Scope Scenarios
@@ -45,11 +54,11 @@
 | Item | Reason |
 |---|---|
 | ISO format creation | Read-only via libarchive; no write support in scope |
-| `open_at_offset` for SFX | Deferred. Requires significant changes to all backends. Returns `ArchiveError::NotImplemented` (DEF-001). Workaround: `extract_stub()` returns the executable prefix bytes (up to the detected archive offset) for security analysis; no temp-file payload extraction helper exists yet. Callers can use `data_offset` from `SfxDetectionResult` to locate the embedded archive. |
+| In-place `open_at_offset` (no tempfile copy) | The shipped implementation (AD 0040) copies the payload tail to a tempfile (capped at 16 GiB) before backend dispatch. True in-place offset-aware backend opening — which would remove that copy — remains deferred. |
 | ~~SecStr migration for all password fields~~ | **Resolved 2026-04-17** (OI-0057-003): `ExtractionOptions.password` and `CompressionOptions.password` are `Option<SecStr>` with zeroize-on-drop; decoded only at the FFI boundary. |
-| Split archive creation | `split_size` field exists but ignored; multi-part creation deferred to v0.2.0 |
-| True streaming extraction | Native backends (Piz, ZipReader, SevenZ, UnRAR) buffer full entries; true streaming limited to libarchive. Current non-libarchive path: extract-to-memory + Cursor wrapper. ZipReader provides buffered decryption for encrypted ZIP. |
-| Backend trait abstraction | Manual dispatch is explicit and performant; refactoring deferred |
+| Split archive creation | `split_size` field exists but ignored; multi-part creation remains deferred (originally targeted v0.2.0; the v0.2.0 release shipped without it — R0071-0020). |
+| True streaming extraction | Native backends (ZipReader, SevenZ, UnRAR) buffer full entries; true streaming limited to libarchive. Current non-libarchive path: extract-to-memory + Cursor wrapper. ZipReader is the sole ZIP backend (DCR-009) and provides buffered decryption for encrypted ZIP. |
+| ~~Backend trait abstraction~~ | **Landed in v0.2.0**: `src/backend.rs` provides `ReadBackend` plus mode-aware `dispatch_read_archive` / `dispatch_read_backend` helpers (R0070-0001 / R0070-0002, R0071-0020). Further `WriteBackend` / `ModifyBackend` traits remain deferred — see AD 0053. |
 | Interactive password prompts | Password must be provided programmatically before extraction |
 | Full cross-platform production support | See platform status below |
 | GZIP/BZIP2/XZ standalone creation | Library creates these only as TAR compression layers |
@@ -73,5 +82,5 @@
 
 | Placeholder | Location | Justification |
 |---|---|---|
-| `open_at_offset` | `src/archive.rs` | SFX direct opening requires multi-backend offset support; returns `ArchiveError::NotImplemented` (DEF-001). Workaround: `extract_stub()` returns the executable prefix bytes for security analysis; callers can use `data_offset` from `SfxDetectionResult` to locate the embedded archive, but no helper to open at offset exists yet. |
+| In-place `open_at_offset` (no tempfile copy) | `src/archive.rs` | DEF-001 closed 2026-04-18: `Archive::open_at_offset()` ships a tempfile-backed implementation (16 GiB payload ceiling per AD 0040). A true in-place offset-aware backend opening that avoids the tempfile copy is still a future item. |
 | `split_size` | `src/options.rs` (CompressionOptions) | Field reserved for future multi-part creation; not currently honored by writers |

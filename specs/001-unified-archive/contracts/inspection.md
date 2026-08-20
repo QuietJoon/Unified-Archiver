@@ -168,6 +168,24 @@ CRC32. Suitable for fast equality checks but **not** collision-resistant.
 
 ### Archive::calculate_manifest_digest
 
+> **Reality check (2026-08-17):** the algorithm and performance text in this
+> section is planning-era and has drifted from the shipped crate. Canonical
+> behaviour is `docs/API_REFERENCE.md` and the rustdoc on
+> `Archive::calculate_content_multiset_digest_and_size` (`src/inspection.rs`),
+> of which `calculate_manifest_digest` is now a shim. Known deltas below:
+> (1) the `"{path}:{size_or_0}"` fallback is **gone** — an entry with no
+> stored CRC32 has its payload streamed through a CRC32 hasher instead, so
+> the digest is content-identity on CRC-less formats and no longer O(n)
+> there (AD 0047); (2) AE-2 AES ZIP entries list `crc32 = None` and therefore
+> take that streaming branch, which makes the digest **require the password**
+> on password-protected ZIPs; (3) a CRC-less entry whose payload does not
+> match its declared size returns `ArchiveError::Corruption` rather than
+> digesting the short payload (DCR-011); (4) duplicate archive-internal paths
+> no longer carry a per-path occurrence ordinal, so digests stored under the
+> older encoding do not match for such archives (DCR-012). Points 2 and 4 are
+> behaviour changes not yet carried by any tagged version — see the
+> `[Unreleased]` section of `CHANGELOG.md`.
+
 ```rust
 impl Archive {
     pub fn calculate_manifest_digest(&self) -> Result<String, ArchiveError>

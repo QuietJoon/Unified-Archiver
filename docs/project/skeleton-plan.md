@@ -1,3 +1,12 @@
+---
+type: Skeleton Plan
+title: "Structural Skeleton Plan (Retrospective)"
+description: "This is a retrospective record."
+tags: [project-control, ADR-0021, ADR-0020, ADR-0040, OI-0065-002]
+timestamp: 2026-05-04T00:00:00Z
+status: active
+---
+
 # Structural Skeleton Plan (Retrospective)
 
 > This is a retrospective record. The structural skeleton is the working implementation itself.
@@ -52,10 +61,10 @@ Additional local commands:
   - True streaming extraction
   - ZIP modification reliability
   - Creation progress callbacks (OI-025-003) — RESOLVED: per-entry progress invoked with `total=None` (AD 0021)
-  - Unknown-stub SFX scanning (OI-027-001) — RESOLVED: unknown stubs proceed to signature scanning
-  - `ModificationOptions` (AD 0020) — all fields honored: `create_backup`/`backup_suffix`, `preserve_metadata` (timestamps + permissions), `compression` override
+  - Unknown-stub SFX scanning (OI-027-001) — RESOLVED, then **superseded 2026-08-16 (R0070-0076):** unknown stubs are rejected at Stage 1 rather than proceeding to the signature scan. See SCN-SFX-08 in `docs/architecture/scenario-matrix.md`.
+  - `ModificationOptions` (AD 0020) — all fields honored: `create_backup`/`backup_suffix`, `preserve_metadata` (modified, accessed, and created timestamps plus Unix permissions on retained regular-file entries — OI-0065-002 resolved; directory metadata still uses backend defaults), `compression` override
 - **Why DEFERRED (not STUB):** These items are explicitly out of MVP scope. The library is functional without them. Distinction between exposed and internal deferrals:
-  - **Exposed placeholder APIs** (callers can see/invoke but behavior is absent): `open_at_offset` (non-functional on positive SFX matches, no fallback).
+  - **Exposed implementation with caveats** (shipped behavior is real but constrained): `open_at_offset` — tempfile-backed implementation (closed 2026-04-18); payloads up to the ceiling in AD 0040 are materialized to a temp copy before opening. `open_sfx()` delegates through it.
   - **Hidden internal deferrals** (no user-visible surface): true streaming for non-libarchive backends, SecStr password migration, split archive creation.
 
 ## Risks and Mitigations

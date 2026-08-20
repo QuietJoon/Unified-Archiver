@@ -159,10 +159,12 @@ fn test_corruption_detection_consistency_across_formats() {
 fn test_validation_empty_file_in_archive() {
     // Test validation of archives containing empty files (0 bytes)
     use std::fs;
-    use std::path::PathBuf;
 
-    let temp_dir = PathBuf::from("/Volumes/Temp/claude/7zip/empty_file_test");
-    fs::create_dir_all(&temp_dir).ok();
+    // R0074-0074: use tempfile so the test is portable and cleans up
+    // automatically. The previous hardcoded scratch path was
+    // machine-specific.
+    let temp_handle = tempfile::tempdir().expect("Failed to create temp dir");
+    let temp_dir = temp_handle.path().to_path_buf();
 
     // Create an empty file
     fs::write(temp_dir.join("empty.txt"), b"").expect("Create empty file");
@@ -198,10 +200,10 @@ fn test_validation_empty_file_in_archive() {
 fn test_validation_large_file() {
     // Test validation of archives with files > 1MB
     use std::fs;
-    use std::path::PathBuf;
 
-    let temp_dir = PathBuf::from("/Volumes/Temp/claude/7zip/large_file_test");
-    fs::create_dir_all(&temp_dir).ok();
+    // R0074-0074: tempdir() makes the path portable + auto-cleans.
+    let temp_handle = tempfile::tempdir().expect("Failed to create temp dir");
+    let temp_dir = temp_handle.path();
 
     // Create a 2MB file with pattern
     let large_data: Vec<u8> = (0..2_000_000).map(|i| (i % 256) as u8).collect();
@@ -232,19 +234,16 @@ fn test_validation_large_file() {
             println!("✓ Large file (2MB) validation passed");
         }
     }
-
-    // Cleanup
-    fs::remove_dir_all(&temp_dir).ok();
 }
 
 #[test]
 fn test_validation_special_characters_in_filename() {
     // Test validation with special characters in filenames
     use std::fs;
-    use std::path::PathBuf;
 
-    let temp_dir = PathBuf::from("/Volumes/Temp/claude/7zip/special_chars_test");
-    fs::create_dir_all(&temp_dir).ok();
+    // R0074-0074: tempdir() makes the path portable + auto-cleans.
+    let temp_handle = tempfile::tempdir().expect("Failed to create temp dir");
+    let temp_dir = temp_handle.path().to_path_buf();
 
     // Create file with special characters (safe subset)
     let special_names = vec![
@@ -415,10 +414,10 @@ fn test_validation_nonexistent_file() {
 fn test_validation_not_an_archive() {
     // Test that non-archive files are rejected
     use std::fs;
-    use std::path::PathBuf;
 
-    let temp_path = PathBuf::from("/Volumes/Temp/claude/7zip/not_archive.zip");
-    fs::create_dir_all(temp_path.parent().unwrap()).ok();
+    // R0074-0074: tempdir() instead of a hardcoded host path.
+    let temp_handle = tempfile::tempdir().expect("Failed to create temp dir");
+    let temp_path = temp_handle.path().join("not_archive.zip");
 
     // Create a text file with .zip extension
     fs::write(&temp_path, b"This is not a ZIP file, just text").ok();
@@ -436,9 +435,6 @@ fn test_validation_not_an_archive() {
         }
         Ok(_) => panic!("Should not open non-archive as ZIP"),
     }
-
-    // Cleanup
-    fs::remove_file(&temp_path).ok();
 }
 
 #[test]

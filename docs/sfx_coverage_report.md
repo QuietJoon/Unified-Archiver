@@ -1,108 +1,98 @@
+---
+type: Report
+title: "SFX Module Test Coverage Report"
+description: "Measured 2026-08-05 with cargo-llvm-cov: 99.4% line coverage across src/sfx/ — the T110a >90% threshold is verified."
+tags: [reference]
+timestamp: 2026-04-12T00:00:00Z
+status: active
+---
+
 # SFX Module Test Coverage Report
 
-**Date**: 2025-11-13
+**Date**: 2026-08-05 (supersedes the 2025-11-13 estimate-only draft)
 **Task**: T110a - Verify >90% test coverage for src/sfx/ module (Constitution Principle IV)
 
 ## Summary
 
-**Status**: Coverage growing -- substantial test corpus across unit and integration suites.
+**Status**: VERIFIED — measured line coverage for `src/sfx/` is **99.4%**, comfortably above the
+>90% threshold. This is a real `cargo-llvm-cov` measurement over the full green test suite, not
+the test/code-line ratio the previous draft used as a proxy.
 
-The SFX module has dozens of unit tests across `result.rs`, `signatures.rs`, `stub_types.rs`, and `detection.rs`, plus integration suites in `tests/integration/sfx_detection.rs` and `tests/integration/sfx_false_positives.rs`. Exact line-coverage percentage requires `cargo-tarpaulin` or `cargo-llvm-cov`.
+The earlier draft predated two structural changes and described a module that no longer exists in
+that shape: Innovation I3 (2026-07-22) replaced the `f32` confidence score with the
+`SfxConfidence` enum (`NotSfx` / `Probable` / `Confirmed`) plus an `evidence: Vec<String>` trail,
+and `src/sfx/limits.rs` now centralises the scan/size ceilings. `limits.rs` does not appear in
+the coverage table because it contains only `const` items — there is no executable code to cover.
 
-## Test Execution Results
+## Measurement
 
 ```bash
-cargo test --lib sfx
-cargo test --test integration
+cargo llvm-cov --all-features --no-report -- --test-threads=4   # full suite, instrumented
+cargo llvm-cov report
 ```
 
-Unit tests span result types, signature matching, stub-type classification, and detection pipeline paths. Integration tests (`tests/integration/sfx_detection.rs`, `tests/integration/sfx_false_positives.rs`) use **synthetic fixtures** — programmatically constructed byte sequences that embed archive signatures after stub headers. These are not real-world SFX binaries (e.g., NSIS installers, WinRAR SFX modules); real-world SFX samples have not been incorporated into the test suite.
+- Toolchain: `cargo-llvm-cov` 0.8.7 + `llvm-tools-preview` (stable, Rust 2024 edition).
+- Test population: the entire suite (unit + all integration binaries), all features enabled;
+  every test passed on the measurement run.
+- Measured at the head of the 001-unified-archive branch on 2026-08-05.
 
-## Coverage Estimation (by file)
+## Measured coverage (src/sfx/)
 
-| File | Code Lines | Test Lines | Test/Code Ratio |
-|------|------------|------------|-----------------|
-| `detection.rs` | 110 | 34 | 30.9% |
-| `result.rs` | 102 | 29 | 28.4% |
-| `signatures.rs` | 122 | 57 | 46.7% |
-| `stub_types.rs` | 74 | 15 | 20.3% |
-| **Total** | **408** | **135** | **~33%** |
+| File | Regions | Region cover | Functions | Function cover | Lines | Line cover |
+|------|---------|--------------|-----------|----------------|-------|------------|
+| `detection.rs` | 1265 | 98.97% | 42 | 95.24% | 534 | **99.06%** |
+| `result.rs` | 436 | 99.31% | 42 | 100.00% | 297 | **100.00%** |
+| `signatures.rs` | 416 | 100.00% | 31 | 100.00% | 208 | **100.00%** |
+| `stub_types.rs` | 451 | 98.89% | 49 | 100.00% | 297 | **98.99%** |
+| **Module total** | 2568 | ~99.2% | 164 | ~98.8% | 1336 | **~99.4%** |
 
-**Note**: Test/Code ratio is a rough proxy for coverage. Actual line coverage requires `cargo-tarpaulin` or `cargo-llvm-cov`.
+(`limits.rs`: constants only, no coverable regions. Whole-crate context: 82.43% lines.)
 
-## Coverage Gaps Identified
+## Gap closure relative to the 2025-11-13 draft
 
-### Missing Test Coverage
+The draft's action items are all discharged:
 
-1. **Error Paths**: Limited testing of error conditions
-   - Invalid executable formats
-   - Corrupted archive signatures
-   - I/O errors during detection
+- **Install a coverage tool** — `cargo-llvm-cov` installed to `CARGO_HOME/bin`; measurement
+  wired as above.
+- **Error-path tests** — landed across the intervening review cycles (corrupted-signature,
+  bounds, and I/O failure paths are covered; e.g. the bzip2 empty-stream/EOS probe R0080-0085,
+  gzip reserved-flag screening R0079-0031) and topped up on 2026-08-05:
+  `test_detect_sfx_xz_reserved_flag_rejected` exercises the Stage-3 xz probe's reject path.
+- **Edge-case tests** — 1 MB scan-boundary, signature-at-offset-0 demotion, and
+  multi-signature preference are covered (`test_detect_sfx_prefers_strong_magic_over_embedded_gzip`
+  and friends); `test_detect_sfx_xz_payload` (2026-08-05) covers the previously-unexercised xz
+  payload-validation arm.
+- **Accessor coverage** (2026-08-05): `test_payload_coordinates_populated_and_none`
+  (`result.rs`) and `test_is_known` (`stub_types.rs`) close the last uncovered public accessors.
+- **Re-run and verify >90%** — done; see the table.
 
-2. **Edge Cases**: Some boundary conditions not tested
-   - SFX files >1MB (scan limit)
-   - Multiple archive signatures in single file
-   - Partial signature matches (false positives)
+## Residual uncovered code (accepted)
 
-3. **Integration**: Integration suites are active and passing
-   - `tests/integration/sfx_detection.rs`
-   - `tests/integration/sfx_false_positives.rs`
+- `detection.rs` Stage-3 payload probe, `_` fallback arm ("unknown format ⇒ require ≥100
+  bytes"): **defensively unreachable** — the signature table in `signatures.rs` contains exactly
+  the seven formats the probe matches explicitly (Zip, Rar, Rar5, SevenZip, Gzip, Bzip2, Xz), so
+  no scan result can reach the arm today. It guards future signature-table additions and is kept
+  deliberately.
+- A handful of cold diagnostic lines (panic-format arguments inside test assertions, an
+  unreachable padding branch in a fixture builder). None are production logic.
 
-## Recommendations to Achieve >90% Coverage
+## Test population snapshot (2026-08-05)
 
-### High Priority (Required for T110a completion)
-
-1. **Install Coverage Tool**:
-   ```bash
-   cargo install cargo-tarpaulin  # or cargo-llvm-cov
-   ```
-
-2. **Add Error Path Tests** (est. +20% coverage):
-   - Test invalid PE/ELF/Mach-O headers
-   - Test corrupted archive signatures
-   - Test file I/O errors
-
-3. **Add Edge Case Tests** (est. +15% coverage):
-   - Test files exactly at 1MB boundary
-   - Test files with archive signatures at offset 0 (plain archives, not SFX)
-   - Test multi-signature scenarios
-
-4. **Integration Tests** (active and passing):
-   - `tests/integration/sfx_detection.rs` and `tests/integration/sfx_false_positives.rs` are compiling and passing
-
-### Medium Priority (Quality improvements)
-
-5. **Property-Based Tests**:
-   - Use proptest for signature scanning invariants
-   - Test stub type detection with fuzzing
-
-6. **Benchmark Coverage**:
-   - Ensure benches/sfx_detection.rs covers performance paths
+114 unit tests live inside the module files themselves — `detection.rs` 33, `result.rs` 23,
+`signatures.rs` 24, `stub_types.rs` 34 — and that is the figure to compare against the per-file
+coverage above. `cargo test --lib sfx` reports 118: the name filter also matches four
+SFX-adjacent tests outside the module (`archive::tests` ×2 and
+`archive::sfx_fallback_error_tests` ×2), which exercise the facade entry points rather than
+`src/sfx/` itself. On top of those sit the integration suites
+`tests/integration/sfx_detection.rs`, `tests/integration/sfx_false_positives.rs`, and
+`tests/integration/sfx_staging_progress.rs`. Integration fixtures remain **synthetic**
+(programmatically constructed stub+signature byte sequences); incorporating real-world SFX
+binaries (NSIS, WinRAR SFX modules) stays a nice-to-have, not a threshold requirement.
 
 ## Action Items
 
-- [ ] Install `cargo-tarpaulin` or `cargo-llvm-cov`
-- [ ] Run actual coverage analysis: `cargo tarpaulin --out Html --lib`
-- [ ] Add missing error path tests
-- [ ] Add edge case tests
-- [ ] Re-run coverage and verify >90% threshold
-
-## Constitutional Compliance
-
-**Constitution Principle IV**: "Testing is mandatory and comprehensive. All code MUST include: Unit tests for individual components (>90% coverage target)"
-
-**Current Status**: ⚠️ Non-compliant - Coverage below 90% target
-
-**Constitutional compliance**: Non-compliant. Principle IV mandates >90% coverage; the module is estimated at ~33% (rough proxy — actual line coverage not measured).
-
-**Release-blocking guidance**: SFX detection is functional and well-tested for primary happy-path use cases. Falling below the 90% threshold does not block the current release, but T110a should not be marked complete until coverage reaches the constitutional target or a formal exception is recorded.
-
-## Conclusion
-
-The SFX module has:
-- Substantial unit test corpus across result.rs, signatures.rs, stub_types.rs, detection.rs
-- Integration suites active and passing (sfx_detection.rs, sfx_false_positives.rs)
-- Good coverage of happy paths
-- Error paths and edge cases have room for improvement
-
-**Recommendation**: Add tests for error paths and edge cases to reach >90% coverage before marking T110a as complete.
+- [x] Install `cargo-llvm-cov` (or `cargo-tarpaulin`)
+- [x] Run actual coverage analysis
+- [x] Add missing error path tests
+- [x] Add edge case tests
+- [x] Re-run coverage and verify >90% threshold — **verified at ~99.4% lines**

@@ -17,7 +17,7 @@ mod common;
 
 use common::fixture;
 use std::io::Read;
-use unified_archive::{Archive, ArchiveFormat, CompressionOptions};
+use unified_archive::{Archive, ArchiveFormat, CompressionOptions, StreamBound};
 
 // ── Contract 1: Basic streaming reader ──
 
@@ -30,7 +30,9 @@ fn contract_streaming_basic_read_zip() {
         .find(|e| e.entry_type == unified_archive::EntryType::File)
         .expect("Should have at least one file entry");
 
-    let mut reader = archive.extract_to_stream(&first_file.path).unwrap();
+    let mut reader = archive
+        .extract_to_stream(&first_file.path, StreamBound::Unbounded)
+        .unwrap();
     let mut content = Vec::new();
     reader.read_to_end(&mut content).unwrap();
 
@@ -62,7 +64,9 @@ fn contract_streaming_basic_read_rar() {
         .find(|e| e.entry_type == unified_archive::EntryType::File)
         .expect("Should have at least one file entry");
 
-    let mut reader = archive.extract_to_stream(&first_file.path).unwrap();
+    let mut reader = archive
+        .extract_to_stream(&first_file.path, StreamBound::Unbounded)
+        .unwrap();
     let mut content = Vec::new();
     reader.read_to_end(&mut content).unwrap();
 
@@ -78,7 +82,9 @@ fn contract_streaming_basic_read_7z() {
         .find(|e| e.entry_type == unified_archive::EntryType::File)
         .expect("Should have at least one file entry");
 
-    let mut reader = archive.extract_to_stream(&first_file.path).unwrap();
+    let mut reader = archive
+        .extract_to_stream(&first_file.path, StreamBound::Unbounded)
+        .unwrap();
     let mut content = Vec::new();
     reader.read_to_end(&mut content).unwrap();
 
@@ -94,7 +100,9 @@ fn contract_streaming_basic_read_tar() {
         .find(|e| e.entry_type == unified_archive::EntryType::File)
         .expect("Should have at least one file entry");
 
-    let mut reader = archive.extract_to_stream(&first_file.path).unwrap();
+    let mut reader = archive
+        .extract_to_stream(&first_file.path, StreamBound::Unbounded)
+        .unwrap();
     let mut content = Vec::new();
     reader.read_to_end(&mut content).unwrap();
 
@@ -112,7 +120,9 @@ fn contract_streaming_chunked_read() {
         .find(|e| e.entry_type == unified_archive::EntryType::File)
         .unwrap();
 
-    let mut reader = archive.extract_to_stream(&file_entry.path).unwrap();
+    let mut reader = archive
+        .extract_to_stream(&file_entry.path, StreamBound::Unbounded)
+        .unwrap();
 
     // Read in small chunks
     let mut chunks = Vec::new();
@@ -150,7 +160,9 @@ fn contract_streaming_matches_extract_to_memory() {
     {
         let memory_data = archive.extract_to_memory(&entry.path).unwrap();
 
-        let mut reader = archive.extract_to_stream(&entry.path).unwrap();
+        let mut reader = archive
+            .extract_to_stream(&entry.path, StreamBound::Unbounded)
+            .unwrap();
         let mut stream_data = Vec::new();
         reader.read_to_end(&mut stream_data).unwrap();
 
@@ -176,7 +188,9 @@ fn contract_streaming_encrypted_rar() {
         .find(|e| e.entry_type == unified_archive::EntryType::File);
 
     if let Some(entry) = file_entry {
-        let mut reader = archive.extract_to_stream(&entry.path).unwrap();
+        let mut reader = archive
+            .extract_to_stream(&entry.path, StreamBound::Unbounded)
+            .unwrap();
         let mut content = Vec::new();
         let result = reader.read_to_end(&mut content);
         // Should succeed with correct password provided at open time
@@ -203,7 +217,7 @@ fn contract_streaming_without_password_fails() {
             .find(|e| e.entry_type == unified_archive::EntryType::File);
 
         if let Some(entry) = file_entry {
-            let result = archive.extract_to_stream(&entry.path);
+            let result = archive.extract_to_stream(&entry.path, StreamBound::Unbounded);
             // Should either fail to open stream or fail during read
             if let Ok(mut reader) = result {
                 let mut content = Vec::new();
@@ -235,7 +249,9 @@ fn contract_streaming_to_file() {
     let output_path = temp.path().join("streamed_output.txt");
 
     // Stream to file using std::io::copy
-    let mut reader = archive.extract_to_stream(&file_entry.path).unwrap();
+    let mut reader = archive
+        .extract_to_stream(&file_entry.path, StreamBound::Unbounded)
+        .unwrap();
     let mut output = std::fs::File::create(&output_path).unwrap();
     let bytes_written = std::io::copy(&mut reader, &mut output).unwrap();
 
@@ -257,7 +273,9 @@ fn contract_streaming_to_vec_writer() {
         .find(|e| e.entry_type == unified_archive::EntryType::File)
         .unwrap();
 
-    let mut reader = archive.extract_to_stream(&file_entry.path).unwrap();
+    let mut reader = archive
+        .extract_to_stream(&file_entry.path, StreamBound::Unbounded)
+        .unwrap();
     let mut buffer = Vec::new();
     std::io::copy(&mut reader, &mut buffer).unwrap();
 
@@ -276,7 +294,9 @@ fn contract_streaming_extractor_progress() {
         .find(|e| e.entry_type == unified_archive::EntryType::File)
         .unwrap();
 
-    let mut reader = archive.extract_to_stream(&file_entry.path).unwrap();
+    let mut reader = archive
+        .extract_to_stream(&file_entry.path, StreamBound::Unbounded)
+        .unwrap();
 
     // Initial state
     assert_eq!(reader.bytes_read(), 0);
@@ -318,7 +338,9 @@ fn contract_streaming_roundtrip() {
     archive.finish().unwrap();
 
     let archive = Archive::open(&archive_path).unwrap();
-    let mut reader = archive.extract_to_stream("stream_test.bin").unwrap();
+    let mut reader = archive
+        .extract_to_stream("stream_test.bin", StreamBound::Unbounded)
+        .unwrap();
     let mut streamed = Vec::new();
     reader.read_to_end(&mut streamed).unwrap();
 

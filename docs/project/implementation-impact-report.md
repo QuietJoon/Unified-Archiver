@@ -1,3 +1,12 @@
+---
+type: Impact Report
+title: "Implementation Impact Report"
+description: "Related DCR(s): none (this is the initial impact report for the retroactive baseline)"
+tags: [project-control, ADR-0040, ADR-0021, ADR-0019, ADR-0018, DCR-001, OI-0057-003]
+timestamp: 2026-04-13T00:00:00Z
+status: active
+---
+
 # Implementation Impact Report
 
 - **Report ID:** IIR-001
@@ -34,17 +43,17 @@ All slices are allowed in parallel — the implementation is complete. Reconcili
 
 ## Known implementation gaps (tracked as DEFERRED in stub manifest)
 
-These gaps are explicitly out of MVP scope. They are architecturally present but not functionally complete. See `docs/project/stub-manifest.md` for manifest rows and `reviews/Open_Issues.md` for issue references.
+These gaps are explicitly out of MVP scope. They are architecturally present but not functionally complete. See `docs/project/stub-manifest.md` for manifest rows and `docs/project/open-issues.md` for issue references.
 
 | DEF ID | Gap | Open Issue | Scenario | Status |
 |---|---|---|---|---|
-| DEF-001 | `Archive::open_at_offset` returns `NotImplemented` | — | SCN-SFX-* open flow | **Closed 2026-04-18** (tempfile-backed implementation shipped; 16 GiB ceiling per AD 0040; `open_sfx()` delegates here) |
+| DEF-001 | `Archive::open_at_offset` — tempfile-backed implementation (payloads ≤ AD 0040 ceiling materialized to temp before opening) | — | SCN-SFX-* open flow | **Closed 2026-04-18** (`open_sfx()` delegates here; remaining caveat is the payload-size ceiling documented in AD 0040) |
 | DEF-002 | `CompressionOptions::split_size` not honored | — | SCN-CRE-* split creation | Open |
 | DEF-003 | Passwords stored in `Option<String>`; no SecStr | OI-0057-003 | All password scenarios | **Closed 2026-04-17** (password fields migrated to `Option<SecStr>`) |
 | DEF-004 | Non-libarchive backends buffer then wrap in `Cursor` | — | SCN-EXT-* streaming | Open |
 | DEF-005 | ZIP `commit_changes()` edge cases | — | SCN-MOD-* | Open (some ZIP-specific scenarios remain; OI-025-001/OI-025-002 resolved 2026-04-14) |
 | DEF-006 | `CompressionOptions::progress` not consumed | OI-025-003 | SCN-CRE-04 | **Closed 2026-04-13** (DCR-001 Phase B.1, AD 0021) |
-| DEF-007 | `StubType::Unknown` scanning deferred | OI-027-001 | SCN-SFX-08 | **Closed 2026-04-13** (DCR-001 Phase A.1) |
+| DEF-007 | `StubType::Unknown` scanning deferred | OI-027-001 | SCN-SFX-08 | **Closed 2026-04-13** (DCR-001 Phase A.1) — **superseded 2026-08-16 (R0070-0076):** unknown stubs are now rejected at Stage 1 rather than proceeding to the signature scan; see SCN-SFX-08 in `docs/architecture/scenario-matrix.md`. |
 | DEF-008 | `ModificationOptions` fields not consumed | OI-025-003 | SCN-MOD-* | **Closed 2026-04-14** (DCR-001 Phases B.2 + C): all fields honored including `preserve_metadata` and `compression` |
 
 Additional acknowledged implementation concerns:
@@ -64,7 +73,7 @@ These items are tracked independently of the implementation gaps and represent d
 | Contract drift | Contract files have drifted from the implemented API in several places; reconciled partially during Review 041/042 review rounds but not exhaustively audited. | `specs/001-unified-archive/contracts/*.md` | Open |
 | Architecture docs | Multiple architecture docs (scenario-matrix, verification-matrix, walkthroughs) contained stale status and assignments; partially reconciled during Reviews 041/042. | `docs/architecture/*.md` | Open |
 | Baseline checklist | `design-baseline.md` "Handoff Readiness Checklist" still has the "phase-state synchronized" box unchecked pending full doc reconciliation. | `docs/project/design-baseline.md` | **Closed 2026-04-13** — checkbox ticked after archive-level integrity contract gap closed. |
-| Decision records | New architectural decisions taken during in-flight remediation (UNRAR mutex, additive `modify_with_options`, per-entry creation progress) lacked ADRs. | `docs/architecture/decisions/` | **Closed 2026-04-13** (DCR-001) — ADRs 0019, 0020, 0021 added; index updated. |
+| Decision records | New architectural decisions taken during in-flight remediation (UNRAR mutex, additive `modify_with_options`, per-entry creation progress) lacked ADRs. | `docs/records/` | **Closed 2026-04-13** (DCR-001) — ADRs 0019, 0020, 0021 added; index updated. |
 | Project state | `phase-state.yaml`, `status.md`, and IIR-001 listed Phase A/B gaps as open after they had been resolved in code. | `docs/project/` | **Closed 2026-04-13** (DCR-001) — phase-state and status refreshed; IIR-001 closures recorded inline. |
 
 ## Required rewind
@@ -79,10 +88,10 @@ These items are tracked independently of the implementation gaps and represent d
 |---|---|---|
 | Close out scenario/contract drift for `calculate_archive_crc()` / `calculate_manifest_digest()` / `calculate_manifest_summary()` by adding them to `inspection.md` | Documentation maintainer | **Closed 2026-04-13** |
 | Complete handoff checklist item "phase-state synchronized to this baseline" once contract drift is reconciled | Documentation maintainer | **Closed 2026-04-13** |
-| Resolve OI-027-001 (unknown-stub SFX scanning) | Implementation slice owner | **Closed 2026-04-13** (DCR-001 Phase A.1) |
+| Resolve OI-027-001 (unknown-stub SFX scanning) | Implementation slice owner | **Closed 2026-04-13** (DCR-001 Phase A.1) — **superseded 2026-08-16 (R0070-0076):** unknown stubs are now rejected at Stage 1 rather than proceeding to the signature scan; see SCN-SFX-08 in `docs/architecture/scenario-matrix.md`. |
 | Resolve RAR concurrent-call stabilization | Implementation slice owner | **Closed 2026-04-13** (DCR-001 Phase A.2, AD 0019) |
 | Resolve OI-025-003 (`CompressionOptions.progress` + `ModificationOptions` dead API) | Implementation slice owner | **Closed 2026-04-13** (DCR-001 Phases B.1 + B.2, ADs 0020 + 0021) |
-| Resolve OI-025-001 / OI-025-002 (modification metadata/settings preservation) | Implementation slice owner | **Closed 2026-04-14** (DCR-001 Phase C): `commit_changes()` preserves timestamps, permissions, and honors compression overrides |
+| Resolve OI-025-001 / OI-025-002 (modification metadata/settings preservation) | Implementation slice owner | **Closed 2026-04-14** (DCR-001 Phase C): `commit_changes()` preserves modification time and Unix permissions, and honors compression overrides |
 | Decide whether to promote any DEF entry into a subsequent MVP scope (requires new design change record if so) | Project lead | Open |
 
 ## Notes

@@ -21,15 +21,18 @@ This project adheres to professional standards of behavior. Please be respectful
 ### Building
 
 ```bash
-git clone https://github.com/yourusername/7zip-rbinding
-cd 7zip-rbinding
+git clone https://github.com/QuietJoon/unified-archive
+cd unified-archive
 cargo build
 ```
 
 The build.rs script automatically:
 - Links libarchive via pkg-config (or Homebrew on macOS)
-- Compiles bundled UnRAR SDK for RAR/RAR5 support
-- Generates FFI bindings
+- Compiles the bundled UnRAR SDK for RAR/RAR5 support with the `cc` crate
+
+The FFI declarations are **not** generated: `src/ffi/libarchive.rs` and
+`src/ffi/unrar.rs` are hand-written `unsafe extern "C"` blocks, so adding a
+native call means adding its declaration by hand.
 
 ### Running Tests
 
@@ -37,8 +40,12 @@ The build.rs script automatically:
 # Run all tests
 cargo test
 
-# Run specific test suite
-cargo test --test integration
+# Run one test binary
+cargo test --test integration_tests
+cargo test --test contract_tests
+
+# Filter down to a single module inside a binary
+cargo test --test integration_tests modification
 
 # Run with output
 cargo test -- --nocapture
@@ -46,6 +53,11 @@ cargo test -- --nocapture
 # Run benchmarks
 cargo bench
 ```
+
+`tests/integration/` and `tests/contract/` are module trees, not cargo test
+targets: each is reached through a single binary (`tests/integration_tests.rs`,
+`tests/contract_tests.rs`) that declares them via `mod`. Select an individual
+module with a filter argument, as above, rather than with `--test`.
 
 ### Testing Philosophy
 
@@ -61,16 +73,28 @@ The project follows comprehensive testing principles:
 ```
 src/
 ├── lib.rs              # Public API exports
-├── archive.rs          # Archive handle and operations
-├── entry.rs            # ArchiveEntry metadata
-├── error.rs            # Error types
-├── format.rs           # Format detection
-├── options.rs          # Configuration structs
-├── ffi/                # FFI bindings
+├── archive.rs          # Archive handle, format detection, backend routing
+├── archive/mode_split.rs # v2-api typed handles (ReadArchive/WriteArchive/ModifyArchive)
+├── backend.rs          # ReadBackend trait — read-side backend dispatch
+│                       #   (WriteBackend is an enum in creation.rs;
+│                       #    a ModifyBackend trait is only planned)
+├── entry.rs            # ArchiveEntry metadata + builder
+├── error.rs            # Error types and Operation enum
+├── format.rs           # Format detection + capability matrix
+├── options.rs          # Configuration structs (ExtractionOptions, CompressionOptions, typed builders)
+├── inspection.rs       # Listing, find_entry/find_entries, integrity, multipart_layout
+├── extraction.rs       # extract_all, extract_file, selective extraction, progress
+├── creation.rs         # Archive::create + create_zip/create_seven_zip/create_libarchive
+├── modification.rs     # Modify-mode tracker and commit_changes
+├── security.rs         # ExtractionLimits + crate-internal sanitize/verify helpers
+├── streaming.rs        # StreamingExtractor (Read trait wrapper)
+├── stream_crc.rs       # GZIP/BZIP2/XZ checksum parsing
+├── ffi/                # FFI bindings (unrar, libarchive, zip, sevenz)
 │   ├── unrar.rs       # UnRAR SDK bindings
 │   ├── libarchive.rs  # libarchive bindings
 │   └── wrapper.rs     # Safe wrappers
-└── sfx/                # SFX detection module
+├── sfx/                # SFX detection module
+└── external/rar.rs     # Optional WinRAR CLI bridge (external-rar-create)
 
 tests/
 ├── integration/        # Integration test modules
@@ -173,10 +197,11 @@ Example:
 ///     destination: "output/".into(),
 ///     ..Default::default()
 /// };
-/// archive.extract_all(options)?;
+/// let result = archive.extract_all(options)?;
+/// for warning in &result.warnings { eprintln!("{warning}"); }
 /// # Ok::<(), unified_archive::ArchiveError>(())
 /// ```
-pub fn extract_all(&self, options: ExtractionOptions) -> Result<()> {
+pub fn extract_all(&self, options: ExtractionOptions) -> Result<ResultWithWarnings<()>> {
     // ...
 }
 ```

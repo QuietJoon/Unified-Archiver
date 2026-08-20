@@ -3,7 +3,7 @@
 mod common;
 
 use std::fs;
-use unified_archive::{Archive, ExtractionLimits, ExtractionOptions};
+use unified_archive::{Archive, Cap, ExtractionLimits, ExtractionOptions, StreamBound};
 
 #[test]
 fn test_extract_file_overwrite_false_blocks_existing_zip() {
@@ -29,10 +29,9 @@ fn test_extract_file_respects_limits_zip() {
     let temp = common::temp_test_dir();
     let archive = Archive::open(common::fixture("test.zip")).expect("Failed to open ZIP");
 
-    let limits = ExtractionLimits {
-        max_file_size: 1,
-        ..Default::default()
-    };
+    let limits = ExtractionLimits::builder()
+        .max_file_size(Cap::Limited(1))
+        .build();
 
     let options = ExtractionOptions {
         limits,
@@ -54,10 +53,9 @@ fn test_extract_files_respects_limits_zip() {
     let temp = common::temp_test_dir();
     let archive = Archive::open(common::fixture("test.zip")).expect("Failed to open ZIP");
 
-    let limits = ExtractionLimits {
-        max_file_size: 1,
-        ..Default::default()
-    };
+    let limits = ExtractionLimits::builder()
+        .max_file_size(Cap::Limited(1))
+        .build();
 
     let options = ExtractionOptions {
         limits,
@@ -79,10 +77,9 @@ fn test_extract_to_memory_with_options_rejects_tight_limit() {
     let archive = Archive::open(common::fixture("test.zip")).expect("Failed to open ZIP");
 
     let options = ExtractionOptions {
-        limits: ExtractionLimits {
-            max_file_size: 1,
-            ..Default::default()
-        },
+        limits: ExtractionLimits::builder()
+            .max_file_size(Cap::Limited(1))
+            .build(),
         ..Default::default()
     };
 
@@ -98,10 +95,9 @@ fn test_extract_to_memory_with_options_accepts_loose_limit() {
     let archive = Archive::open(common::fixture("test.zip")).expect("Failed to open ZIP");
 
     let options = ExtractionOptions {
-        limits: ExtractionLimits {
-            max_file_size: 1024,
-            ..Default::default()
-        },
+        limits: ExtractionLimits::builder()
+            .max_file_size(Cap::Limited(1024))
+            .build(),
         ..Default::default()
     };
 
@@ -116,14 +112,17 @@ fn test_extract_to_stream_with_options_rejects_tight_limit() {
     let archive = Archive::open(common::fixture("test.zip")).expect("Failed to open ZIP");
 
     let options = ExtractionOptions {
-        limits: ExtractionLimits {
-            max_file_size: 1,
-            ..Default::default()
-        },
+        limits: ExtractionLimits::builder()
+            .max_file_size(Cap::Limited(1))
+            .build(),
         ..Default::default()
     };
 
-    let result = archive.extract_to_stream_with_options("test_file.txt", &options);
+    let result = archive.extract_to_stream_with_options(
+        "test_file.txt",
+        &options,
+        StreamBound::DeclaredSize,
+    );
     assert!(
         result.is_err(),
         "Expected max_file_size=1 to reject 18-byte entry"
@@ -137,15 +136,14 @@ fn test_extract_to_stream_with_options_accepts_loose_limit() {
     let archive = Archive::open(common::fixture("test.zip")).expect("Failed to open ZIP");
 
     let options = ExtractionOptions {
-        limits: ExtractionLimits {
-            max_file_size: 1024,
-            ..Default::default()
-        },
+        limits: ExtractionLimits::builder()
+            .max_file_size(Cap::Limited(1024))
+            .build(),
         ..Default::default()
     };
 
     let mut stream = archive
-        .extract_to_stream_with_options("test_file.txt", &options)
+        .extract_to_stream_with_options("test_file.txt", &options, StreamBound::DeclaredSize)
         .expect("Expected stream with generous limit to succeed");
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).expect("read_to_end");

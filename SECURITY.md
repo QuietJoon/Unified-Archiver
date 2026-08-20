@@ -1,18 +1,18 @@
 # Security Audit & Fixes Report
 
-**Date**: 2025-01-18
-**Project**: unified-archive v0.1.0
-**Status**: ✅ **ALL CRITICAL VULNERABILITIES FIXED**
+> **Historical v0.1.0 audit snapshot (2025-01-18).** Public surface,
+> constants, line numbers, module paths, and test counts have evolved
+> since. In particular the `piz` ZIP backend (`src/ffi/piz_wrapper.rs`)
+> and its memory-map size cap were removed in DCR-009; the `zip` crate
+> is now the sole ZIP backend. See `docs/API_REFERENCE.md` and
+> `src/security.rs` for current behaviour, and
+> `cargo test --all-features` for current test results. The numbers and
+> references below describe v0.1.0 state, not the current crate — only
+> the sections explicitly labelled "current" track the shipping code.
 
 ## Executive Summary
 
-A comprehensive security audit identified **7 security vulnerabilities** ranging from critical to low severity. All vulnerabilities have been successfully remediated with extensive testing.
-
-**Test Results**:
-- ✅ **11/11** security module tests passing
-- ✅ **13/14** recovery percentage tests passing
-- ✅ **All** extraction tests passing with security checks
-- ✅ **Zero** compilation errors or warnings
+A comprehensive security audit identified **7 security vulnerabilities** ranging from critical to low severity. All were remediated; the original audit pass recorded 11/11 security tests, 13/14 recovery tests, and full extraction-test coverage green.
 
 ---
 
@@ -52,11 +52,12 @@ let entry_path = sanitize_entry_path(&entry.name, dest_path)?;
 ```
 
 #### Files Modified
-- ✅ `src/security.rs` (new) - Sanitization function
-- ✅ `src/ffi/piz_wrapper.rs:165` - ZIP extraction
-- ✅ `src/ffi/sevenz_wrapper.rs:201` - 7z extraction
-- ✅ `src/ffi/zip_wrapper.rs:200` - ZIP extraction (legacy)
-- ✅ `src/ffi/libarchive_wrapper.rs:259` - TAR extraction
+
+- `src/security.rs` (new) — sanitisation function
+- `src/ffi/piz_wrapper.rs` — ZIP extraction
+- `src/ffi/sevenz_wrapper.rs` — 7z extraction
+- `src/ffi/zip_wrapper.rs` — ZIP extraction (legacy)
+- `src/ffi/libarchive_wrapper.rs` — TAR extraction
 
 #### Testing
 ```bash
@@ -87,8 +88,8 @@ bomb.zip (10 KB) → extracts to 10 TB
 
 #### Fix Implemented
 Created `ExtractionLimits` with configurable thresholds:
-- **Max total size**: 10 GB (default)
-- **Max file size**: 1 GB (default)
+- **Max total size**: 10 GiB (default)
+- **Max file size**: 1 GiB (default)
 - **Max compression ratio**: 1000:1 (default)
 - **Max entry count**: 100,000 (default)
 
@@ -242,7 +243,6 @@ Malicious RAR could specify huge `cmt_size` causing memory exhaustion.
 ```rust
 // AFTER (SAFE):
 if !header.cmt_buf.is_null() && header.cmt_size > 0 {
-    const MAX_COMMENT_SIZE: u32 = 64 * 1024;  // 64 KB limit
     if header.cmt_size > MAX_COMMENT_SIZE {
         None  // Reject oversized comments
     } else {
@@ -250,6 +250,15 @@ if !header.cmt_buf.is_null() && header.cmt_size > 0 {
     }
 }
 ```
+
+> **Correction (2026-08-09, R0001-0065).** This sample previously declared
+> `const MAX_COMMENT_SIZE: u32 = 64 * 1024;` inline, which was wrong twice over: the value is one
+> byte above what a ZIP EOCD's `u16` comment-length field can express, and no such check was ever
+> wired into the UnRAR header path — `security::MAX_COMMENT_SIZE` had zero call sites anywhere in
+> the tree, so this section described a bound the code did not apply. The constant is now
+> `u16::MAX` (65,535) and is enforced on the ZIP **write** path by `ZipWriter::set_archive_comment`.
+> The UnRAR read path shown here still bounds its slice by `header.cmt_size` validity alone; a RAR
+> comment ceiling remains unimplemented, and no backend currently populates `ArchiveEntry::comment`.
 
 ---
 
@@ -281,19 +290,32 @@ let timestamp = SystemTime::now()
 
 ### New Security Module (`src/security.rs`)
 
-**Exports**:
-- `sanitize_entry_path()` - Path traversal protection
-- `check_extraction_safe()` - Zip bomb detection
-- `verify_crc32()` - Integrity verification
-- `ExtractionLimits` - Configurable resource limits
+**Public surface (current, v0.4.0)** — re-exported from the crate root
+(`pub use security::{Cap, CompressionRatio, ExtractionLimits, ExtractionLimitsBuilder}`):
+- `ExtractionLimits` - Configurable resource limits, built through `ExtractionLimits::builder()`
+- `ExtractionLimitsBuilder` - The only way to construct a non-default limit set (the fields are private)
+- `Cap` - Per-axis ceiling: `Cap::Limited(n)` (bytes or entries, `From<u64>`) or `Cap::Unlimited`
+- `CompressionRatio` - Exact `u64` rational ratio ceiling; its constructors reject a zero numerator or denominator
+- The `DEFAULT_MAX_*` constants and `MAX_COMMENT_SIZE` are also `pub`
 
-**Constants**:
-- `DEFAULT_MAX_TOTAL_SIZE = 10 GB`
-- `DEFAULT_MAX_FILE_SIZE = 1 GB`
+**Crate-internal helpers** (called automatically inside the extraction
+gate; not part of the public API): `sanitize_entry_path()`,
+`sanitize_entry_path_with_base()`, `validate_archive_internal_path()`,
+`check_extraction_safe()`, `verify_crc32()`. The public surface was
+deliberately narrowed in later releases — see `src/lib.rs` and the API
+reference.
+
+**Constants** (current):
+- `DEFAULT_MAX_TOTAL_SIZE = 10 GiB`
+- `DEFAULT_MAX_FILE_SIZE = 1 GiB`
 - `DEFAULT_MAX_COMPRESSION_RATIO = 1000:1`
 - `DEFAULT_MAX_ENTRY_COUNT = 100,000`
-- `DEFAULT_MAX_MMAP_SIZE = 100 MB`
-- `MAX_COMMENT_SIZE = 64 KB`
+- `DEFAULT_MAX_SFX_PAYLOAD_SIZE = 16 GiB`
+- `MAX_COMMENT_SIZE = 65,535` — the ZIP EOCD comment-length field is a `u16`, so this is the
+  largest expressible archive comment. Enforced at the ZIP **write** boundary by
+  `ZipWriter::set_archive_comment`, which rejects an oversized comment with `OperationBlocked`
+  before any writer state is mutated (R0001-0033 / R0001-0065). Until 2026-08-09 the constant
+  was `64 * 1024` — one byte above what the field can express — and nothing read it.
 
 ### Updated Public API
 
@@ -307,7 +329,8 @@ pub struct ExtractionOptions {
 }
 ```
 
-**Usage**:
+**Usage** (v0.4.0 shape — `ExtractionLimits` fields are private and are set
+through the builder, per Innovation I1):
 ```rust
 // Default limits (recommended)
 let options = ExtractionOptions::default();
@@ -315,19 +338,26 @@ archive.extract_all(options)?;
 
 // Custom limits for trusted sources
 let options = ExtractionOptions {
-    limits: ExtractionLimits {
-        max_total_size: 100 * 1024 * 1024 * 1024,  // 100 GB
-        ..Default::default()
-    },
+    limits: ExtractionLimits::builder()
+        .max_total_size(100u64 * 1024 * 1024 * 1024)  // 100 GiB
+        .build(),
     ..Default::default()
 };
 
-// Unlimited (use with EXTREME caution!)
+// Lifting a specific ceiling (use with EXTREME caution!)
 let options = ExtractionOptions {
-    limits: ExtractionLimits::unlimited(),
+    limits: ExtractionLimits::builder()
+        .max_total_size(Cap::Unlimited)
+        .max_file_size(Cap::Unlimited)
+        .max_entry_count(Cap::Unlimited)
+        .unlimited_compression_ratio()
+        .build(),
     ..Default::default()
 };
 ```
+
+There is no public "everything unlimited" preset: each axis is opted out
+individually with `Cap::Unlimited` (or `unlimited_compression_ratio()`).
 
 ---
 
@@ -363,7 +393,7 @@ let options = ExtractionOptions {
 **None**. All fixes are backward compatible:
 - Default extraction options include security checks
 - Existing code continues to work
-- Opt-out available via `ExtractionLimits::unlimited()` if needed
+- Opt-out available per axis via the `ExtractionLimits` builder (`Cap::Unlimited`, `unlimited_compression_ratio()`) if needed
 
 ---
 
@@ -374,7 +404,7 @@ let options = ExtractionOptions {
 1. **Always use default `ExtractionOptions`** unless you have a specific reason
 2. **Validate archive sources** - Only extract from trusted origins
 3. **Monitor disk space** before extraction
-4. **Enable CRC verification** (`verify_crc32: true`) for critical data
+4. **Enable CRC verification where supported** — `verify_crc32: true` only on backends that expose per-entry CRC32 (ZIP, 7z, RAR/RAR5). Libarchive-backed formats (TAR, ISO, raw streams) return `Unsupported` when this flag is enabled (AD 0062 A.3); use `Archive::validate_integrity()` instead, which falls back to read-based error detection where CRC32 is unavailable
 5. **Review extraction limits** for your use case
 
 ### For Library Maintainers

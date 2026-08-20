@@ -1,11 +1,20 @@
+---
+type: Intake
+title: "MVP Intake: unified-archive"
+description: "Retroactive intake record."
+tags: [project-control, ADR-0019, ADR-0018, ADR-0040, ADR-0027, ADR-0021, ADR-0016, OI-0057-003]
+timestamp: 2026-05-04T00:00:00Z
+status: active
+---
+
 # MVP Intake: unified-archive
 
-> Retroactive intake record. Implementation is complete with tracked gaps. See [`reviews/Open_Issues.md`](../../reviews/Open_Issues.md) for deferred items.
+> Retroactive intake record. Implementation is complete with tracked gaps. See [`open-issues.md`](./open-issues.md) for deferred items.
 
 ## Product Goal
-- Goal: Unified, format-agnostic Rust library for archive operations (inspection, extraction, creation, modification, SFX detection) across ZIP, 7z, RAR, RAR5, TAR (.tar.gz, .tar.bz2, .tar.xz), standalone GZIP/BZIP2/XZ (read-only, AD 0019), and ISO — inspired by 7zip-JBinding's design philosophy. Standalone compressed-file *creation* is out of scope per AD 0018; these compressors are produced only via the TAR compound variants.
-- Local run target: `cargo test` (full test suite, 867+ tests across unit, contract, and integration suites)
-- Definition of "working": All five user stories implemented with tracked gaps (open_at_offset deferred, native streaming buffers entries). Creation progress is now wired per-entry (OI-025-003 resolved). Library compiles on macOS (primary), with Windows/Linux as secondary targets. Bounded memory streaming (target: <100MB for 10GB+ archives) applies only to libarchive-backed extraction paths; native backends (Piz, ZipReader, SevenZ, UnRAR) buffer entries in memory.
+- Goal: Unified, format-agnostic Rust library for archive operations (inspection, extraction, creation, modification, SFX detection) across ZIP, 7z, RAR, RAR5, TAR family (`.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz`, `.tar.zst`, `.tar.lz4`, `.tar.lzma`), standalone GZIP/BZIP2/XZ/ZST/LZ4/LZMA (read-only, MADR-0019), and ISO — inspired by 7zip-JBinding's design philosophy. Standalone compressed-file *creation* is out of scope per AD 0018; the TAR.ZST/TAR.LZ4/TAR.LZMA variants are read *and* write as of 0.3.1, which wired the libarchive `zstd` / `lz4` / `lzma` write filters and their compression levels.
+- Local run target: `cargo test` (full test suite across unit, contract, and integration suites)
+- Definition of "working": All five user stories implemented with tracked gaps (`open_at_offset` ships tempfile-backed per AD 0040 with a 16 GiB payload ceiling; native streaming buffers entries). Creation progress is now wired per-entry (OI-025-003 resolved). Library compiles on macOS (primary), with Windows/Linux as secondary targets. Bounded memory streaming (target: <100MB for 10GB+ archives) applies only to libarchive-backed extraction paths; native backends (ZIP, SevenZ, UnRAR) buffer entries in memory.
 
 ## Actors and Roles
 - Actor: Rust developer
@@ -27,7 +36,7 @@
 | SCN-EXT-05 | Monitor extraction progress | Large archive + callback | Rate-limited progress updates (frequency varies by backend) | No |
 | SCN-CRE-01 | Create archive in multiple formats | Files + format selection | Valid archive readable by standard tools | Yes |
 | SCN-CRE-02 | Create with max compression | Files + Maximum compression level | Optimal compression ratio per format | No |
-| SCN-CRE-03 | Create password-protected archive (rejected) | Files + password | `OperationBlocked` for every format per AD 0027; encrypted reads remain supported via `open_encrypted()` | Yes |
+| SCN-CRE-03 | Create password-protected archive (rejected) | Files + password | `OperationBlocked` for every format per MADR-0027; encrypted reads remain supported via `open_encrypted()` | Yes |
 | SCN-CRE-04 | Create from large dataset | 10GB+ data + callback | Bounded memory usage, per-entry progress with `total=None` | Resolved (OI-025-003, AD 0021) |
 | SCN-CRE-05 | Create with compression level control | Pre-compressed files + level adjustment | Adjustable compression overhead | No |
 | SCN-MOD-01 | Add files to existing archive | Archive + new files | Archive contains original + new entries | Yes |
@@ -45,9 +54,9 @@
 
 ## Explicit Non-Goals
 - ISO format creation (read-only via libarchive)
-- True streaming extraction (native backends — Piz, ZipReader, SevenZ, UnRAR — buffer full entries before constructing StreamingExtractor; true streaming limited to libarchive-backed formats)
+- True streaming extraction (native backends — ZIP, SevenZ, UnRAR — buffer full entries before constructing StreamingExtractor; true streaming limited to libarchive-backed formats)
 - Split archive creation (`split_size` field exists but is unused — IG-005-08)
-- `open_at_offset` for SFX direct opening (deferred; `extract_stub()` returns the executable prefix bytes, not the embedded archive. No convenience extraction of the embedded archive payload exists yet — IG-005-01)
+- In-place `open_at_offset` (without tempfile staging) — the shipped `Archive::open_at_offset()` copies the payload tail to a tempfile (capped at 16 GiB per AD 0040) before backend dispatch; a backend-native offset-aware opening path is still a future item (IG-005-01).
 - ~~SecStr migration for all password fields~~ — **Resolved 2026-04-17** (OI-0057-003): `ExtractionOptions.password` and `CompressionOptions.password` are `Option<SecStr>` with zeroize-on-drop.
 - Backend trait abstraction (manual dispatch is explicit and performant — IG-014-001)
 - Interactive password prompts (password must be provided before extraction)
@@ -65,7 +74,7 @@
 |---|---|---|---|---|
 | Input archive | Caller provides path | Caller's filesystem | (read-only access) | Caller manages lifecycle |
 | Extracted files | Archive contents | Destination dir (caller-specified) | Extracted files + directory structure | Caller manages lifecycle |
-| Temp files (extraction) | extract_to_memory (backend-specific) | OS temp dir or /Volumes/Temp/claude/7zip/ | libarchive: streams directly to memory (no temp dir). SevenZ/Piz/ZipReader: buffer full entries in memory. UnRAR: extracts via FFI callbacks, may use temp dir for multipart volumes. | RAII cleanup via TempDirGuard / Drop |
+| Temp files (extraction) | extract_to_memory (backend-specific) | OS temp dir or /Volumes/Temp/claude/7zip/ | libarchive: streams directly to memory (no temp dir). SevenZ/ZIP: buffer full entries in memory. UnRAR: extracts via FFI callbacks, may use temp dir for multipart volumes. | RAII cleanup via `tempfile` types (`TempDir` / `TempPath` / `NamedTempFile`) on Drop |
 | Temp files (modification) | commit_changes creates copy | Same directory as source archive | Modified archive via copy-on-write | Atomic rename replaces original; temp removed |
 | Created archives | Creator API output | Caller-specified path | New archive file | Caller manages lifecycle |
 | SFX stubs | extract_stub extracts prefix bytes | In-memory (returns Vec<u8>; caller writes to disk if needed) | Stub binary bytes | Caller manages lifecycle |
@@ -73,12 +82,11 @@
 ## Integrations
 | Integration | Required for MVP? | Real or deferred? | Notes |
 |---|---|---|---|
-| UnRAR SDK (FFI) | Yes | Real | RAR/RAR5 read/extract. Statically linked. License: free for non-commercial use. |
-| libarchive (FFI) | Yes | Real | TAR family (.tar.gz, .tar.bz2, .tar.xz), ISO read, archive creation (7z/TAR — not ZIP), and direct read/extract of standalone `.gz` / `.bz2` / `.xz` streams per AD 0019. Standalone stream *creation* remains out of scope per AD 0018. Linked via pkg-config. |
+| UnRAR SDK (FFI) | Yes | Real | RAR/RAR5 read/extract. Statically linked. License: free of charge for handling RAR archives (commercial use included); the sources may not be used to build a RAR-compatible archiver or re-create the RAR compression algorithm, and the governing paragraph must be reproduced — see `LICENSE`. |
+| libarchive (FFI) | Yes | Real | TAR family (.tar.gz, .tar.bz2, .tar.xz), ISO read, archive creation (7z/TAR — not ZIP), and direct read/extract of standalone `.gz` / `.bz2` / `.xz` streams per MADR-0019. Standalone stream *creation* remains out of scope per AD 0018. Linked via pkg-config. |
 | goblin crate | Yes | Real | PE/ELF/Mach-O binary parsing for SFX detection. Pure Rust. |
-| piz crate | Yes | Real | Native Rust ZIP inspection/extraction backend with parallel extraction and CRC32 metadata. |
 | sevenz-rust2 crate | Yes | Real | Native Rust 7z inspection/extraction backend with CRC32 metadata access. |
-| zip crate (ZipReader/ZipWriter) | Yes | Real | ZipWriter: ZIP creation. ZipReader: buffered backend for encrypted ZIP reading. |
+| zip crate (ZipArchive/ZipWriter) | Yes | Real | Sole ZIP backend: `ZipArchive` reads, lists, and extracts all ZIP archives (encrypted and unencrypted) with CRC32 metadata; `ZipWriter` handles ZIP creation. |
 | External WinRAR CLI | No | Deferred | RAR creation on Windows only. Behind `external-rar-create` feature flag. |
 
 ## System Shape
@@ -94,7 +102,7 @@
 - Required negative path behavior: `ERAR_BAD_DATA` mapped to `ArchiveError::Corruption`; password failures mapped to `ArchiveError::Password`; missing volumes handled gracefully.
 
 - Item: libarchive (FFI)
-- Why critical: TAR/ISO backbone and creation backend for 7z/TAR (not ZIP/7z main read paths — those use native Piz, ZipReader, and SevenZ backends). FFI boundary with C library.
+- Why critical: TAR/ISO backbone and creation backend for 7z/TAR (not ZIP/7z main read paths — those use the native ZIP and SevenZ backends). FFI boundary with C library.
 - Required negative path behavior: `ARCHIVE_FAILED` mapped to appropriate `ArchiveError` variants; checksum errors detected and mapped to `ArchiveError::Corruption`.
 
 - Item: Path traversal attacks during extraction
@@ -103,7 +111,7 @@
 
 - Item: SFX detection with malicious executables
 - Why critical: Security scanning is a primary use case for SFX detection.
-- Required negative path behavior: Detection scans only first 1MB. No execution of the SFX stub. `open_at_offset()` is deferred and returns `ArchiveError::NotImplemented` (DEF-001; future-state: invalid archive at detected offset will return a clear error once offset-based opening is implemented).
+- Required negative path behavior: Detection scans only first 1MB. No execution of the SFX stub. `open_at_offset()` ships as a tempfile-backed implementation (AD 0040) with a 16 GiB payload ceiling — an invalid archive at the detected offset surfaces as a format/corruption error from the chosen backend.
 
 ## Estimation Preference
 - Default: dependency-ordered slices with risk notes

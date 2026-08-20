@@ -3,7 +3,11 @@
 use std::path::PathBuf;
 
 /// Unified error type for all archive operations
+///
+/// R0076-0076: marked `#[non_exhaustive]` so adding a new variant is not a
+/// breaking change for downstream code that exhaustively matches.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ArchiveError {
     /// I/O error during file operations
     Io {
@@ -18,7 +22,13 @@ pub enum ArchiveError {
         message: String,
     },
 
-    /// Archive corruption detected
+    /// Corruption detected
+    ///
+    /// `path` names the corrupt subject, which is an *entry* path for
+    /// payload/CRC failures and an *archive* path for container-level
+    /// failures (header walks, recovery records, backend-state
+    /// inconsistencies). `Display` therefore stays neutral about which
+    /// of the two it is (R0001-0069).
     Corruption { path: String, details: String },
 
     /// Password authentication error
@@ -44,7 +54,14 @@ pub enum ArchiveError {
     /// Backend does not support this operation (e.g. creation on read-only backend)
     ReadOnlyBackend { operation: String },
 
-    /// Feature not yet implemented (deferred to future phase)
+    /// Feature not yet implemented (deferred to future phase).
+    ///
+    /// No public call path returns this today: its only production
+    /// producer is the `ReadBackend::extract_to_stream_by_listing_id`
+    /// trait default, and the one caller
+    /// (`Archive::calculate_content_multiset_digest_and_size`) catches
+    /// it and falls back to the by-path stream. It stays in the enum as
+    /// the typed home for future deferrals.
     NotImplemented { operation: String, reason: String },
 
     /// Operation blocked by resource limits, conflicts, or format constraints
@@ -52,28 +69,229 @@ pub enum ArchiveError {
 
     /// Invalid path
     InvalidPath { path: String, reason: String },
+
+    /// Operation cancelled by a caller-supplied callback (R0075-0003).
+    ///
+    /// Returned when a long-running step is aborted via a progress hook
+    /// that signalled cancellation. Exactly three labels are emitted
+    /// today: SFX staging (`"sfx_staging"`), the backend extract-all
+    /// loops (`"extract_all"`), and creation writes (`"create"`).
+    /// `extract_files` / `extract_by_ids` / `extract_some` cancel
+    /// through those shared loops, so they also report `"extract_all"`;
+    /// single-entry `extract_file` passes no cancellation hook to
+    /// `write_entry_atomically` and therefore never yields this
+    /// variant. One typed variant covers every
+    /// cancellation surface so callers match on it instead of sniffing
+    /// `Format` / `OperationBlocked` message text
+    /// (R0076-0012 / R0076-0064 / R0076-0065).
+    Cancelled { operation: &'static str },
 }
 
-/// String constants for operation names used in error construction.
-/// Prevents typos and enables refactoring of operation names.
+/// Operation identifier carried by `ArchiveError::Unsupported`,
+/// `OperationBlocked`, `WriteModeOnly`, and friends.
+///
+/// Migration target for the previously stringly-typed `error::ops::*`
+/// constants (Review 0068 D7 / R0068-0045). Using the enum on new
+/// construction sites is preferred — it eliminates typos and lets the
+/// type system enforce that every variant has a known kebab/snake-case
+/// label. The public `ArchiveError` constructors still accept anything
+/// `Into<String>`, so call sites can pass either `Operation::ExtractAll`
+/// (auto-stringified via `Display`) or one of the legacy
+/// `error::ops::EXTRACT_ALL` constants without churn during the
+/// migration.
+///
+/// R0076-0077: `#[non_exhaustive]` so new operation labels can be added
+/// without breaking downstream exhaustive matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Operation {
+    /// Generic "extract" label for shared per-entry safety checks that
+    /// run before the caller's specific extract_* path is identified.
+    Extract,
+    /// `Archive::extract_all`
+    ExtractAll,
+    /// `Archive::extract_file`
+    ExtractFile,
+    /// `Archive::extract_to_memory` / `extract_to_memory_with_options`
+    ExtractToMemory,
+    /// `Archive::extract_to_stream` / `extract_to_stream_with_options`
+    ExtractToStream,
+    /// `Archive::extract_files`
+    ExtractFiles,
+    /// `Archive::extract_by_ids`
+    ExtractByIds,
+    /// `Archive::extract_some` / `extract_filtered`
+    ExtractSome,
+    /// `Archive::list_files`
+    ListFiles,
+    /// `Archive::list_files_for_limits`
+    ListFilesForLimits,
+    /// `Archive::validate_integrity`
+    ValidateIntegrity,
+    /// `Archive::modify` / `modify_with_options`
+    Modify,
+    /// `Archive::add_entry`
+    AddEntry,
+    /// `Archive::remove_entry` / `remove_entry_by_id` / `replace_entry`
+    RemoveEntry,
+    /// `Archive::commit_changes`
+    CommitChanges,
+    /// `Archive::pending_operations`
+    PendingOperations,
+    /// `Archive::clear_operations`
+    ClearOperations,
+    /// `Archive::add_directory_entry`
+    AddDirectoryEntry,
+    /// `Archive::add_file_from_data`
+    AddFileFromData,
+    /// `Archive::add_file_from_path_as`
+    AddFileFromPathAs,
+    /// `Archive::add_directory`
+    AddDirectory,
+    /// `Archive::add_directory_recursive`
+    AddDirectoryRecursive,
+    /// `Archive::create`
+    Create,
+    /// `Archive::finish` / `close`
+    Finish,
+}
+
+impl Operation {
+    /// Stable kebab/snake-case label used in error messages and assertion
+    /// strings. `const`-eligible so the legacy `error::ops::*` constants
+    /// can be derived from it without runtime cost.
+    ///
+    /// Crate-internal: external callers should rely on the `Display` impl
+    /// (or `to_string()`) rather than the raw `&'static str`. Keeping the
+    /// raw accessor crate-private leaves room to change the kebab/snake
+    /// labels later without breaking downstream `match` statements.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Extract => "extract",
+            Self::ExtractAll => "extract_all",
+            Self::ExtractFile => "extract_file",
+            Self::ExtractToMemory => "extract_to_memory",
+            Self::ExtractToStream => "extract_to_stream",
+            Self::ExtractFiles => "extract_files",
+            Self::ExtractByIds => "extract_by_ids",
+            Self::ExtractSome => "extract_some",
+            Self::ListFiles => "list_files",
+            Self::ListFilesForLimits => "list_files_for_limits",
+            Self::ValidateIntegrity => "validate_integrity",
+            Self::Modify => "modify",
+            Self::AddEntry => "add_entry",
+            Self::RemoveEntry => "remove_entry",
+            Self::CommitChanges => "commit_changes",
+            Self::PendingOperations => "pending_operations",
+            Self::ClearOperations => "clear_operations",
+            Self::AddDirectoryEntry => "add_directory_entry",
+            Self::AddFileFromData => "add_file_from_data",
+            Self::AddFileFromPathAs => "add_file_from_path_as",
+            Self::AddDirectory => "add_directory",
+            Self::AddDirectoryRecursive => "add_directory_recursive",
+            Self::Create => "create",
+            Self::Finish => "finish",
+        }
+    }
+}
+
+impl std::fmt::Display for Operation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<Operation> for String {
+    fn from(op: Operation) -> Self {
+        op.as_str().to_string()
+    }
+}
+
+/// Legacy string constants used in error construction. New code should
+/// prefer the [`Operation`] enum directly; these constants are kept as
+/// thin views over it for the migration window (R0068-0045 / AD 0051).
 pub(crate) mod ops {
-    pub const EXTRACT_ALL: &str = "extract_all";
-    pub const EXTRACT_FILE: &str = "extract_file";
-    pub const EXTRACT_TO_MEMORY: &str = "extract_to_memory";
-    pub const EXTRACT_TO_STREAM: &str = "extract_to_stream";
-    pub const EXTRACT_FILTERED: &str = "extract_filtered";
-    pub const EXTRACT_FILES: &str = "extract_files";
-    pub const EXTRACT_BY_IDS: &str = "extract_by_ids";
-    pub const LIST_FILES: &str = "list_files";
-    pub const LIST_FILES_FOR_LIMITS: &str = "list_files_for_limits";
-    pub const VALIDATE_INTEGRITY: &str = "validate_integrity";
-    pub const MODIFY: &str = "modify";
-    pub const ADD_ENTRY: &str = "add_entry";
-    pub const REMOVE_ENTRY: &str = "remove_entry";
-    pub const COMMIT_CHANGES: &str = "commit_changes";
-    pub const ADD_DIRECTORY_ENTRY: &str = "add_directory_entry";
-    pub const CREATE: &str = "create";
-    pub const FINISH: &str = "finish";
+    use super::Operation;
+    pub const EXTRACT: &str = Operation::Extract.as_str();
+    pub const EXTRACT_ALL: &str = Operation::ExtractAll.as_str();
+    pub const EXTRACT_FILE: &str = Operation::ExtractFile.as_str();
+    pub const EXTRACT_TO_MEMORY: &str = Operation::ExtractToMemory.as_str();
+    pub const EXTRACT_TO_STREAM: &str = Operation::ExtractToStream.as_str();
+    pub const EXTRACT_FILES: &str = Operation::ExtractFiles.as_str();
+    pub const EXTRACT_BY_IDS: &str = Operation::ExtractByIds.as_str();
+    pub const EXTRACT_SOME: &str = Operation::ExtractSome.as_str();
+    pub const LIST_FILES: &str = Operation::ListFiles.as_str();
+    pub const LIST_FILES_FOR_LIMITS: &str = Operation::ListFilesForLimits.as_str();
+    pub const VALIDATE_INTEGRITY: &str = Operation::ValidateIntegrity.as_str();
+    pub const MODIFY: &str = Operation::Modify.as_str();
+    pub const ADD_ENTRY: &str = Operation::AddEntry.as_str();
+    pub const REMOVE_ENTRY: &str = Operation::RemoveEntry.as_str();
+    pub const COMMIT_CHANGES: &str = Operation::CommitChanges.as_str();
+    pub const PENDING_OPERATIONS: &str = Operation::PendingOperations.as_str();
+    pub const CLEAR_OPERATIONS: &str = Operation::ClearOperations.as_str();
+    pub const ADD_DIRECTORY_ENTRY: &str = Operation::AddDirectoryEntry.as_str();
+    pub const ADD_FILE_FROM_DATA: &str = Operation::AddFileFromData.as_str();
+    pub const ADD_FILE_FROM_PATH_AS: &str = Operation::AddFileFromPathAs.as_str();
+    pub const ADD_DIRECTORY: &str = Operation::AddDirectory.as_str();
+    pub const ADD_DIRECTORY_RECURSIVE: &str = Operation::AddDirectoryRecursive.as_str();
+    pub const CREATE: &str = Operation::Create.as_str();
+    pub const FINISH: &str = Operation::Finish.as_str();
+}
+
+/// Format the reason text for an out-of-range entry-ID lookup.
+///
+/// Special-cases empty archives so the message reads "archive has 0
+/// entries; no valid IDs" instead of the prior "valid IDs: 0-0" which
+/// implied ID 0 was acceptable (R0069-0013). Lives in `error.rs` so
+/// every module that surfaces ID-range errors (extraction,
+/// modification) can import it without a peer-module dependency.
+pub(crate) fn invalid_id_reason(id: usize, entry_count: usize) -> String {
+    if entry_count == 0 {
+        format!("Invalid ID {}: archive has 0 entries; no valid IDs", id)
+    } else {
+        format!(
+            "Invalid ID {}: archive has {} entries (valid IDs: 0-{})",
+            id,
+            entry_count,
+            entry_count - 1,
+        )
+    }
+}
+
+/// Kinds of link entries rejected by single-file extraction (FR-022).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum LinkKind {
+    Symbolic,
+    Hard,
+}
+
+/// Construct the `OperationBlocked` error returned by each backend's
+/// single-file extraction path when it encounters a link entry.
+/// Centralising the phrasing keeps the FR-022 reason string consistent
+/// across backends (tests match on "FR-022") and avoids copy-paste
+/// drift.
+///
+/// `op` lets callers attribute the rejection to the public API the user
+/// invoked — `extract_to_memory`, `extract_to_stream`, `extract_file`,
+/// or `extract_some` (R0070-0054). Past versions hard-coded
+/// `extract_file`, so memory/stream callers saw a misleading op label
+/// in the resulting error.
+pub(crate) fn link_extract_blocked(
+    file_path: &str,
+    kind: LinkKind,
+    op: &'static str,
+) -> ArchiveError {
+    let label = match kind {
+        LinkKind::Symbolic => "symbolic link",
+        LinkKind::Hard => "hard link",
+    };
+    ArchiveError::OperationBlocked {
+        operation: op.to_string(),
+        reason: format!(
+            "Entry '{}' is a {}; refusing to materialize per FR-022 link-skip policy",
+            file_path, label
+        ),
+    }
 }
 
 impl std::error::Error for ArchiveError {
@@ -109,7 +327,11 @@ impl std::fmt::Display for ArchiveError {
                 }
             }
             ArchiveError::Corruption { path, details } => {
-                write!(f, "Corrupted entry '{}': {}", path, details)
+                // R0001-0069: `path` names an archive at many construction
+                // sites and an entry at others, so the message stays neutral
+                // about which of the two the subject is instead of asserting
+                // "entry" and mislabelling whole-archive corruption.
+                write!(f, "Corruption detected in '{}': {}", path, details)
             }
             ArchiveError::Password { message } => {
                 write!(f, "Password error: {}", message)
@@ -174,6 +396,9 @@ impl std::fmt::Display for ArchiveError {
             }
             ArchiveError::InvalidPath { path, reason } => {
                 write!(f, "Invalid path '{}': {}", path, reason)
+            }
+            ArchiveError::Cancelled { operation } => {
+                write!(f, "Operation '{}' was cancelled by caller", operation)
             }
         }
     }
@@ -341,10 +566,14 @@ impl ArchiveError {
     }
 }
 
-/// Warning emitted during archive operations (FR-022)
+/// Warning emitted during archive operations (FR-022).
 ///
 /// Warnings indicate non-fatal conditions that may require user attention.
+/// Currently emitted only by the extraction path. The enum is
+/// `#[non_exhaustive]` so future variants can be added without
+/// breaking existing callers.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ArchiveWarning {
     /// Symbolic link skipped during operation
     ///
@@ -364,6 +593,23 @@ pub enum ArchiveWarning {
     SkippedHardLink {
         /// Path of the skipped hard link
         path: String,
+    },
+
+    /// Two entries' output paths collide on case-insensitive filesystems
+    ///
+    /// The extraction preflight compares output paths byte-exactly, but
+    /// default macOS (APFS) and Windows volumes fold case, so entries such
+    /// as `README` and `readme` silently merge — the later entry replaces
+    /// the earlier one (R0079-0036). The destination's case sensitivity
+    /// cannot be known portably, so this is a warning rather than an
+    /// error; callers extracting to case-insensitive volumes should treat
+    /// it as a conflict. The comparison uses Unicode lowercase folding;
+    /// normalization-form collisions (NFC vs NFD) are not detected.
+    OutputPathCaseCollision {
+        /// Archive path of the entry that first claimed the output path
+        first: String,
+        /// Archive path of the later entry whose output path collides
+        second: String,
     },
 }
 
@@ -390,6 +636,13 @@ impl std::fmt::Display for ArchiveWarning {
                     f,
                     "Skipped hard link '{}' (FR-022: limited cross-platform support)",
                     path
+                )
+            }
+            ArchiveWarning::OutputPathCaseCollision { first, second } => {
+                write!(
+                    f,
+                    "Entries '{}' and '{}' differ only by case and merge on case-insensitive destination filesystems (R0079-0036)",
+                    first, second
                 )
             }
         }
@@ -581,10 +834,10 @@ mod tests {
 
     #[test]
     fn test_not_implemented_error() {
-        let err = ArchiveError::not_implemented("open_at_offset", "deferred to future phase");
+        let err = ArchiveError::not_implemented("create_split", "split-archive creation deferred");
         match &err {
             ArchiveError::NotImplemented { operation, reason } => {
-                assert_eq!(operation, "open_at_offset");
+                assert_eq!(operation, "create_split");
                 assert!(reason.contains("deferred"));
             }
             other => panic!("Expected NotImplemented variant, got {:?}", other),
@@ -636,8 +889,19 @@ mod tests {
     fn test_display_corruption_error() {
         let err = ArchiveError::corruption("inner/data.bin", "expected CRC 0xDEAD got 0xBEEF");
         let msg = err.to_string();
-        assert!(msg.contains("Corrupted entry 'inner/data.bin'"));
+        assert!(msg.contains("Corruption detected in 'inner/data.bin'"));
         assert!(msg.contains("0xDEAD"));
+    }
+
+    /// R0001-0069: the same `Display` arm renders archive-subject
+    /// corruption, so it must not claim the path is an entry.
+    #[test]
+    fn test_display_corruption_error_archive_subject() {
+        let err =
+            ArchiveError::corruption("/vol/backup.rar", "recovery record header CRC mismatch");
+        let msg = err.to_string();
+        assert!(msg.contains("Corruption detected in '/vol/backup.rar'"));
+        assert!(!msg.contains("entry"));
     }
 
     #[test]
@@ -699,11 +963,11 @@ mod tests {
 
     #[test]
     fn test_display_not_implemented() {
-        let err = ArchiveError::not_implemented("open_at_offset", "deferred to phase 2");
+        let err = ArchiveError::not_implemented("create_split", "split-archive creation deferred");
         let msg = err.to_string();
-        assert!(msg.contains("'open_at_offset'"));
+        assert!(msg.contains("'create_split'"));
         assert!(msg.contains("not yet implemented"));
-        assert!(msg.contains("deferred to phase 2"));
+        assert!(msg.contains("split-archive creation deferred"));
     }
 
     #[test]

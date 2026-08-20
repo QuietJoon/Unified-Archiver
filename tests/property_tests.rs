@@ -5,7 +5,7 @@
 
 use proptest::prelude::*;
 use std::path::PathBuf;
-use unified_archive::{Archive, ArchiveFormat, EntryType};
+use unified_archive::{Archive, ArchiveFormat, EntryType, StreamBound};
 
 /// Helper to get test fixtures directory
 fn fixtures_dir() -> PathBuf {
@@ -170,7 +170,7 @@ proptest! {
 
         let archive2 = Archive::open(&path)
             .map_err(|e| TestCaseError::fail(format!("Failed to open {}: {}", filename, e)))?;
-        let mut stream = archive2.extract_to_stream(file_to_extract)
+        let mut stream = archive2.extract_to_stream(file_to_extract, StreamBound::Unbounded)
             .map_err(|e| TestCaseError::fail(format!("extract_to_stream failed: {}", e)))?;
 
         let mut stream_data = Vec::new();
@@ -329,7 +329,7 @@ proptest! {
             .map_err(|e| TestCaseError::fail(format!("list_files failed: {}", e)))?;
 
         for entry in entries {
-            if let Some(ratio) = entry.compression_ratio() {
+            if let Some(ratio) = entry.compression_fraction() {
                 prop_assert!(
                     ratio >= 0.0,
                     "Compression ratio for '{}' should be non-negative, got {} in {}",

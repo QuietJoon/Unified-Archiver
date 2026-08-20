@@ -5,81 +5,22 @@
 use super::common;
 
 use std::fs;
-use std::io::Write;
-use std::path::Path;
-use std::process::Command;
-
-/// Check if a required command is available
-fn command_exists(cmd: &str) -> bool {
-    Command::new("which")
-        .arg(cmd)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// Create a test archive with hard links using tar
-fn create_tar_with_hardlink(archive_path: &Path, temp_dir: &Path) -> std::io::Result<bool> {
-    // Create source files
-    let file1_path = temp_dir.join("original.txt");
-    let hardlink_path = temp_dir.join("hardlink.txt");
-
-    // Create original file
-    let mut file1 = fs::File::create(&file1_path)?;
-    file1.write_all(b"This is the original file content.\n")?;
-    file1.sync_all()?;
-
-    // Create hard link
-    #[cfg(unix)]
-    {
-        std::fs::hard_link(&file1_path, &hardlink_path)?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        // On non-Unix, just create a regular copy (test will be less meaningful)
-        fs::copy(&file1_path, &hardlink_path)?;
-    }
-
-    // Create tar archive that preserves hard links
-    let output = Command::new("tar")
-        .args(["cvf", archive_path.to_str().unwrap()])
-        .args(["-C", temp_dir.to_str().unwrap()])
-        .args(["original.txt", "hardlink.txt"])
-        .output()?;
-
-    Ok(output.status.success())
-}
 
 #[test]
 #[cfg(unix)]
 fn test_hardlink_skip_during_extraction() {
-    // Skip if tar command not available
-    if !command_exists("tar") {
-        eprintln!("Skipping test: tar command not available");
-        return;
-    }
-
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let source_dir = temp_dir.path().join("source");
     let archive_path = temp_dir.path().join("test_hardlink.tar");
     let extract_dir = temp_dir.path().join("extracted");
 
-    // Create directories
-    fs::create_dir_all(&source_dir).expect("Failed to create source dir");
     fs::create_dir_all(&extract_dir).expect("Failed to create extract dir");
 
-    // Create archive with hard link
-    match create_tar_with_hardlink(&archive_path, &source_dir) {
-        Ok(true) => {}
-        Ok(false) => {
-            eprintln!("Skipping test: Failed to create tar archive");
-            return;
-        }
-        Err(e) => {
-            eprintln!("Skipping test: Error creating archive: {}", e);
-            return;
-        }
+    // Shared fixture builder: `regular.txt` + `hardlink.txt` hard-linked
+    // to it. Skips gracefully when the environment can't produce it.
+    if !common::build_tar_with_hardlink(&archive_path, &source_dir) {
+        eprintln!("Skipping test: cannot build hardlink tar fixture");
+        return;
     }
 
     // Extract using unified-archive
@@ -110,7 +51,7 @@ fn test_hardlink_skip_during_extraction() {
     );
 
     // Verify original file was extracted
-    let extracted_original = extract_dir.join("original.txt");
+    let extracted_original = extract_dir.join("regular.txt");
     assert!(
         extracted_original.exists(),
         "Original file should be extracted"
@@ -119,20 +60,52 @@ fn test_hardlink_skip_during_extraction() {
     // Read and verify content
     let content = fs::read_to_string(&extracted_original).expect("Failed to read extracted file");
     assert!(
-        content.contains("original file content"),
+        content.contains("hello from a regular file"),
         "Extracted content should match original"
     );
 }
 
 #[test]
+#[cfg(unix)]
 fn test_hardlink_entry_detection() {
-    // Test that EntryType::HardLink is properly defined
+    // R0079-0046: the previous version only matched the EntryType
+    // variant against itself. This pins the actual detection path: a
+    // TAR hard link must surface from list_files() as
+    // EntryType::HardLink with its link target populated.
     use unified_archive::entry::EntryType;
 
-    let hardlink_type = EntryType::HardLink;
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let source_dir = temp_dir.path().join("source");
+    let archive_path = temp_dir.path().join("test_hardlink.tar");
+
+    if !common::build_tar_with_hardlink(&archive_path, &source_dir) {
+        eprintln!("Skipping test: cannot build hardlink tar fixture");
+        return;
+    }
+
+    let archive = unified_archive::Archive::open(&archive_path).expect("Failed to open archive");
+    let entries = archive.list_files().expect("Failed to list files");
+
+    let hardlink_entry = entries
+        .iter()
+        .find(|e| e.path.ends_with("hardlink.txt"))
+        .expect("hardlink.txt entry should be listed");
+    assert_eq!(
+        hardlink_entry.entry_type,
+        EntryType::HardLink,
+        "hardlink.txt should be detected as a hard link"
+    );
     assert!(
-        matches!(hardlink_type, EntryType::HardLink),
-        "HardLink variant should exist"
+        hardlink_entry.is_hardlink(),
+        "is_hardlink() should be true for the detected entry"
+    );
+    assert!(
+        hardlink_entry
+            .link_target
+            .as_deref()
+            .is_some_and(|t| t.ends_with("regular.txt")),
+        "hard link target should point at regular.txt, got {:?}",
+        hardlink_entry.link_target
     );
 }
 

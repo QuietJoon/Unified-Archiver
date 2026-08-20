@@ -5,7 +5,8 @@
 //! Performance targets:
 //! - Non-executable files: <1ms (early exit)
 //! - Shell script SFX: 15-50ms (full scan)
-//! - Binary executable SFX: 20-70ms (goblin parsing + scan)
+//! - Binary executable SFX: 20-70ms (whole fixed ELF/PE/Mach-O header validated from
+//!   the 4 KiB prefix — R0001-0066 / R0001-0067 — plus the 1 MiB signature scan)
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use std::io::Write;
@@ -56,7 +57,7 @@ fn bench_non_executable_detection(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     let result = Archive::detect_sfx(black_box(file.path())).unwrap();
-                    assert!(!result.is_sfx);
+                    assert!(!result.is_sfx());
                 });
             },
         );
@@ -79,7 +80,7 @@ fn bench_shell_script_sfx_detection(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     let result = Archive::detect_sfx(black_box(file.path())).unwrap();
-                    assert!(result.is_sfx);
+                    assert!(result.is_sfx());
                 });
             },
         );
@@ -102,7 +103,7 @@ fn bench_large_stub_sfx_detection(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     let result = Archive::detect_sfx(black_box(file.path())).unwrap();
-                    assert!(result.is_sfx);
+                    assert!(result.is_sfx());
                 });
             },
         );
@@ -149,7 +150,7 @@ fn bench_executable_without_archive(c: &mut Criterion) {
     c.bench_function("sfx_no_archive_full_scan", |b| {
         b.iter(|| {
             let result = Archive::detect_sfx(black_box(temp.path())).unwrap();
-            assert!(!result.is_sfx);
+            assert!(!result.is_sfx());
         });
     });
 }
@@ -175,7 +176,7 @@ fn bench_multiple_signatures(c: &mut Criterion) {
     c.bench_function("sfx_multiple_signatures", |b| {
         b.iter(|| {
             let result = Archive::detect_sfx(black_box(temp.path())).unwrap();
-            assert!(result.is_sfx);
+            assert!(result.is_sfx());
         });
     });
 }
@@ -194,7 +195,7 @@ fn bench_signature_alignment(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     let result = Archive::detect_sfx(black_box(file.path())).unwrap();
-                    assert!(result.is_sfx);
+                    assert!(result.is_sfx());
                 });
             },
         );

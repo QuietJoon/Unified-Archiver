@@ -170,6 +170,10 @@ fn contract_enhanced_metadata_entry_type() {
             | unified_archive::EntryType::Symlink
             | unified_archive::EntryType::HardLink
             | unified_archive::EntryType::Other => {}
+            // R0076-0079: `EntryType` is `#[non_exhaustive]`; the wildcard
+            // arm means the contract test stays green when a new entry
+            // category is added without forcing a same-PR contract update.
+            _ => {}
         }
     }
 }
@@ -283,9 +287,22 @@ fn contract_validate_integrity_valid_7z() {
 
 // ── Contract 6: Performance ──
 
+// R0074-0071: contract suites should encode behavioral compatibility
+// only. The previous performance assertion (`elapsed.as_secs() < 1`)
+// was timing-dependent and belonged in a benchmark profile, not a
+// contract suite. Gated behind the `UA_RUN_PERF_CONTRACT_TEST` env
+// var so the timing check is still available as an opt-in spot-check
+// without coupling normal test runs to machine load.
 #[test]
 fn contract_list_files_performance() {
     use std::time::Instant;
+
+    if std::env::var_os("UA_RUN_PERF_CONTRACT_TEST").is_none() {
+        eprintln!(
+            "skipping contract_list_files_performance — set UA_RUN_PERF_CONTRACT_TEST=1 to run (R0074-0071)",
+        );
+        return;
+    }
 
     let archive = Archive::open(fixture("test.zip")).unwrap();
     let start = Instant::now();

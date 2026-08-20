@@ -6,7 +6,7 @@ A cross-platform Rust library providing a unified interface for archive inspecti
 
 ## Features
 
-✨ **Unified Interface** - Same API works identically for ZIP, 7z, RAR, RAR5, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, GZIP, BZIP2, XZ, and ISO
+✨ **Unified Interface** - Same API works identically for ZIP, 7z, RAR, RAR5, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, TAR.ZST, TAR.LZ4, TAR.LZMA, GZIP, BZIP2, XZ, ZST, LZ4, LZMA, and ISO
 🔍 **Automatic Format Detection** - Magic byte detection, no need to specify format explicitly
 🚀 **High Performance** - SIMD-accelerated CRC32, streaming architecture, <100MB memory for 10GB+ archives (for libarchive-backed formats; ZIP, 7z, and RAR backends currently buffer entries during streaming extraction)
 🔐 **Encrypted Read Support** - Open encrypted RAR, RAR5, ZIP, and 7z archives through one API
@@ -23,18 +23,22 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-unified-archive = "0.1.0"
+unified-archive = "0.4.0"
 ```
+
+> **Not on crates.io.** No version of this crate has been published to a public registry, so
+> the line above will not resolve as written. Until it is published, depend on the crate by
+> `path` or `git`.
 
 ### Build Requirements
 
 **Linux:**
 ```bash
 # Ubuntu/Debian
-sudo apt-get install libarchive-dev pkg-config make g++
+sudo apt-get install libarchive-dev pkg-config g++
 
 # Fedora/RHEL
-sudo dnf install libarchive-devel pkgconf-pkg-config make gcc-c++
+sudo dnf install libarchive-devel pkgconf-pkg-config gcc-c++
 ```
 
 **macOS:**
@@ -42,17 +46,31 @@ sudo dnf install libarchive-devel pkgconf-pkg-config make gcc-c++
 brew install libarchive pkg-config
 ```
 
-> `pkg-config`, `make`, and a C++ compiler are required for building the bundled UnRAR SDK.
+> `pkg-config` and a C++ compiler are required: `build.rs` compiles the bundled
+> UnRAR SDK sources through the `cc` crate, and libarchive is located with
+> `pkg-config`.
 
 **Windows:**
-Dependencies bundled automatically
+Not yet auto-configured. The blocker is libarchive discovery: `build.rs`'s
+Windows branch emits only a build warning and no link directives, and libarchive
+is not feature-gated, so it must be supplied by hand. Until vcpkg-based
+discovery lands (tracked as OI-0065-001), either:
+
+- install libarchive under `vcpkg` and set its lib directory via
+  `RUSTFLAGS="-L native=<path>"`; or
+- vendor libarchive yourself and provide a precompiled `.lib`.
+
+Keep `rar-support` enabled: the bundled UnRAR sources compile on Windows through
+the `cc` crate, so `--no-default-features` only removes working RAR read support
+without helping with libarchive. RAR *creation* on Windows continues to work
+through the optional `external::RarCreator` (WinRAR CLI).
 
 ## Documentation
 
 - [User Manual](./docs/USER_MANUAL.md) - End-user guide for installation, workflows, and caveats
 - [Getting Started](./docs/GETTING_STARTED.md) - First project and common tasks
 - [API Reference](./docs/API_REFERENCE.md) - Public API surface and behavior notes
-- [Limitations](./Limitations.md) - Current v0.1.0 caveats and unsupported cases
+- [Limitations](./Limitations.md) - Current v0.4.0 caveats and unsupported cases
 - [Changelog](./CHANGELOG.md) - Release history and release notes
 
 ## Usage
@@ -88,7 +106,12 @@ let options = ExtractionOptions {
     ..Default::default()
 };
 
-archive.extract_all(options)?;
+// extract_all returns ResultWithWarnings<()>: skipped symlinks / hard-links
+// surface here as ArchiveWarning entries — the extraction itself still succeeded.
+let result = archive.extract_all(options)?;
+for warning in &result.warnings {
+    eprintln!("warning: {warning}");
+}
 ```
 
 ### Password-Protected Archives
@@ -114,11 +137,9 @@ use unified_archive::Archive;
 
 // Detect SFX archive
 let result = Archive::detect_sfx("installer.exe")?;
-if result.is_sfx {
-    println!("Found {} archive at offset {}",
-        result.archive_format.unwrap(),
-        result.data_offset.unwrap());
-    println!("Stub type: {:?}", result.stub_type);
+if let Some((format, offset, stub)) = result.payload_coordinates() {
+    println!("Found {:?} archive at offset {}", format, offset);
+    println!("Stub type: {:?}", stub);
     println!("{}", result.summary());
 }
 
@@ -133,7 +154,7 @@ println!("Embedded entries: {}", sfx_archive.entry_count()?);
 use std::path::PathBuf;
 use unified_archive::{Archive, ExtractionOptions};
 
-// RAR/RAR5 split archives are supported end-to-end in v0.1.0
+// RAR/RAR5 split archives are supported end-to-end in v0.4.0
 let archive = Archive::open("backup.part1.rar")?;
 let (is_multipart, parts) = archive.detect_multipart()?;
 if is_multipart {
@@ -144,7 +165,10 @@ let options = ExtractionOptions {
     destination: PathBuf::from("./output"),
     ..Default::default()
 };
-archive.extract_all(options)?; // Uses all RAR parts automatically
+let result = archive.extract_all(options)?; // Uses all RAR parts automatically
+for warning in &result.warnings {
+    eprintln!("warning: {warning}");
+}
 ```
 
 ### Archive Metadata Inspection
@@ -183,31 +207,40 @@ See the [User Manual](./docs/USER_MANUAL.md) and [Getting Started guide](./docs/
 |--------|----------------|---------|------------------------------|--------|----------------|-------|
 | **RAR** | ✅ | ✅ | ❌ | ❌ | ✅ | RAR creation is not part of `Archive::create`; an optional Windows-only `external::RarCreator` exists behind `external-rar-create` |
 | **RAR5** | ✅ | ✅ | ❌ | ❌ | ✅ | Same caveats as RAR |
-| **ZIP** | ✅ | ✅ | ✅ | ✅ | ✅ | Encrypted ZIP creation is deliberately rejected in v0.1.0 |
+| **ZIP** | ✅ | ✅ | ✅ | ✅ | ✅ | Encrypted ZIP creation is deliberately rejected in v0.4.0 |
 | **7z** | ✅ | ✅ | ✅ | ✅ | ✅ | Encrypted 7z creation is not supported |
 | **TAR** | ✅ | ✅ | ✅ | ❌ | ❌ | |
 | **TAR.GZ** | ✅ | ✅ | ✅ | ❌ | ❌ | |
 | **TAR.BZ2** | ✅ | ✅ | ✅ | ❌ | ❌ | |
 | **TAR.XZ** | ✅ | ✅ | ✅ | ❌ | ❌ | |
+| **TAR.ZST** | ✅ | ✅ | ✅ | ❌ | ❌ | Create needs a libarchive with the zstd write filter — see the codec note below |
+| **TAR.LZ4** | ✅ | ✅ | ✅ | ❌ | ❌ | Create needs a libarchive with the lz4 write filter — see the codec note below |
+| **TAR.LZMA** | ✅ | ✅ | ✅ | ❌ | ❌ | Create needs a libarchive with the lzma write filter — see the codec note below |
 | **GZIP** | ✅ | ✅ | ❌ | ❌ | ❌ | Standalone `.gz` is read/extract only |
 | **BZIP2** | ✅ | ✅ | ❌ | ❌ | ❌ | Standalone `.bz2` is read/extract only |
 | **XZ** | ✅ | ✅ | ❌ | ❌ | ❌ | Standalone `.xz` is read/extract only |
+| **ZST** | ✅ | ✅ | ❌ | ❌ | ❌ | Standalone `.zst` is read/extract only |
+| **LZ4** | ✅ | ✅ | ❌ | ❌ | ❌ | Standalone `.lz4` is read/extract only |
+| **LZMA** | ✅ | ✅ | ❌ | ❌ | ❌ | Standalone `.lzma` is read/extract only |
 | **ISO** | ✅ | ✅ | ❌ | ❌ | ❌ | Read/extract only |
 
 Additional notes:
 
-- **Multi-part extraction:** RAR/RAR5 split archives are supported end-to-end. ZIP and 7z split volumes are not supported in v0.1.0.
+- **Compressed-tar codecs:** creating `TAR.ZST` / `TAR.LZ4` / `TAR.LZMA` uses libarchive's zstd / lz4 / lzma **write** filters, which the linked libarchive must have been built with. When a filter is missing, creation fails immediately with an `ArchiveError::Format` at writer construction — the library never silently falls back to an external compressor binary. Reading those formats has no such requirement beyond the matching read filter.
+- **Multi-part extraction:** RAR/RAR5 split archives are supported end-to-end. ZIP and 7z split volumes are not supported in v0.4.0.
 - **SFX workflows:** `detect_sfx()`, `open_sfx()`, `open_at_offset()`, and `extract_stub()` are available for embedded archive inspection.
 - **Streaming memory bounds:** Bounded-memory streaming currently applies to libarchive-backed formats (TAR family and ISO). ZIP, 7z, and RAR backends expose the same `Read` API but buffer entries first.
 
 ## Release Status
 
-**Version 0.1.0 - Initial public release**
+**Version 0.4.0 - Current public release**
 
 Current release highlights:
 
 - ✅ Unified inspection and extraction across all supported formats
-- ✅ Archive creation through `Archive::create` for ZIP, 7z, and TAR variants
+- ✅ Archive creation through `Archive::create` for ZIP, 7z, TAR, TAR.GZ, TAR.BZ2, TAR.XZ,
+  TAR.ZST, TAR.LZ4, and TAR.LZMA (the last three depend on the libarchive build carrying the
+  matching write filter; see the codec-availability note above)
 - ✅ Rewrite-based modification for ZIP and 7z through `Archive::modify` / `Archive::modify_with_options`
 - ✅ SFX detection, stub extraction, and embedded archive opening
 - ✅ Encrypted archive reading for RAR, RAR5, ZIP, and 7z
@@ -216,25 +249,24 @@ Current release highlights:
 
 ## Limitations
 
-See [Limitations.md](./Limitations.md) for the full catalog. Key caveats in v0.1.0:
+See [Limitations.md](./Limitations.md) for the full catalog. Key caveats in v0.4.0:
 
-- **Modification is rewrite-based and limited to ZIP/7z.** `commit_changes()` recreates the archive instead of editing in place. `modify_with_options()` can preserve timestamps and Unix permissions on retained entries, and ZIP rewrites preserve the archive comment plus stored/deflated method, but encrypted ZIP re-encryption and ZIP64 edge coverage remain caveats.
+- **Modification is rewrite-based and limited to ZIP/7z.** `commit_changes()` recreates the archive instead of editing in place. `modify_with_options()` preserves modified, accessed, and created timestamps plus Unix permissions on retained regular-file entries (where the backend supports the timestamp); directory metadata still uses backend defaults. ZIP rewrites preserve the archive comment plus stored/deflated method. Encrypted archives are refused up front by `Archive::modify`, the rewrite drops symlink, hardlink, and other special entries, and ZIP64 edge coverage remains a caveat.
 - **Streaming bounded-memory is libarchive-only.** `extract_to_stream()` reads TAR/ISO in chunks; ZIP, 7z, and RAR backends present the same `Read` API but buffer the entry in memory first.
-- **Split archives: RAR/RAR5 only.** ZIP and 7z split volumes are not supported end-to-end in v0.1.0.
+- **Split archives: RAR/RAR5 only.** ZIP and 7z split volumes are not supported end-to-end in v0.4.0.
 - **Encrypted creation is rejected by the main facade.** `Archive::create()` returns `OperationBlocked` when `CompressionOptions.password` is set. Optional Windows-only RAR creation lives in `external::RarCreator`, not the `Archive` facade.
-- **Standalone `.gz` / `.bz2` / `.xz` are read-only.** Use the `.tar.*` compound variants for compressed-archive creation.
-- **Encrypted-header RAR** (`-hp`) cannot be listed without the password — other formats surface entry names without one.
+- **Standalone `.gz` / `.bz2` / `.xz` / `.zst` / `.lz4` / `.lzma` are read-only.** Use the creatable `.tar.*` compound variants for compressed-archive creation.
+- **Encrypted-header archives** (RAR `-hp`, 7z `-mhe`) cannot be listed without the password — use `Archive::open_encrypted` up front. Encrypted ZIP entries still surface names without a password.
 - **Platform coverage:** macOS and Linux are tested; Windows support exists but is not release-verified yet.
 
 ## Architecture
 
 **Backend Engines:**
-- **Piz** - ZIP read/extract
-- **zip crate** - Encrypted ZIP read + ZIP creation
+- **zip crate** - All ZIP read, extract, and creation (encrypted and unencrypted)
 - **SevenZ** - 7z read/extract
-- **libarchive** - TAR-family formats, standalone `.gz`/`.bz2`/`.xz`, ISO, and non-ZIP creation
+- **libarchive** - TAR-family formats (including TAR.ZST/TAR.LZ4/TAR.LZMA), standalone `.gz`/`.bz2`/`.xz`/`.zst`/`.lz4`/`.lzma`, ISO, and creatable non-ZIP formats (7z, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, TAR.ZST, TAR.LZ4, TAR.LZMA)
 - **UnRAR** - RAR/RAR5
-- **goblin** - Binary parsing for SFX detection (PE/ELF/Mach-O)
+- **In-crate SFX scanner** - Header-field stub classification (PE/ELF/Mach-O) plus payload signature scanning, in `src/sfx/`; no binary-parsing crate is linked
 - **Optional `external::RarCreator`** - Windows-only WinRAR CLI bridge for out-of-process RAR creation
 
 **Key Design Decisions:**
@@ -245,9 +277,16 @@ See [Limitations.md](./Limitations.md) for the full catalog. Key caveats in v0.1
 
 ## License
 
-Licensed under the [MIT License](./LICENSE-MIT).
+Licensed under the [MIT License](./LICENSE).
 
-**RAR Support:** UnRAR license applies (free for non-commercial use). Commercial use requires license from RARLAB. Disable with `--no-default-features` if needed.
+**RAR Support:** the `rar-support` feature compiles the vendored UnRAR sources in
+`src/ffi/native/unrar/`, which carry their own freeware licence
+(`src/ffi/native/unrar/license.txt`). It permits use in any software that handles
+RAR archives, free of charge and without a commercial-use restriction; what it
+forbids is using those sources to develop a RAR (WinRAR) compatible archiver or
+to re-create the RAR compression algorithm. It also requires the governing
+paragraph to be reproduced verbatim — see the "Third-party: UnRAR" section of
+[LICENSE](./LICENSE).
 
 ## Contributing
 

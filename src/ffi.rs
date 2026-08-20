@@ -1,0 +1,15 @@
+//! FFI bindings and native Rust archive backends
+//!
+//! This module provides both FFI wrappers around native C libraries
+//! and native Rust implementations for optimal performance.
+
+pub(crate) mod common; // Shared utilities (AtomicOutputFile, write_entry_atomically, normalize_path)
+pub mod libarchive; // libarchive manual bindings
+pub mod libarchive_wrapper; // libarchive safe wrapper
+pub mod sevenz_wrapper; // Native Rust 7z backend with CRC32 metadata
+#[cfg(feature = "rar-support")]
+pub mod unrar; // UnRAR manual bindings
+#[cfg(feature = "rar-support")]
+pub mod wrapper; // UnRAR safe wrapper
+pub mod zip_wrapper; // Native Rust ZIP backend — sole reader/extractor for encrypted and unencrypted ZIP
+pub mod zip_writer; // Native Rust ZIP creation backend

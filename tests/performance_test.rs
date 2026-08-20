@@ -10,7 +10,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 use std::time::Instant;
-use unified_archive::Archive;
+use unified_archive::{Archive, StreamBound};
 
 /// Helper to get test fixtures directory
 fn fixtures_dir() -> PathBuf {
@@ -160,12 +160,19 @@ fn perf_small_file_extraction() {
 
 /// Performance target: Streaming extraction has minimal overhead
 ///
-/// Target: Streaming should be within 2x of memory extraction time
+/// Target: Streaming should be within 2x of memory extraction time.
+///
+/// R0070-0085: ZIP streaming (`Archive::extract_to_stream` on the
+/// `zip`-crate backend) currently materialises the entry into a
+/// `Cursor<Vec<u8>>` rather than truly streaming — see
+/// [`OI-0057-007`](docs/project/open-issues.md). This test drops ZIP
+/// from the comparison so the streaming-vs-memory ratio reflects
+/// backends that actually stream (libarchive-backed RAR/7z).
 #[test]
+#[cfg(feature = "rar-support")]
 #[serial_test::file_serial(rar)]
-#[ignore = "ZIP streaming has known issues with test fixtures - test.zip extraction fails"]
 fn perf_streaming_overhead() {
-    let test_files = vec!["test.rar", "test.zip", "test.7z"];
+    let test_files = vec!["test.rar", "test.7z"];
     let file_to_extract = "test_file.txt";
 
     for filename in test_files {
@@ -186,7 +193,7 @@ fn perf_streaming_overhead() {
         for _ in 0..20 {
             let archive = Archive::open(&path).expect("Failed to open");
             let mut stream = archive
-                .extract_to_stream(file_to_extract)
+                .extract_to_stream(file_to_extract, StreamBound::Unbounded)
                 .expect("Failed to create stream");
 
             let mut buffer = Vec::new();
@@ -287,14 +294,20 @@ fn perf_validation() {
     }
 }
 
-/// Memory efficiency test: Streaming uses bounded memory
+/// Streaming chunked-read integrity test
 ///
-/// This test verifies that streaming doesn't accumulate data (SC-009).
-/// For our small test file, we verify the concept works correctly.
+/// R0079-0046: previously named `perf_streaming_memory_bounded` and
+/// claimed to "prove we're not loading all at once" — a tiny read
+/// buffer cannot demonstrate that (a backend that buffered the whole
+/// entry would still hand it out 4 bytes per `read` call). What the
+/// tiny buffer *does* pin is that data delivered across many small
+/// reads reassembles into the exact entry content on every backend.
+/// Memory-bound verification (SC-009) needs an external profiling
+/// harness.
 #[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
-fn perf_streaming_memory_bounded() {
+fn perf_streaming_chunked_read_integrity() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
     let file_to_extract = "test_file.txt";
 
@@ -303,27 +316,27 @@ fn perf_streaming_memory_bounded() {
         let archive = Archive::open(&path).expect("Failed to open");
 
         let mut stream = archive
-            .extract_to_stream(file_to_extract)
+            .extract_to_stream(file_to_extract, StreamBound::Unbounded)
             .expect("Failed to create stream");
 
-        // Read in very small chunks to verify streaming works
+        // Read in very small chunks
         let chunk_size = 4; // Intentionally tiny
         let mut buffer = vec![0u8; chunk_size];
         let mut chunks_read = 0;
-        let mut total_bytes = 0;
+        let mut content = Vec::new();
 
         loop {
             match stream.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(n) => {
-                    total_bytes += n;
+                    content.extend_from_slice(&buffer[..n]);
                     chunks_read += 1;
                 }
                 Err(e) => panic!("Stream read error: {}", e),
             }
         }
 
-        // Verify we read multiple chunks (proves we're not loading all at once)
+        // A 4-byte buffer over an 18-byte entry must take several reads.
         assert!(
             chunks_read > 1,
             "Should read multiple chunks for {} (got {})",
@@ -331,17 +344,21 @@ fn perf_streaming_memory_bounded() {
             chunks_read
         );
 
-        // Verify we read complete file
+        // The chunked reads must reassemble into the exact entry content.
+        let text = String::from_utf8_lossy(&content);
         assert!(
-            total_bytes >= 17,
-            "Should read complete file for {} (got {} bytes)",
+            text.contains("Hello, RAR World!"),
+            "Chunked reads should reassemble entry content for {} (got {:?})",
             filename,
-            total_bytes
+            text
         );
 
         println!(
-            "✓ {} streaming memory: {} chunks of {} bytes (total {} bytes)",
-            filename, chunks_read, chunk_size, total_bytes
+            "✓ {} chunked streaming: {} chunks of {} bytes (total {} bytes)",
+            filename,
+            chunks_read,
+            chunk_size,
+            content.len()
         );
     }
 }
@@ -384,7 +401,7 @@ fn perf_regression_check() {
     let archive3 = Archive::open(&path).expect("Failed to open for stream");
     let start = Instant::now();
     let mut stream = archive3
-        .extract_to_stream(file_to_extract)
+        .extract_to_stream(file_to_extract, StreamBound::Unbounded)
         .expect("Failed to stream");
     let mut buffer = Vec::new();
     stream.read_to_end(&mut buffer).expect("Failed to read");
@@ -395,13 +412,18 @@ fn perf_regression_check() {
     let _report = archive.validate_integrity().expect("Failed to validate");
     let validate_time = start.elapsed();
 
-    println!("\n=== Performance Baseline (test.rar) ===");
-    println!("  Open:         {:?}", open_time);
-    println!("  List:         {:?}", list_time);
-    println!("  Find:         {:?}", find_time);
-    println!("  Extract:      {:?}", extract_time);
-    println!("  Stream:       {:?}", stream_time);
-    println!("  Validate:     {:?}", validate_time);
+    // R0074-0078: keep the timing assertions but gate the noisy
+    // baseline print behind an opt-in env var so default test runs
+    // stay quiet.
+    if std::env::var_os("UA_PRINT_PERF_BASELINE").is_some() {
+        println!("\n=== Performance Baseline (test.rar) ===");
+        println!("  Open:         {:?}", open_time);
+        println!("  List:         {:?}", list_time);
+        println!("  Find:         {:?}", find_time);
+        println!("  Extract:      {:?}", extract_time);
+        println!("  Stream:       {:?}", stream_time);
+        println!("  Validate:     {:?}", validate_time);
+    }
 
     // Sanity checks: operations should complete in reasonable time
     // These are very generous limits (10x what we expect in practice)

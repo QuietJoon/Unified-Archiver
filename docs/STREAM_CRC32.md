@@ -1,3 +1,12 @@
+---
+type: Guide
+title: "Stream Checksums and Archive Integrity"
+description: "Comprehensive guide to understanding checksums in compression and archive formats."
+tags: [reference, ADR-0047]
+timestamp: 2026-06-10T00:00:00Z
+status: active
+---
+
 # Stream Checksums and Archive Integrity
 
 Comprehensive guide to understanding checksums in compression and archive formats.
@@ -59,6 +68,8 @@ println!("Size: {} bytes", checksum.uncompressed_size.unwrap());
 - CRC32 is always present
 - Covers entire uncompressed payload
 - Doesn't change if you modify header metadata (filename, timestamp, comments)
+- **Multi-member files** (RFC 1952 members concatenated by `pigz`, `bgzip`, or `cat a.gz b.gz`): only the trailer at the end of the file is read, so the reported CRC32 and size describe the **last member only**, not the whole concatenated payload
+- `uncompressed_size` is the trailer `ISIZE` = uncompressed size **mod 2^32** (RFC 1952): exact only for payloads below 4 GiB. A member of 4 GiB or larger reports its size modulo 2^32, not the true size
 
 ---
 
@@ -92,6 +103,7 @@ println!("CRC32: {:08X}", checksum.crc32.unwrap());
 - CRC32 is always present
 - Combines CRCs from all compression blocks
 - Uses different bit order than GZIP
+- The EOS marker is bit-packed (blocks carry no byte-alignment padding), so it usually starts mid-byte; extraction scans the file tail at every bit offset
 
 ---
 
@@ -127,6 +139,7 @@ match checksum.check_type {
 - Most files use CRC64 (default)
 - Actual check value requires parsing entire stream
 - Currently we only extract the check type
+- **Multi-stream files** (independent XZ streams concatenated, e.g. `cat a.xz b.xz`): only the first Stream Header is read, so the reported check type describes the **first stream only**, not any later streams (which may use a different check type)
 
 ---
 
@@ -299,10 +312,10 @@ let bz = extract_bzip2_stream_crc("file.bz2")?;
 let xz = extract_xz_stream_check("file.xz")?;
 ```
 
-**Important**: These helpers are stream-checksum utilities that read stored metadata from compression format headers/trailers. They do NOT provide standalone archive-opening support for .gz/.bz2/.xz files, and they do NOT recompute checksums for verification.
+**Important**: These helpers are stream-checksum utilities that read stored metadata from compression format headers/trailers. They do NOT provide standalone archive-opening support for .gz/.bz2/.xz files, and they do NOT recompute checksums for verification. `extract_stream_checksum` detects the format from magic bytes only — the file extension is never consulted, and files whose magic matches no supported format are rejected regardless of extension.
 
 **Supported Formats**:
-- ✅ GZIP - Full CRC32 + size extraction (reads stored metadata from trailer)
+- ✅ GZIP - Full CRC32 + size extraction (reads stored metadata from trailer); multi-member files report the last member's trailer only
 - ✅ BZIP2 - Full CRC32 extraction (reads stored metadata from EOS marker)
 - ✅ XZ - Check type detection only (CRC32/CRC64/SHA-256/None); actual check value is not extracted
 
@@ -323,9 +336,64 @@ for entry in archive.list_files()? {
 
 **Supported Formats**:
 - ✅ RAR/RAR5 - Direct from UnRAR SDK
-- ✅ ZIP - Stored metadata read from Piz native backend
+- ✅ ZIP - Stored metadata read from the `zip` crate native backend
 - ✅ 7z - Stored metadata read from SevenZ native backend
-- ✅ TAR - Read during listing via libarchive
+- ❌ TAR and the other libarchive-backed formats - the format stores no
+  per-entry CRC32 and the libarchive reader sets `crc32 = None` on every
+  entry; `calculate_manifest_digest` recomputes content CRCs for these
+  instead (see **Manifest Digest** under "Future Enhancements")
+
+**Caveat:** AES-encrypted ZIP entries written in AE-2 mode store `0` in the
+central-directory CRC32 field by specification, so that field is a placeholder
+rather than a content checksum. The question of how those entries should
+surface a CRC32 in the listing has been decided and implemented: **they list
+`crc32 = None`.** The gate is `crc32_check_exempt` in
+`src/ffi/zip_wrapper.rs`, and it is a **three-way** conjunction:
+
+```text
+zip_file.encrypted()
+    && zip_file.crc32() == 0
+    && aes_vendor_version(zip_file) == Some(AE2)
+```
+
+The third conjunct reads the vendor version out of the entry's `0x9901`
+WinZip-AES extra field (`0x0001` = AE-1, which stores a real CRC32; `0x0002` =
+AE-2, which stores none), and it is load-bearing rather than a belt-and-braces
+extra. `encrypted() && crc32() == 0` alone is a *superset* of AE-2: it also
+sweeps in any encrypted entry whose payload is genuinely **empty** — a legacy
+ZipCrypto empty file, or an AE-1 empty file from a writer that does not follow
+the `zip` crate's "under 20 bytes ⇒ AE-2" rule. Those carry a real stored
+`CRC32(b"") == 0`, which AD 0012 says is a valid checksum and not an absent
+one; exempting them would discard a checksum the archive actually carried and
+would force a needless decrypt-and-stream during the digest walk. With the
+vendor-version conjunct they keep `Some(0)`, as does any plaintext empty file.
+`test_zip_wrapper_encrypted_empty_file_without_aes_field_keeps_crc32` in
+`src/ffi/zip_wrapper.rs` exists solely to pin that seam.
+
+Extraction likewise skips the CRC comparison for exempt entries and relies on
+the AES authentication tag instead. There is no placeholder in the listing to
+compare against, so nothing built on `entry.crc32` can silently treat AE-2
+entries as matching.
+
+One residual is stated rather than hidden: an AE-2 entry whose central record
+omits the `0x9901` field is not recognised by the gate. Such an entry is
+unreadable anyway — the `zip` crate rejects "AES encryption without AES extra
+data field" while parsing the central directory — so it never reaches a CRC
+comparison.
+
+The cost of that correctness is a **password precondition on the digest
+surface**. Because AE-2 entries expose no stored CRC32,
+`calculate_content_multiset_digest_and_size` (and its
+`calculate_manifest_digest` / `calculate_manifest_summary` shims) falls through
+to streaming the entry's payload, which means decrypting it. Listing an
+encrypted ZIP still needs no password — only reading entry data does — so a
+digest call on a password-protected ZIP opened without a usable password
+**fails** where it previously returned a digest computed over the placeholder.
+Open such archives with `Archive::open_encrypted()`. The refusal currently
+arrives as `ArchiveError::Format` carrying `"… Password required to decrypt
+file"` rather than as `ArchiveError::Password`; that mis-classification is
+pre-existing and tracked separately (ti-9bdf2c), so match on it defensively
+rather than reading it as the intended classification.
 
 ### Future Enhancements
 
@@ -353,7 +421,7 @@ Wrapping sum of all per-file CRC32 values. Matches 7-Zip's "Archive CRC" display
 let digest = archive.calculate_manifest_digest()?;
 println!("Manifest digest: {}", digest); // e.g. "a1b2c3d4"
 ```
-Sorts per-entry identifier strings, joins with `,`, then CRC32-hashes the result. For entries with a CRC32, the hex-formatted CRC is used; for entries without CRC32 (e.g., TAR entries), the function falls back to `path:size` as the identifier. More collision-resistant than archive CRC because sorting preserves per-entry identity instead of collapsing it into a sum.
+Sorts per-entry identifier strings, joins with `,`, then CRC32-hashes the result. For entries with a stored CRC32, the hex-formatted CRC is used as-is; for entries whose format does not carry a CRC32 in metadata (e.g., TAR, TAR+gz/bz2/xz, ISO), the decompressed payload is streamed through `compute_crc32_reader()` and the resulting CRC feeds the digest — see AD 0047. Where the backend offers a one-pass walk that streaming happens for all such entries in a single traversal (`resolve_crc32_single_pass`); otherwise it falls back to the per-entry `entry_crc32_for_digest()`. Either way, errors during the stream are propagated, never silently substituted. More collision-resistant than archive CRC because sorting preserves per-entry identity instead of collapsing it into a sum.
 
 **Comparison:**
 
@@ -362,10 +430,15 @@ Sorts per-entry identifier strings, joins with `,`, then CRC32-hashes the result
 | Algorithm | Wrapping sum | Sort + join + CRC32 hash |
 | Output | `u32` | 8-char hex string |
 | Collision resistance | Low (addition is lossy) | Higher (preserves per-entry identity) |
-| Use case | Quick comparison, 7-Zip compatibility | Archive comparison and deduplication |
+| Use case | Quick comparison, 7-Zip compatibility | Archive comparison and deduplication (unique-path archives; see the caveats below) |
 | Empty archive | `0` | `""` (empty string) |
 
-Both are order-independent and format-independent. When all entries have CRC32 values, the same file contents produce the same result whether stored in ZIP, 7z, or RAR. However, when the `path:size` fallback is used (for entries lacking CRC32), the digest incorporates path and size metadata rather than pure content identity, so results may differ across formats if paths or metadata vary.
+Both properties are qualified rather than absolute:
+
+- **Order-independence** holds unconditionally, duplicate paths included (DCR-012). Archives may legitimately repeat a path (TAR append/update, shadowed ZIP/7z central-directory entries), and every entry — first occurrence or fifth — contributes the same bare `{crc32:08x}` element for its own payload; multiplicity is carried by that element appearing once per occurrence in the sorted multiset. An earlier encoding appended a per-path occurrence ordinal (`<crc32-hex>#<n>`) from the second occurrence onward, which made duplicate-path digests depend on the relative listing order of the same-path occurrences; that ordinal was removed, so **digests stored under it do not match current ones for duplicate-path archives and must be recomputed**. Unique-path archives digest exactly as before. See the rustdoc on `Archive::calculate_content_multiset_digest_and_size` (`src/inspection.rs`), of which `calculate_manifest_digest` is a thin shim.
+- **Format-independence** holds only when every entry of every archive being compared exposes a stored CRC32 in its listing. ZIP, 7z, and RAR do, so identical contents in those formats produce equal results — the exception is the AE-2 entries above, which list `None`; the manifest digest recovers format-independence for them by streaming the decrypted payload (given the password), while `calculate_archive_crc` simply skips them. For `calculate_archive_crc` a returned `0` is additionally ambiguous between an empty archive, an archive whose entries expose no CRC32, and a genuine wrap to zero — see the rustdoc on `Archive::calculate_archive_crc`.
+
+On CRC-less formats (TAR and friends), the manifest digest streams entry content through `compute_crc32_reader()` (AD 0047), so the result is still content-identity — no path/size surrogate. The trade-off is a full pass over entry payloads, and that pass is **linear**, not quadratic: since OI-0001-009 (ticgit `82bf8fd4`) the libarchive backend resolves every CRC-less entry in a single traversal (`LibarchiveArchive::visit_payloads_by_listing_id`, reached through `Archive::resolve_crc32_single_pass` in `src/inspection.rs`), so a compressed TAR is decompressed **once** rather than re-decompressed from byte zero once per member. The per-entry resolver `entry_crc32_for_digest()` remains as the fallback for a backend that offers no one-pass walk; it produces the identical digest, just more slowly. Errors during either route are propagated, never silently substituted. Prefer `calculate_archive_crc` when a cheap summary suffices — the digest still reads every payload, and reports no progress.
 
 ---
 
@@ -470,5 +543,5 @@ if d1 == d2 {
 
 ---
 
-**Last Updated**: 2025-11-01
-**Version**: 0.1.0
+**Last Updated**: 2026-06-10
+**Version**: 0.4.0

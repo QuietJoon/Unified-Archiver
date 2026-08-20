@@ -1,6 +1,15 @@
 //! Format compatibility integration tests
 //!
-//! Verifies that the unified API works consistently across different archive formats
+//! Verifies that the unified API works consistently across different archive formats.
+//!
+//! **Companion suite (R0074-0073).** A second format-compatibility
+//! suite lives at [`tests/integration/format_compatibility.rs`]. This
+//! root-level file focuses on root-level fixture coverage (smoke
+//! tests, regression cases added since v0.2.0); the integration
+//! variant carries the broader cross-format expectations. Both share
+//! the `tests/fixtures/` data set. Consolidation into a single
+//! contract+integration suite is tracked as test-suite reorganization
+//! work (R0074-0079).
 
 use unified_archive::{Archive, ArchiveFormat, EntryType, ValidationReport};
 
@@ -120,11 +129,13 @@ fn test_nonexistent_file_error() {
 fn test_validation_report_structure() {
     let report = ValidationReport {
         total_entries: 10,
+        total_files: 10,
         validated: 8,
         failed: vec!["file1.txt".to_string(), "file2.txt".to_string()],
     };
 
     assert_eq!(report.total_entries, 10);
+    assert_eq!(report.total_files, 10);
     assert_eq!(report.validated, 8);
     assert_eq!(report.failed.len(), 2);
     assert_eq!(report.failed[0], "file1.txt");
@@ -337,7 +348,7 @@ fn test_tar_xz_extract_to_memory() {
 
 // ── GZIP format tests ──
 // Plain .gz / .bz2 / .xz files use archive_read_support_format_raw() via
-// libarchive. Per AD 0019, the single "data" entry is renamed to the archive's
+// libarchive. Per MADR-0019, the single "data" entry is renamed to the archive's
 // file stem (e.g., test.gz → "test") for a stable, predictable API.
 
 #[test]
@@ -417,6 +428,51 @@ fn test_xz_extract_to_memory() {
     assert_eq!(String::from_utf8_lossy(&data), "Hello, RAR World!\n");
 }
 
+// ── ISO format tests ──
+//
+// R0079-0033: ISO is advertised read/extract-supported but previously
+// had no end-to-end coverage. tests/fixtures/test.iso was produced via
+// `hdiutil makehybrid -iso -joliet` over a staging dir containing
+// test_file.txt with the shared fixture content.
+
+#[test]
+fn test_iso_format_detection() {
+    let archive = Archive::open("tests/fixtures/test.iso").expect("Failed to open ISO archive");
+    assert_eq!(archive.format(), ArchiveFormat::Iso);
+}
+
+#[test]
+fn test_iso_list_files() {
+    let archive = Archive::open("tests/fixtures/test.iso").expect("Failed to open ISO archive");
+    let entries = archive.list_files().expect("Failed to list files");
+
+    assert!(!entries.is_empty());
+    let file_entries: Vec<_> = entries
+        .iter()
+        .filter(|e| e.entry_type == EntryType::File)
+        .collect();
+    assert_eq!(file_entries.len(), 1);
+    assert!(
+        file_entries[0].path.ends_with("test_file.txt"),
+        "unexpected ISO entry path: {}",
+        file_entries[0].path
+    );
+}
+
+#[test]
+fn test_iso_extract_to_memory() {
+    let archive = Archive::open("tests/fixtures/test.iso").expect("Failed to open ISO archive");
+    let entries = archive.list_files().expect("Failed to list files");
+    let file_entry = entries
+        .iter()
+        .find(|e| e.entry_type == EntryType::File)
+        .expect("ISO should contain a file entry");
+    let data = archive
+        .extract_to_memory(&file_entry.path)
+        .expect("Failed to extract ISO entry to memory");
+    assert_eq!(String::from_utf8_lossy(&data), "Hello, RAR World!\n");
+}
+
 // ── Cross-format consistency tests ──
 
 /// All libarchive-backed formats with test_file.txt should produce
@@ -443,7 +499,7 @@ fn test_cross_format_content_consistency() {
 }
 
 /// All single-stream formats should produce identical decompressed content
-/// via libarchive's format_raw (AD 0019).
+/// via libarchive's format_raw (MADR-0019).
 #[test]
 fn test_single_stream_content_consistency() {
     let stream_formats = vec![
@@ -473,4 +529,300 @@ fn test_single_stream_content_consistency() {
     for (i, data) in results.iter().enumerate().skip(1) {
         assert_eq!(data, &results[0], "Stream format {} differs from first", i);
     }
+}
+
+/// AD 0062 A.6: opening a plain gzip file with a `.tar.gz` filename
+/// must surface a precise `ArchiveError::Format` instead of producing
+/// a malformed listing later. The detect path stays optimistic on the
+/// extension hint; the open path's confirmation pass refuses to
+/// accept the file as TarGzip when libarchive's first header reports
+/// a non-tar format.
+#[test]
+fn test_open_plain_gzip_with_tar_gz_extension_rejected() {
+    let temp = tempfile::tempdir().unwrap();
+    let misnamed = temp.path().join("masquerader.tar.gz");
+    // Copy the plain-gzip fixture under a `.tar.gz` filename.
+    std::fs::copy("tests/fixtures/test.gz", &misnamed).unwrap();
+
+    let err = match Archive::open(&misnamed) {
+        Ok(_) => panic!("expected open to reject a plain gzip wearing a .tar.gz filename"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("compressed-tar") || msg.contains("not a tar stream") || msg.contains("tar"),
+        "expected tar-confirmation diagnostic, got: {msg}"
+    );
+}
+
+/// AD 0062 A.6: a real tar.gz archive must still open cleanly through
+/// the confirmation path — the check must not flag genuine
+/// compressed tar inputs.
+#[test]
+fn test_open_real_tar_gz_passes_confirmation() {
+    let archive = Archive::open("tests/fixtures/test.tar.gz")
+        .expect("real tar.gz must open through the AD 0062 A.6 confirmation pass");
+    assert_eq!(archive.format(), ArchiveFormat::TarGzip);
+}
+
+/// AD 0062 A.3: requesting `verify_crc32 = true` against a
+/// libarchive-backed format (TAR family / ISO / raw gzip-bzip2-xz)
+/// must surface `ArchiveError::Unsupported` instead of silently
+/// no-opping. The flag previously had per-backend-defined behaviour
+/// that varied silently between formats.
+#[test]
+fn test_extract_all_verify_crc32_rejected_on_tar_gz() {
+    use unified_archive::{ArchiveError, ExtractionOptions};
+    let temp = tempfile::tempdir().unwrap();
+    let archive = Archive::open("tests/fixtures/test.tar.gz").expect("open tar.gz");
+    let opts = ExtractionOptions {
+        destination: temp.path().to_path_buf(),
+        verify_crc32: true,
+        ..Default::default()
+    };
+    let err = match archive.extract_all(opts) {
+        Ok(_) => panic!(
+            "extract_all with verify_crc32=true must fail on TAR.GZ (libarchive cannot honour it)"
+        ),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(err, ArchiveError::Unsupported { .. }),
+        "expected Unsupported variant, got: {err}"
+    );
+    assert!(
+        err.to_string().to_lowercase().contains("crc"),
+        "diagnostic should mention CRC: {err}"
+    );
+}
+
+/// AD 0062 A.3: `verify_crc32 = false` on the same TAR.GZ fixture
+/// must extract cleanly — only the `true` request is gated.
+#[test]
+fn test_extract_all_verify_crc32_false_on_tar_gz_succeeds() {
+    use unified_archive::ExtractionOptions;
+    let temp = tempfile::tempdir().unwrap();
+    let archive = Archive::open("tests/fixtures/test.tar.gz").expect("open tar.gz");
+    let opts = ExtractionOptions {
+        destination: temp.path().to_path_buf(),
+        verify_crc32: false,
+        ..Default::default()
+    };
+    archive
+        .extract_all(opts)
+        .expect("verify_crc32=false on TAR.GZ must succeed");
+}
+
+// ── AD 0062 heuristic-open: extension lies, magic wins ──
+//
+// `Archive::open` is content-first. When a file's extension and its
+// magic bytes disagree, magic-byte detection wins and the archive
+// opens as the actual format. `Archive::extension_format()` lets a
+// caller observe the mismatch.
+
+/// Heuristic case 1: RAR bytes carrying a `.zip` filename open as
+/// RAR. The mismatch is observable via
+/// `extension_format()` ≠ `format()`.
+#[cfg(feature = "rar-support")]
+#[test]
+#[serial_test::file_serial(rar)]
+fn test_open_rar_bytes_with_zip_extension_routes_to_rar() {
+    let temp = tempfile::tempdir().unwrap();
+    let misnamed = temp.path().join("masquerader.zip");
+    std::fs::copy("tests/fixtures/test.rar", &misnamed)
+        .expect("copy RAR fixture under .zip filename");
+
+    let archive = Archive::open(&misnamed).expect("magic-first detection must beat extension");
+    assert_eq!(
+        archive.format(),
+        ArchiveFormat::Rar5,
+        "actual format from magic bytes"
+    );
+    assert_eq!(
+        archive.extension_format(),
+        Some(ArchiveFormat::Zip),
+        "extension claim is ZIP"
+    );
+    assert_ne!(
+        archive.format(),
+        archive.extension_format().unwrap(),
+        "mismatch must be observable"
+    );
+
+    // Functional check: listing reports the embedded RAR entry.
+    let entries = archive.list_files().expect("list");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].path, "test_file.txt");
+}
+
+/// Heuristic case 2: 7z bytes carrying a `.zip` filename open as 7z.
+#[test]
+fn test_open_7z_bytes_with_zip_extension_routes_to_7z() {
+    let temp = tempfile::tempdir().unwrap();
+    let misnamed = temp.path().join("masquerader.zip");
+    std::fs::copy("tests/fixtures/test.7z", &misnamed)
+        .expect("copy 7z fixture under .zip filename");
+
+    let archive = Archive::open(&misnamed).expect("magic-first detection must beat extension");
+    assert_eq!(archive.format(), ArchiveFormat::SevenZip);
+    assert_eq!(archive.extension_format(), Some(ArchiveFormat::Zip));
+
+    let entries = archive.list_files().expect("list");
+    assert!(!entries.is_empty(), "7z fixture has at least one entry");
+}
+
+/// Heuristic case 3: ZIP bytes carrying a `.exe` filename open as
+/// ZIP. The `.exe` extension would have triggered the SFX fallback,
+/// but magic-first detection finds `PK..` at offset 0 before the
+/// fallback runs.
+#[test]
+fn test_open_zip_bytes_with_exe_extension_routes_to_zip() {
+    let temp = tempfile::tempdir().unwrap();
+    let misnamed = temp.path().join("masquerader.exe");
+    std::fs::copy("tests/fixtures/test.zip", &misnamed)
+        .expect("copy ZIP fixture under .exe filename");
+
+    let archive = Archive::open(&misnamed).expect("plain ZIP renamed to .exe must open as ZIP");
+    assert_eq!(archive.format(), ArchiveFormat::Zip);
+    // `.exe` doesn't map to a single archive format in
+    // `format_from_extension`, so the extension claim is `None`.
+    assert!(archive.extension_format().is_none());
+}
+
+/// SFX-fallback: a real self-extracting archive (executable header
+/// followed by an embedded archive at non-zero offset) opens
+/// transparently through `Archive::open` thanks to the
+/// `.exe`-extension fallback path that retries via `Archive::open_sfx`.
+#[test]
+fn test_open_real_sfx_with_exe_extension_falls_back_to_sfx() {
+    use std::io::Write;
+    let temp = tempfile::tempdir().unwrap();
+    let sfx_path = temp.path().join("installer.exe");
+
+    // Synthetic SFX: shell-script stub + padding + real ZIP fixture.
+    // Mirrors the shape `tests/integration/sfx_detection.rs` uses for
+    // its synthetic SFX cases.
+    let stub = b"#!/bin/sh\necho 'self-extracting wrapper'\nexit 0\n";
+    let padding = vec![0u8; 100];
+    let zip_bytes = std::fs::read("tests/fixtures/test.zip").expect("read fixture");
+
+    let mut f = std::fs::File::create(&sfx_path).unwrap();
+    f.write_all(stub).unwrap();
+    f.write_all(&padding).unwrap();
+    f.write_all(&zip_bytes).unwrap();
+    f.flush().unwrap();
+    drop(f);
+
+    let archive = Archive::open(&sfx_path)
+        .expect("magic-first fails for SFX header; SFX fallback must open the embedded ZIP");
+    assert_eq!(archive.format(), ArchiveFormat::Zip);
+
+    let entries = archive.list_files().expect("list embedded entries");
+    assert!(
+        !entries.is_empty(),
+        "embedded ZIP must surface its entries through the facade"
+    );
+}
+
+/// Negative SFX-fallback: an `.exe` whose content is neither a known
+/// archive nor an SFX must surface the original
+/// `Unknown archive format` diagnostic, not a generic "executable"
+/// message. The fallback only adds detection paths; it doesn't mask
+/// content failures.
+#[test]
+fn test_open_plain_executable_with_exe_extension_propagates_unknown() {
+    use std::io::Write;
+    let temp = tempfile::tempdir().unwrap();
+    let plain_exe = temp.path().join("plain.exe");
+    let mut f = std::fs::File::create(&plain_exe).unwrap();
+    // MZ DOS header followed by a sparse section table — looks like
+    // an executable but contains no embedded archive signatures.
+    f.write_all(b"MZ").unwrap();
+    f.write_all(&[0u8; 8192]).unwrap();
+    f.flush().unwrap();
+    drop(f);
+
+    let err = match Archive::open(&plain_exe) {
+        Ok(_) => panic!("plain executable must not open through Archive::open"),
+        Err(e) => e,
+    };
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("unknown") || msg.contains("not an archive") || msg.contains("format"),
+        "expected detection-failure diagnostic, got: {err}"
+    );
+}
+
+/// `extension_format()` returns the right format guess for the
+/// supported extensions and `None` for ambiguous ones.
+#[test]
+fn test_extension_format_extension_guess_table() {
+    use std::path::Path;
+    use unified_archive::format::format_from_extension;
+
+    assert_eq!(
+        format_from_extension(Path::new("foo.zip")),
+        Some(ArchiveFormat::Zip)
+    );
+    // R0074-0009: `.rar` is ambiguous between Rar (4.x) and Rar5 — the
+    // helper now refuses to guess. Magic-byte detection in
+    // `ArchiveFormat::detect_from_bytes` distinguishes the two via the
+    // RAR5 / RAR4 marker byte.
+    assert_eq!(format_from_extension(Path::new("foo.rar")), None);
+    assert_eq!(
+        format_from_extension(Path::new("foo.7z")),
+        Some(ArchiveFormat::SevenZip)
+    );
+    assert_eq!(
+        format_from_extension(Path::new("foo.tar")),
+        Some(ArchiveFormat::Tar)
+    );
+    assert_eq!(
+        format_from_extension(Path::new("foo.tar.gz")),
+        Some(ArchiveFormat::TarGzip)
+    );
+    assert_eq!(
+        format_from_extension(Path::new("foo.tgz")),
+        Some(ArchiveFormat::TarGzip)
+    );
+    assert_eq!(
+        format_from_extension(Path::new("foo.tar.zst")),
+        Some(ArchiveFormat::TarZst)
+    );
+    assert_eq!(
+        format_from_extension(Path::new("foo.tzst")),
+        Some(ArchiveFormat::TarZst)
+    );
+    assert_eq!(
+        format_from_extension(Path::new("foo.tar.lz4")),
+        Some(ArchiveFormat::TarLz4)
+    );
+    assert_eq!(
+        format_from_extension(Path::new("foo.tar.lzma")),
+        Some(ArchiveFormat::TarLzma)
+    );
+    assert_eq!(
+        format_from_extension(Path::new("foo.tlz")),
+        Some(ArchiveFormat::TarLzma)
+    );
+    assert_eq!(
+        format_from_extension(Path::new("foo.zst")),
+        Some(ArchiveFormat::Zst)
+    );
+    assert_eq!(
+        format_from_extension(Path::new("foo.lz4")),
+        Some(ArchiveFormat::Lz4)
+    );
+    assert_eq!(
+        format_from_extension(Path::new("foo.lzma")),
+        Some(ArchiveFormat::Lzma)
+    );
+    assert_eq!(
+        format_from_extension(Path::new("foo.iso")),
+        Some(ArchiveFormat::Iso)
+    );
+    // Ambiguous / unsupported extensions return None.
+    assert_eq!(format_from_extension(Path::new("foo.exe")), None);
+    assert_eq!(format_from_extension(Path::new("foo")), None);
+    assert_eq!(format_from_extension(Path::new("foo.dat")), None);
 }

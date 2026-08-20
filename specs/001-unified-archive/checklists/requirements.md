@@ -4,7 +4,7 @@
 **Created**: 2025-10-30
 **Feature**: [spec.md](../spec.md)
 
-> **Post-v0.1.0 reality check (2026-04-18):** Checklist rows below are stale — they were last audited before 0.1.0 shipped. Canonical current behavior lives in the source tree and `docs/architecture/decisions/*.md`. Known shifts that affect several rows: (1) FR-029 / SC-019 / `open_at_offset()` — the method is **implemented** (temp-file-backed) and no longer returns `Unsupported`; (2) AD 0019 supersedes AD 0018 for *read/extract* of standalone `.gz` / `.bz2` / `.xz` — only stream *creation* remains out of scope.
+> **Post-v0.1.0 reality check (2026-04-18):** Checklist rows below are stale — they were last audited before 0.1.0 shipped. Canonical current behavior lives in the source tree and `docs/records/*.md`. Known shifts that affect several rows: (1) FR-029 / SC-019 / `open_at_offset()` — the method is **implemented** (temp-file-backed) and no longer returns `Unsupported`; (2) AD 0019 supersedes AD 0018 for *read/extract* of standalone `.gz` / `.bz2` / `.xz` — only stream *creation* remains out of scope.
 
 ## Content Quality
 

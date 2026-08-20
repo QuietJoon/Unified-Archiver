@@ -4,13 +4,12 @@
 
 use super::common;
 
-use std::path::PathBuf;
 use unified_archive::{Archive, ArchiveFormat};
 
 #[test]
 fn test_add_files_to_archive() {
     // Create a test archive first
-    let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_add.zip");
+    let test_path = common::temp_test_dir().join("test_modify_add.zip");
 
     // Create initial archive
     let options = common::default_compression_options(ArchiveFormat::Zip);
@@ -39,7 +38,7 @@ fn test_add_files_to_archive() {
 #[test]
 fn test_remove_files_from_archive() {
     // Create a test archive first
-    let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_remove.zip");
+    let test_path = common::temp_test_dir().join("test_modify_remove.zip");
 
     let options = common::default_compression_options(ArchiveFormat::Zip);
 
@@ -74,7 +73,7 @@ fn test_remove_files_from_archive() {
 #[test]
 fn test_replace_files_in_archive() {
     // Create a test archive first
-    let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_replace.zip");
+    let test_path = common::temp_test_dir().join("test_modify_replace.zip");
 
     let options = common::default_compression_options(ArchiveFormat::Zip);
 
@@ -102,7 +101,7 @@ fn test_replace_files_in_archive() {
 #[test]
 fn test_combined_operations() {
     // Create a test archive first
-    let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_combined.zip");
+    let test_path = common::temp_test_dir().join("test_modify_combined.zip");
 
     let options = common::default_compression_options(ArchiveFormat::Zip);
 
@@ -153,7 +152,7 @@ fn test_open_nonexistent_archive() {
 
 #[test]
 fn test_modify_preserves_unchanged_content_bytes() {
-    let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_preserve_bytes.zip");
+    let test_path = common::temp_test_dir().join("test_modify_preserve_bytes.zip");
 
     let options = common::default_compression_options(ArchiveFormat::Zip);
 
@@ -181,7 +180,7 @@ fn test_modify_preserves_unchanged_content_bytes() {
 
 #[test]
 fn test_modify_empty_archive_add_then_commit() {
-    let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_empty_base.zip");
+    let test_path = common::temp_test_dir().join("test_modify_empty_base.zip");
 
     let options = common::default_compression_options(ArchiveFormat::Zip);
 
@@ -209,7 +208,7 @@ fn test_modify_empty_archive_add_then_commit() {
 
 #[test]
 fn test_modify_replace_grows_and_shrinks_payload() {
-    let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_grow_shrink.zip");
+    let test_path = common::temp_test_dir().join("test_modify_grow_shrink.zip");
 
     let options = common::default_compression_options(ArchiveFormat::Zip);
 
@@ -244,7 +243,7 @@ fn test_modify_replace_grows_and_shrinks_payload() {
 
 #[test]
 fn test_modify_remove_nonexistent_entry_errors_on_commit() {
-    let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_remove_missing.zip");
+    let test_path = common::temp_test_dir().join("test_modify_remove_missing.zip");
 
     let options = common::default_compression_options(ArchiveFormat::Zip);
 
@@ -271,7 +270,7 @@ fn test_modify_add_and_remove_queues_are_independent() {
     // Adds and removes are tracked in independent queues. A remove targets
     // entries in the *source* archive, not pending adds, so an add+remove
     // of the same name produces the added entry (the remove is a no-op).
-    let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_add_remove_same.zip");
+    let test_path = common::temp_test_dir().join("test_modify_add_remove_same.zip");
 
     let options = common::default_compression_options(ArchiveFormat::Zip);
 
@@ -297,7 +296,7 @@ fn test_modify_add_and_remove_queues_are_independent() {
 
 #[test]
 fn test_modify_many_entries_preserves_ordering_and_content() {
-    let test_path = PathBuf::from("/Volumes/Temp/claude/test_modify_many_entries.zip");
+    let test_path = common::temp_test_dir().join("test_modify_many_entries.zip");
 
     let options = common::default_compression_options(ArchiveFormat::Zip);
 
@@ -324,7 +323,7 @@ fn test_modify_many_entries_preserves_ordering_and_content() {
     assert!(!entries.iter().any(|e| e.path == "entry_10.txt"));
     assert!(entries.iter().any(|e| e.path == "inserted.txt"));
 
-    let extract_dir = PathBuf::from("/Volumes/Temp/claude/test_modify_many_entries_out");
+    let extract_dir = common::temp_test_dir().join("test_modify_many_entries_out");
     let _ = std::fs::remove_dir_all(&extract_dir);
     std::fs::create_dir_all(&extract_dir).unwrap();
     archive

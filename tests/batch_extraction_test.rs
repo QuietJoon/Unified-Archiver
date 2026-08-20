@@ -7,10 +7,8 @@ use std::fs;
 use std::path::PathBuf;
 use unified_archive::Archive;
 
-const TEST_TEMP_DIR: &str = "/Volumes/Temp/claude/7zip/batch_extraction";
-
 fn setup_temp_dir(test_name: &str) -> PathBuf {
-    let dir = PathBuf::from(TEST_TEMP_DIR).join(test_name);
+    let dir = common::temp_test_dir().join(test_name);
     if dir.exists() {
         fs::remove_dir_all(&dir).ok();
     }
@@ -296,15 +294,16 @@ fn test_extract_by_ids_multiple_files() {
 }
 
 #[test]
-fn test_extract_files_parallel_extraction() {
-    let temp_dir = setup_temp_dir("extract_files_parallel");
+fn test_extract_files_batch() {
+    // Sequential batch extraction; verifies the multi-file selection
+    // round-trips correctly.
+    let temp_dir = setup_temp_dir("extract_files_batch");
 
     let archive =
         Archive::open("tests/fixtures/batch_test.zip").expect("Failed to open batch test ZIP");
 
     let entries = archive.list_files().expect("Failed to list files");
 
-    // Extract 4+ files to trigger parallel extraction
     if entries.len() >= 4 {
         let paths: Vec<&str> = entries
             .iter()
@@ -316,9 +315,8 @@ fn test_extract_files_parallel_extraction() {
         if paths.len() >= 4 {
             archive
                 .extract_files(&paths, common::default_extraction_options(temp_dir.clone()))
-                .expect("Failed to extract files in parallel");
+                .expect("Failed to extract batch of files");
 
-            // Verify all extracted files exist
             for path in &paths {
                 let full_path = temp_dir.join(path);
                 assert!(full_path.exists(), "File {} should be extracted", path);

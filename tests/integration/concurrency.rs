@@ -13,44 +13,25 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Create a minimal valid ZIP file for testing
+/// Create a test ZIP using the crate's own creation API. Hermetic: no
+/// dependency on an external `zip` CLI or `which` probe (R0065-0014/0015).
 fn create_test_zip(path: &Path, content: &str) -> std::io::Result<()> {
-    // Use the zip crate if available, otherwise create minimal ZIP structure
-    // For simplicity, we'll create a text file and use system zip if available
-    let temp_dir = tempfile::tempdir()?;
-    let temp_file = temp_dir.path().join("test.txt");
-    fs::write(&temp_file, content)?;
-
-    let output = std::process::Command::new("zip")
-        .args(["-j"]) // junk paths
-        .arg(path)
-        .arg(&temp_file)
-        .output()?;
-
-    if !output.status.success() {
-        return Err(std::io::Error::other("Failed to create ZIP"));
-    }
-
+    use unified_archive::{Archive, CompressionOptions};
+    let options = CompressionOptions::new(unified_archive::ArchiveFormat::Zip);
+    let mut archive = Archive::create(path, options)
+        .map_err(|e| std::io::Error::other(format!("Archive::create: {e}")))?;
+    archive
+        .add_file_from_data("test.txt", content.as_bytes())
+        .map_err(|e| std::io::Error::other(format!("add_file_from_data: {e}")))?;
+    archive
+        .finish()
+        .map_err(|e| std::io::Error::other(format!("finish: {e}")))?;
     Ok(())
-}
-
-/// Check if zip command is available
-fn zip_available() -> bool {
-    std::process::Command::new("which")
-        .arg("zip")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }
 
 #[test]
 fn test_concurrent_archive_open() {
     // T120a: Test concurrent Archive::open() calls on different files
-    if !zip_available() {
-        eprintln!("Skipping test: zip command not available");
-        return;
-    }
-
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
 
     // Create multiple test archives
@@ -105,11 +86,6 @@ fn test_concurrent_archive_open() {
 #[test]
 fn test_concurrent_list_files() {
     // Test that multiple threads can list files from different archives concurrently
-    if !zip_available() {
-        eprintln!("Skipping test: zip command not available");
-        return;
-    }
-
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
 
     // Create test archives
@@ -152,11 +128,6 @@ fn test_concurrent_list_files() {
 #[test]
 fn test_concurrent_extraction_different_archives() {
     // Test extracting from different archives concurrently
-    if !zip_available() {
-        eprintln!("Skipping test: zip command not available");
-        return;
-    }
-
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
 
     // Create test archives
@@ -203,44 +174,86 @@ fn test_concurrent_extraction_different_archives() {
     );
 }
 
+/// Entry metadata compared across threads — enough of `ArchiveEntry` to
+/// catch a backend that hands one thread another thread's listing, or a
+/// partially-populated one (R0001-0092).
+type EntryFacts = (String, Option<u64>, Option<u32>, unified_archive::EntryType);
+
+fn entry_facts(entries: &[unified_archive::ArchiveEntry]) -> Vec<EntryFacts> {
+    entries
+        .iter()
+        .map(|e| (e.path.clone(), e.size, e.crc32, e.entry_type))
+        .collect()
+}
+
 #[test]
 fn test_no_data_races_on_repeated_access() {
     // Test that repeated concurrent access doesn't cause data races
-    if !zip_available() {
-        eprintln!("Skipping test: zip command not available");
-        return;
-    }
-
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let archive_path = temp_dir.path().join("race_test.zip");
     create_test_zip(&archive_path, "Race test content").expect("Failed to create ZIP");
 
+    // R0001-0092: the previous body discarded `list_files()` and bumped the
+    // counter unconditionally, so forty consecutive listing failures — or
+    // forty mutually inconsistent listings — still reached
+    // `assert_eq!(count, 40)`. Capture the expected listing once,
+    // sequentially, then require every threaded listing to match it exactly
+    // and propagate the first divergence out through the join.
+    let baseline_archive =
+        unified_archive::Archive::open(&archive_path).expect("Baseline open should succeed");
+    let baseline = entry_facts(
+        baseline_archive
+            .list_files()
+            .expect("Baseline list should succeed"),
+    );
+    drop(baseline_archive);
+    assert_eq!(
+        baseline.len(),
+        1,
+        "Fixture ZIP should hold exactly one entry, got {baseline:?}"
+    );
+
     let archive_path = Arc::new(archive_path);
-    let iteration_count = Arc::new(AtomicUsize::new(0));
+    let baseline = Arc::new(baseline);
 
     // Multiple threads opening and listing the same archive path
     // (different Archive instances)
     let handles: Vec<_> = (0..4)
-        .map(|_| {
+        .map(|thread_id| {
             let path = Arc::clone(&archive_path);
-            let counter = Arc::clone(&iteration_count);
-            thread::spawn(move || {
-                for _ in 0..10 {
-                    let archive =
-                        unified_archive::Archive::open(path.as_ref()).expect("Should open");
-                    let _ = archive.list_files();
-                    counter.fetch_add(1, Ordering::SeqCst);
+            let expected = Arc::clone(&baseline);
+            thread::spawn(move || -> Result<usize, String> {
+                let mut completed = 0usize;
+                for iteration in 0..10 {
+                    let archive = unified_archive::Archive::open(path.as_ref())
+                        .map_err(|e| format!("thread {thread_id} iter {iteration}: open: {e}"))?;
+                    let entries = archive.list_files().map_err(|e| {
+                        format!("thread {thread_id} iter {iteration}: list_files: {e}")
+                    })?;
+                    let observed = entry_facts(entries);
+                    if observed != *expected {
+                        return Err(format!(
+                            "thread {thread_id} iter {iteration}: listing diverged: \
+                             {observed:?} != {expected:?}"
+                        ));
+                    }
+                    completed += 1;
                 }
+                Ok(completed)
             })
         })
         .collect();
 
+    let mut iteration_count = 0usize;
     for handle in handles {
-        handle.join().expect("Thread panicked");
+        match handle.join().expect("Thread panicked") {
+            Ok(completed) => iteration_count += completed,
+            Err(message) => panic!("{message}"),
+        }
     }
 
     // All 40 iterations (4 threads * 10 iterations) should complete
-    assert_eq!(iteration_count.load(Ordering::SeqCst), 40);
+    assert_eq!(iteration_count, 40);
 }
 
 #[cfg(feature = "rar-support")]
@@ -318,11 +331,6 @@ fn test_concurrent_rar_open_and_list() {
 #[test]
 fn test_concurrent_performance_no_excessive_blocking() {
     // Test that concurrent operations don't block excessively
-    if !zip_available() {
-        eprintln!("Skipping test: zip command not available");
-        return;
-    }
-
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
 
     // Create test archives

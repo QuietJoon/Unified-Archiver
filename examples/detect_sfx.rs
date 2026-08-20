@@ -4,10 +4,10 @@
 //! archive (executable with embedded archive data) and extract information about it.
 //!
 //! Usage:
-//!   cargo run --example detect_sfx <file_path>
+//!   cargo run --example detect_sfx -- <file_path>
 //!
 //! Example:
-//!   cargo run --example detect_sfx installer.exe
+//!   cargo run --example detect_sfx -- installer.exe
 
 use std::env;
 use std::process;
@@ -40,7 +40,7 @@ fn detect_sfx_example(file_path: &str) -> Result<(), ArchiveError> {
     // Detect if file is SFX
     let detection = Archive::detect_sfx(file_path)?;
 
-    if !detection.is_sfx {
+    if !detection.is_sfx() {
         println!("❌ Not a self-extracting archive");
         println!("   This is a regular file or standard archive format.");
         return Ok(());
@@ -51,24 +51,26 @@ fn detect_sfx_example(file_path: &str) -> Result<(), ArchiveError> {
     println!("Detection Summary:");
     println!("  {}\n", detection.summary());
 
-    // Detailed information
+    // Detailed information. `payload_coordinates()` returns the format, offset
+    // and stub type as a unit, so there is no way to read a half-populated
+    // result — prefer it over unwrapping the three accessors separately.
     println!("Detailed Information:");
-    println!("  Executable Type: {:?}", detection.stub_type.unwrap());
-    println!("  Archive Format:  {:?}", detection.archive_format.unwrap());
-    println!(
-        "  Archive Offset:  {} bytes (0x{:X})",
-        detection.data_offset.unwrap(),
-        detection.data_offset.unwrap()
-    );
-    println!("  Confidence:      {:.0}%", detection.confidence * 100.0);
-    println!(
-        "  Confirmed:       {}",
-        if detection.is_confirmed() {
-            "Yes"
-        } else {
-            "No"
+    if let Some((format, offset, stub)) = detection.payload_coordinates() {
+        println!("  Executable Type: {stub:?}");
+        println!("  Archive Format:  {format:?}");
+        println!("  Archive Offset:  {offset} bytes (0x{offset:X})");
+    }
+    // `confidence()` is the whole answer here. Production detection emits only
+    // `NotSfx` / `Probable`, so an `is_confirmed()` line would print the same
+    // "No" for every input — `Confirmed` is reserved for callers that verify a
+    // payload out of band.
+    println!("  Confidence:      {:?}", detection.confidence());
+    if !detection.evidence().is_empty() {
+        println!("  Evidence:");
+        for item in detection.evidence() {
+            println!("    - {item}");
         }
-    );
+    }
 
     // Try to list files in the embedded archive
     println!("\n📂 Attempting to list embedded archive contents...");
@@ -103,7 +105,7 @@ fn detect_sfx_example(file_path: &str) -> Result<(), ArchiveError> {
     match Archive::extract_stub(file_path, &detection) {
         Ok(stub_data) => {
             println!("   Stub Size:       {} bytes", stub_data.len());
-            println!("   Stub Type:       {:?}", detection.stub_type.unwrap());
+            println!("   Stub Type:       {:?}", detection.stub_type().unwrap());
             println!("   ");
             println!("   ⚠️  Security Note:");
             println!("   The executable stub contains code that runs before extraction.");

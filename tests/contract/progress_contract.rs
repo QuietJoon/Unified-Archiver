@@ -8,7 +8,7 @@
 //!
 //! Note: The current API uses ExtractionOptions.progress (a boxed ProgressCallback trait)
 //! rather than a separate extract_all_with_progress method. All production backends
-//! (RAR, ZIP/Piz, 7z/SevenZ, libarchive) invoke the callback and honour
+//! (RAR, ZIP/ZipReader, 7z/SevenZ, libarchive) invoke the callback and honour
 //! ControlFlow::Break; the tests below exercise each backend.
 
 #[path = "../common/mod.rs"]
@@ -52,7 +52,7 @@ fn contract_progress_callback_is_invoked_for_rar() {
 
 #[test]
 fn contract_progress_callback_accepted_for_zip() {
-    // ZIP (Piz) invokes the progress callback during extraction.
+    // ZIP (the `zip`-crate reader) invokes the progress callback during extraction.
     let archive = Archive::open(fixture("test.zip")).unwrap();
     let temp = tempfile::tempdir().unwrap();
 

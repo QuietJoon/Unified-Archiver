@@ -198,11 +198,11 @@ maturity so callers know what works today and what is still in progress.
 - **Password handling**: passwords stored as `Option<SecStr>` (zeroize-on-drop)
 - **CRC32 verification** during extraction
 - **SFX detection** with `SfxDetectionResult` (includes `confidence` field); `open_sfx()` and `open_at_offset()` are shipped (temp-file-backed payload opening)
-- **Raw compressed streams** (`.gz`, `.bz2`, `.xz`) are directly openable via `Archive::open()` per AD 0019 (only stream *creation* is out of scope per AD 0018)
+- **Raw compressed streams** (`.gz`, `.bz2`, `.xz`) are directly openable via `Archive::open()` per MADR-0019 (only stream *creation* is out of scope per AD 0018)
 - **EntryType** variants: `File`, `Directory`, `Symlink`, `HardLink`, `Other`
 - **ArchiveError** variants: `Io`, `Format`, `Corruption`, `Password`, `Unsupported`, `CodecUnavailable`, `WriteModeOnly`, `ReadOnlyBackend`, `NotImplemented`, `OperationBlocked`, `InvalidPath` (see `src/error.rs` for the canonical list)
 
-See [`reviews/Open_Issues.md`](../../reviews/Open_Issues.md) for the full deferred-items list and known gaps.
+See [`docs/project/open-issues.md`](../../docs/project/open-issues.md) for the full deferred-items list and known gaps.
 
 ## License
 

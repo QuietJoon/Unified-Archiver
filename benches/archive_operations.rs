@@ -9,7 +9,7 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use std::io::Read;
 use std::path::PathBuf;
-use unified_archive::Archive;
+use unified_archive::{Archive, StreamBound};
 
 /// Helper to get test fixtures directory
 fn fixtures_dir() -> PathBuf {
@@ -139,7 +139,10 @@ fn bench_streaming_extraction(c: &mut Criterion) {
                     b.iter(|| {
                         let archive = Archive::open(black_box(path)).unwrap();
                         let mut stream = archive
-                            .extract_to_stream(black_box(file_to_extract))
+                            .extract_to_stream(
+                                black_box(file_to_extract),
+                                StreamBound::DeclaredSize,
+                            )
                             .unwrap();
 
                         let mut buffer = vec![0u8; *chunk_size];

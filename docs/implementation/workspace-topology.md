@@ -1,3 +1,12 @@
+---
+type: Workspace Topology
+title: "Workspace Topology"
+description: "Repo layout, package members, and structural conventions."
+tags: [implementation]
+timestamp: 2026-05-01T00:00:00Z
+status: active
+---
+
 # Workspace Topology
 
 Repo layout, package members, and structural conventions.
@@ -15,14 +24,14 @@ unified-archive/
 │   ├── options.rs                  # ExtractionOptions, CompressionOptions, ProgressCallback
 │   ├── security.rs                 # Path sanitization, ExtractionLimits
 │   ├── inspection.rs               # list_files, find_entry, validate, multi-part
-│   ├── extraction.rs               # extract_all, extract_file, parallel, progress
+│   ├── extraction.rs               # extract_all, extract_file, shared sequential selective extraction, progress
 │   ├── creation.rs                 # Archive::create, add_file_from_data, add_file_from_path, add_file_from_path_as, add_directory, add_directory_recursive
 │   ├── modification.rs             # Archive::modify, commit_changes
 │   ├── streaming.rs                # StreamingExtractor (Read trait wrapper)
 │   ├── stream_crc.rs               # GZIP/BZIP2/XZ checksum parsing
 │   ├── ffi/
 │   │   ├── mod.rs                  # FFI module root
-│   │   ├── common.rs               # TempDirGuard, path normalization, CRC helpers
+│   │   ├── common.rs               # AtomicOutputFile, path normalization, CRC helpers
 │   │   ├── unrar.rs                # Raw UnRAR C FFI bindings
 │   │   ├── wrapper.rs              # Safe UnRAR adapter
 │   │   ├── libarchive.rs           # Raw libarchive C FFI bindings
@@ -57,7 +66,7 @@ unified-archive/
 │   ├── integrity_comprehensive_test.rs
 │   ├── property_tests.rs
 │   └── ...
-├── examples/                       # 9 usage examples
+├── examples/                       # 8 usage examples
 │   ├── inspect_archive.rs
 │   ├── extract_archive.rs
 │   ├── create_archive.rs
@@ -66,8 +75,6 @@ unified-archive/
 │   └── ...
 ├── benches/                        # Criterion benchmarks
 │   ├── archive_operations.rs
-│   ├── extraction.rs
-│   ├── inspection.rs
 │   ├── integrity_validation_bench.rs
 │   └── sfx_detection.rs
 ├── specs/001-unified-archive/      # Feature specification

@@ -1,0 +1,56 @@
+# Blocks the manual marks ```rust``` but which are, in fact, fragments:
+# continuations that reuse a binding from an earlier block on the same page,
+# or bare item declarations shown for reference. They cannot type-check on
+# their own, and `tests/manual_snippets.rs` skips them.
+#
+# Recorded 2026-08-16 (ticgit c8d771eb). The durable fix is to mark each one
+# ```rust,fragment``` in the page itself, which `tests/manual_conformance.rs`
+# already accepts. That edit changes page BODIES and therefore invalidates
+# `synced_hash`, so it must ride a `write-diataxis-manual` sync run with a
+# `manual/log.md` entry rather than being hand-applied — the same mistake
+# commit 005a9ad made when the 0.3.1 release edited bodies without re-hashing.
+# Until then, this table keeps the lane honest instead of red.
+#
+# Format, one per line:
+#   <repo-relative page path> :: <first non-blank line of the block>
+#
+# An entry covers every ```rust``` block on that page whose first non-blank
+# line matches exactly; three blocks in your-first-archive.md share
+# `fn main() -> Result<(), ArchiveError> {`, and one entry covers all three.
+#
+# `fragment_allowlist_is_not_stale` fails on any entry that no longer matches
+# a block, so this table can only shrink: mark a block in the page, and its
+# entry here must be deleted in the same change.
+
+manual/how-to/user/en/create-an-archive.md :: // In-memory bytes under an explicit archive-internal name.
+manual/how-to/user/en/create-an-archive.md :: Archive::create_seven_zip("out.7z", SevenZCompressionOptions::new())
+manual/how-to/user/en/create-an-archive.md :: archive.finish()?;   // or archive.close()?, which is the same call
+manual/how-to/user/en/create-an-archive.md :: let format = ArchiveFormat::TarZst;
+manual/how-to/user/en/create-an-archive.md :: let mut archive =
+manual/how-to/user/en/create-an-archive.md :: let options = CompressionOptions {
+manual/how-to/user/en/extract-untrusted-archives-safely.md :: use std::path::PathBuf;
+manual/how-to/user/en/extract-untrusted-archives-safely.md :: use unified_archive::{ArchiveError, ExtractionOptions, Operation};
+manual/how-to/user/en/extract-untrusted-archives-safely.md :: use unified_archive::error::ArchiveWarning;
+manual/how-to/user/en/handle-self-extracting-archives.md :: let archive = Archive::open_at_offset("installer.exe", 8192)?;
+manual/how-to/user/en/handle-self-extracting-archives.md :: let archive = Archive::open_sfx("installer.exe")?;
+manual/how-to/user/en/handle-self-extracting-archives.md :: let detection = Archive::detect_sfx("installer.exe")?;
+manual/how-to/user/en/handle-self-extracting-archives.md :: let progress = SfxStagingProgress::new(|copied| {
+manual/how-to/user/en/handle-self-extracting-archives.md :: let progress = SfxStagingProgress::with_cancel(move |copied| {
+manual/how-to/user/en/handle-self-extracting-archives.md :: let Some((format, offset, stub)) = detection.payload_coordinates() else {
+manual/how-to/user/en/handle-self-extracting-archives.md :: let stub = Archive::extract_stub("installer.exe", &detection)?;
+manual/how-to/user/en/modify-a-zip-or-7z.md :: archive.commit_changes()?;
+manual/how-to/user/en/modify-a-zip-or-7z.md :: let queued = archive.pending_operations()?;   // adds + removals + directory entries
+manual/how-to/user/en/open-password-protected-archives.md :: let archive = Archive::open_encrypted("secret.7z", "hunter2")?;
+manual/how-to/user/en/open-password-protected-archives.md :: use unified_archive::{Archive, ArchiveError};
+manual/how-to/user/en/report-progress-and-cancel.md :: let plain = options.strip_progress();
+manual/how-to/user/en/report-progress-and-cancel.md :: use unified_archive::ArchiveError;
+manual/reference/user/en/errors-and-warnings.md :: fn source(&self) -> Option<&(dyn std::error::Error + 'static)>
+manual/reference/user/en/errors-and-warnings.md :: let result = archive.extract_all(options)?;
+manual/reference/user/en/errors-and-warnings.md :: pub struct ResultWithWarnings<T> {
+manual/reference/user/en/errors-and-warnings.md :: pub type Result<T> = std::result::Result<T, ArchiveError>;
+manual/reference/user/en/errors-and-warnings.md :: use unified_archive::ArchiveError;
+manual/reference/user/en/options-and-defaults.md :: impl<F> ProgressCallback for F
+manual/reference/user/en/options-and-defaults.md :: pub fn entry_filter_from_fn<F>(f: F) -> EntryFilter
+manual/reference/user/en/options-and-defaults.md :: pub type EntryFilter = Box<dyn FnMut(&ArchiveEntry) -> bool + Send>;
+manual/tutorials/user/en/your-first-archive.md :: fn main() -> Result<(), ArchiveError> {
+manual/tutorials/user/en/your-first-archive.md :: use unified_archive::{Archive, ArchiveError, ArchiveFormat, CompressionLevel, CompressionOptions};

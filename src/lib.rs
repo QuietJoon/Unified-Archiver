@@ -3,15 +3,20 @@
 //! Unified, ergonomic Rust library for archive inspection, extraction, and creation.
 //!
 //! This library provides a consistent, high-level API for working with multiple archive formats
-//! (RAR, RAR5, ZIP, 7z, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, GZIP, BZIP2, XZ, ISO) without requiring
-//! format-specific code. Write once, work with any format.
+//! (RAR, RAR5, ZIP, 7z, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, TAR.ZST, TAR.LZ4, TAR.LZMA, GZIP, BZIP2,
+//! XZ, ZST, LZ4, LZMA, ISO) without requiring format-specific code. Write once, work with any
+//! format.
 //!
 //! ## Features
 //!
 //! - ✨ **Unified Interface** - Same API for all formats
 //! - 🔍 **Automatic Format Detection** - Magic byte and extension-based detection
-//! - 🚀 **High Performance** - SIMD CRC32, streaming architecture
-//! - 💾 **Memory Efficient** - <100MB memory for multi-GB archives (for libarchive-backed formats; native ZIP/7z/RAR backends buffer entries during streaming)
+//! - 🌊 **libarchive-backed Streaming** - True streaming for TAR family, ISO,
+//!   and standalone Gzip/Bzip2/Xz; native ZIP/7z/RAR backends buffer the
+//!   selected entry into memory before exposing a `Read` adapter, so memory
+//!   usage tracks per-entry size for those formats. See [`Archive::extract_to_stream`]
+//!   and the per-backend notes in `docs/USER_MANUAL.md` for details.
+//! - 🚀 **High Performance** - SIMD CRC32 on supported targets
 //! - 🔐 **Encrypted Read Support** - Encrypted archives (RAR, RAR5, ZIP, 7z)
 //! - ✅ **Integrity Validation** - CRC32 verification
 //! - 📊 **Rich Metadata** - Sizes, timestamps, CRC32, permissions
@@ -52,7 +57,10 @@
 //!     ..Default::default()
 //! };
 //!
-//! archive.extract_all(options)?;
+//! let result = archive.extract_all(options)?;
+//! for warning in &result.warnings {
+//!     eprintln!("warning: {warning}");
+//! }
 //! # Ok::<(), unified_archive::ArchiveError>(())
 //! ```
 //!
@@ -70,20 +78,28 @@
 //!
 //! ### Streaming Extraction
 //!
+//! Propagate read errors instead of treating them as EOF — corruption
+//! and I/O failures surface through `Err`. Pass a [`StreamBound`] to
+//! choose the output cap: [`StreamBound::DeclaredSize`] (the safe
+//! default) and [`StreamBound::Cap`] report over-production as an
+//! `Err`, while [`StreamBound::Unbounded`] forwards bytes verbatim and
+//! trusts the source.
+//!
 //! ```no_run
-//! use unified_archive::Archive;
+//! use unified_archive::{Archive, StreamBound};
 //! use std::io::Read;
 //!
 //! let archive = Archive::open("large.zip")?;
-//! let mut stream = archive.extract_to_stream("huge_file.bin")?;
+//! let mut stream = archive.extract_to_stream("huge_file.bin", StreamBound::DeclaredSize)?;
 //!
 //! let mut buffer = [0u8; 8192];
-//! while let Ok(n) = stream.read(&mut buffer) {
+//! loop {
+//!     let n = stream.read(&mut buffer)?;
 //!     if n == 0 { break; }
 //!     // Process chunk — note that actual streaming behavior depends on backend
 //!     // (libarchive truly streams; native backends may buffer)
 //! }
-//! # Ok::<(), unified_archive::ArchiveError>(())
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
 //! ### Password-Protected Archives
@@ -127,11 +143,11 @@
 //! use unified_archive::Archive;
 //!
 //! let result = Archive::detect_sfx("installer.exe")?;
-//! if result.is_sfx {
-//!     println!("Found {:?} archive at offset {}",
-//!         result.archive_format.unwrap(),
-//!         result.data_offset.unwrap());
-//!     println!("Stub type: {:?}", result.stub_type);
+//! // `payload_coordinates()` yields the three fields together, or `None` if
+//! // this is not an SFX — prefer it over unwrapping the accessors one by one.
+//! if let Some((format, offset, stub)) = result.payload_coordinates() {
+//!     println!("Found {format:?} archive at offset {offset}");
+//!     println!("Stub type: {stub:?}");
 //! }
 //! # Ok::<(), unified_archive::ArchiveError>(())
 //! ```
@@ -148,17 +164,24 @@
 //! | **TAR.GZ**| ✅   | ✅      | ✅                           | ❌             | ❌            |
 //! | **TAR.BZ2**| ✅  | ✅      | ✅                           | ❌             | ❌            |
 //! | **TAR.XZ**| ✅   | ✅      | ✅                           | ❌             | ❌            |
+//! | **TAR.ZST**| ✅  | ✅      | ✅‡                          | ❌             | ❌            |
+//! | **TAR.LZ4**| ✅  | ✅      | ✅‡                          | ❌             | ❌            |
+//! | **TAR.LZMA**| ✅ | ✅      | ✅‡                          | ❌             | ❌            |
 //! | **GZIP**  | ✅   | ✅      | ❌                           | ❌             | ❌            |
 //! | **BZIP2** | ✅   | ✅      | ❌                           | ❌             | ❌            |
 //! | **XZ**    | ✅   | ✅      | ❌                           | ❌             | ❌            |
+//! | **ZST**   | ✅   | ✅      | ❌                           | ❌             | ❌            |
+//! | **LZ4**   | ✅   | ✅      | ❌                           | ❌             | ❌            |
+//! | **LZMA**  | ✅   | ✅      | ❌                           | ❌             | ❌            |
 //! | **ISO**   | ✅   | ✅      | ❌                           | ❌             | ❌            |
 //!
 //! *Optional Windows-only RAR creation exists via `external::RarCreator` behind the `external-rar-create` feature.*
 //! *† 7z encryption: read-only via `open_encrypted()`; encrypted creation is not supported by `Archive::create()`.*
+//! *‡ TAR.ZST / TAR.LZ4 / TAR.LZMA creation needs a libarchive built with the matching zstd / lz4 / lzma write filter; a missing filter fails at writer construction rather than degrading.*
 //! Standalone `.gz`/`.bz2`/`.xz` files are supported for read/extract via libarchive's
-//! raw-format binding (AD 0019). Creation of standalone compressed files is out of scope
+//! raw-format binding (MADR-0019). Creation of standalone compressed files is out of scope
 //! per AD 0018; use the TAR compound variants to produce compressed archives.
-//! ZIP encryption is read-only in `v0.1.0` (AD 0027): `open_encrypted()` reads
+//! ZIP encryption is read-only (MADR-0027): `open_encrypted()` reads
 //! AES/ZipCrypto archives, but `Archive::create()` deliberately rejects password-based
 //! ZIP creation with `OperationBlocked`.
 //!
@@ -166,15 +189,15 @@
 //!
 //! - **CRC32**: SIMD-accelerated checksum validation
 //! - **Memory**: <100MB for multi-GB archives with libarchive-backed formats (streaming architecture);
-//!   native ZIP (Piz), 7z (SevenZ), and RAR (UnRAR) backends buffer individual entries in memory
+//!   native ZIP (`zip` crate), 7z (SevenZ), and RAR (UnRAR) backends buffer individual entries in memory
 //!   during streaming extraction
 //! - **Detection**: <100ms for SFX detection (first 1MB scan)
 //!
 //! ## Architecture
 //!
 //! This library uses four backend engines:
-//! - **piz**: ZIP read/extract (memory-mapped, default for unencrypted ZIP)
-//! - **zip**: ZIP read/extract for encrypted archives, ZIP creation
+//! - **zip**: ZIP read/extract/create — the sole ZIP backend for both
+//!   encrypted and unencrypted archives (AD 0007 collapse)
 //! - **sevenz-rust2**: 7z read/extract (native Rust)
 //! - **libarchive**: TAR family, single-file compressed formats, ISO, and archive creation
 //! - **UnRAR**: RAR/RAR5 with full CRC32 support (statically linked)
@@ -190,25 +213,44 @@
 
 // Core modules
 pub mod archive;
+pub(crate) mod backend; // D1: ReadBackend trait scaffold (R0068-0029)
 pub mod entry;
 pub mod error;
 pub mod format;
 pub mod options;
+pub mod password;
 pub mod security; // Security utilities
 pub mod sfx;
 pub mod stream_crc; // Stream-level CRC32 extraction
 pub mod streaming; // Phase 2.4: Streaming extraction // Phase 7: SFX detection
 
-// Operation modules
-pub mod creation;
-pub mod extraction;
-pub mod inspection;
-pub mod modification;
+// Operation modules. AD 0062 A.1: visibility tightened to
+// `pub(crate)` — the curated facade re-exports below are the only
+// public entry points, so backend renames and module reorganisations
+// stay non-breaking.
+pub(crate) mod creation;
+pub(crate) mod extraction;
+/// Shared inode-identity primitive for the by-name revalidation guards
+/// (DCR-007 / OI-0081-001 / R0080-0061).
+pub(crate) mod fs_identity;
+pub(crate) mod inspection;
+pub(crate) mod modification;
 
 #[cfg(test)]
 pub(crate) mod test_utils;
 
-// FFI layer (public for testing)
+// FFI layer (AD 0062 A.1).
+//
+// Marked `#[doc(hidden)]` rather than `pub(crate)` so internal
+// integration tests under `tests/` (which link against the
+// non-test build of the library) can still reach backend types
+// they exercise directly — `tests/unrar_crc32_test.rs`,
+// `tests/integration/directory_entry_single_file.rs`, and
+// `tests/integration/link_skip_single_file.rs` deliberately probe
+// backend-specific behaviour that the facade abstracts away. Doc
+// generation skips the module so it stays out of the published API
+// surface; new callers should rely on the facade re-exports.
+#[doc(hidden)]
 pub mod ffi;
 
 // External tool integrations
@@ -217,21 +259,50 @@ pub mod external;
 
 // Public API re-exports
 pub use archive::Archive;
-pub use entry::{ArchiveEntry, EntryType, FileAttributes};
-pub use error::{ArchiveError, Result};
+
+/// D2 typed-handle split (R0068-0027 / AD 0053). Behind the
+/// `v2-api` cargo feature in v0.3; v0.4 will enable it by default.
+///
+/// External callers opt in by enabling `v2-api`:
+///
+/// ```toml
+/// unified-archive = { version = "0.3", features = ["v2-api"] }
+/// ```
+///
+/// And import the typed handles via `unified_archive::v2`:
+///
+/// ```ignore
+/// // requires --features v2-api
+/// use unified_archive::v2::{ReadArchive, WriteArchive, ModifyArchive};
+/// ```
+#[cfg(feature = "v2-api")]
+pub mod v2 {
+    pub use crate::archive::mode_split::{ModifyArchive, ReadArchive, WriteArchive};
+}
+pub use entry::{ArchiveEntry, ArchiveEntryBuilder, EntryType, FileAttributes};
+pub use error::{ArchiveError, Operation, Result};
 pub use format::{ArchiveFormat, FormatCapabilities, Support};
-pub use inspection::ValidationReport;
+pub use inspection::{MultipartLayout, ValidationReport};
 pub use modification::ModificationOptions; // Phase 6: Archive modification
 pub use options::{
-    CompressionLevel, CompressionOptions, EntryFilter, ExtractionOptions, ProgressCallback,
+    CompressionLevel, CompressionOptions, EntryFilter, ExtractionOptions,
+    LibarchiveCompressionOptions, ProgressCallback, SevenZCompressionOptions, SfxStagingProgress,
+    ZipCompressionOptions, entry_filter_from_fn,
 };
-pub use security::{
-    ExtractionLimits, check_archive_ratio, check_extraction_safe, check_single_entry_safe,
-    sanitize_entry_path, validate_entry_path, verify_crc32,
-};
-pub use sfx::{SfxDetectionResult, StubType}; // Phase 7: SFX detection
+pub use password::Password;
+// Narrow the public surface to what callers reasonably
+// audit. The raw policy fragments (`check_archive_ratio`,
+// `check_extraction_safe`, `check_single_entry_safe`,
+// `check_single_entry_safe_with_archive`, `sanitize_entry_path`,
+// `verify_crc32`) accept caller-constructed
+// entry slices and paths, so exposing them invited callers to drive
+// the policy without the invariants the facade normally establishes.
+// They are demoted to `pub(crate)` and the few that remain useful as
+// public API are kept here.
+pub use security::{Cap, CompressionRatio, ExtractionLimits, ExtractionLimitsBuilder};
+pub use sfx::{SfxConfidence, SfxDetectionResult, StubType}; // Phase 7: SFX detection
 pub use stream_crc::{
     CheckType, StreamChecksum, extract_bzip2_stream_crc, extract_gzip_stream_crc,
     extract_stream_checksum, extract_xz_stream_check,
 };
-pub use streaming::StreamingExtractor; // Phase 2.4 // Security utilities
+pub use streaming::{StreamBound, StreamingExtractor}; // Phase 2.4 // Security utilities

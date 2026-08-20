@@ -9,6 +9,11 @@
 //! - Metadata fields are consistently populated
 //! - find_entry() works identically across formats
 //! - validate_integrity() provides consistent reporting
+//!
+//! **Companion suite (R0074-0073).** [`tests/format_compatibility_test.rs`]
+//! holds the root-level smoke/regression coverage; this file carries
+//! broader cross-format expectations. Future consolidation tracked
+//! under R0074-0079 (test taxonomy).
 
 use std::path::PathBuf;
 use unified_archive::{Archive, ArchiveFormat};
@@ -19,6 +24,23 @@ fn fixture_path(name: &str) -> PathBuf {
         .join("tests")
         .join("fixtures")
         .join(name)
+}
+
+/// Resolve a **required** committed fixture, asserting it is present.
+///
+/// Every fixture named in this suite is committed under `tests/fixtures/`, so a
+/// missing file signals a mispackaged checkout rather than an optional case to
+/// skip. Panicking here keeps the cross-format matrix from passing vacuously
+/// when no fixtures are exercised (R0081-0089).
+fn require_fixture(name: &str) -> PathBuf {
+    let path = fixture_path(name);
+    assert!(
+        path.exists(),
+        "required fixture `{}` is missing at {} \u{2014} the cross-format matrix cannot run vacuously",
+        name,
+        path.display()
+    );
+    path
 }
 
 #[cfg(feature = "rar-support")]
@@ -35,11 +57,7 @@ fn test_open_multiple_formats() {
     ];
 
     for (filename, expected_format) in formats {
-        let path = fixture_path(filename);
-        if !path.exists() {
-            eprintln!("Skipping {}: fixture not found", filename);
-            continue;
-        }
+        let path = require_fixture(filename);
 
         let result = Archive::open(&path);
         assert!(
@@ -68,11 +86,7 @@ fn test_list_files_consistency() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
 
     for filename in test_files {
-        let path = fixture_path(filename);
-        if !path.exists() {
-            eprintln!("Skipping {}: fixture not found", filename);
-            continue;
-        }
+        let path = require_fixture(filename);
 
         let archive =
             Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
@@ -120,11 +134,7 @@ fn test_entry_count_consistency() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
 
     for filename in test_files {
-        let path = fixture_path(filename);
-        if !path.exists() {
-            eprintln!("Skipping {}: fixture not found", filename);
-            continue;
-        }
+        let path = require_fixture(filename);
 
         let archive =
             Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
@@ -151,16 +161,13 @@ fn test_entry_count_consistency() {
 fn test_find_entry_consistency() {
     // Test that find_entry() works consistently across formats
     //
-    // Note: This test assumes all test archives contain a file named "test_file.txt"
-    // Adjust the filename based on actual fixture contents
+    // The lookup target is each archive's own first listed entry rather than a
+    // hard-coded member name, so the case exercises every committed fixture
+    // without depending on any particular file being present inside them.
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
 
     for filename in test_files {
-        let path = fixture_path(filename);
-        if !path.exists() {
-            eprintln!("Skipping {}: fixture not found", filename);
-            continue;
-        }
+        let path = require_fixture(filename);
 
         let archive =
             Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
@@ -170,9 +177,11 @@ fn test_find_entry_consistency() {
             .list_files()
             .unwrap_or_else(|_| panic!("Failed to list files in {}", filename));
 
-        if entries.is_empty() {
-            continue;
-        }
+        assert!(
+            !entries.is_empty(),
+            "{} should contain at least one entry to exercise find_entry",
+            filename
+        );
 
         let first_entry_path = &entries[0].path;
 
@@ -204,11 +213,7 @@ fn test_find_entry_not_found() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
 
     for filename in test_files {
-        let path = fixture_path(filename);
-        if !path.exists() {
-            eprintln!("Skipping {}: fixture not found", filename);
-            continue;
-        }
+        let path = require_fixture(filename);
 
         let archive =
             Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
@@ -233,11 +238,7 @@ fn test_validate_integrity_consistency() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
 
     for filename in test_files {
-        let path = fixture_path(filename);
-        if !path.exists() {
-            eprintln!("Skipping {}: fixture not found", filename);
-            continue;
-        }
+        let path = require_fixture(filename);
 
         let archive =
             Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
@@ -274,11 +275,7 @@ fn test_path_getter_consistency() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
 
     for filename in test_files {
-        let path = fixture_path(filename);
-        if !path.exists() {
-            eprintln!("Skipping {}: fixture not found", filename);
-            continue;
-        }
+        let path = require_fixture(filename);
 
         let archive =
             Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
@@ -300,11 +297,7 @@ fn test_is_encrypted_consistency() {
     let unencrypted_files = vec!["test.rar", "test.zip", "test.7z"];
 
     for filename in unencrypted_files {
-        let path = fixture_path(filename);
-        if !path.exists() {
-            eprintln!("Skipping {}: fixture not found", filename);
-            continue;
-        }
+        let path = require_fixture(filename);
 
         let archive =
             Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
@@ -326,41 +319,36 @@ fn test_is_encrypted_consistency() {
     ];
 
     for (filename, should_be_encrypted, password) in encrypted_files {
-        let path = fixture_path(filename);
-        if !path.exists() {
-            eprintln!("Skipping {}: fixture not found", filename);
-            continue;
-        }
+        let path = require_fixture(filename);
 
-        // Try to open without password first - this should succeed for listing
-        // but is_encrypted() might fail if password is required for metadata
-        let archive_result = Archive::open(&path);
+        // Opening without a password must succeed for these header-unencrypted
+        // fixtures; password validation is deferred to extraction (AD 0014).
+        let archive = Archive::open(&path)
+            .unwrap_or_else(|_| panic!("Failed to open {} without password", filename));
 
-        if let Ok(archive) = archive_result {
-            // Some formats allow opening without password for inspection
-            let is_encrypted_result = archive.is_encrypted();
+        // Some formats allow opening without password for inspection
+        let is_encrypted_result = archive.is_encrypted();
 
-            if let Ok(is_encrypted) = is_encrypted_result {
-                assert_eq!(
-                    is_encrypted, should_be_encrypted,
-                    "{} encryption detection mismatch",
-                    filename
-                );
-            } else {
-                // Password required - try with password
-                let archive_with_pass = Archive::open_encrypted(&path, password)
-                    .unwrap_or_else(|_| panic!("Failed to open {} with password", filename));
+        if let Ok(is_encrypted) = is_encrypted_result {
+            assert_eq!(
+                is_encrypted, should_be_encrypted,
+                "{} encryption detection mismatch",
+                filename
+            );
+        } else {
+            // Password required - try with password
+            let archive_with_pass = Archive::open_encrypted(&path, password)
+                .unwrap_or_else(|_| panic!("Failed to open {} with password", filename));
 
-                let is_encrypted = archive_with_pass
-                    .is_encrypted()
-                    .unwrap_or_else(|_| panic!("Failed to check encryption for {}", filename));
+            let is_encrypted = archive_with_pass
+                .is_encrypted()
+                .unwrap_or_else(|_| panic!("Failed to check encryption for {}", filename));
 
-                assert_eq!(
-                    is_encrypted, should_be_encrypted,
-                    "{} encryption detection mismatch",
-                    filename
-                );
-            }
+            assert_eq!(
+                is_encrypted, should_be_encrypted,
+                "{} encryption detection mismatch",
+                filename
+            );
         }
     }
 }
@@ -373,11 +361,7 @@ fn test_calculate_archive_crc_consistency() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
 
     for filename in test_files {
-        let path = fixture_path(filename);
-        if !path.exists() {
-            eprintln!("Skipping {}: fixture not found", filename);
-            continue;
-        }
+        let path = require_fixture(filename);
 
         let archive =
             Archive::open(&path).unwrap_or_else(|_| panic!("Failed to open {}", filename));
@@ -415,11 +399,7 @@ fn test_unified_api_cross_format() {
     ];
 
     for (filename, expected_format) in test_files {
-        let path = fixture_path(filename);
-        if !path.exists() {
-            eprintln!("Skipping {}: fixture not found", filename);
-            continue;
-        }
+        let path = require_fixture(filename);
 
         // 1. Open archive
         let archive =
@@ -443,14 +423,12 @@ fn test_unified_api_cross_format() {
             .unwrap_or_else(|_| panic!("Failed to get entry count for {}", filename));
         assert_eq!(count, entries.len());
 
-        // 6. Find entry
-        if !entries.is_empty() {
-            let first_path = &entries[0].path;
-            let found = archive
-                .find_entry(first_path)
-                .unwrap_or_else(|_| panic!("Failed to find entry in {}", filename));
-            assert!(found.is_some());
-        }
+        // 6. Find entry (entries is non-empty per the assertion in step 4)
+        let first_path = &entries[0].path;
+        let found = archive
+            .find_entry(first_path)
+            .unwrap_or_else(|_| panic!("Failed to find entry in {}", filename));
+        assert!(found.is_some());
 
         // 7. Check encryption
         let _ = archive

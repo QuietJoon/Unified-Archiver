@@ -1,8 +1,17 @@
+---
+type: Getting Started
+title: "Getting Started with unified-archive"
+description: "This guide will walk you through installing and using unified-archive for the first time."
+tags: [reference, ADR-0062]
+timestamp: 2026-06-10T00:00:00Z
+status: active
+---
+
 # Getting Started with unified-archive
 
 This guide will walk you through installing and using unified-archive for the first time.
 
-If you want the full user-facing guide for `v0.1.0`, start with the [User Manual](./USER_MANUAL.md) and come back here for the fastest path to a working program.
+If you want the full user-facing guide for `v0.4.0`, start with the [User Manual](./USER_MANUAL.md) and come back here for the fastest path to a working program.
 
 ## Table of Contents
 
@@ -25,22 +34,23 @@ brew install libarchive pkg-config
 **Linux (Ubuntu/Debian):**
 ```bash
 sudo apt-get update
-sudo apt-get install libarchive-dev pkg-config
+sudo apt-get install libarchive-dev pkg-config g++
 ```
 
 **Linux (Fedora/RHEL):**
 ```bash
-sudo dnf install libarchive-devel pkgconf-pkg-config
+sudo dnf install libarchive-devel pkgconf-pkg-config gcc-c++
 ```
 
 > libarchive is discovered at build time via `pkg-config`. The library is **not** bundled with
 > unified-archive on macOS or Linux -- you must install it through your system package manager.
 >
-> **Additional build prerequisites:** `pkg-config`, `make`, and a C++ compiler (e.g. `g++` or
-> `clang++`) are required for building the UnRAR SDK that ships with the `unrar` crate.
+> **Additional build prerequisites:** `pkg-config` and a C++ compiler (e.g. `g++` or
+> `clang++`) are required: `build.rs` compiles the bundled UnRAR SDK sources through the
+> `cc` crate.
 
 **Windows:**
-Not yet tested on Windows; macOS is the primary platform, Linux secondary.
+macOS and Linux are tested; Windows support is present but not release-verified.
 
 ### Add to Your Project
 
@@ -48,8 +58,12 @@ Add unified-archive to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-unified-archive = "0.1.0"
+unified-archive = "0.4.0"
 ```
+
+> **Not on crates.io.** No version of this crate has been published to a public registry, so
+> the line above will not resolve as written. Until it is published, depend on the crate by
+> `path` or `git`.
 
 ### Verify Installation
 
@@ -102,8 +116,12 @@ cd archive-inspector
 Edit `Cargo.toml`:
 ```toml
 [dependencies]
-unified-archive = "0.1.0"
+unified-archive = "0.4.0"
 ```
+
+> **Not on crates.io.** No version of this crate has been published to a public registry, so
+> the line above will not resolve as written. Until it is published, depend on the crate by
+> `path` or `git`.
 
 ### Step 3: Write the Code
 
@@ -134,7 +152,7 @@ fn main() -> Result<(), ArchiveError> {
     println!("Contents:");
     let entries = archive.list_files()?;
 
-    for entry in &entries {
+    for entry in entries {
         let size = entry.size.unwrap_or(0);
         let crc = entry.crc32
             .map(|c| format!("{:08X}", c))
@@ -206,7 +224,10 @@ fn extract_archive(archive_path: &str, output_dir: &str) -> Result<(), Box<dyn s
     };
 
     println!("Extracting to {}...", output_dir);
-    archive.extract_all(options)?;
+    let result = archive.extract_all(options)?;
+    for warning in &result.warnings {
+        eprintln!("warning: {warning}");
+    }
     println!("Done!");
 
     Ok(())
@@ -303,8 +324,17 @@ fn extract_large_file(archive_path: &str, file_path: &str, output: &str)
 
     // Read incrementally through the streaming API.
     // Note: bounded-memory streaming applies to libarchive-backed formats only;
-    // other backends (Piz, ZipReader, SevenZ, UnRAR) buffer full entries first.
-    let mut stream = archive.extract_to_stream(file_path)?;
+    // other backends (ZIP, SevenZ, UnRAR) buffer full entries first.
+    //
+    // `StreamBound::DeclaredSize` is the safe default for untrusted input:
+    // it holds the reader to the entry's declared listing size, reporting
+    // over-production as `io::ErrorKind::InvalidData` (AD 0062 A.2 /
+    // DCR-006) and an early end-of-stream as `io::ErrorKind::UnexpectedEof`
+    // (R0001-0011). `StreamBound::Cap(n)` is a ceiling-only resource
+    // budget; `StreamBound::Unbounded` opts out of both and is for trusted
+    // input only. All three keep the same progress accessors.
+    use unified_archive::StreamBound;
+    let mut stream = archive.extract_to_stream(file_path, StreamBound::DeclaredSize)?;
     let mut output_file = File::create(output)?;
 
     // Process in 1MB chunks
@@ -381,7 +411,10 @@ fn extract_encrypted(archive_path: &str, password: &str)
                 destination: PathBuf::from("./output"),
                 ..Default::default()
             };
-            archive.extract_all(options)?;
+            let result = archive.extract_all(options)?;
+            for warning in &result.warnings {
+                eprintln!("warning: {warning}");
+            }
             println!("Extraction complete!");
 
             Ok(())
@@ -435,7 +468,10 @@ fn extract_with_progress(archive_path: &str)
         ..Default::default()
     };
 
-    archive.extract_all(options)?;
+    let result = archive.extract_all(options)?;
+    for warning in &result.warnings {
+        eprintln!("warning: {warning}");
+    }
 
     Ok(())
 }
@@ -464,9 +500,15 @@ cargo run --example inspect_archive -- tests/fixtures/test.zip
 # Extract an archive
 cargo run --example extract_archive -- tests/fixtures/test.rar ./output
 
-# Streaming extraction
-cargo run --example streaming_extract -- tests/fixtures/test.7z large_file.bin
+# Streaming extraction (TAR.GZ: the libarchive-backed formats are the ones that
+# really stream; ZIP/7z/RAR materialize the entry before handing back the reader)
+cargo run --example streaming_extract -- tests/fixtures/test.tar.gz test_file.txt
 ```
+
+> `streaming_extract` writes the entry under its base name in the **current directory**.
+> It stages bytes into a sibling `.part` file and renames it into place only after a clean
+> EOF, and it refuses to overwrite an existing file unless you pass `--force` (R0001-0077).
+> Run it from a scratch directory so it does not collide with a file of the same name.
 
 ### Explore Supported Formats
 
@@ -519,17 +561,17 @@ match Archive::open("file.rar") {
 1. **Use Streaming for Large Files**
    ```rust
    // Good for large files (bounded memory for libarchive-backed formats;
-   // other backends such as Piz, ZipReader, SevenZ, and UnRAR still
+   // other backends such as ZIP, SevenZ, and UnRAR still
    // buffer full entries)
-   let stream = archive.extract_to_stream("huge.bin")?;
+   let stream = archive.extract_to_stream("huge.bin", StreamBound::DeclaredSize)?;
 
    // Avoid for large files (loads entirely into memory)
    let data = archive.extract_to_memory("huge.bin")?;
    ```
 
-2. **Leverage Parallel Extraction**
+2. **Use Selective Extraction**
    ```rust
-   // Automatically parallel for 4+ files
+   // Single-pass selective extraction (sequential).
    archive.extract_filtered(|e| e.path.ends_with(".jpg"), options)?;
    ```
 
@@ -539,15 +581,15 @@ match Archive::open("file.rar") {
    // Still, reuse the returned slice if convenient to avoid the call overhead.
    let entries = archive.list_files()?;
 
-   // Use the returned entries
-   for entry in &entries {
+   // Use the returned entries (a `&[ArchiveEntry]` slice)
+   for entry in entries {
        // ...
    }
    ```
 
 ### Additional Resources
 
-- **[User Manual](./USER_MANUAL.md)** - Complete release-facing guide for v0.1.0
+- **[User Manual](./USER_MANUAL.md)** - Complete release-facing guide for v0.4.0
 - **[API Reference](./API_REFERENCE.md)** - API reference covering inspection, extraction, creation, modification, SFX, and streaming
 - **[Limitations](../Limitations.md)** - Current unsupported and partially supported cases
 - **[Examples](../examples/)** - Complete working examples

@@ -5,7 +5,7 @@
 //! - Adding files from data (in-memory)
 //! - Adding files from filesystem paths
 //! - Setting compression levels
-//! - Encrypted-archive creation is NOT supported (see AD 0027) —
+//! - Encrypted-archive creation is NOT supported (see MADR-0027) —
 //!   use the demo below to see how the API rejects such requests.
 
 use std::path::Path;
@@ -95,13 +95,13 @@ fn example_create_tar_gz(base: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Demonstrate that encrypted-archive creation is rejected (AD 0027).
+/// Demonstrate that encrypted-archive creation is rejected (MADR-0027).
 ///
 /// `Archive::create` with a password set returns `ArchiveError::OperationBlocked`
 /// for every supported format. Encrypted reads are still fully supported via
 /// `Archive::open_encrypted`.
 fn example_encrypted_creation_rejected(base: &Path) -> Result<()> {
-    println!("3. Encrypted-archive creation is rejected (AD 0027)...");
+    println!("3. Encrypted-archive creation is rejected (MADR-0027)...");
 
     let options = CompressionOptions {
         format: ArchiveFormat::Zip,

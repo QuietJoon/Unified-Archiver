@@ -6,102 +6,85 @@ use std::sync::OnceLock;
 
 use crate::format::ArchiveFormat;
 
-/// Archive format signature definition
+/// Archive format signature definition.
+///
+/// Crate-internal: this primitive describes the table the SFX signature
+/// scanner walks. It is not part of the public API surface — high-level
+/// SFX detection results are exposed via [`SfxDetectionResult`] in the
+/// parent module.
 #[derive(Debug, Clone)]
-pub struct Signature {
-    /// Magic bytes to search for
+pub(crate) struct Signature {
+    /// Magic bytes to search for (at any offset)
     pub bytes: &'static [u8],
     /// Archive format this signature indicates
     pub format: ArchiveFormat,
-    /// Optional offset where signature should appear (None = search anywhere)
-    pub fixed_offset: Option<usize>,
 }
 
 /// Known archive format signatures
-pub const SIGNATURES: &[Signature] = &[
+pub(crate) const SIGNATURES: &[Signature] = &[
     // ZIP format (local file header)
     Signature {
         bytes: b"PK\x03\x04",
         format: ArchiveFormat::Zip,
-        fixed_offset: None,
     },
     // RAR 4.x format
     Signature {
         bytes: b"Rar!\x1a\x07\x00",
         format: ArchiveFormat::Rar,
-        fixed_offset: None,
     },
     // RAR 5.x format
     Signature {
         bytes: b"Rar!\x1a\x07\x01\x00",
         format: ArchiveFormat::Rar5,
-        fixed_offset: None,
     },
     // 7-Zip format
     Signature {
         bytes: b"7z\xbc\xaf\x27\x1c",
         format: ArchiveFormat::SevenZip,
-        fixed_offset: None,
     },
     // gzip format
     Signature {
         bytes: b"\x1f\x8b",
         format: ArchiveFormat::Gzip,
-        fixed_offset: None,
     },
     // bzip2 format
     Signature {
         bytes: b"BZh",
         format: ArchiveFormat::Bzip2,
-        fixed_offset: None,
     },
     // XZ format
     Signature {
         bytes: b"\xfd7zXZ\x00",
         format: ArchiveFormat::Xz,
-        fixed_offset: None,
     },
 ];
 
-/// Pre-computed first-byte dispatch table for variable-offset signatures.
+/// Pre-computed first-byte dispatch table for the signature scan.
 /// Built once on first use, shared across all calls.
-fn variable_sig_table() -> &'static [Vec<usize>; 256] {
+fn sig_dispatch_table() -> &'static [Vec<usize>; 256] {
     static TABLE: OnceLock<[Vec<usize>; 256]> = OnceLock::new();
     TABLE.get_or_init(|| {
         let mut table: [Vec<usize>; 256] = std::array::from_fn(|_| Vec::new());
         for (i, sig) in SIGNATURES.iter().enumerate() {
-            if sig.fixed_offset.is_none() {
-                table[sig.bytes[0] as usize].push(i);
-            }
+            table[sig.bytes[0] as usize].push(i);
         }
         table
     })
 }
 
-/// Scan buffer for archive signatures
+/// Scan buffer for archive signatures.
 ///
-/// # Arguments
-/// * `buffer` - Buffer to scan for signatures
-/// * `_chunk_size` - Reserved for future SIMD optimization (currently unused)
+/// Returns a vector of `(offset, format)` tuples for every signature that
+/// matches inside `buffer`, sorted by offset. The scanner walks each byte
+/// once using a first-byte dispatch table, so callers do not need to pass a
+/// chunk size.
 ///
-/// # Returns
-/// Vector of (offset, format) tuples for all found signatures
-pub fn scan_for_signatures(buffer: &[u8], _chunk_size: usize) -> Vec<(usize, ArchiveFormat)> {
+/// Crate-internal — public SFX detection goes through
+/// [`crate::sfx::detect_sfx`].
+pub(crate) fn scan_for_signatures(buffer: &[u8]) -> Vec<(usize, ArchiveFormat)> {
     let mut found = Vec::new();
 
-    // First handle fixed-offset signatures (like TAR at offset 257)
-    for sig in SIGNATURES {
-        if let Some(fixed_offset) = sig.fixed_offset {
-            if fixed_offset + sig.bytes.len() <= buffer.len()
-                && &buffer[fixed_offset..fixed_offset + sig.bytes.len()] == sig.bytes
-            {
-                found.push((fixed_offset, sig.format));
-            }
-        }
-    }
-
-    // Use pre-computed dispatch table for variable-offset signatures
-    let table = variable_sig_table();
+    let table = sig_dispatch_table();
 
     // Single pass through buffer
     for offset in 0..buffer.len() {
@@ -121,11 +104,16 @@ pub fn scan_for_signatures(buffer: &[u8], _chunk_size: usize) -> Vec<(usize, Arc
     found
 }
 
-/// Find first archive signature in buffer
+/// Find first archive signature in buffer.
 ///
-/// Returns the earliest offset and format found, or None if no signature detected
-pub fn find_first_signature(buffer: &[u8], chunk_size: usize) -> Option<(usize, ArchiveFormat)> {
-    scan_for_signatures(buffer, chunk_size).into_iter().next()
+/// Returns the earliest offset and format found, or `None` if no signature
+/// was detected. Crate-internal helper for the SFX detection pipeline.
+/// Currently only used from this module's tests; kept `#[cfg(test)]` so a
+/// future internal caller can revive it without producing a dead-code
+/// warning in the meantime.
+#[cfg(test)]
+pub(crate) fn find_first_signature(buffer: &[u8]) -> Option<(usize, ArchiveFormat)> {
+    scan_for_signatures(buffer).into_iter().next()
 }
 
 #[cfg(test)]
@@ -135,7 +123,7 @@ mod tests {
     #[test]
     fn test_zip_signature() {
         let data = b"Some data PK\x03\x04 more data";
-        let results = scan_for_signatures(data, 1);
+        let results = scan_for_signatures(data);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, 10); // Offset where "PK" starts
         assert_eq!(results[0].1, ArchiveFormat::Zip);
@@ -144,7 +132,7 @@ mod tests {
     #[test]
     fn test_rar5_signature() {
         let data = b"Rar!\x1a\x07\x01\x00test";
-        let results = scan_for_signatures(data, 1);
+        let results = scan_for_signatures(data);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1, ArchiveFormat::Rar5);
     }
@@ -152,7 +140,7 @@ mod tests {
     #[test]
     fn test_7z_signature() {
         let data = b"7z\xbc\xaf\x27\x1c";
-        let results = scan_for_signatures(data, 1);
+        let results = scan_for_signatures(data);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1, ArchiveFormat::SevenZip);
     }
@@ -160,7 +148,7 @@ mod tests {
     #[test]
     fn test_no_signature() {
         let data = b"No archive signature here";
-        let results = scan_for_signatures(data, 1);
+        let results = scan_for_signatures(data);
         assert_eq!(results.len(), 0);
     }
 
@@ -171,7 +159,7 @@ mod tests {
             let mut data = vec![0u8; offset + 100];
             data[offset..offset + 4].copy_from_slice(b"PK\x03\x04");
 
-            let results = scan_for_signatures(&data, 512);
+            let results = scan_for_signatures(&data);
             assert_eq!(
                 results.len(),
                 1,
@@ -193,7 +181,7 @@ mod tests {
         data[500..504].copy_from_slice(b"PK\x03\x04"); // ZIP at 500
         data[700..707].copy_from_slice(b"Rar!\x1a\x07\x00"); // RAR at 700
 
-        let result = find_first_signature(&data, 512);
+        let result = find_first_signature(&data);
         assert!(result.is_some());
         let (offset, format) = result.unwrap();
         assert_eq!(offset, 500);
@@ -203,7 +191,7 @@ mod tests {
     #[test]
     fn test_find_first_signature_none() {
         let data = b"No signatures here";
-        let result = find_first_signature(data, 512);
+        let result = find_first_signature(data);
         assert!(result.is_none());
     }
 
@@ -215,7 +203,7 @@ mod tests {
         data[500..506].copy_from_slice(b"7z\xbc\xaf\x27\x1c"); // 7z
         data[1000..1007].copy_from_slice(b"Rar!\x1a\x07\x00"); // RAR
 
-        let results = scan_for_signatures(&data, 512);
+        let results = scan_for_signatures(&data);
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].0, 100); // Sorted by offset
         assert_eq!(results[1].0, 500);
@@ -228,14 +216,14 @@ mod tests {
         let mut data = vec![0u8; 500];
         data[257..262].copy_from_slice(b"ustar");
 
-        let results = scan_for_signatures(&data, 512);
+        let results = scan_for_signatures(&data);
         assert_eq!(results.len(), 0, "TAR should not be in SFX signatures");
     }
 
     #[test]
     fn test_gzip_signature() {
         let data = b"\x1f\x8b\x08\x00test";
-        let results = scan_for_signatures(data, 1);
+        let results = scan_for_signatures(data);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1, ArchiveFormat::Gzip);
     }
@@ -243,7 +231,7 @@ mod tests {
     #[test]
     fn test_bzip2_signature() {
         let data = b"BZh91AYtest";
-        let results = scan_for_signatures(data, 1);
+        let results = scan_for_signatures(data);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1, ArchiveFormat::Bzip2);
     }
@@ -251,7 +239,7 @@ mod tests {
     #[test]
     fn test_xz_signature() {
         let data = b"\xfd7zXZ\x00test";
-        let results = scan_for_signatures(data, 1);
+        let results = scan_for_signatures(data);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1, ArchiveFormat::Xz);
     }
@@ -263,7 +251,7 @@ mod tests {
     #[test]
     fn test_empty_buffer() {
         let data: &[u8] = b"";
-        let results = scan_for_signatures(data, 512);
+        let results = scan_for_signatures(data);
         assert_eq!(results.len(), 0, "Empty buffer should have no signatures");
     }
 
@@ -271,7 +259,7 @@ mod tests {
     fn test_buffer_shorter_than_signature() {
         // Buffer shorter than shortest signature (gzip is 2 bytes)
         let data: &[u8] = b"\x1f"; // Only 1 byte of gzip signature
-        let results = scan_for_signatures(data, 512);
+        let results = scan_for_signatures(data);
         assert_eq!(results.len(), 0, "Partial signature should not match");
     }
 
@@ -279,11 +267,11 @@ mod tests {
     fn test_malformed_signature_bytes() {
         // Almost-but-not-quite matching signatures
         let data = b"PK\x03\x05"; // Wrong 4th byte (should be \x04)
-        let results = scan_for_signatures(data, 512);
+        let results = scan_for_signatures(data);
         assert_eq!(results.len(), 0, "Malformed ZIP signature should not match");
 
         let data2 = b"Rar!\x1a\x08\x00"; // Wrong 6th byte (should be \x07)
-        let results2 = scan_for_signatures(data2, 512);
+        let results2 = scan_for_signatures(data2);
         assert_eq!(
             results2.len(),
             0,
@@ -297,7 +285,7 @@ mod tests {
         let mut data = vec![0u8; 512];
         data[508..512].copy_from_slice(b"PK\x03\x04"); // At offset 508, length 4 = ends at 512
 
-        let results = scan_for_signatures(&data, 512);
+        let results = scan_for_signatures(&data);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, 508);
         assert_eq!(results[0].1, ArchiveFormat::Zip);
@@ -309,7 +297,7 @@ mod tests {
         let mut data = vec![0u8; 512];
         data[510..512].copy_from_slice(b"PK"); // Only first 2 bytes of 4-byte signature
 
-        let results = scan_for_signatures(&data, 512);
+        let results = scan_for_signatures(&data);
         assert_eq!(
             results.len(),
             0,
@@ -325,7 +313,7 @@ mod tests {
         data[500..504].copy_from_slice(b"PK\x03\x04"); // ZIP #2
         data[800..804].copy_from_slice(b"PK\x03\x04"); // ZIP #3
 
-        let results = scan_for_signatures(&data, 512);
+        let results = scan_for_signatures(&data);
         assert_eq!(results.len(), 3, "Should find all 3 ZIP signatures");
         assert_eq!(results[0].0, 100);
         assert_eq!(results[1].0, 500);
@@ -337,7 +325,7 @@ mod tests {
         // RAR5 signature contains RAR4 as prefix, ensure proper detection
         let data = b"Rar!\x1a\x07\x01\x00more_data"; // RAR5
 
-        let results = scan_for_signatures(data, 512);
+        let results = scan_for_signatures(data);
         // Both RAR and RAR5 might match at offset 0
         // RAR4: "Rar!\x1a\x07\x00" - should NOT match (different 7th byte)
         // RAR5: "Rar!\x1a\x07\x01\x00" - should match
@@ -352,27 +340,21 @@ mod tests {
         data[100..105].copy_from_slice(b"ustar");
         data[257..262].copy_from_slice(b"ustar");
 
-        let results = scan_for_signatures(&data, 512);
+        let results = scan_for_signatures(&data);
         assert_eq!(results.len(), 0, "TAR should not be in SFX signatures");
     }
 
     #[test]
-    fn test_chunk_size_does_not_affect_accuracy() {
-        // Different chunk sizes should yield same results
+    fn test_scan_is_deterministic_across_calls() {
+        // Successive calls on the same buffer must yield identical results.
         let mut data = vec![0u8; 2000];
         data[123..127].copy_from_slice(b"PK\x03\x04");
         data[777..783].copy_from_slice(b"7z\xbc\xaf\x27\x1c");
 
-        let results_1 = scan_for_signatures(&data, 1);
-        let results_128 = scan_for_signatures(&data, 128);
-        let results_512 = scan_for_signatures(&data, 512);
-        let results_1024 = scan_for_signatures(&data, 1024);
-
-        assert_eq!(results_1.len(), results_128.len());
-        assert_eq!(results_128.len(), results_512.len());
-        assert_eq!(results_512.len(), results_1024.len());
-        assert_eq!(results_1[0], results_512[0]);
-        assert_eq!(results_1[1], results_512[1]);
+        let first = scan_for_signatures(&data);
+        let second = scan_for_signatures(&data);
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 2);
     }
 
     #[test]
@@ -389,7 +371,7 @@ mod tests {
         ];
 
         for (signature, expected_format) in test_cases {
-            let results = scan_for_signatures(signature, 512);
+            let results = scan_for_signatures(signature);
             assert!(
                 !results.is_empty(),
                 "Should detect {:?} signature",
@@ -402,7 +384,7 @@ mod tests {
     #[test]
     fn test_find_first_with_empty_buffer() {
         let data: &[u8] = b"";
-        let result = find_first_signature(data, 512);
+        let result = find_first_signature(data);
         assert!(result.is_none(), "Empty buffer should return None");
     }
 
@@ -411,7 +393,6 @@ mod tests {
         // Verify Signature struct is properly constructed
         let sig = &SIGNATURES[0]; // ZIP local file header
         assert!(!sig.bytes.is_empty());
-        assert!(sig.fixed_offset.is_none());
 
         // TAR signature was removed from SFX SIGNATURES (not a real-world SFX format)
         let tar_sig = SIGNATURES.iter().find(|s| s.format == ArchiveFormat::Tar);

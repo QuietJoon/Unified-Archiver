@@ -10,9 +10,24 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
 
-/// Test directory for rename tests
+/// Test directory for rename tests.
+///
+/// R0070-0082: previously hardcoded a machine-specific harness scratch
+/// path even in `#[cfg(windows)]` code, where that path is meaningless. Use a
+/// fresh `tempfile::TempDir` so the suite stays portable across
+/// platforms and parallel runs don't collide.
 fn test_dir() -> PathBuf {
-    PathBuf::from("/Volumes/Temp/claude/7zip/rename_test")
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("ua-rename-{}-{}-{}", pid, nanos, id));
+    let _ = fs::create_dir_all(&dir);
+    dir
 }
 
 /// Test that rename_with_overwrite works correctly

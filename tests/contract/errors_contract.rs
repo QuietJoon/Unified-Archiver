@@ -85,14 +85,65 @@ fn contract_corruption_error_for_corrupted_archive() {
     // Some backends may reject at open time — that's also acceptable
 }
 
+/// R0001-0091: the traversal lookup used to be assigned to `_result` and
+/// discarded, so any outcome — including a successful read — satisfied the
+/// contract. `extract_to_memory` runs the single-entry policy gate before
+/// dispatching to a backend, and `../../etc/passwd` matches no entry in the
+/// archive metadata, so the documented answer is a typed refusal:
+/// `OperationBlocked { operation: "extract_to_memory", .. }` naming the
+/// requested path. (`InvalidPath` is accepted too — it is the other typed
+/// refusal the errors contract allows for an unusable entry path — but a
+/// silently sanitized success is not.)
 #[test]
 fn contract_invalid_path_error_for_path_traversal() {
-    // This tests the normalized_entry_path behavior
-    let archive = Archive::open(fixture("test.zip")).unwrap();
-    // Extracting with traversal path should be handled safely
-    let _result = archive.extract_to_memory("../../etc/passwd");
-    // Either returns error or sanitizes the path — both are acceptable
-    // Just verify it doesn't panic
+    // Work on a copy inside a scratch directory so "no filesystem
+    // mutation" can be checked over a known-empty area.
+    let staging = common::temp_test_dir();
+    let archive_path = staging.join("traversal.zip");
+    std::fs::copy(fixture("test.zip"), &archive_path).expect("copy fixture");
+    let size_before = std::fs::metadata(&archive_path).expect("metadata").len();
+
+    let archive = Archive::open(&archive_path).unwrap();
+    let err = archive
+        .extract_to_memory("../../etc/passwd")
+        .expect_err("a path-traversal entry name must be refused, not resolved");
+
+    match &err {
+        ArchiveError::OperationBlocked { operation, reason } => {
+            assert_eq!(
+                operation.as_str(),
+                "extract_to_memory",
+                "refusal must name the failing operation: {err:?}"
+            );
+            assert!(
+                reason.contains("../../etc/passwd"),
+                "refusal must name the requested entry: {reason}"
+            );
+        }
+        ArchiveError::InvalidPath { .. } => {}
+        other => panic!("Expected OperationBlocked or InvalidPath, got: {other:?}"),
+    }
+
+    drop(archive);
+
+    // The call is in-memory only: nothing may have been created inside the
+    // staging directory, and the archive itself must be byte-length intact.
+    let staged: Vec<_> = std::fs::read_dir(&staging)
+        .expect("read staging dir")
+        .map(|e| e.expect("dir entry").file_name())
+        .collect();
+    assert_eq!(
+        staged.len(),
+        1,
+        "extract_to_memory must not materialize anything on disk, found {staged:?}"
+    );
+    assert_eq!(
+        std::fs::metadata(&archive_path).expect("metadata").len(),
+        size_before,
+        "extract_to_memory must not rewrite the source archive"
+    );
+
+    common::cleanup(&staging);
 }
 
 // ── Contract 2: Error message clarity and actionability ──

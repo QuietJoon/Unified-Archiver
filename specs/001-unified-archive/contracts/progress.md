@@ -6,7 +6,7 @@
 **Status**: Implemented (retrospective documentation)
 **Scope**: Extraction and creation progress. Creation progress (`CompressionOptions.progress`) is invoked per-entry by both ZIP and libarchive backends with `total=None` (AD 0021 / OI-025-003 resolved).
 
-> **Post-v0.1.0 reality check (2026-04-18):** The extraction-entry-point signatures below still show `Result<()>` — the shipped code returns `Result<ResultWithWarnings<()>>` per AD 0010. Treat the snippets as illustrative for progress semantics only; use `docs/API_REFERENCE.md` for current signatures.
+> **Post-v0.1.0 reality check (2026-04-18):** The extraction-entry-point signatures below still show `Result<()>` — the shipped code returns `Result<ResultWithWarnings<()>>` per MADR-0010. Treat the snippets as illustrative for progress semantics only; use `docs/API_REFERENCE.md` for current signatures.
 
 ## Overview
 

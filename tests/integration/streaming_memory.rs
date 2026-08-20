@@ -4,20 +4,12 @@
 //! Target: <20MB memory delta for extracting a 10MB archive.
 
 use super::common;
+use super::common::command_exists;
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::process::Command;
-
-/// Check if a required command is available
-fn command_exists(cmd: &str) -> bool {
-    Command::new("which")
-        .arg(cmd)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
 
 /// Create a test archive with specified total uncompressed size
 fn create_test_archive(archive_path: &Path, total_size_bytes: usize) -> std::io::Result<bool> {
@@ -161,42 +153,10 @@ fn test_streaming_extraction_single_file() {
     assert!(result.is_ok(), "Streaming extraction should succeed");
 }
 
-#[test]
-fn test_memory_efficiency_claim() {
-    // This test documents the memory efficiency requirements from FR-012:
-    // - 64KB read buffers
-    // - <50MB total library overhead
-    // - 10GB+ archives in <100MB memory (streaming)
-
-    // Per-module memory budgets from plan.md:
-    // - extraction.rs: 35MB max
-    // - inspection.rs: 10MB max
-    // - sfx/: 5MB max
-    // - creation.rs: 30MB max
-    // - modification.rs: 40MB max
-    // - Remaining: 10MB
-
-    // Total: ~130MB budget, but streaming allows concurrent usage
-    // within these limits by not loading entire archives into memory.
-
-    // This test serves as documentation - actual memory profiling
-    // requires external tools like valgrind/heaptrack.
-    // Memory efficiency is verified by design (streaming APIs)
-}
-
-#[test]
-fn test_buffer_size_constants() {
-    // Verify that buffer size constants exist and are reasonable
-    // These would be defined in the library itself
-
-    // FR-012 specifies:
-    // - 64KB read buffers
-    // - <50MB total overhead
-
-    // This test documents the expected constants
-    let expected_read_buffer_size = 64 * 1024; // 64KB
-    let max_library_overhead = 50 * 1024 * 1024; // 50MB
-
-    assert_eq!(expected_read_buffer_size, 65536);
-    assert_eq!(max_library_overhead, 52428800);
-}
+// R0079-0046: the former `test_memory_efficiency_claim` (comment-only)
+// and `test_buffer_size_constants` (asserted local literals against
+// themselves; the library exports no read-buffer-size constant) were
+// removed — they claimed FR-012 coverage but could not fail. Real
+// memory-bound verification requires an external profiling harness
+// (valgrind/heaptrack); the streaming tests above cover the
+// chunked-extraction behavior itself.

@@ -1,0 +1,23 @@
+# Exemptions for tests/manual_conformance.rs, check (a).
+#
+# Format, one per line:
+#   <repo-relative page path> :: <exact normalized span text> :: <reason>
+#
+# Rules, all enforced by `exemption_table_hygiene`:
+#   * the page must exist;
+#   * the reason must be at least 30 characters and say something;
+#   * the entry must still be needed — a stale one fails the test, so the
+#     table can only shrink on its own;
+#   * at most MAX_EXEMPTIONS entries. If the rule needs more escapes than
+#     that, the rule is wrong and should be narrowed, not padded.
+#
+# The manual profile's "unknown producer keys are preserved" rule would also
+# allow a page-local `checks_exempt:` frontmatter key, which diffs next to the
+# quotation it excuses and does not perturb `synced_hash`. That is the nicer
+# home; this file is the profile's documented fallback, used here because the
+# pages under manual/ are not this checker's to edit.
+
+manual/explanation/user/en/checksums-and-integrity.md :: "{path}:{size}" :: 2026-08-16 (c8d771eb): illustrative shape for a caller-built manifest line, not a string this crate emits. The literal rule cannot tell an example apart from a quotation.
+manual/how-to/user/en/create-an-archive.md :: "dir/./file.txt" :: 2026-08-16 (c8d771eb): an example archive-internal entry name used to explain path normalization; it is input to the library, never a literal inside it.
+manual/tutorials/user/en/getting-started.md :: src/main.rs :: 2026-08-16 (c8d771eb): refers to the READER's crate, which the tutorial has just had them create with `cargo new`; this crate is a library and has no src/main.rs.
+manual/tutorials/user/en/your-first-archive.md :: src/main.rs :: 2026-08-16 (c8d771eb): refers to the READER's crate, which the tutorial has just had them create with `cargo new`; this crate is a library and has no src/main.rs.

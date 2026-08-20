@@ -8,9 +8,9 @@ use unified_archive::{Archive, ArchiveFormat, CompressionLevel, CompressionOptio
 #[path = "common/mod.rs"]
 mod common;
 
-// Note: ZIP creation now uses the native Rust `zip` crate instead of libarchive,
-// fixing the known central directory issues. The piz crate handles extraction,
-// providing reliable ZIP support for both creation and extraction.
+// Note: ZIP creation uses the native Rust `zip` crate instead of libarchive,
+// fixing the known central directory issues. Since DCR-009 the same crate also
+// handles ZIP reading and extraction, so both directions share one backend.
 #[test]
 fn test_create_and_extract_zip() {
     let temp = common::temp_test_dir();

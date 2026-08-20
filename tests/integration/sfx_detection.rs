@@ -41,14 +41,14 @@ fn test_shell_script_zip_sfx() {
     let result = Archive::detect_sfx(temp.path()).unwrap();
 
     // Verify detection
-    assert!(result.is_sfx, "Should detect shell script SFX");
-    assert_eq!(result.stub_type, Some(StubType::ScriptInterpreter));
-    assert_eq!(result.archive_format, Some(ArchiveFormat::Zip));
-    assert!(result.data_offset.is_some());
+    assert!(result.is_sfx(), "Should detect shell script SFX");
+    assert_eq!(result.stub_type(), Some(StubType::ScriptInterpreter));
+    assert_eq!(result.archive_format(), Some(ArchiveFormat::Zip));
+    assert!(result.data_offset().is_some());
     assert!(
-        result.confidence >= 0.9,
-        "Confidence should be >= 0.9, got {}",
-        result.confidence
+        result.is_probable(),
+        "Confidence should be Probable, got {:?}",
+        result.confidence()
     );
 }
 
@@ -80,10 +80,10 @@ fn test_shell_script_rar_sfx() {
     let result = Archive::detect_sfx(temp.path()).unwrap();
 
     // Verify detection
-    assert!(result.is_sfx, "Should detect RAR5 SFX");
-    assert_eq!(result.stub_type, Some(StubType::ScriptInterpreter));
-    assert_eq!(result.archive_format, Some(ArchiveFormat::Rar5));
-    assert!(result.confidence >= 0.9);
+    assert!(result.is_sfx(), "Should detect RAR5 SFX");
+    assert_eq!(result.stub_type(), Some(StubType::ScriptInterpreter));
+    assert_eq!(result.archive_format(), Some(ArchiveFormat::Rar5));
+    assert!(result.is_probable());
 }
 
 #[test]
@@ -116,11 +116,11 @@ fn test_shell_script_7z_sfx() {
     let result = Archive::detect_sfx(temp.path()).unwrap();
 
     // Verify detection
-    assert!(result.is_sfx, "Should detect 7z SFX");
-    assert_eq!(result.stub_type, Some(StubType::ScriptInterpreter));
-    assert_eq!(result.archive_format, Some(ArchiveFormat::SevenZip));
-    assert_eq!(result.data_offset, Some(512));
-    assert!(result.confidence >= 0.9);
+    assert!(result.is_sfx(), "Should detect 7z SFX");
+    assert_eq!(result.stub_type(), Some(StubType::ScriptInterpreter));
+    assert_eq!(result.archive_format(), Some(ArchiveFormat::SevenZip));
+    assert_eq!(result.data_offset(), Some(512));
+    assert!(result.is_probable());
 }
 
 #[test]
@@ -154,9 +154,9 @@ fn test_multiple_signatures_iterates_candidates() {
     // when no candidate fully validates via backend parse).
     let result = Archive::detect_sfx(temp.path()).unwrap();
 
-    assert!(result.is_sfx);
+    assert!(result.is_sfx());
     // ZIP is the first candidate to be tried (smallest offset)
-    assert_eq!(result.archive_format, Some(ArchiveFormat::Zip));
+    assert_eq!(result.archive_format(), Some(ArchiveFormat::Zip));
 }
 
 #[test]
@@ -212,6 +212,63 @@ fn test_extract_stub() {
 }
 
 #[test]
+fn test_extract_stub_rejects_forged_offset() {
+    // R0069-0007: a caller cannot forge an offset on a non-SFX file
+    // and trick `extract_stub` into reading at an attacker-chosen
+    // location. Re-detection inside the call must contradict the
+    // forged hint.
+    let mut temp = NamedTempFile::new().unwrap();
+    // Plain executable bytes — no embedded archive signature.
+    temp.write_all(b"\x7fELFnot-an-sfx-payload-at-all-just-an-elf-header")
+        .unwrap();
+    temp.flush().unwrap();
+
+    let forged = unified_archive::SfxDetectionResult::probable(
+        StubType::LinuxELF,
+        ArchiveFormat::Zip,
+        16, // attacker-chosen offset
+        Vec::new(),
+    );
+    let err = Archive::extract_stub(temp.path(), &forged).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("no longer detected as SFX")
+            || msg.contains("re-detection")
+            || msg.contains("offset"),
+        "expected SFX re-verification diagnostic, got: {msg}"
+    );
+}
+
+#[test]
+fn test_extract_stub_rejects_offset_mismatch() {
+    // Build a real SFX, then ask `extract_stub` for an offset that
+    // differs from what fresh detection finds. The mismatch must be
+    // surfaced rather than silently honoured.
+    let mut temp = NamedTempFile::new().unwrap();
+    let stub = b"#!/bin/sh\necho hi\n";
+    temp.write_all(stub).unwrap();
+    temp.write_all(b"PK\x03\x04").unwrap();
+    temp.write_all(&[0u8; 100]).unwrap();
+    temp.flush().unwrap();
+
+    let real = Archive::detect_sfx(temp.path()).unwrap();
+    assert!(real.is_sfx());
+    let real_offset = real.data_offset().unwrap();
+
+    let forged = unified_archive::SfxDetectionResult::probable(
+        real.stub_type().unwrap(),
+        real.archive_format().unwrap(),
+        real_offset.saturating_sub(2).max(1), // any non-equal offset
+        Vec::new(),
+    );
+    let err = Archive::extract_stub(temp.path(), &forged).unwrap_err();
+    assert!(
+        err.to_string().contains("mismatch"),
+        "expected offset-mismatch diagnostic, got: {err}"
+    );
+}
+
+#[test]
 fn test_open_at_offset_with_real_zip() {
     // Build a real SFX-style file: shell-script stub + contents of test.zip.
     // After concatenation, open_at_offset should hand back a working Archive.
@@ -234,6 +291,36 @@ fn test_open_at_offset_with_real_zip() {
     assert_eq!(entries[0].path, "test_file.txt");
 }
 
+/// R0066-0001/0002: `open_at_offset()` must preserve the caller-facing path.
+/// Before the fix, `Archive::path()` returned the internal staging tempfile
+/// path and multipart discovery ran against the temp directory instead of the
+/// real source directory.
+#[test]
+fn test_open_at_offset_preserves_caller_path() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test.zip");
+    let zip_bytes = std::fs::read(&fixture).expect("read test.zip");
+
+    let mut temp = NamedTempFile::new().unwrap();
+    let stub = b"#!/bin/sh\necho 'stub'\n";
+    temp.write_all(stub).unwrap();
+    temp.write_all(&zip_bytes).unwrap();
+    temp.flush().unwrap();
+
+    let source_path = temp.path().to_path_buf();
+    let archive = Archive::open_at_offset(&source_path, stub.len() as u64)
+        .expect("open_at_offset should succeed");
+
+    // `Archive::path()` must resolve to the original source, not the temp
+    // staging file. The staging tempfile lives inside /tmp (or equivalent)
+    // via `tempfile::Builder::tempfile()`, so a leaked staging path would
+    // not equal `source_path`.
+    assert_eq!(
+        archive.path(),
+        source_path.as_path(),
+        "open_at_offset must restore caller-facing path"
+    );
+}
+
 #[test]
 fn test_open_at_offset_zero_matches_plain_open() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test.zip");
@@ -251,6 +338,91 @@ fn test_open_at_offset_past_eof_errors() {
 
     let result = Archive::open_at_offset(&fixture, len);
     assert!(result.is_err(), "should reject offset==len");
+}
+
+// Regression guards for R0064-0001/0002/0003: `open_at_offset()` used to stage
+// embedded tar-wrapped compressed payloads into a `.bin` tempfile, stripping
+// the `.tar.` prefix that `ArchiveFormat::detect()` needs to distinguish
+// tar.gz / tar.bz2 / tar.xz from their single-file siblings. The staging
+// suffix now reflects the source's compound extension.
+fn build_sfx_fixture(payload: &[u8], suffix: &str) -> (tempfile::NamedTempFile, u64) {
+    let temp = tempfile::Builder::new()
+        .prefix("sfx-offset-")
+        .suffix(suffix)
+        .tempfile()
+        .unwrap();
+    let mut file = temp.reopen().unwrap();
+    let stub = b"#!/bin/sh\necho 'stub'\n";
+    file.write_all(stub).unwrap();
+    let padding = vec![0u8; 500];
+    file.write_all(&padding).unwrap();
+    let offset = (stub.len() + padding.len()) as u64;
+    file.write_all(payload).unwrap();
+    file.flush().unwrap();
+    (temp, offset)
+}
+
+#[test]
+fn test_open_at_offset_with_tar_gz_payload() {
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test.tar.gz");
+    let bytes = std::fs::read(&fixture).expect("read test.tar.gz");
+    let (temp, offset) = build_sfx_fixture(&bytes, ".tar.gz");
+
+    let archive = Archive::open_at_offset(temp.path(), offset)
+        .expect("open_at_offset for tar.gz should succeed");
+    assert_eq!(
+        archive.format(),
+        ArchiveFormat::TarGzip,
+        "staged tempfile must preserve .tar.gz so detect() upgrades Gzip to TarGzip"
+    );
+    let entries = archive.list_files().expect("list_files");
+    assert!(
+        entries.iter().any(|e| e.path.contains("test_file.txt")),
+        "tar.gz payload should expose its TAR entry, not a single raw gzip stream"
+    );
+}
+
+#[test]
+fn test_open_at_offset_with_tar_bz2_payload() {
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test.tar.bz2");
+    let bytes = std::fs::read(&fixture).expect("read test.tar.bz2");
+    let (temp, offset) = build_sfx_fixture(&bytes, ".tar.bz2");
+
+    let archive = Archive::open_at_offset(temp.path(), offset)
+        .expect("open_at_offset for tar.bz2 should succeed");
+    assert_eq!(
+        archive.format(),
+        ArchiveFormat::TarBzip2,
+        "staged tempfile must preserve .tar.bz2 so detect() upgrades Bzip2 to TarBzip2"
+    );
+    let entries = archive.list_files().expect("list_files");
+    assert!(
+        entries.iter().any(|e| e.path.contains("test_file.txt")),
+        "tar.bz2 payload should expose its TAR entry, not a single raw bzip2 stream"
+    );
+}
+
+#[test]
+fn test_open_at_offset_with_tar_xz_payload() {
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test.tar.xz");
+    let bytes = std::fs::read(&fixture).expect("read test.tar.xz");
+    let (temp, offset) = build_sfx_fixture(&bytes, ".tar.xz");
+
+    let archive = Archive::open_at_offset(temp.path(), offset)
+        .expect("open_at_offset for tar.xz should succeed");
+    assert_eq!(
+        archive.format(),
+        ArchiveFormat::TarXz,
+        "staged tempfile must preserve .tar.xz so detect() upgrades Xz to TarXz"
+    );
+    let entries = archive.list_files().expect("list_files");
+    assert!(
+        entries.iter().any(|e| e.path.contains("test_file.txt")),
+        "tar.xz payload should expose its TAR entry, not a single raw xz stream"
+    );
 }
 
 #[test]
@@ -282,7 +454,7 @@ fn test_elf_binary_detection() {
     let result = Archive::detect_sfx("/bin/ls").unwrap();
 
     // /bin/ls is an ELF but not an SFX
-    assert!(!result.is_sfx, "/bin/ls should not be detected as SFX");
+    assert!(!result.is_sfx(), "/bin/ls should not be detected as SFX");
 }
 
 #[cfg(target_os = "macos")]
@@ -293,5 +465,5 @@ fn test_macho_binary_detection() {
     let result = Archive::detect_sfx("/bin/ls").unwrap();
 
     // /bin/ls is Mach-O but not an SFX
-    assert!(!result.is_sfx, "/bin/ls should not be detected as SFX");
+    assert!(!result.is_sfx(), "/bin/ls should not be detected as SFX");
 }

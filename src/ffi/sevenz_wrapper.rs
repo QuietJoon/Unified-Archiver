@@ -5,38 +5,59 @@
 
 use crate::entry::{ArchiveEntry, EntryType};
 use crate::error::{ArchiveError, ArchiveWarning, Result};
-use crate::ffi::common::{AtomicOutputFile, copy_with_optional_crc, normalize_path};
+use crate::ffi::common::{
+    StagedEntryWrite, check_extraction_cancelled, entry_cancel_hook, normalize_path,
+    read_entry_to_memory_capped, unix_mode_is_symlink, write_entry_atomically,
+};
 use crate::format::ArchiveFormat;
 use crate::options::ProgressCallback;
-use crate::security::sanitize_entry_path;
-use secstr::SecStr;
+use crate::security::{canonicalize_dest_base, sanitize_entry_path, sanitize_entry_path_with_base};
+use once_cell::sync::OnceCell;
 use sevenz_rust2::{ArchiveReader, Password};
-use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 /// Native Rust 7z archive wrapper
 ///
 /// Provides 7z operations with CRC32 from metadata when available.
+///
+/// **Caching (AD 0065):** the parsed listing is memoised in `listing`
+/// so the header/TOC parse is paid once per handle — the first
+/// `list_files` call walks a fresh reader; later calls clone the
+/// snapshot. Extraction paths still open their own reader because
+/// sevenz-rust2's walk API consumes it.
 pub struct SevenZArchive {
     path: PathBuf,
-    password: Option<SecStr>,
+    password: Option<crate::Password>,
+    listing: OnceCell<std::sync::Arc<Vec<ArchiveEntry>>>,
 }
 
 impl SevenZArchive {
-    /// Open 7z archive for reading
+    /// Open 7z archive for reading.
+    ///
+    /// **Validation timing (AD 0052):** only the path is stored. The 7z
+    /// header signature, table of contents, and any LZMA/LZMA2 codec
+    /// requirements are not parsed until the caller invokes
+    /// `list_files`, `extract_*`, or `test_integrity`. Corrupt or non-7z
+    /// inputs surface their error from the first real operation, not
+    /// from `open()`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
 
         Ok(Self {
             path: path_buf,
             password: None,
+            listing: OnceCell::new(),
         })
     }
 
-    /// Open encrypted 7z archive with password
+    /// Open encrypted 7z archive with password.
+    ///
+    /// Same lazy-validation semantics as [`SevenZArchive::open`]. Password
+    /// correctness is verified at extraction time; a wrong password
+    /// surfaces as `ArchiveError::Password` from the `extract_*` paths.
     pub fn open_with_password(path: impl AsRef<Path>, password: &str) -> Result<Self> {
         let mut archive = Self::open(path)?;
-        archive.password = Some(SecStr::from(password));
+        archive.password = Some(crate::Password::new(password));
         Ok(archive)
     }
 
@@ -45,12 +66,35 @@ impl SevenZArchive {
         &self.path
     }
 
-    /// Open a 7z ArchiveReader with the stored path and password
+    /// Open a 7z ArchiveReader with the stored path and password.
+    ///
+    /// Maps wrong-password / encryption-required failures to
+    /// [`ArchiveError::Password`] (R0070-0049). The previous mapping
+    /// collapsed every sevenz-rust2 error onto `ArchiveError::Format`,
+    /// breaking the API contract that says wrong passwords surface as
+    /// `Password { .. }`.
     fn open_reader(&self) -> Result<ArchiveReader<std::fs::File>> {
-        let password = crate::options::password_as_str(&self.password)?
+        let password = self
+            .password
+            .as_ref()
+            .map(crate::Password::as_str)
             .map_or_else(Password::empty, Password::from);
         ArchiveReader::open(&self.path, password).map_err(|e| {
-            ArchiveError::format(Some(ArchiveFormat::SevenZip), format!("Invalid 7z: {}", e))
+            let msg = e.to_string();
+            // R0075-0027: phrase-based classifier so an archive whose
+            // generic error text incidentally mentions "password" /
+            // "encrypted" doesn't get reclassified as a password
+            // failure. The phrases below are the ones sevenz-rust2
+            // surfaces for genuine encryption failures
+            // (wrong password, missing password, AES-specific guard).
+            if is_sevenz_encryption_message(&msg) {
+                ArchiveError::password(format!("7z: {}", msg))
+            } else {
+                ArchiveError::format(
+                    Some(ArchiveFormat::SevenZip),
+                    format!("Invalid 7z: {}", msg),
+                )
+            }
         })
     }
 
@@ -72,15 +116,256 @@ impl SevenZArchive {
         Ok(archive.is_solid)
     }
 
-    /// List all files in 7z archive with CRC32 from metadata
+    /// Modification time from 7z metadata (NtTime → SystemTime).
     ///
-    /// CRC32 is read from 7z headers when available.
-    /// Encryption status is determined from block coders (not password presence).
-    pub fn list_files(&self) -> Result<Vec<ArchiveEntry>> {
-        let reader = self.open_reader()?;
-        let archive = reader.archive();
+    /// R0075-0048: NtTime is `u64` 100-ns intervals since 1601-01-01;
+    /// hostile or corrupt archives can carry values that overflow when
+    /// subtracted from the Unix-epoch baseline or multiplied to
+    /// nanoseconds. Use checked arithmetic and drop the timestamp when
+    /// it cannot be represented as a valid `SystemTime` rather than
+    /// panicking in debug or wrapping in release. Shared by listing and
+    /// the extraction-time metadata application (R0079-0019).
+    fn entry_modified_time(entry: &sevenz_rust2::ArchiveEntry) -> Option<std::time::SystemTime> {
+        if !entry.has_last_modified_date {
+            return None;
+        }
+        let nt_time = u64::from(entry.last_modified_date);
+        let unix_epoch_nt: u64 = 116_444_736_000_000_000; // NT time at Unix epoch
+        // R0001-0059: NT time starts at 1601-01-01, so every timestamp
+        // between 1601 and the Unix epoch is a *valid* instant that
+        // `checked_sub(unix_epoch_nt)` turned into `None`, silently
+        // dropping the archive's modification time. `SystemTime`
+        // represents pre-epoch instants fine — subtract the gap FROM
+        // `UNIX_EPOCH` instead. The R0075-0048 contract is unchanged:
+        // every step stays checked, so a hostile value still yields
+        // `None` rather than panicking in debug or wrapping in release.
+        let (delta_nt, is_after_epoch) = match nt_time.checked_sub(unix_epoch_nt) {
+            Some(delta_nt) => (delta_nt, true),
+            // `checked_sub` only returns `None` when `nt_time <
+            // unix_epoch_nt`, so this subtraction cannot underflow.
+            None => (unix_epoch_nt - nt_time, false),
+        };
+        let delta = std::time::Duration::from_nanos(delta_nt.checked_mul(100)?);
+        if is_after_epoch {
+            std::time::UNIX_EPOCH.checked_add(delta)
+        } else {
+            std::time::UNIX_EPOCH.checked_sub(delta)
+        }
+    }
 
-        // Pre-compute which blocks use AES encryption
+    /// Unix permission bits from the 7z attribute field's upper half
+    /// (the p7zip convention used by `parse_entry` for listing).
+    /// `None` when the archive carries no attributes or no Unix mode
+    /// bits — Windows-created 7z archives are not given a synthetic
+    /// mode (R0079-0019).
+    fn entry_unix_mode(entry: &sevenz_rust2::ArchiveEntry) -> Option<u32> {
+        if !entry.has_windows_attributes {
+            return None;
+        }
+        let mode = (entry.windows_attributes >> 16) & 0o7777;
+        (mode != 0).then_some(mode)
+    }
+
+    /// Link probe shared by listing and every extract/integrity path
+    /// (R0075-0049 / R0075-0053): Unix S_IFLNK in the attribute word's
+    /// upper half (p7zip convention), or the Windows reparse-point bit
+    /// (FILE_ATTRIBUTE_REPARSE_POINT, 0x0400) in the lower half.
+    fn entry_is_link(entry: &sevenz_rust2::ArchiveEntry) -> bool {
+        entry.has_windows_attributes
+            && (unix_mode_is_symlink(entry.windows_attributes >> 16)
+                || (entry.windows_attributes & 0x0400) != 0)
+    }
+
+    /// Classify a 7z entry into an [`EntryType`] — the single source of
+    /// truth for this backend, so listing, extraction, the progress
+    /// denominator, and the integrity walk agree on every entry's kind.
+    ///
+    /// R0001-0022: the attribute word's upper half carries the Unix mode
+    /// on p7zip-created archives (the same half [`Self::entry_unix_mode`]
+    /// reads), so FIFO, socket, and character/block-device modes are
+    /// reachable here. Decoding only `S_IFLNK` and falling back to the
+    /// TOC directory flag classified all of them as regular files and
+    /// decoded them under file semantics. Decode `S_IFMT` in full and map
+    /// every unsupported kind to [`EntryType::Other`], which the
+    /// extraction paths skip and `validate_single_entry` already refuses.
+    /// Mirrors `classify_zip_entry_type` (R0081-0076 / R0081-0077),
+    /// including the zero-nibble fallthrough: Windows-created archives
+    /// carry no Unix mode, so their upper half is `0` and the TOC flag
+    /// decides. Advances OI-0080-007.
+    fn classify_entry_type(entry: &sevenz_rust2::ArchiveEntry) -> EntryType {
+        const S_IFMT: u32 = 0o170000;
+        const S_IFLNK: u32 = 0o120000;
+        const S_IFDIR: u32 = 0o040000;
+        const S_IFREG: u32 = 0o100000;
+
+        // R0075-0049: classify links before directories so a
+        // reparse-point entry whose `is_directory` flag is set does not
+        // bypass the link policy. Matches the ordering used by the ZIP
+        // backend.
+        if Self::entry_is_link(entry) {
+            return EntryType::Symlink;
+        }
+
+        if entry.has_windows_attributes {
+            match (entry.windows_attributes >> 16) & S_IFMT {
+                S_IFLNK => return EntryType::Symlink,
+                S_IFDIR => return EntryType::Directory,
+                S_IFREG => return EntryType::File,
+                0 => {} // no type nibble recorded — fall through to the TOC flag
+                _ => return EntryType::Other, // FIFO / char / block device / socket / ...
+            }
+        }
+
+        if entry.is_directory {
+            EntryType::Directory
+        } else {
+            EntryType::File
+        }
+    }
+
+    /// CRC32 from 7z metadata, gated on the optional kCRC digest being
+    /// present (R0079-0005) and fitting in `u32` (R0070-0050).
+    ///
+    /// `sevenz_rust2::ArchiveEntry::crc` defaults to 0 when the archive
+    /// omits the digest, so the value is meaningless unless `has_crc`
+    /// is set — reading it unconditionally surfaced `Some(0)` for
+    /// CRC-less entries and made `verify_crc32` extraction fail
+    /// spuriously on valid data. Returns `None` in both failure modes
+    /// so callers elide verification rather than comparing against a
+    /// bogus value.
+    fn entry_crc32(entry: &sevenz_rust2::ArchiveEntry) -> Option<u32> {
+        (entry.has_crc && entry.crc <= u32::MAX as u64).then_some(entry.crc as u32)
+    }
+
+    /// Compute the order in which `ArchiveReader::for_each_entries`
+    /// visits `archive.files` indices (R0079-0004).
+    ///
+    /// sevenz-rust2 0.19 walks block by block — per block the contiguous
+    /// run `files[block_first_file_index[b]..][..num_unpack_sub_streams]`
+    /// — then makes a second pass over block-less files
+    /// (`file_block_index == None`) in `files` order.
+    /// 7-Zip writes no-stream entries (directories, empty files) ahead
+    /// of stream entries in the TOC, so callback order differs from
+    /// `list_files()` order for essentially every real-world archive.
+    /// The per-block sub-stream count is crate-private upstream;
+    /// `BlockDecoder::entry_count` is its public accessor and reads
+    /// only archive metadata (the dummy source is never touched).
+    ///
+    /// The returned order is validated to be an exact permutation of
+    /// `0..files_len` (R0081-0073 / R0081-0074): a corrupt stream map
+    /// is rejected as [`ArchiveError::corruption`] rather than clamped
+    /// into a truncated or non-permutation walk that would map callback
+    /// positions onto the wrong listing entries.
+    fn visit_order(&self, archive: &sevenz_rust2::Archive) -> Result<Vec<usize>> {
+        let files_len = archive.files.len();
+        let mut order = Vec::with_capacity(files_len);
+        let password = Password::empty();
+        let mut dummy = std::io::Cursor::new([0u8; 0]);
+        for block_index in 0..archive.blocks.len() {
+            let count =
+                sevenz_rust2::BlockDecoder::new(1, block_index, archive, &password, &mut dummy)
+                    .entry_count();
+            // R0081-0073: a missing first-file index or a sub-stream run
+            // that overruns `files` is corrupt stream metadata, not a
+            // range to clamp — the previous `unwrap_or(files_len)` /
+            // `.min(files_len)` silently truncated the block (or emptied
+            // it), dropping entries from the walk. Reject it instead.
+            let start = archive
+                .stream_map
+                .block_first_file_index
+                .get(block_index)
+                .copied()
+                .ok_or_else(|| {
+                    ArchiveError::corruption(
+                        self.path.display().to_string(),
+                        format!(
+                            "7z stream map: block {} has no first-file index",
+                            block_index
+                        ),
+                    )
+                })?;
+            let end = start
+                .checked_add(count)
+                .filter(|&end| end <= files_len)
+                .ok_or_else(|| {
+                    ArchiveError::corruption(
+                        self.path.display().to_string(),
+                        format!(
+                            "7z stream map: block {} sub-stream run {}..{}+{} overruns {} files",
+                            block_index, start, start, count, files_len
+                        ),
+                    )
+                })?;
+            order.extend(start..end);
+        }
+        for (file_index, block_idx) in archive.stream_map.file_block_index.iter().enumerate() {
+            if block_idx.is_none() {
+                order.push(file_index);
+            }
+        }
+        // R0081-0074: the extract walk's length-only guard (R0080-0027)
+        // cannot see overlapping block runs that duplicate some indices
+        // while omitting others — the vector length can still match yet
+        // callback positions map to the wrong listing entries. Require
+        // `order` to be an exact permutation of `0..files_len`: every
+        // file index present exactly once.
+        let mut seen = vec![false; files_len];
+        for &index in &order {
+            let slot = seen.get_mut(index).ok_or_else(|| {
+                ArchiveError::corruption(
+                    self.path.display().to_string(),
+                    format!(
+                        "7z visit order: index {} out of range for {} files",
+                        index, files_len
+                    ),
+                )
+            })?;
+            if *slot {
+                return Err(ArchiveError::corruption(
+                    self.path.display().to_string(),
+                    format!(
+                        "7z visit order: file index {} visited more than once",
+                        index
+                    ),
+                ));
+            }
+            *slot = true;
+        }
+        if let Some(missing) = seen.iter().position(|visited| !visited) {
+            return Err(ArchiveError::corruption(
+                self.path.display().to_string(),
+                format!("7z visit order: file index {} is never visited", missing),
+            ));
+        }
+        Ok(order)
+    }
+
+    /// Per-file encryption flags derived from block coders, indexed by
+    /// `archive.files` position. Shared by listing (encryption status)
+    /// and the extraction paths (password-suspect error
+    /// classification, R0079-0006).
+    fn encrypted_file_flags(&self, archive: &sevenz_rust2::Archive) -> Result<Vec<bool>> {
+        // R0001-0021: the returned vector is built by iterating
+        // `file_block_index`, so it is sized by the stream map — but every
+        // consumer indexes it by `archive.files` position and defaults a
+        // missing slot with `.unwrap_or(false)`. A stream map shorter than
+        // the file table therefore reported trailing files as
+        // *unencrypted*, suppressing listing's encryption status and
+        // disarming the password-suspect classification for exactly those
+        // entries. Require the mapping to cover every file and fail closed
+        // on a mismatch, matching the R0081-0075 block-index check below.
+        let files_len = archive.files.len();
+        let mapping_len = archive.stream_map.file_block_index.len();
+        if mapping_len != files_len {
+            return Err(ArchiveError::corruption(
+                self.path.display().to_string(),
+                format!(
+                    "7z stream map: file-block index covers {} entries but the table of contents declares {} files",
+                    mapping_len, files_len
+                ),
+            ));
+        }
+
         let aes_id = sevenz_rust2::EncoderMethod::ID_AES256_SHA256;
         let encrypted_blocks: Vec<bool> = archive
             .blocks
@@ -92,25 +377,165 @@ impl SevenZArchive {
                     .any(|coder| coder.encoder_method_id() == aes_id)
             })
             .collect();
+        // R0081-0075: a file that references a block index past the end
+        // of `blocks` is corrupt metadata — the previous
+        // `.unwrap_or(false)` reported it as unencrypted, masking the
+        // corruption and potentially misclassifying a later password
+        // failure. Surface it as corruption instead. The per-entry
+        // lookup stays O(1), so the AD 0065 cached listing path is not
+        // slowed.
+        archive
+            .stream_map
+            .file_block_index
+            .iter()
+            .enumerate()
+            .map(|(file_index, block_idx)| match block_idx {
+                Some(idx) => encrypted_blocks.get(*idx).copied().ok_or_else(|| {
+                    ArchiveError::corruption(
+                        self.path.display().to_string(),
+                        format!(
+                            "7z stream map: file {} references block {} but only {} blocks exist",
+                            file_index,
+                            idx,
+                            encrypted_blocks.len()
+                        ),
+                    )
+                }),
+                None => Ok(false),
+            })
+            .collect()
+    }
+
+    /// Map an error returned by `ArchiveReader::for_each_entries` onto
+    /// the crate error contract (R0079-0006).
+    ///
+    /// The default `7z a -p` shape encrypts content but not the
+    /// header, so `open()` succeeds with any password and the typed
+    /// `PasswordRequired` / `MaybeBadPassword` failures only surface
+    /// during block decode — they must classify as
+    /// [`ArchiveError::Password`], not `Format`.
+    ///
+    /// R0001-0061: everything else used to flatten onto
+    /// [`ArchiveError::format`], so a failure to *read the archive file*
+    /// was indistinguishable from a damaged archive. Reuse the crate's
+    /// existing corruption-vs-operational judgement
+    /// ([`sevenz_read_error_is_corruption`]) on the wrapped source and
+    /// keep an operational failure's `Io` shape — the same distinction
+    /// `test_integrity` already draws inside the callback (R0080-0030).
+    /// Advances OI-0080-007.
+    fn map_walk_error(&self, error: sevenz_rust2::Error, context: &str) -> ArchiveError {
+        if matches!(
+            error,
+            sevenz_rust2::Error::PasswordRequired | sevenz_rust2::Error::MaybeBadPassword(_)
+        ) {
+            return ArchiveError::password(format!("7z: {}", error));
+        }
+        let described = format!("{}: {}", context, error);
+        match error {
+            sevenz_rust2::Error::Io(source, _) | sevenz_rust2::Error::FileOpen(source, _)
+                if !sevenz_read_error_is_corruption(&source) =>
+            {
+                // The archive path is the resource that failed: upstream's
+                // `Io` / `FileOpen` wrappers only carry source-side reads
+                // and opens of the archive itself.
+                ArchiveError::io(
+                    "read",
+                    self.path.clone(),
+                    std::io::Error::new(source.kind(), described),
+                )
+            }
+            _ => ArchiveError::format(Some(ArchiveFormat::SevenZip), described),
+        }
+    }
+
+    /// Reclassify a decode-side failure as a password error when it
+    /// came from an encrypted block and a password was supplied
+    /// (R0079-0006).
+    ///
+    /// A wrong password does not surface as a typed upstream error
+    /// from inside the callbacks: AES decodes garbage, which fails as
+    /// a decoder `Io` read error or as a CRC/size mismatch
+    /// (`Corruption`). Upstream's `MaybeBadPassword` wrapping only
+    /// applies to errors *returned* from the callback, which the
+    /// stash-and-`Ok(false)` pattern never does. Write-side `Io`
+    /// errors and all errors on unencrypted entries keep their
+    /// original classification.
+    fn classify_decode_error(&self, error: ArchiveError, entry_encrypted: bool) -> ArchiveError {
+        if !entry_encrypted || self.password.is_none() {
+            return error;
+        }
+        let password_suspect = match &error {
+            ArchiveError::Io { operation, .. } => operation == "read",
+            ArchiveError::Corruption { .. } => true,
+            _ => false,
+        };
+        if password_suspect {
+            ArchiveError::password(format!(
+                "7z: decoding an encrypted entry failed with the supplied password (likely wrong password): {}",
+                error
+            ))
+        } else {
+            error
+        }
+    }
+
+    /// List all files in 7z archive with CRC32 from metadata
+    ///
+    /// CRC32 is read from 7z headers when available.
+    /// Encryption status is determined from block coders (not password presence).
+    ///
+    /// **Caching (AD 0065 / OI-0065-003).** The first call parses the
+    /// TOC and stores the result; subsequent calls share the snapshot
+    /// via `Arc::clone`.
+    pub fn list_files(&self) -> Result<std::sync::Arc<Vec<ArchiveEntry>>> {
+        self.list_files_budgeted(None)
+    }
+
+    /// Budgeted listing (OI-0080-003). `budget = Some(n)` aborts before
+    /// building our `Vec<ArchiveEntry>` when the TOC declares more than `n`
+    /// entries. Residual: sevenz-rust2 materialized `archive.files` when the
+    /// reader was constructed, so the budget bounds only OUR allocation, not
+    /// the library-internal TOC. The budget applies only to the first
+    /// materialization; a cache hit ignores it, and an aborted parse does not
+    /// populate `listing`.
+    pub fn list_files_budgeted(
+        &self,
+        budget: Option<usize>,
+    ) -> Result<std::sync::Arc<Vec<ArchiveEntry>>> {
+        self.listing
+            .get_or_try_init(|| self.walk_listing(budget).map(std::sync::Arc::new))
+            .map(std::sync::Arc::clone)
+    }
+
+    fn walk_listing(&self, budget: Option<usize>) -> Result<Vec<ArchiveEntry>> {
+        let reader = self.open_reader()?;
+        let archive = reader.archive();
+
+        // OI-0080-003: `archive.files` is the TOC sevenz-rust2 already parsed
+        // on reader construction; reject before allocating our `Vec` past the
+        // budget (see trait rustdoc for the residual).
+        if let Some(budget) = budget {
+            if archive.files.len() > budget {
+                return Err(crate::security::too_many_entries_parsed(budget));
+            }
+        }
+
+        let encrypted_files = self.encrypted_file_flags(archive)?;
 
         let mut entries = Vec::new();
 
         for (index, entry) in archive.files.iter().enumerate() {
-            let is_encrypted = archive
-                .stream_map
-                .file_block_index
-                .get(index)
-                .and_then(|opt| opt.as_ref())
-                .is_some_and(|&block_idx| {
-                    encrypted_blocks.get(block_idx).copied().unwrap_or(false)
-                });
+            let is_encrypted = encrypted_files.get(index).copied().unwrap_or(false);
 
             let mut parsed_entry = self.parse_entry(entry, is_encrypted)?;
 
-            // CRC32 from 7z metadata (0 is valid — it's the CRC32 of empty content)
-            // Note: entry.crc is u64; validate it fits in u32 before casting
-            if entry.crc <= u32::MAX as u64 {
-                parsed_entry.crc32 = Some(entry.crc as u32);
+            // CRC32 from 7z metadata (R0079-0005): only file entries
+            // that actually carry the optional kCRC digest get a
+            // value — directories and CRC-less entries report `None`
+            // per the `ArchiveEntry` contract, matching the ZIP/RAR
+            // backends.
+            if parsed_entry.entry_type == EntryType::File {
+                parsed_entry.crc32 = Self::entry_crc32(entry);
             }
 
             parsed_entry.id = index;
@@ -128,48 +553,29 @@ impl SevenZArchive {
     ) -> Result<ArchiveEntry> {
         // Normalize path separators to forward slashes
         let path = normalize_path(&entry.name);
-        let is_dir = entry.is_directory;
 
-        // Detect symlinks via windows_attributes:
-        // - Unix: upper 16 bits contain Unix mode; S_IFLNK = 0xA000
-        // - Windows: FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
-        let is_symlink = if entry.has_windows_attributes {
-            let unix_mode = (entry.windows_attributes >> 16) as u16;
-            let unix_symlink = (unix_mode & 0xF000) == 0xA000;
-            let win_reparse = (entry.windows_attributes & 0x0400) != 0;
-            unix_symlink || win_reparse
-        } else {
-            false
-        };
-
-        let entry_type = if is_dir {
-            EntryType::Directory
-        } else if is_symlink {
-            EntryType::Symlink
-        } else {
-            EntryType::File
-        };
+        // R0001-0022: classify through the shared 7z decoder. It keeps
+        // the symlink-before-directory ordering (R0075-0049) and maps
+        // special Unix modes (FIFO/char/block/socket) to
+        // `EntryType::Other` instead of silently reporting them as
+        // regular files.
+        let entry_type = Self::classify_entry_type(entry);
+        let is_dir = entry_type == EntryType::Directory;
 
         let size = if is_dir { None } else { Some(entry.size) };
 
-        // 7z doesn't always store compressed size per file
-        let compressed_size = Some(entry.compressed_size);
-
-        // Modified time (convert NtTime to SystemTime)
-        let modified = if entry.has_last_modified_date {
-            // NtTime is 100-nanosecond intervals since 1601-01-01
-            // Convert to Unix timestamp (seconds since 1970-01-01)
-            let nt_time = u64::from(entry.last_modified_date);
-            let unix_epoch_nt = 116444736000000000u64; // NT time at Unix epoch
-            if nt_time >= unix_epoch_nt {
-                let unix_nanos = (nt_time - unix_epoch_nt) * 100;
-                Some(std::time::UNIX_EPOCH + std::time::Duration::from_nanos(unix_nanos))
-            } else {
-                None
-            }
-        } else {
+        // R0072-0010: directory entries carry no payload, so the
+        // `ArchiveEntry` contract requires `compressed_size = None` for
+        // them. Previously 7z surfaced `Some(entry.compressed_size)`
+        // unconditionally, which broke cross-format consumers comparing
+        // directory invariants.
+        let compressed_size = if is_dir {
             None
+        } else {
+            Some(entry.compressed_size)
         };
+
+        let modified = Self::entry_modified_time(entry);
 
         let mut entry_parsed = ArchiveEntry::new(path, 0);
         entry_parsed.entry_type = entry_type;
@@ -177,6 +583,26 @@ impl SevenZArchive {
         entry_parsed.compressed_size = compressed_size;
         entry_parsed.modified = modified;
         entry_parsed.is_encrypted = is_encrypted;
+        // R0075-0050: surface 7z attributes on the entry when the
+        // archive carries them. The lower 16 bits store Windows
+        // file attributes; the upper 16 bits store Unix mode (when
+        // produced by p7zip on Unix). Map the Windows half into
+        // `attributes.windows`; the Unix permissions half is masked
+        // into `permissions` if non-zero. Other 7z fields (e.g.
+        // creation time / archive-specific flags) are not exposed
+        // by sevenz-rust2's `ArchiveEntry` yet — surface what we
+        // have and leave the rest as `None`.
+        if entry.has_windows_attributes {
+            let win_attrs = entry.windows_attributes;
+            entry_parsed.permissions = Self::entry_unix_mode(entry);
+            // Lower 16 bits are the canonical Windows file-attribute
+            // bitmap.
+            entry_parsed.attributes = Some(crate::entry::FileAttributes {
+                windows: Some(win_attrs & 0xFFFF),
+                unix_xattr: None,
+                archive_specific: None,
+            });
+        }
 
         Ok(entry_parsed)
     }
@@ -187,57 +613,184 @@ impl SevenZArchive {
         dest_path: &Path,
         progress: Option<&mut Box<dyn ProgressCallback>>,
     ) -> Result<Vec<ArchiveWarning>> {
-        self.extract_all_with_options(dest_path, progress, true, false)
+        self.extract_all_with_options(dest_path, progress, true, true, true, false, None)
     }
 
+    /// Extract all files with options. When `selection` is `Some`, only entries
+    /// whose positional index (matching `list_files()` order) is in the set are
+    /// materialized; the archive is traversed once per AD 0029.
+    ///
+    /// `preserve_permissions` / `preserve_times` (R0079-0019) apply the
+    /// TOC's Unix mode bits (p7zip attribute convention) / NT-time
+    /// modification timestamp to each staged file before the atomic
+    /// install.
+    #[allow(clippy::too_many_arguments)]
     pub fn extract_all_with_options(
         &self,
         dest_path: &Path,
         mut progress: Option<&mut Box<dyn ProgressCallback>>,
         overwrite: bool,
+        preserve_permissions: bool,
+        preserve_times: bool,
         verify_crc32: bool,
+        selection: Option<&std::collections::HashSet<usize>>,
     ) -> Result<Vec<ArchiveWarning>> {
         let mut warnings: Vec<ArchiveWarning> = Vec::new();
         let mut reader = self.open_reader()?;
 
-        // Calculate total size for progress
+        // R0079-0004: for_each_entries visits entries block-major (stream
+        // files per block, then no-stream files), not in TOC order.
+        // Precompute the visit order so `selection` indices always mean
+        // `list_files()` order.
+        let visit_order = self.visit_order(reader.archive())?;
+        let encrypted_files = self.encrypted_file_flags(reader.archive())?;
+
+        // R0080-0027: pin the validated listing so the extraction walk can
+        // be cross-checked against it per visited position (extends the
+        // R0080-0009 listing-drift philosophy to 7z). Cached after the
+        // first call (AD 0065), so this is a metadata-only parse.
+        let listing = self.list_files()?;
+
+        // Calculate total size for progress (selected entries only when
+        // filtering). R0080-0064: exclude links as well as directories so
+        // the denominator matches what the extraction loop actually writes
+        // — the loop skips both, and `test_integrity` in this file uses the
+        // same predicate. Counting link sizes here left progress unable to
+        // reach 100% naturally. R0001-0022: the shared classifier now also
+        // excludes `EntryType::Other` (FIFO/device/socket), which the loop
+        // skips too.
         let total_bytes: u64 = if progress.is_some() {
             reader
                 .archive()
                 .files
                 .iter()
-                .filter(|e| !e.is_directory)
-                .map(|e| e.size)
-                .sum()
+                .enumerate()
+                .filter(|(_, e)| Self::classify_entry_type(e) == EntryType::File)
+                .filter(|(idx, _)| match selection {
+                    Some(sel) => sel.contains(idx),
+                    None => true,
+                })
+                .map(|(_, e)| e.size)
+                .fold(0u64, u64::saturating_add)
         } else {
             0
         };
 
         let mut bytes_processed = 0u64;
         let mut extraction_error: Option<ArchiveError> = None;
+        let mut callback_pos: usize = 0;
+        // R0001-0060: directory metadata is applied in a post-walk pass —
+        // `(output path, unix mode, mtime)` per extracted directory entry.
+        let mut pending_dir_metadata: Vec<(PathBuf, Option<u32>, Option<std::time::SystemTime>)> =
+            Vec::new();
+        // Canonicalize the destination once — every entry's sanitize
+        // pass compares against the same stable base.
+        let canonical_dest = canonicalize_dest_base(dest_path)?;
 
         // Extract using for_each_entries
         let result = reader.for_each_entries(|entry, entry_reader| {
+            // R0079-0024: upstream discards the per-block stop flag, so
+            // `Ok(false)` only terminates the current block — later
+            // blocks and the no-stream pass keep invoking the callback.
+            // Stop doing work once a fatal error is recorded.
+            if extraction_error.is_some() {
+                return Ok(false);
+            }
+
             // Check cancellation
-            if let Some(callback) = progress.as_mut() {
-                if let ControlFlow::Break(()) =
-                    callback.on_progress(bytes_processed, Some(total_bytes))
-                {
-                    extraction_error =
-                        Some(ArchiveError::format(None, "Extraction cancelled by user"));
+            if let Err(e) = check_extraction_cancelled(
+                &mut progress,
+                bytes_processed,
+                total_bytes,
+                crate::error::ops::EXTRACT_ALL,
+            ) {
+                extraction_error = Some(e);
+                return Ok(false);
+            }
+
+            // R0079-0004: translate the callback position back to the
+            // `files` index so selection matches `list_files()` order.
+            let Some(current_idx) = visit_order.get(callback_pos).copied() else {
+                extraction_error = Some(ArchiveError::format(
+                    Some(ArchiveFormat::SevenZip),
+                    "Extract: archive walk visited more entries than the table of contents declares",
+                ));
+                return Ok(false);
+            };
+            callback_pos += 1;
+
+            // R0080-0027: cross-check the walked entry's name against the
+            // cached listing at this position. `entry.name` is available in
+            // the callback, so a walk that yields a different entry than the
+            // validated listing at `current_idx` — a stale AD 0065 cache or
+            // a rewritten archive — is caught before any bytes are written.
+            let normalized_path = normalize_path(&entry.name);
+            match listing.get(current_idx) {
+                Some(listed) if listed.path == normalized_path => {}
+                Some(listed) => {
+                    extraction_error = Some(ArchiveError::corruption(
+                        normalized_path.clone(),
+                        format!(
+                            "Extract: listing drift at index {} — expected '{}', walked '{}'",
+                            current_idx, listed.path, normalized_path
+                        ),
+                    ));
+                    return Ok(false);
+                }
+                None => {
+                    extraction_error = Some(ArchiveError::corruption(
+                        normalized_path.clone(),
+                        format!(
+                            "Extract: walk visited index {} beyond the {} listed entries",
+                            current_idx,
+                            listing.len()
+                        ),
+                    ));
                     return Ok(false);
                 }
             }
 
-            // Sanitize entry path to prevent path traversal
-            let normalized_path = normalize_path(&entry.name);
-            let entry_path = match sanitize_entry_path(&normalized_path, dest_path) {
-                Ok(path) => path,
-                Err(e) => {
-                    extraction_error = Some(e);
-                    return Ok(false);
+            if let Some(sel) = selection {
+                if !sel.contains(&current_idx) {
+                    return Ok(true);
                 }
-            };
+            }
+
+            // R0075-0053 / R0075-0052: classify and skip link entries
+            // *before* sanitising the destination path so a symlink
+            // whose archive name carries a traversal pattern surfaces
+            // as a `SkippedSymlink` warning rather than as an
+            // `InvalidPath` error. Warning paths use the same
+            // normalised string that listing/filtering uses so UI
+            // consumers can correlate by string match.
+            let entry_type = Self::classify_entry_type(entry);
+            if entry_type == EntryType::Symlink {
+                warnings.push(ArchiveWarning::SkippedSymlink {
+                    path: normalized_path.clone(),
+                    target: None,
+                });
+                return Ok(true); // skip, continue to next entry
+            }
+            // R0001-0022: special Unix modes (FIFO/char/block/socket) are
+            // neither regular files nor directories; skip them rather than
+            // materializing a plain file, exactly as the ZIP backend does
+            // for `EntryType::Other` (R0081-0077). No `ArchiveWarning`
+            // variant describes a skipped special entry yet, so the skip is
+            // silent — the listing already reports the entry as `Other`.
+            if entry_type == EntryType::Other {
+                return Ok(true); // skip, continue to next entry
+            }
+
+            // Sanitize entry path to prevent path traversal (link
+            // entries already handled above).
+            let entry_path =
+                match sanitize_entry_path_with_base(&normalized_path, dest_path, &canonical_dest) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        extraction_error = Some(e);
+                        return Ok(false);
+                    }
+                };
 
             // Create parent directories
             if let Some(parent) = entry_path.parent() {
@@ -248,58 +801,64 @@ impl SevenZArchive {
                 }
             }
 
-            // Skip symlinks for security (detected via windows_attributes)
-            if entry.has_windows_attributes {
-                let unix_mode = (entry.windows_attributes >> 16) as u16;
-                let is_link =
-                    (unix_mode & 0xF000) == 0xA000 || (entry.windows_attributes & 0x0400) != 0;
-                if is_link {
-                    warnings.push(ArchiveWarning::SkippedSymlink {
-                        path: entry.name.clone(),
-                        target: None,
-                    });
-                    return Ok(true); // skip, continue to next entry
-                }
-            }
-
-            if entry.is_directory {
+            if entry_type == EntryType::Directory {
                 // Create directory
                 if let Err(e) = std::fs::create_dir_all(&entry_path) {
                     extraction_error = Some(ArchiveError::io("create_dir", entry_path.clone(), e));
                     return Ok(false);
                 }
+                // R0001-0060: `preserve_permissions` / `preserve_times`
+                // reached only the file writer, so extracted directories
+                // kept the umask mode and the creation-time mtime even when
+                // preservation was requested. Record the metadata and apply
+                // it after the walk (deepest-first): installing a child
+                // re-stamps its parent's mtime, and a restrictive archived
+                // mode applied up front could block that install outright.
+                let dir_mode = preserve_permissions
+                    .then(|| Self::entry_unix_mode(entry))
+                    .flatten();
+                let dir_modified = preserve_times
+                    .then(|| Self::entry_modified_time(entry))
+                    .flatten();
+                if dir_mode.is_some() || dir_modified.is_some() {
+                    pending_dir_metadata.push((entry_path.clone(), dir_mode, dir_modified));
+                }
             } else {
-                // Extract file
-                let mut output_file = match AtomicOutputFile::create(&entry_path, overwrite) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        extraction_error = Some(e);
-                        return Ok(false);
-                    }
-                };
-
-                let expected_crc = if verify_crc32 {
-                    Some(entry.crc as u32)
-                } else {
-                    None
-                };
-
-                match copy_with_optional_crc(
+                // Extract file through the shared staged-write pipeline
+                // (Exact budget, optional CRC, metadata preservation,
+                // atomic commit). Errors that came off the decoder get
+                // the password-suspect reclassification (R0079-0006);
+                // stage/metadata/commit errors pass through it unchanged
+                // (the classifier only rewrites read-Io and Corruption).
+                let mut cancel_check =
+                    entry_cancel_hook(&mut progress, bytes_processed, total_bytes);
+                match write_entry_atomically(
                     entry_reader,
-                    output_file.file_mut(),
-                    expected_crc,
-                    &normalized_path,
-                    &entry_path,
+                    StagedEntryWrite {
+                        output_path: &entry_path,
+                        entry_path: &normalized_path,
+                        op: crate::error::ops::EXTRACT_ALL,
+                        overwrite,
+                        expected_crc: if verify_crc32 {
+                            Self::entry_crc32(entry)
+                        } else {
+                            None
+                        },
+                        declared_size: entry.size,
+                        unix_mode: preserve_permissions
+                            .then(|| Self::entry_unix_mode(entry))
+                            .flatten(),
+                        modified: preserve_times
+                            .then(|| Self::entry_modified_time(entry))
+                            .flatten(),
+                    },
+                    Some(&mut cancel_check),
                 ) {
-                    Ok(bytes_written) => {
-                        if let Err(e) = output_file.commit() {
-                            extraction_error = Some(e);
-                            return Ok(false);
-                        }
-                        bytes_processed += bytes_written;
-                    }
+                    Ok(bytes_written) => bytes_processed += bytes_written,
                     Err(e) => {
-                        extraction_error = Some(e);
+                        let entry_encrypted =
+                            encrypted_files.get(current_idx).copied().unwrap_or(false);
+                        extraction_error = Some(self.classify_decode_error(e, entry_encrypted));
                         return Ok(false);
                     }
                 }
@@ -308,18 +867,55 @@ impl SevenZArchive {
             Ok(true) // Continue extraction
         });
 
-        result.map_err(|e| {
-            ArchiveError::format(Some(ArchiveFormat::SevenZip), format!("Extract: {}", e))
-        })?;
-
+        // R0001-0023: the stashed callback error is the *real* cause — a
+        // cancellation, a path refusal, a cap breach, a listing-drift
+        // corruption. Returning `Ok(false)` to abort the walk can itself
+        // make upstream surface an error, so mapping `result` first
+        // overwrote the typed cause with a generic `Format`. Prefer the
+        // stash; only map the upstream result when nothing was recorded.
+        // Advances OI-0080-007.
         if let Some(err) = extraction_error {
             return Err(err);
         }
 
-        // Final progress update (100%)
-        if let Some(callback) = progress.as_mut() {
-            let _ = callback.on_progress(total_bytes, Some(total_bytes));
+        result.map_err(|e| self.map_walk_error(e, "Extract"))?;
+
+        // R0080-0027: guard against a truncated upstream walk. Out-of-range
+        // callback positions already error above, but a walk that invokes
+        // the callback for *fewer* entries than the TOC declares would
+        // otherwise leave selected entries silently unextracted and still
+        // report a forced 100% progress. Require every declared position to
+        // have been visited.
+        if callback_pos != visit_order.len() {
+            return Err(ArchiveError::corruption(
+                self.path.display().to_string(),
+                format!(
+                    "Extract: archive walk visited {} of {} declared entries",
+                    callback_pos,
+                    visit_order.len()
+                ),
+            ));
         }
+
+        // R0001-0060: apply the deferred directory metadata now that every
+        // payload is installed. Deepest-first (descending component count)
+        // so stamping a parent cannot be undone by a child install, and so
+        // a read-only archived mode on a parent is applied only after its
+        // children are already in place.
+        pending_dir_metadata
+            .sort_by_key(|(path, _, _)| std::cmp::Reverse(path.components().count()));
+        for (path, unix_mode, modified) in &pending_dir_metadata {
+            apply_directory_metadata(path, *unix_mode, *modified)?;
+        }
+
+        // R0070-0037: honor cancellation in the final callback the
+        // same way the per-entry path does.
+        check_extraction_cancelled(
+            &mut progress,
+            total_bytes,
+            total_bytes,
+            crate::error::ops::EXTRACT_ALL,
+        )?;
 
         Ok(warnings)
     }
@@ -329,6 +925,8 @@ impl SevenZArchive {
         self.extract_file_with_options(file_path, dest_path, true, false)
     }
 
+    /// Legacy single-file surface; metadata preservation defaults to on,
+    /// matching `ExtractionOptions::default()` (R0079-0019).
     pub fn extract_file_with_options(
         &self,
         file_path: &str,
@@ -336,70 +934,150 @@ impl SevenZArchive {
         overwrite: bool,
         verify_crc32: bool,
     ) -> Result<()> {
+        self.extract_file_with_options_preserve(
+            file_path,
+            dest_path,
+            overwrite,
+            true,
+            true,
+            verify_crc32,
+        )
+    }
+
+    /// Metadata-aware variant of [`Self::extract_file_with_options`]
+    /// (R0079-0019): `preserve_permissions` / `preserve_times` apply the
+    /// TOC's Unix mode bits / NT-time modification timestamp to the
+    /// staged file before the atomic install.
+    pub fn extract_file_with_options_preserve(
+        &self,
+        file_path: &str,
+        dest_path: &Path,
+        overwrite: bool,
+        preserve_permissions: bool,
+        preserve_times: bool,
+        verify_crc32: bool,
+    ) -> Result<()> {
+        // OI-0076-002: resolve through the shared single-entry gate
+        // before opening the extraction reader — existence, uniqueness,
+        // and link/directory policy live in validate_single_entry
+        // (directory entries now error at the gate instead of
+        // materializing, R0076-0060).
+        let listing = self.list_files()?;
+        let validated = crate::security::validate_single_entry(
+            &listing,
+            file_path,
+            crate::error::ops::EXTRACT_FILE,
+        )?;
+        let target_id = validated.id();
+        let validated_path = validated.path().to_string();
+
         let mut reader = self.open_reader()?;
 
+        // R0079-0006: per-entry encryption flags for password-suspect
+        // error classification; callback positions translate through
+        // the R0079-0004 visit order.
+        let visit_order = self.visit_order(reader.archive())?;
+        let encrypted_files = self.encrypted_file_flags(reader.archive())?;
+        let entry_encrypted = encrypted_files.get(target_id).copied().unwrap_or(false);
+
         let mut found = false;
-        // Sanitize entry path to prevent path traversal
-        let output_path = sanitize_entry_path(file_path, dest_path)?;
+        // Sanitize the validated listing path (R0076-0050) to prevent
+        // path traversal.
+        let output_path = sanitize_entry_path(&validated_path, dest_path)?;
         let mut extraction_error: Option<ArchiveError> = None;
+        let mut callback_pos: usize = 0;
 
         let result = reader.for_each_entries(|entry, entry_reader| {
-            let normalized_path = normalize_path(&entry.name);
-            if normalized_path == file_path {
-                found = true;
-
-                // Create parent directories
-                if let Some(parent) = output_path.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        extraction_error =
-                            Some(ArchiveError::io("create_dir", parent.to_path_buf(), e));
-                        return Ok(false);
-                    }
-                }
-
-                // Extract file
-                let mut output_file = match AtomicOutputFile::create(&output_path, overwrite) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        extraction_error = Some(e);
-                        return Ok(false);
-                    }
-                };
-
-                let expected_crc = if verify_crc32 {
-                    Some(entry.crc as u32)
-                } else {
-                    None
-                };
-
-                if let Err(e) = copy_with_optional_crc(
-                    entry_reader,
-                    output_file.file_mut(),
-                    expected_crc,
-                    file_path,
-                    &output_path,
-                ) {
-                    extraction_error = Some(e);
-                    return Ok(false);
-                }
-                if let Err(e) = output_file.commit() {
-                    extraction_error = Some(e);
-                    return Ok(false);
-                }
-
-                Ok(false) // Stop extraction
-            } else {
-                Ok(true) // Continue
+            // R0079-0024: upstream discards the per-block stop flag, so
+            // `Ok(false)` only terminates the current block. Stop
+            // decoding later blocks once the target has been handled or
+            // a fatal error is recorded.
+            if found || extraction_error.is_some() {
+                return Ok(false);
             }
+            // R0076-0059: seek by stable listing id, never by name scan;
+            // the callback position translates through the R0079-0004
+            // visit order.
+            let Some(current_idx) = visit_order.get(callback_pos).copied() else {
+                extraction_error = Some(ArchiveError::format(
+                    Some(ArchiveFormat::SevenZip),
+                    "Extract: archive walk visited more entries than the table of contents declares",
+                ));
+                return Ok(false);
+            };
+            callback_pos += 1;
+
+            if current_idx != target_id {
+                return Ok(true); // Continue
+            }
+            found = true;
+
+            // OI-0076-002 drift guard: the AD 0065 listing snapshot can
+            // go stale if the archive is rewritten on disk between
+            // listing and extraction — never extract a mismatched entry.
+            let walked_path = normalize_path(&entry.name);
+            if walked_path != validated_path {
+                extraction_error = Some(ArchiveError::format(
+                    Some(ArchiveFormat::SevenZip),
+                    format!(
+                        "single-entry listing drift at index {}: expected '{}', found '{}'",
+                        current_idx, validated_path, walked_path
+                    ),
+                ));
+                return Ok(false);
+            }
+
+            // Create parent directories
+            if let Some(parent) = output_path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    extraction_error = Some(ArchiveError::io("create_dir", parent.to_path_buf(), e));
+                    return Ok(false);
+                }
+            }
+
+            // Extract file through the shared staged-write pipeline
+            // (Exact budget, optional CRC, metadata preservation,
+            // atomic commit). Decoder errors get the
+            // password-suspect reclassification (R0079-0006);
+            // stage/metadata/commit errors pass through it unchanged
+            // (the classifier only rewrites read-Io and Corruption).
+            if let Err(e) = write_entry_atomically(
+                entry_reader,
+                StagedEntryWrite {
+                    output_path: &output_path,
+                    entry_path: &validated_path,
+                    op: crate::error::ops::EXTRACT_FILE,
+                    overwrite,
+                    expected_crc: if verify_crc32 {
+                        Self::entry_crc32(entry)
+                    } else {
+                        None
+                    },
+                    declared_size: entry.size,
+                    unix_mode: preserve_permissions
+                        .then(|| Self::entry_unix_mode(entry))
+                        .flatten(),
+                    modified: preserve_times
+                        .then(|| Self::entry_modified_time(entry))
+                        .flatten(),
+                },
+                None,
+            ) {
+                extraction_error = Some(self.classify_decode_error(e, entry_encrypted));
+                return Ok(false);
+            }
+
+            Ok(false) // Stop extraction
         });
 
-        result.map_err(|e| {
-            ArchiveError::format(Some(ArchiveFormat::SevenZip), format!("Extract: {}", e))
-        })?;
-
+        // R0001-0023: prefer the typed error the callback stashed over the
+        // upstream walk error the abort may have produced (see the
+        // `extract_all_with_options` note).
         if let Some(err) = extraction_error {
             return Err(err);
         }
+
+        result.map_err(|e| self.map_walk_error(e, "Extract"))?;
 
         if !found {
             return Err(ArchiveError::format(
@@ -413,64 +1091,192 @@ impl SevenZArchive {
 
     /// Extract a single file to memory
     pub fn extract_to_memory(&self, file_path: &str) -> Result<Vec<u8>> {
+        self.extract_to_memory_capped(file_path, None, crate::error::ops::EXTRACT_TO_MEMORY)
+    }
+
+    /// Cap-aware extract-to-memory: `max_bytes` is honoured *before*
+    /// buffering — an entry whose TOC-declared size exceeds the cap is
+    /// rejected up front instead of being fully decoded and post-checked
+    /// (R0076-0062). Backend `extract_to_memory_with_limit` routes here.
+    ///
+    /// R5 (ti-581bcda4): `op` labels every error this path can raise, so a
+    /// refusal raised on behalf of `Archive::extract_to_stream` is not
+    /// mislabelled `extract_to_memory` (R0071-0010).
+    pub(crate) fn extract_to_memory_capped(
+        &self,
+        file_path: &str,
+        max_bytes: Option<u64>,
+        op: &'static str,
+    ) -> Result<Vec<u8>> {
+        // OI-0076-002: resolve through the shared single-entry gate
+        // before opening the extraction reader — existence, uniqueness,
+        // and link/directory policy live in validate_single_entry
+        // (R0076-0060).
+        let listing = self.list_files()?;
+        // R5 (ti-581bcda4): `op`, not a hard-coded `extract_to_memory`.
+        let validated = crate::security::validate_single_entry(&listing, file_path, op)?;
+        let target_id = validated.id();
+        let validated_path = validated.path().to_string();
+
+        self.extract_to_memory_by_listing_id(target_id, &validated_path, max_bytes, op)
+    }
+
+    /// Id-addressed core of [`Self::extract_to_memory_capped`]: everything
+    /// after the by-path single-entry gate.
+    ///
+    /// `target_id` is a stable listing id — an index into `archive.files`,
+    /// which [`Self::list_files_budgeted`] assigns positionally — and
+    /// `validated_path` is the normalized listing name the caller already
+    /// resolved for it. The walk still translates callback positions
+    /// through the R0079-0004 visit order and still applies the
+    /// OI-0076-002 drift guard; what it deliberately does *not* do is
+    /// re-run `validate_single_entry`, whose uniqueness half is precisely
+    /// what an id-addressed seek exists to bypass.
+    fn extract_to_memory_by_listing_id(
+        &self,
+        target_id: usize,
+        validated_path: &str,
+        max_bytes: Option<u64>,
+        op: &'static str,
+    ) -> Result<Vec<u8>> {
         let mut reader = self.open_reader()?;
+
+        // R0079-0006: per-entry encryption flags for password-suspect
+        // error classification; callback positions translate through
+        // the R0079-0004 visit order.
+        let visit_order = self.visit_order(reader.archive())?;
+        let encrypted_files = self.encrypted_file_flags(reader.archive())?;
+        let entry_encrypted = encrypted_files.get(target_id).copied().unwrap_or(false);
 
         let mut result: Option<Vec<u8>> = None;
         let mut extraction_error: Option<ArchiveError> = None;
+        let mut callback_pos: usize = 0;
 
         let extract_result = reader.for_each_entries(|entry, entry_reader| {
-            let normalized_path = normalize_path(&entry.name);
-            if normalized_path == file_path {
-                let expected_size = entry.size;
-                if expected_size > usize::MAX as u64 {
-                    extraction_error = Some(ArchiveError::OperationBlocked {
-                        operation: crate::error::ops::EXTRACT_TO_MEMORY.to_string(),
-                        reason: format!(
-                            "Entry '{}' is too large to buffer in memory: {} bytes",
-                            file_path, expected_size
-                        ),
-                    });
-                    return Ok(false);
-                }
+            // R0079-0024: upstream discards the per-block stop flag, so
+            // `Ok(false)` only terminates the current block. Stop
+            // decoding later blocks once the target has been handled or
+            // a fatal error is recorded.
+            if result.is_some() || extraction_error.is_some() {
+                return Ok(false);
+            }
+            // R0076-0059: seek by stable listing id, never by name scan;
+            // the callback position translates through the R0079-0004
+            // visit order.
+            let Some(current_idx) = visit_order.get(callback_pos).copied() else {
+                extraction_error = Some(ArchiveError::format(
+                    Some(ArchiveFormat::SevenZip),
+                    "Extract: archive walk visited more entries than the table of contents declares",
+                ));
+                return Ok(false);
+            };
+            callback_pos += 1;
 
-                let mut buffer = Vec::new();
-                if buffer.try_reserve(expected_size as usize).is_err() {
-                    extraction_error = Some(ArchiveError::OperationBlocked {
-                        operation: crate::error::ops::EXTRACT_TO_MEMORY.to_string(),
-                        reason: format!(
-                            "Unable to allocate {} bytes for entry '{}'",
-                            expected_size, file_path
-                        ),
-                    });
-                    return Ok(false);
-                }
+            if current_idx != target_id {
+                return Ok(true); // Continue
+            }
 
-                if let Err(e) = entry_reader.read_to_end(&mut buffer) {
-                    extraction_error = Some(ArchiveError::io("read", PathBuf::from(file_path), e));
-                    return Ok(false);
-                }
+            // OI-0076-002 drift guard: the AD 0065 listing snapshot can
+            // go stale if the archive is rewritten on disk between
+            // listing and extraction — never extract a mismatched entry.
+            let walked_path = normalize_path(&entry.name);
+            if walked_path != validated_path {
+                extraction_error = Some(ArchiveError::format(
+                    Some(ArchiveFormat::SevenZip),
+                    format!(
+                        "single-entry listing drift at index {}: expected '{}', found '{}'",
+                        current_idx, validated_path, walked_path
+                    ),
+                ));
+                return Ok(false);
+            }
 
-                result = Some(buffer);
-                Ok(false) // Stop extraction
-            } else {
-                Ok(true) // Continue
+            // Shared bounds contract (R0070-0015): over-produce is
+            // corruption; `require_exact` because the 7z TOC size is
+            // authoritative, so a short read surfaces as corruption
+            // rather than silent success (R0075-0051). The caller
+            // cap is enforced before buffering (R0076-0062).
+            match read_entry_to_memory_capped(
+                entry_reader,
+                entry.size,
+                max_bytes,
+                validated_path,
+                // R5 (ti-581bcda4): carry the caller's operation label.
+                op,
+                None,
+                true,
+            ) {
+                Ok(buffer) => {
+                    result = Some(buffer);
+                    Ok(false) // Stop extraction
+                }
+                Err(e) => {
+                    extraction_error = Some(self.classify_decode_error(e, entry_encrypted));
+                    Ok(false)
+                }
             }
         });
 
-        extract_result.map_err(|e| {
-            ArchiveError::format(Some(ArchiveFormat::SevenZip), format!("Extract: {}", e))
-        })?;
-
+        // R0001-0023: prefer the typed error the callback stashed over the
+        // upstream walk error the abort may have produced (see the
+        // `extract_all_with_options` note).
         if let Some(err) = extraction_error {
             return Err(err);
         }
 
+        extract_result.map_err(|e| self.map_walk_error(e, "Extract"))?;
+
         result.ok_or_else(|| {
             ArchiveError::format(
                 Some(ArchiveFormat::SevenZip),
-                format!("File '{}' not found in archive", file_path),
+                format!("File '{}' not found in archive", validated_path),
             )
         })
+    }
+
+    /// Stream one entry addressed by its stable listing id rather than by
+    /// path (ti-2a6e3153 for tar; DCR-012 for AE-2 ZIP; this method closes
+    /// the same hole for 7z).
+    ///
+    /// **Why 7z needs this at all.** A 7z file entry lists `crc32: None`
+    /// whenever its record carries no optional kCRC digest — see
+    /// [`Self::entry_crc32`], which gates on `entry.has_crc`. 7-Zip itself
+    /// writes no-stream entries (empty files) that way, and nothing in the
+    /// format obliges a writer to store the digest for a streamed member
+    /// either. Such an entry routes through the content-multiset digest
+    /// walk's streaming arm. Before this method existed the walk hit the
+    /// `ReadBackend::extract_to_stream_by_listing_id` trait default, fell
+    /// back to the by-*path* stream, and a 7z holding the same path twice
+    /// with a CRC-less occurrence stopped digesting at
+    /// `security::validate_single_entry` with `OperationBlocked` — the
+    /// OI-0076-002 defect, reached through 7z instead of ZIP.
+    ///
+    /// **What still guards this path.** The id-addressed walk keeps the
+    /// OI-0076-002 drift guard (a header whose normalized name disagrees
+    /// with `validated_path` is refused, so a stale AD 0065 listing cannot
+    /// redirect the read) and the R0070-0015 exact-size bound. Only the
+    /// uniqueness half of the single-entry gate is skipped.
+    ///
+    /// Same buffered-adapter caveat as [`Self::extract_to_stream`]:
+    /// sevenz-rust2 exposes no owned entry-level `Read` (AD 0035 /
+    /// DEF-004), so the entry is materialized in full before the cursor is
+    /// handed back.
+    ///
+    /// The forward in `crate::backend` is what makes any of this reachable;
+    /// calling this inherent method directly cannot detect a missing one.
+    /// Prove it from the facade.
+    pub(crate) fn extract_to_stream_by_listing_id(
+        &self,
+        id: usize,
+        validated_path: &str,
+    ) -> Result<crate::streaming::StreamingExtractor> {
+        let data = self.extract_to_memory_by_listing_id(
+            id,
+            validated_path,
+            None,
+            crate::error::ops::EXTRACT_TO_STREAM,
+        )?;
+        Ok(crate::streaming::StreamingExtractor::from_bytes(data))
     }
 
     /// Extract a single file to a stream
@@ -483,63 +1289,292 @@ impl SevenZArchive {
         &self,
         file_path: &str,
     ) -> Result<crate::streaming::StreamingExtractor> {
-        use std::io::Cursor;
+        self.extract_to_stream_with_limit(file_path, None)
+    }
 
-        // Buffered adapter: sevenz-rust2 0.19.4 exposes no owned entry-level Read
-        // (all public APIs are either callback-scoped &mut dyn Read or return Vec<u8>).
-        // Deferred per AD 0035 until upstream exposes an owned reader.
-        let data = self.extract_to_memory(file_path)?;
-        let size = data.len() as u64;
-        let reader = Box::new(Cursor::new(data));
-
-        Ok(crate::streaming::StreamingExtractor::new(
-            reader,
-            Some(size),
-        ))
+    /// Streaming variant of [`Self::extract_to_memory_capped`].
+    ///
+    /// R0001-0011: the 7z stream path used to inherit the
+    /// `ReadBackend::extract_to_stream_with_limit` trait default, which
+    /// materializes the whole entry first and caps only the returned
+    /// reader. Routing through the capped memory path rejects an entry
+    /// whose TOC-declared size exceeds `max_bytes` before buffering
+    /// (R0076-0062), so a caller-chosen budget binds pre-materialization.
+    ///
+    /// Buffered adapter either way: sevenz-rust2 0.19.4 exposes no owned
+    /// entry-level `Read` (all public APIs are either callback-scoped
+    /// `&mut dyn Read` or return `Vec<u8>`), deferred per AD 0035 until
+    /// upstream exposes an owned reader. For a solid block the decoder
+    /// still works through preceding members to reach the target — the cap
+    /// bounds our buffer, not that decode work.
+    pub(crate) fn extract_to_stream_with_limit(
+        &self,
+        file_path: &str,
+        max_bytes: Option<u64>,
+    ) -> Result<crate::streaming::StreamingExtractor> {
+        // R5 (ti-581bcda4): label the refusal with the public operation the
+        // caller actually invoked.
+        let data = self.extract_to_memory_capped(
+            file_path,
+            max_bytes,
+            crate::error::ops::EXTRACT_TO_STREAM,
+        )?;
+        Ok(crate::streaming::StreamingExtractor::from_bytes(data))
     }
 
     /// Test archive integrity by verifying CRC32 for all files
     ///
     /// Streams each entry through an 8KB buffer; sevenz-rust2 verifies
-    /// CRC32 during decompression. Returns a list of paths that failed.
+    /// CRC32 during decompression. Per-entry payload corruption — a CRC
+    /// mismatch or a decode-class read error — is recorded as a failed
+    /// path; a genuine archive-file I/O error (open/read on the archive
+    /// itself) propagates as `Err` (R0080-0030). Returns a list of paths
+    /// that failed.
     pub fn test_integrity(&self) -> Result<Vec<String>> {
         let mut reader = self.open_reader()?;
 
+        // R0001-0025: the validated visit-order mapping (R0079-0004 /
+        // R0081-0073 / R0081-0074) is the declared-entry census. Building
+        // it here also rejects a corrupt stream map before any decode.
+        let visit_order = self.visit_order(reader.archive())?;
+
         let mut failed_files = Vec::new();
+        // R0080-0030: a genuine archive-file I/O error is operational, not
+        // an integrity failure. The `for_each_entries` callback can only
+        // return `sevenz_rust2::Error`, so stash the typed error here and
+        // surface it after the walk to keep its true `Io` shape instead of
+        // flattening it to a `Format` error.
+        let mut operational_error: Option<ArchiveError> = None;
+        let mut callback_pos: usize = 0;
 
-        // Single-pass: sevenz-rust2 verifies CRC32 during decompression
-        reader
-            .for_each_entries(|entry, entry_reader| {
-                if entry.is_directory {
-                    return Ok(true);
-                }
+        // Single-pass: sevenz-rust2 verifies CRC32 during decompression.
+        // R0070-0051: skip non-regular entries (directories, symlinks,
+        // reparse points). Extraction policy already drops these, so
+        // including them in the integrity walk yielded inconsistent
+        // failure counts vs the file-only `validated` accounting.
+        // R0001-0022: the shared classifier also skips `EntryType::Other`
+        // (FIFO/device/socket), which extraction skips too.
+        let walk = reader.for_each_entries(|entry, entry_reader| {
+            if operational_error.is_some() {
+                return Ok(false);
+            }
+            // R0001-0025: count every callback so the post-walk
+            // completeness check can prove the whole file table was
+            // visited, and reject a walk that overruns the declared
+            // census — the same guard the extraction paths apply.
+            if callback_pos >= visit_order.len() {
+                operational_error = Some(ArchiveError::corruption(
+                    self.path.display().to_string(),
+                    "test_integrity: archive walk visited more entries than the table of contents declares",
+                ));
+                return Ok(false);
+            }
+            callback_pos += 1;
 
-                let path = normalize_path(&entry.name);
-                let mut buf = [0u8; 8192];
-                loop {
-                    match entry_reader.read(&mut buf) {
-                        Ok(0) => break,
-                        Ok(_) => continue,
-                        Err(_) => {
-                            // Drain remaining data to keep decompression stream aligned
-                            // (required for solid archives)
-                            while entry_reader.read(&mut buf).unwrap_or(0) > 0 {}
-                            failed_files.push(path);
-                            return Ok(true);
+            if Self::classify_entry_type(entry) != EntryType::File {
+                return Ok(true);
+            }
+
+            let path = normalize_path(&entry.name);
+            let mut buf = [0u8; 8192];
+            // R0001-0024: count the decoded bytes. The drain loop only
+            // checked for decoder errors, so an entry that ends early and
+            // carries no kCRC digest (`has_crc == false` — upstream then
+            // interposes no `Crc32VerifyingReader`) drained cleanly and was
+            // reported as valid. The 7z TOC size is authoritative (the same
+            // premise `extract_to_memory` encodes as `require_exact`,
+            // R0075-0051), so require exact equality.
+            let mut bytes_read: u64 = 0;
+            loop {
+                match entry_reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        bytes_read = bytes_read.saturating_add(n as u64);
+                        continue;
+                    }
+                    Err(e) => {
+                        // R0080-0030: a decoder-reported CRC mismatch or
+                        // a corrupt/truncated compressed stream is an
+                        // integrity failure recorded against the entry;
+                        // a genuine archive-file I/O error is operational
+                        // and propagates as the true error.
+                        if !sevenz_read_error_is_corruption(&e) {
+                            operational_error =
+                                Some(ArchiveError::io("read", self.path.clone(), e));
+                            return Ok(false);
                         }
+                        // R0075-0054: drain remaining data after a
+                        // CRC failure so the solid-stream cursor
+                        // stays aligned for the next entry.
+                        // Subsequent drain errors are intentionally
+                        // ignored — the entry is already recorded
+                        // as failed, and any persistent stream
+                        // damage will surface again on the next
+                        // entry's own read loop. Surfacing them
+                        // separately here would require a parallel
+                        // failed-list that the caller currently
+                        // has no way to interpret.
+                        while entry_reader.read(&mut buf).unwrap_or(0) > 0 {}
+                        failed_files.push(path);
+                        return Ok(true);
                     }
                 }
-                Ok(true)
-            })
-            .map_err(|e| {
-                ArchiveError::format(
-                    Some(ArchiveFormat::SevenZip),
-                    format!("test_integrity: {}", e),
-                )
-            })?;
+            }
+            // R0001-0024: a clean early EOF is an integrity failure, not a
+            // pass — record the short entry instead of reporting success.
+            if bytes_read != entry.size {
+                failed_files.push(path);
+            }
+            Ok(true)
+        });
+
+        // R0001-0023: prefer the typed error the callback stashed over the
+        // upstream walk error the abort may have produced (see the
+        // `extract_all_with_options` note).
+        if let Some(err) = operational_error {
+            return Err(err);
+        }
+
+        walk.map_err(|e| self.map_walk_error(e, "test_integrity"))?;
+
+        // R0001-0025: prove the whole file table was tested. The walk's
+        // per-callback bound above rejects an overrun; this rejects a
+        // truncated walk that would otherwise return an incomplete
+        // "everything passed" report. `visit_order` is an exact
+        // permutation of `0..files.len()` (R0081-0074), so equality here
+        // means every declared entry position was visited exactly once.
+        if callback_pos != visit_order.len() {
+            return Err(ArchiveError::corruption(
+                self.path.display().to_string(),
+                format!(
+                    "test_integrity: archive walk visited {} of {} declared entries",
+                    callback_pos,
+                    visit_order.len()
+                ),
+            ));
+        }
 
         Ok(failed_files)
     }
+}
+
+/// Apply preserved directory metadata after extraction (R0001-0060).
+///
+/// The file path applies metadata to the *staged* handle before the
+/// atomic install (`common::apply_preserved_metadata`);
+/// directories have no staging step, so they are stamped in place once
+/// every child is written. `unix_mode` is masked to the permission bits
+/// (matching the `ArchiveEntry::permissions` contract) and is a no-op on
+/// non-Unix platforms, exactly as the file path does.
+///
+/// The timestamp is applied before the mode so a restrictive archived
+/// mode cannot block the handle the timestamp needs; `chmod` touches
+/// `ctime`, never `mtime`, so the order is otherwise immaterial.
+fn apply_directory_metadata(
+    path: &Path,
+    unix_mode: Option<u32>,
+    modified: Option<std::time::SystemTime>,
+) -> Result<()> {
+    if let Some(mtime) = modified {
+        let dir = open_directory_for_metadata(path)
+            .map_err(|e| ArchiveError::io("open_dir", path.to_path_buf(), e))?;
+        dir.set_modified(mtime)
+            .map_err(|e| ArchiveError::io("set_times", path.to_path_buf(), e))?;
+    }
+    #[cfg(unix)]
+    if let Some(mode) = unix_mode {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o7777))
+            .map_err(|e| ArchiveError::io("set_permissions", path.to_path_buf(), e))?;
+    }
+    #[cfg(not(unix))]
+    let _ = unix_mode;
+    Ok(())
+}
+
+/// Open a directory handle that `SetFileTime` / `futimens` accept
+/// (R0001-0060).
+///
+/// Unix opens the directory read-only — `futimens` needs no write
+/// access. Windows refuses `File::open` on a directory outright: the
+/// handle must carry `FILE_FLAG_BACKUP_SEMANTICS`, and setting
+/// timestamps needs `FILE_WRITE_ATTRIBUTES` rather than `GENERIC_WRITE`.
+fn open_directory_for_metadata(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0000_0100;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        std::fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::File::open(path)
+    }
+}
+
+/// Does a `for_each_entries` read error mark a corrupt entry payload
+/// (record it as an integrity failure, R0080-0030) rather than a genuine
+/// archive-file I/O error (propagate it)?
+///
+/// sevenz-rust2 surfaces a decoder-detected CRC mismatch as
+/// `io::Error::other(sevenz_rust2::Error::ChecksumVerificationFailed)` and
+/// other decode/format faults as `io::Error::other(Error::…)`; the inner
+/// value downcasts to the crate's error type. A real read failure on the
+/// underlying archive file propagates as a plain OS `io::Error` whose inner
+/// value is not a `sevenz_rust2::Error` (or is its `Io` / `FileOpen`
+/// wrapper), while a corrupt/truncated codec stream shows up as a plain
+/// `InvalidData` / `UnexpectedEof`.
+fn sevenz_read_error_is_corruption(e: &std::io::Error) -> bool {
+    if let Some(inner) = e
+        .get_ref()
+        .and_then(|i| i.downcast_ref::<sevenz_rust2::Error>())
+    {
+        return !matches!(
+            inner,
+            sevenz_rust2::Error::Io(..) | sevenz_rust2::Error::FileOpen(..)
+        );
+    }
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
+    )
+}
+
+/// Phrase-based encryption-error classifier for sevenz-rust2 errors.
+///
+/// R0075-0027: previously the classifier accepted any message
+/// containing `password` / `encrypted` / `aes` and treated it as a
+/// password failure. That misfires on archives whose error text
+/// mentions any of those words for an unrelated reason. Restrict to
+/// canonical phrases the upstream crate emits for genuine encryption
+/// failures.
+fn is_sevenz_encryption_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    const ENCRYPTION_PHRASES: &[&str] = &[
+        "password required",
+        "password is required",
+        "wrong password",
+        "bad password",
+        "invalid password",
+        "incorrect password",
+        "password mismatch",
+        "passphrase required",
+        "passphrase incorrect",
+        "wrong passphrase",
+        "incorrect passphrase",
+        "bad passphrase",
+        "decryption failed",
+        "decryption error",
+        "encrypted file",
+        "encrypted archive requires",
+        "aes-256 encryption",
+        "aes encryption requires",
+    ];
+    ENCRYPTION_PHRASES.iter().any(|p| lower.contains(p))
 }
 
 #[cfg(test)]
@@ -571,7 +1606,7 @@ mod tests {
         let entries = entries.unwrap();
         assert!(!entries.is_empty(), "7z should have at least one entry");
 
-        for entry in &entries {
+        for entry in entries.iter() {
             assert!(!entry.path.is_empty(), "Entry path should not be empty");
         }
     }
@@ -582,7 +1617,7 @@ mod tests {
         let archive = SevenZArchive::open(&path).unwrap();
         let entries = archive.list_files().unwrap();
 
-        for entry in &entries {
+        for entry in entries.iter() {
             if entry.entry_type == EntryType::File {
                 // 7z should provide CRC32 in metadata
                 assert!(
@@ -637,5 +1672,662 @@ mod tests {
         stream.read_to_end(&mut stream_data).unwrap();
 
         assert_eq!(mem_data, stream_data);
+    }
+
+    /// Build a 7z whose TOC interleaves no-stream entries (directory,
+    /// empty file) ahead of stream entries — the layout 7-Zip produces.
+    /// List order is [dir, empty.txt, dir/a.txt, dir/b.txt, top.txt]
+    /// while the for_each_entries walk visits stream files (block
+    /// order) first.
+    fn build_mixed_layout_archive(dir: &Path) -> PathBuf {
+        let path = dir.join("mixed.7z");
+        let mut writer = sevenz_rust2::ArchiveWriter::create(&path).unwrap();
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_directory("dir"),
+                None::<&[u8]>,
+            )
+            .unwrap();
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file("empty.txt"),
+                None::<&[u8]>,
+            )
+            .unwrap();
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file("dir/a.txt"),
+                Some(&b"alpha content"[..]),
+            )
+            .unwrap();
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file("dir/b.txt"),
+                Some(&b"bravo content"[..]),
+            )
+            .unwrap();
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file("top.txt"),
+                Some(&b"top content"[..]),
+            )
+            .unwrap();
+        writer.finish().unwrap();
+        path
+    }
+
+    /// R0079-0004: pins the upstream block-major iteration model the
+    /// visit-order translation relies on. If a sevenz-rust2 bump
+    /// changes the for_each_entries walk, this fails loudly.
+    #[test]
+    fn test_sevenz_visit_order_is_block_major() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = build_mixed_layout_archive(temp.path());
+        let archive = SevenZArchive::open(&archive_path).unwrap();
+        let reader = archive.open_reader().unwrap();
+
+        // Stream files in block order (a, b, top), then no-stream
+        // files (dir, empty.txt) in files order.
+        assert_eq!(
+            archive.visit_order(reader.archive()).unwrap(),
+            vec![2, 3, 4, 0, 1]
+        );
+    }
+
+    /// R0079-0004: selection indices mean `list_files()` order, not
+    /// callback order — extracting `dir/a.txt` by its list index must
+    /// not materialize a different entry.
+    #[test]
+    fn test_sevenz_selective_extraction_matches_list_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = build_mixed_layout_archive(temp.path());
+        let archive = SevenZArchive::open(&archive_path).unwrap();
+
+        let entries = archive.list_files().unwrap();
+        let a_idx = entries.iter().position(|e| e.path == "dir/a.txt").unwrap();
+        // The no-stream entries precede it in the TOC, so list order
+        // and callback order genuinely differ for this index.
+        assert_eq!(a_idx, 2);
+
+        let dest = temp.path().join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        let selection: std::collections::HashSet<usize> = [a_idx].into_iter().collect();
+        archive
+            .extract_all_with_options(&dest, None, true, true, true, true, Some(&selection))
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(dest.join("dir/a.txt")).unwrap(),
+            b"alpha content"
+        );
+        assert!(!dest.join("dir/b.txt").exists());
+        assert!(!dest.join("top.txt").exists());
+        assert!(!dest.join("empty.txt").exists());
+    }
+
+    /// R0079-0005: entries without the optional kCRC digest
+    /// (directories, no-stream empty files) list `crc32 = None`, file
+    /// entries report the real digest, and `verify_crc32` extraction
+    /// does not spuriously fail on the CRC-less entries.
+    #[test]
+    fn test_sevenz_crcless_entries_list_none_and_extract_verified() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = build_mixed_layout_archive(temp.path());
+        let archive = SevenZArchive::open(&archive_path).unwrap();
+
+        let entries = archive.list_files().unwrap();
+        let by_path = |p: &str| entries.iter().find(|e| e.path == p).unwrap();
+        assert_eq!(by_path("dir").crc32, None);
+        assert_eq!(by_path("empty.txt").crc32, None);
+        assert_eq!(
+            by_path("dir/a.txt").crc32,
+            Some(crc32fast::hash(b"alpha content"))
+        );
+
+        let dest = temp.path().join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        archive
+            .extract_all_with_options(&dest, None, true, true, true, true, None)
+            .unwrap();
+        assert_eq!(std::fs::read(dest.join("empty.txt")).unwrap(), b"");
+        assert_eq!(std::fs::read(dest.join("top.txt")).unwrap(), b"top content");
+    }
+
+    /// R0079-0006: the default `7z a -p` shape (content encrypted,
+    /// header plaintext) opens fine with any password; both the
+    /// missing-password and wrong-password failures must surface as
+    /// `ArchiveError::Password`, not Format/Io/Corruption.
+    #[test]
+    fn test_sevenz_content_encrypted_password_classification() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("enc.7z");
+        let mut writer = sevenz_rust2::ArchiveWriter::create(&archive_path).unwrap();
+        writer.set_encrypt_header(false);
+        writer.set_content_methods(vec![
+            sevenz_rust2::encoder_options::AesEncoderOptions::new(Password::from("correct")).into(),
+            sevenz_rust2::EncoderMethod::LZMA2.into(),
+        ]);
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file("secret.txt"),
+                Some(&b"secret payload"[..]),
+            )
+            .unwrap();
+        writer.finish().unwrap();
+
+        // Missing password: the typed PasswordRequired error is raised
+        // by the walk itself.
+        let no_pw = SevenZArchive::open(&archive_path).unwrap();
+        let err = no_pw.extract_to_memory("secret.txt").unwrap_err();
+        assert!(matches!(err, ArchiveError::Password { .. }), "got {err:?}");
+
+        // Wrong password: garbage decode surfaces from inside the
+        // callback and must reclassify as password-suspect.
+        let wrong = SevenZArchive::open_with_password(&archive_path, "wrong").unwrap();
+        let err = wrong.extract_to_memory("secret.txt").unwrap_err();
+        assert!(matches!(err, ArchiveError::Password { .. }), "got {err:?}");
+
+        let right = SevenZArchive::open_with_password(&archive_path, "correct").unwrap();
+        assert_eq!(
+            right.extract_to_memory("secret.txt").unwrap(),
+            b"secret payload"
+        );
+    }
+
+    /// R0079-0019: `preserve_permissions` / `preserve_times` must be
+    /// honoured by the 7z extract path — an entry carrying Unix mode
+    /// 0o755 (p7zip attribute convention) and an NT-time mtime keeps
+    /// both when the flags are set, and gets neither when cleared.
+    #[test]
+    #[cfg(unix)]
+    fn test_sevenz_extract_preserves_mode_and_mtime_per_flags() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("mode.7z");
+        let mut writer = sevenz_rust2::ArchiveWriter::create(&archive_path).unwrap();
+        let mut entry = sevenz_rust2::ArchiveEntry::new_file("tool.sh");
+        entry.has_windows_attributes = true;
+        // Upper half carries the Unix mode (p7zip convention); 0x8000
+        // is the "Unix extension" marker bit p7zip sets in the lower half.
+        entry.windows_attributes = (0o755 << 16) | 0x8000;
+        entry.has_last_modified_date = true;
+        // 2010-01-02T03:04:06Z as NT time (100-ns ticks since 1601).
+        let unix_secs: u64 = 1_262_401_446;
+        entry.last_modified_date =
+            sevenz_rust2::NtTime::new(unix_secs * 10_000_000 + 116_444_736_000_000_000);
+        writer
+            .push_archive_entry(entry, Some(&b"#!/bin/sh\n"[..]))
+            .unwrap();
+        writer.finish().unwrap();
+        let expected_mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix_secs);
+
+        let archive = SevenZArchive::open(&archive_path).unwrap();
+
+        let preserved = temp.path().join("preserved");
+        std::fs::create_dir_all(&preserved).unwrap();
+        archive
+            .extract_all_with_options(&preserved, None, true, true, true, false, None)
+            .unwrap();
+        let meta = std::fs::metadata(preserved.join("tool.sh")).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o755);
+        assert_eq!(meta.modified().unwrap(), expected_mtime);
+
+        let plain = temp.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        archive
+            .extract_all_with_options(&plain, None, true, false, false, false, None)
+            .unwrap();
+        let meta = std::fs::metadata(plain.join("tool.sh")).unwrap();
+        assert_eq!(
+            meta.permissions().mode() & 0o111,
+            0,
+            "exec bits must not be applied when preserve_permissions = false"
+        );
+        assert_ne!(meta.modified().unwrap(), expected_mtime);
+    }
+
+    /// R0079-0024: after a fatal per-entry error the walk must stop
+    /// materializing entries — upstream keeps invoking the callback
+    /// for later blocks, so without the guard `second.txt` would still
+    /// be written.
+    #[test]
+    fn test_sevenz_extract_all_stops_after_fatal_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("two_files.7z");
+        let mut writer = sevenz_rust2::ArchiveWriter::create(&archive_path).unwrap();
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file("first.txt"),
+                Some(&b"first"[..]),
+            )
+            .unwrap();
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file("second.txt"),
+                Some(&b"second"[..]),
+            )
+            .unwrap();
+        writer.finish().unwrap();
+
+        let dest = temp.path().join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        // Pre-existing file + overwrite=false makes the first entry
+        // fail deterministically.
+        std::fs::write(dest.join("first.txt"), b"existing").unwrap();
+
+        let archive = SevenZArchive::open(&archive_path).unwrap();
+        let err = archive
+            .extract_all_with_options(&dest, None, false, true, true, false, None)
+            .unwrap_err();
+        assert!(
+            matches!(err, ArchiveError::OperationBlocked { .. }),
+            "got {err:?}"
+        );
+        assert!(!dest.join("second.txt").exists());
+    }
+
+    /// OI-0076-002: duplicate entry names are ambiguous for single-entry
+    /// APIs — the shared gate refuses to pick one (the previous
+    /// first-match behavior is deliberately superseded). R0079-0024's
+    /// block-stop guard still matters for the walk itself: once the
+    /// validated id has been handled, the callback must stop decoding
+    /// later blocks.
+    #[test]
+    fn test_sevenz_extract_to_memory_duplicate_names_blocked() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("dup.7z");
+        let mut writer = sevenz_rust2::ArchiveWriter::create(&archive_path).unwrap();
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file("dup.txt"),
+                Some(&b"first copy"[..]),
+            )
+            .unwrap();
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file("dup.txt"),
+                Some(&b"second copy"[..]),
+            )
+            .unwrap();
+        writer.finish().unwrap();
+
+        let archive = SevenZArchive::open(&archive_path).unwrap();
+        let err = archive.extract_to_memory("dup.txt").unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ArchiveError::OperationBlocked { reason, .. }
+                    if reason.contains("Multiple entries match")
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// R0080-0030: a corrupt regular-file payload must be recorded in the
+    /// failed list, not abort `test_integrity` with an error. Only genuine
+    /// archive-file I/O errors propagate. COPY (stored) compression is used
+    /// so flipping one packed byte leaves the framing intact but breaks the
+    /// entry CRC, exercising the checksum-verification failure path.
+    #[test]
+    fn test_sevenz_integrity_records_corrupt_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("corrupt.7z");
+        let payload = b"unified-archive integrity payload marker bytes";
+
+        let mut writer = sevenz_rust2::ArchiveWriter::create(&archive_path).unwrap();
+        writer.set_content_methods(vec![sevenz_rust2::EncoderConfiguration::new(
+            sevenz_rust2::EncoderMethod::COPY,
+        )]);
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file("data.txt"),
+                Some(&payload[..]),
+            )
+            .unwrap();
+        writer.finish().unwrap();
+
+        // COPY stores the payload verbatim; flip one packed byte so the
+        // stored entry CRC no longer matches while the TOC stays intact.
+        let mut bytes = std::fs::read(&archive_path).unwrap();
+        let at = bytes
+            .windows(payload.len())
+            .position(|w| w == &payload[..])
+            .expect("stored payload present in archive");
+        bytes[at] ^= 0xFF;
+        std::fs::write(&archive_path, &bytes).unwrap();
+
+        let archive = SevenZArchive::open(&archive_path).unwrap();
+        let failed = archive
+            .test_integrity()
+            .expect("corrupt payload must be recorded, not abort the walk");
+        assert_eq!(failed, vec!["data.txt".to_string()]);
+    }
+
+    /// R0001-0024: an entry that decodes *short* must be recorded as an
+    /// integrity failure. Upstream's `Crc32VerifyingReader` compares the
+    /// digest only once its declared byte budget is consumed, so a clean
+    /// early EOF never reaches the comparison — the old drain loop saw
+    /// `Ok(0)`, broke, and reported the archive as valid.
+    ///
+    /// The fixture removes the tail of the COPY-stored pack stream and
+    /// slides the trailing header back over it, fixing the signature
+    /// header's `NextHeaderOffset` and `StartHeaderCRC` so the TOC still
+    /// parses and still declares the full unpacked size.
+    #[test]
+    fn test_sevenz_integrity_records_short_entry() {
+        const SIGNATURE_HEADER_SIZE: usize = 32;
+        const REMOVED: u64 = 10_000;
+
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("short.7z");
+        let payload: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+
+        let mut writer = sevenz_rust2::ArchiveWriter::create(&archive_path).unwrap();
+        writer.set_content_methods(vec![sevenz_rust2::EncoderConfiguration::new(
+            sevenz_rust2::EncoderMethod::COPY,
+        )]);
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file("data.txt"),
+                Some(&payload[..]),
+            )
+            .unwrap();
+        writer.finish().unwrap();
+
+        // Signature header layout: [8..12] StartHeaderCRC over [12..32],
+        // [12..20] NextHeaderOffset (relative to the 32-byte signature
+        // header), [20..28] NextHeaderSize, [28..32] NextHeaderCRC.
+        let mut bytes = std::fs::read(&archive_path).unwrap();
+        let next_header_offset = u64::from_le_bytes(bytes[12..20].try_into().unwrap());
+        let header_start = SIGNATURE_HEADER_SIZE + next_header_offset as usize;
+        // 0x01 = kHeader (raw). A kEncodedHeader (0x17) would put a second
+        // packed stream inside the region this fixture truncates.
+        assert_eq!(
+            bytes[header_start], 0x01,
+            "fixture assumes sevenz-rust2 wrote a raw (unencoded) 7z header"
+        );
+        assert!(next_header_offset > REMOVED);
+
+        bytes.drain(header_start - REMOVED as usize..header_start);
+        bytes[12..20].copy_from_slice(&(next_header_offset - REMOVED).to_le_bytes());
+        let start_header_crc = crc32fast::hash(&bytes[12..SIGNATURE_HEADER_SIZE]);
+        bytes[8..12].copy_from_slice(&start_header_crc.to_le_bytes());
+        std::fs::write(&archive_path, &bytes).unwrap();
+
+        let archive = SevenZArchive::open(&archive_path).unwrap();
+        // The TOC survived: the entry still declares the full payload size.
+        let entries = archive.list_files().unwrap();
+        assert_eq!(entries.first().unwrap().size, Some(payload.len() as u64));
+
+        let failed = archive
+            .test_integrity()
+            .expect("a short payload is an integrity failure, not an operational error");
+        assert_eq!(failed, vec!["data.txt".to_string()]);
+    }
+
+    /// R0001-0059: NT time counts from 1601-01-01, so 1601..1970 values
+    /// are valid instants. They used to be dropped by the
+    /// `checked_sub(unix_epoch_nt)` baseline; `SystemTime` represents them
+    /// fine. 1960-01-01T00:00:00Z is 3653 days (three leap years) before
+    /// the Unix epoch.
+    #[test]
+    fn test_sevenz_pre_epoch_modified_time_is_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("pre_epoch.7z");
+        let mut writer = sevenz_rust2::ArchiveWriter::create(&archive_path).unwrap();
+        let mut entry = sevenz_rust2::ArchiveEntry::new_file("old.txt");
+        entry.has_last_modified_date = true;
+        let before_epoch_secs: u64 = 3653 * 86_400;
+        entry.last_modified_date =
+            sevenz_rust2::NtTime::new(116_444_736_000_000_000 - before_epoch_secs * 10_000_000);
+        writer
+            .push_archive_entry(entry, Some(&b"vintage"[..]))
+            .unwrap();
+        writer.finish().unwrap();
+
+        let expected = std::time::UNIX_EPOCH - std::time::Duration::from_secs(before_epoch_secs);
+        let archive = SevenZArchive::open(&archive_path).unwrap();
+        let entries = archive.list_files().unwrap();
+        assert_eq!(entries.first().unwrap().modified, Some(expected));
+    }
+
+    /// R0001-0022: a p7zip entry whose Unix mode carries a non-regular,
+    /// non-directory `S_IFMT` (here `S_IFIFO`) must list as
+    /// `EntryType::Other`, must not be materialized by bulk extraction,
+    /// and must be refused by the single-entry gate. Previously it was
+    /// classified as a regular file and decoded under file semantics.
+    #[test]
+    fn test_sevenz_special_unix_mode_lists_other_and_is_not_materialized() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("special.7z");
+        let mut writer = sevenz_rust2::ArchiveWriter::create(&archive_path).unwrap();
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file("plain.txt"),
+                Some(&b"plain content"[..]),
+            )
+            .unwrap();
+        let mut fifo = sevenz_rust2::ArchiveEntry::new_file("pipe");
+        fifo.has_windows_attributes = true;
+        // S_IFIFO | 0644 in the attribute word's upper half; 0x8000 is the
+        // "Unix extension" marker bit p7zip sets in the lower half.
+        fifo.windows_attributes = (0o010644 << 16) | 0x8000;
+        writer
+            .push_archive_entry(fifo, Some(&b"not a real fifo payload"[..]))
+            .unwrap();
+        writer.finish().unwrap();
+
+        let archive = SevenZArchive::open(&archive_path).unwrap();
+        let entries = archive.list_files().unwrap();
+        let by_path = |p: &str| entries.iter().find(|e| e.path == p).unwrap();
+        assert_eq!(by_path("pipe").entry_type, EntryType::Other);
+        assert_eq!(by_path("plain.txt").entry_type, EntryType::File);
+
+        let dest = temp.path().join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+        archive
+            .extract_all_with_options(&dest, None, true, true, true, false, None)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(dest.join("plain.txt")).unwrap(),
+            b"plain content"
+        );
+        assert!(
+            !dest.join("pipe").exists(),
+            "a special-mode entry must not be materialized as a regular file"
+        );
+
+        // The shared single-entry gate refuses non-regular entries.
+        let err = archive.extract_to_memory("pipe").unwrap_err();
+        assert!(
+            matches!(err, ArchiveError::OperationBlocked { .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// R0001-0060: `preserve_permissions` / `preserve_times` reached only
+    /// the file writer, leaving extracted directories with the umask mode
+    /// and the creation-time mtime. The deferred deepest-first pass must
+    /// restore both — after the directory's children are installed, so the
+    /// child writes cannot re-stamp the parent.
+    #[test]
+    #[cfg(unix)]
+    fn test_sevenz_extract_restores_directory_metadata() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("dirmeta.7z");
+        let unix_secs: u64 = 1_400_000_000;
+        let mut writer = sevenz_rust2::ArchiveWriter::create(&archive_path).unwrap();
+        let mut dir = sevenz_rust2::ArchiveEntry::new_directory("subdir");
+        dir.has_windows_attributes = true;
+        // S_IFDIR | 0750 in the attribute word's upper half.
+        dir.windows_attributes = (0o040750 << 16) | 0x8000;
+        dir.has_last_modified_date = true;
+        dir.last_modified_date =
+            sevenz_rust2::NtTime::new(unix_secs * 10_000_000 + 116_444_736_000_000_000);
+        writer.push_archive_entry(dir, None::<&[u8]>).unwrap();
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file("subdir/child.txt"),
+                Some(&b"child content"[..]),
+            )
+            .unwrap();
+        writer.finish().unwrap();
+        let expected_mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix_secs);
+
+        let archive = SevenZArchive::open(&archive_path).unwrap();
+        let entries = archive.list_files().unwrap();
+        let listed_dir = entries.iter().find(|e| e.path == "subdir").unwrap();
+        assert_eq!(listed_dir.entry_type, EntryType::Directory);
+
+        let preserved = temp.path().join("preserved");
+        std::fs::create_dir_all(&preserved).unwrap();
+        archive
+            .extract_all_with_options(&preserved, None, true, true, true, false, None)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(preserved.join("subdir/child.txt")).unwrap(),
+            b"child content"
+        );
+        let meta = std::fs::metadata(preserved.join("subdir")).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o750);
+        assert_eq!(meta.modified().unwrap(), expected_mtime);
+
+        let plain = temp.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        archive
+            .extract_all_with_options(&plain, None, true, false, false, false, None)
+            .unwrap();
+        let meta = std::fs::metadata(plain.join("subdir")).unwrap();
+        assert_ne!(
+            meta.modified().unwrap(),
+            expected_mtime,
+            "directory mtime must not be applied when preserve_times = false"
+        );
+    }
+    /// Build a 7z that repeats one listing path, where the first
+    /// occurrence carries **no** kCRC digest.
+    ///
+    /// `ArchiveEntry::new_file` with a `None` payload produces a
+    /// no-stream entry: `has_crc` stays false, so
+    /// [`SevenZArchive::entry_crc32`] lists `crc32: None` for it. The
+    /// second occurrence is a streamed member and does carry a digest.
+    /// The pair is therefore the minimal 7z that reaches the
+    /// content-multiset digest walk's streaming arm *and* trips the
+    /// by-path single-entry gate.
+    fn build_crcless_duplicate_path_archive(dir: &Path) -> PathBuf {
+        let path = dir.join("dup-crcless.7z");
+        let mut writer = sevenz_rust2::ArchiveWriter::create(&path).unwrap();
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file("dup.txt"),
+                None::<&[u8]>,
+            )
+            .unwrap();
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file("dup.txt"),
+                Some(&b"seven content"[..]),
+            )
+            .unwrap();
+        writer.finish().unwrap();
+        path
+    }
+
+    /// The listing precondition the two tests below rest on: a 7z file
+    /// entry really can carry `crc32: None`, so the claim that "7z carries
+    /// a real per-entry CRC32 for every file entry" is false and the
+    /// digest walk really does reach 7z's streaming arm.
+    #[test]
+    fn test_sevenz_crcless_file_entry_can_repeat_a_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = build_crcless_duplicate_path_archive(temp.path());
+        let entries = SevenZArchive::open(&archive_path)
+            .unwrap()
+            .list_files()
+            .unwrap();
+
+        let dups: Vec<_> = entries.iter().filter(|e| e.path == "dup.txt").collect();
+        assert_eq!(dups.len(), 2, "both occurrences must be listed");
+        assert!(
+            dups.iter().all(|e| e.entry_type == crate::EntryType::File),
+            "both occurrences must list as file entries"
+        );
+        assert_eq!(
+            dups[0].crc32, None,
+            "no-stream entry carries no kCRC digest"
+        );
+        assert_eq!(dups[1].crc32, Some(crc32fast::hash(b"seven content")));
+    }
+
+    /// Id-addressed streaming reaches each occurrence's own payload
+    /// instead of aliasing to the first (OI-0076-002).
+    #[test]
+    fn test_sevenz_extract_to_stream_by_listing_id_hits_each_occurrence() {
+        use std::io::Read as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = build_crcless_duplicate_path_archive(temp.path());
+        let archive = SevenZArchive::open(&archive_path).unwrap();
+        let entries = archive.list_files().unwrap();
+        let ids: Vec<usize> = entries
+            .iter()
+            .filter(|e| e.path == "dup.txt")
+            .map(|e| e.id)
+            .collect();
+
+        let read_id = |id: usize| {
+            let mut buf = Vec::new();
+            archive
+                .extract_to_stream_by_listing_id(id, "dup.txt")
+                .unwrap()
+                .read_to_end(&mut buf)
+                .unwrap();
+            buf
+        };
+        assert_eq!(read_id(ids[0]), b"");
+        assert_eq!(read_id(ids[1]), b"seven content");
+
+        // The drift guard still refuses a name that disagrees with the id.
+        assert!(
+            archive
+                .extract_to_stream_by_listing_id(ids[1], "other.txt")
+                .is_err(),
+            "listing drift must be refused"
+        );
+    }
+
+    /// The regression this whole seam exists for, asserted at the
+    /// **facade** — the only altitude that exercises the
+    /// `ReadBackend::extract_to_stream_by_listing_id` forward. Calling the
+    /// inherent method (the test above) passes with or without the
+    /// forward; without it, this one fails with `OperationBlocked
+    /// { reason: "Multiple entries match ..." }` from
+    /// `security::validate_single_entry`, exactly as ZIP did between the
+    /// DCR-012 listing change and its own forward being wired.
+    #[test]
+    fn test_sevenz_crcless_duplicate_path_digests_through_the_facade() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = build_crcless_duplicate_path_archive(temp.path());
+
+        let (digest, total_size) = crate::Archive::open(&archive_path)
+            .unwrap()
+            .calculate_content_multiset_digest_and_size()
+            .expect("a CRC-less duplicate-path 7z must still digest");
+
+        // One element per file entry: the empty no-stream occurrence's
+        // streamed payload, and the listed digest of the streamed one.
+        let mut elements = [
+            format!("{:08x}", crc32fast::hash(b"")),
+            format!("{:08x}", crc32fast::hash(b"seven content")),
+        ];
+        elements.sort();
+        assert_eq!(
+            digest,
+            format!("{:08x}", crc32fast::hash(elements.join(",").as_bytes()))
+        );
+        assert_eq!(total_size, b"seven content".len() as u64);
     }
 }

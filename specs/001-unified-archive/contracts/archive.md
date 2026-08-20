@@ -5,7 +5,7 @@
 **Status**: Implemented (retrospective documentation)
 **Purpose**: Define public API for opening, closing, and managing archive handles
 
-> **Post-v0.1.0 reality check (2026-04-18):** Contract text below has drifted from the shipped 0.1.0 crate. Canonical behavior is in `src/archive.rs`, `src/error.rs`, `docs/API_REFERENCE.md`. Known deltas: (1) `Archive::open_at_offset()` / `Archive::open_sfx()` are **shipped** (temp-file-backed), not deferred; (2) `ArchiveError` has no `UnsupportedOperation` variant — use `WriteModeOnly` / `ReadOnlyBackend` / `NotImplemented` / `OperationBlocked`; (3) standalone `.gz` / `.bz2` / `.xz` are openable via `Archive::open()` per AD 0019 (only stream *creation* is out of scope per AD 0018).
+> **Post-v0.1.0 reality check (2026-04-18):** Contract text below has drifted from the shipped 0.1.0 crate. Canonical behavior is in `src/archive.rs`, `src/error.rs`, `docs/API_REFERENCE.md`. Known deltas: (1) `Archive::open_at_offset()` / `Archive::open_sfx()` are **shipped** (temp-file-backed), not deferred; (2) `ArchiveError` has no `UnsupportedOperation` variant — use `WriteModeOnly` / `ReadOnlyBackend` / `NotImplemented` / `OperationBlocked`; (3) standalone `.gz` / `.bz2` / `.xz` are openable via `Archive::open()` per MADR-0019 (only stream *creation* is out of scope per AD 0018).
 
 ## Overview
 

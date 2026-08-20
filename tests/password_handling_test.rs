@@ -65,148 +65,133 @@ fn test_open_encrypted_rar_with_correct_password() {
     );
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_open_encrypted_rar_with_wrong_password() {
-    // Test that wrong password is properly detected
-    let archive_result = Archive::open_encrypted(
+    // A wrong password is not rejected at open time: password validation is
+    // deferred to extraction by design (AD 0014). The contract asserted here is
+    // that opening still succeeds and that extraction then fails.
+    let archive = Archive::open_encrypted(
         fixtures_dir().join("test_encrypted_data.rar"),
         "wrongpassword",
-    );
+    )
+    .expect("open_encrypted defers password validation and must succeed (AD 0014)");
 
-    // Opening may succeed (password not verified until extraction)
-    if let Ok(archive) = archive_result {
-        // Try to list files or extract - should fail
-        let temp_dest = std::env::temp_dir().join("wrong_password_test");
-        fs::create_dir_all(&temp_dest).ok();
+    let temp_dest = std::env::temp_dir().join("wrong_password_test");
+    fs::create_dir_all(&temp_dest).ok();
 
-        let options = common::default_extraction_options(temp_dest.clone());
+    let options = common::default_extraction_options(temp_dest.clone());
 
-        let result = archive.extract_all(options);
-        fs::remove_dir_all(&temp_dest).ok();
+    let result = archive.extract_all(options);
+    fs::remove_dir_all(&temp_dest).ok();
 
-        // Should get a password error
-        assert!(
-            result.is_err(),
-            "Expected extraction to fail with wrong password"
-        );
-
-        match result.unwrap_err() {
-            ArchiveError::Password { message } => {
-                assert!(
-                    message.contains("password") || message.contains("Password"),
-                    "Expected password error message, got: {}",
-                    message
-                );
-            }
-            other => {
-                // Format or corruption errors are also acceptable (different backends)
-                println!("Got error (acceptable): {:?}", other);
-            }
+    // Extraction with the wrong password must fail.
+    let err = result.expect_err("extraction must fail with a wrong password");
+    match err {
+        ArchiveError::Password { message } => {
+            assert!(
+                message.contains("password") || message.contains("Password"),
+                "Expected password error message, got: {}",
+                message
+            );
+        }
+        other => {
+            // Format or corruption errors are also acceptable (different backends)
+            println!("Got error (acceptable): {:?}", other);
         }
     }
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_open_encrypted_rar_without_password() {
-    // Test that opening encrypted archive without password fails appropriately
-    let archive = Archive::open(fixtures_dir().join("test_encrypted_data.rar"));
+    // Opening a RAR with non-encrypted headers succeeds even without a password;
+    // password validation is deferred to extraction (AD 0014).
+    let archive = Archive::open(fixtures_dir().join("test_encrypted_data.rar"))
+        .expect("opening an encrypted RAR without a password must succeed for listing");
 
-    if let Ok(arch) = archive {
-        // Archive may open successfully (encryption detected during read)
-        let temp_dest = std::env::temp_dir().join("no_password_test");
-        fs::create_dir_all(&temp_dest).ok();
+    let temp_dest = std::env::temp_dir().join("no_password_test");
+    fs::create_dir_all(&temp_dest).ok();
 
-        let options = common::default_extraction_options(temp_dest.clone());
+    let options = common::default_extraction_options(temp_dest.clone());
 
-        let result = arch.extract_all(options);
-        fs::remove_dir_all(&temp_dest).ok();
+    let result = archive.extract_all(options);
+    fs::remove_dir_all(&temp_dest).ok();
 
-        // Should fail with password error
-        assert!(
-            result.is_err(),
-            "Expected extraction to fail without password"
-        );
-
-        match result.unwrap_err() {
-            ArchiveError::Password { message } => {
-                assert!(
-                    message.contains("password")
-                        || message.contains("Password")
-                        || message.contains("required"),
-                    "Expected password required message, got: {}",
-                    message
-                );
-            }
-            other => {
-                println!("Got error (may be acceptable): {:?}", other);
-            }
+    // Extraction without a password must fail.
+    let err = result.expect_err("extraction without a password must fail");
+    match err {
+        ArchiveError::Password { message } => {
+            assert!(
+                message.contains("password")
+                    || message.contains("Password")
+                    || message.contains("required"),
+                "Expected password required message, got: {}",
+                message
+            );
+        }
+        other => {
+            println!("Got error (may be acceptable): {:?}", other);
         }
     }
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_password_does_not_leak_in_errors() {
-    // Verify that passwords are not exposed in error messages
-    let result = Archive::open_encrypted(
+    // Verify that passwords are not exposed in error messages.
+    let archive = Archive::open_encrypted(
         fixtures_dir().join("test_encrypted_data.rar"),
         "secretpassword123",
+    )
+    .expect("open_encrypted defers password validation and must succeed (AD 0014)");
+
+    // Force an error by trying to extract a non-existent file.
+    let temp_dest = std::env::temp_dir().join("password_leak_test");
+    fs::create_dir_all(&temp_dest).ok();
+
+    let options = common::default_extraction_options(temp_dest.clone());
+
+    let outcome = archive.extract_file("nonexistent.txt", options);
+    fs::remove_dir_all(&temp_dest).ok();
+
+    // Extracting a non-existent entry must fail, and the password must never
+    // appear in the resulting error message.
+    let err = outcome.expect_err("extracting a non-existent entry must fail");
+    let error_string = format!("{:?}", err);
+    assert!(
+        !error_string.contains("secretpassword123"),
+        "Password leaked in error message: {}",
+        error_string
     );
-
-    // Try to trigger an error and verify password is not in error message
-    if let Ok(archive) = result {
-        // Force an error by trying to extract non-existent file
-        let temp_dest = std::env::temp_dir().join("password_leak_test");
-        fs::create_dir_all(&temp_dest).ok();
-
-        let options = common::default_extraction_options(temp_dest.clone());
-
-        match archive.extract_file("nonexistent.txt", options) {
-            Err(e) => {
-                let error_string = format!("{:?}", e);
-                assert!(
-                    !error_string.contains("secretpassword123"),
-                    "Password leaked in error message: {}",
-                    error_string
-                );
-            }
-            Ok(_) => {
-                // File doesn't exist, so this shouldn't succeed
-            }
-        }
-
-        fs::remove_dir_all(&temp_dest).ok();
-    }
-
-    // Test passes if password is not in any error messages
 }
 
+#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_encrypted_metadata_available_without_password() {
-    // Test that file list and metadata can be accessed without password
-    // (This is format-dependent: RAR with non-encrypted headers allows listing)
-    let archive = Archive::open(fixtures_dir().join("test_encrypted_data.rar"));
+    // File list and metadata are accessible without a password for RAR archives
+    // with non-encrypted headers.
+    let archive = Archive::open(fixtures_dir().join("test_encrypted_data.rar"))
+        .expect("opening an encrypted RAR with non-encrypted headers must succeed");
 
-    if let Ok(arch) = archive {
-        // RAR allows listing files without password
-        let result = arch.list_files();
+    // RAR allows listing files without a password.
+    let entries = archive
+        .list_files()
+        .expect("listing an encrypted RAR with non-encrypted headers must succeed");
 
-        if let Ok(entries) = result {
-            // Can list files
-            assert!(
-                !entries.is_empty(),
-                "Should be able to list encrypted archive files"
-            );
+    assert!(
+        !entries.is_empty(),
+        "Should be able to list encrypted archive files"
+    );
 
-            // Check encryption flag is set
-            let has_encrypted = entries.iter().any(|e| e.is_encrypted);
-            assert!(
-                has_encrypted,
-                "Should detect that archive contains encrypted files"
-            );
-        }
-    }
+    // The encryption flag must be set on the encrypted entries.
+    let has_encrypted = entries.iter().any(|e| e.is_encrypted);
+    assert!(
+        has_encrypted,
+        "Should detect that archive contains encrypted files"
+    );
 }

@@ -429,3 +429,32 @@ fn test_unified_extraction_api_consistency() {
         common::cleanup(&temp);
     }
 }
+
+// ── R0064-0024: `ExtractionOptions.filter` wiring ──
+
+#[test]
+fn test_extract_all_honors_options_filter() {
+    let temp = common::temp_test_dir();
+    let archive = Archive::open(common::fixture("batch_test.zip")).expect("open batch_test.zip");
+
+    let mut options = common::default_extraction_options(temp.clone());
+    options.filter = Some(Box::new(|entry| entry.path == "file2.txt"));
+
+    archive
+        .extract_all(options)
+        .expect("extract_all with filter should succeed");
+
+    assert!(temp.join("file2.txt").exists(), "filtered entry present");
+    assert!(!temp.join("file1.txt").exists(), "non-selected absent");
+    assert!(!temp.join("file3.txt").exists(), "non-selected absent");
+    assert!(!temp.join("subdir").exists(), "non-selected dir absent");
+
+    common::cleanup(&temp);
+}
+
+// AD 0007 collapse (2026-07-23): the `max_mmap_size` limit and the
+// memory-mapped piz backend it gated were removed; the sole `zip`-crate
+// ZIP backend reads over `File` and never memory-maps. The former
+// `test_extract_all_respects_max_mmap_size_limit` (and the standalone
+// `large_zip_mmap_test.rs`) asserted an enforcement path that no longer
+// exists, so both were dropped rather than left asserting dead behaviour.

@@ -8,7 +8,7 @@
 //! 3-stage detection process with early exit optimization:
 //! 1. **Executable Validation** (~1ms): Check if file is PE/ELF/Mach-O/Script
 //! 2. **Signature Scanning** (~10-50ms): Search first 1MB for archive signatures
-//! 3. **Archive Validation** (~10-20ms): Verify archive structure at detected offset
+//! 3. **Heuristic Screening** (~10-20ms): Screen for a plausible archive header at the detected offset
 //!
 //! ## Platform Support
 //!
@@ -24,11 +24,11 @@
 //!
 //! // Detect if file is SFX
 //! let result = Archive::detect_sfx("installer.exe")?;
-//! if result.is_sfx {
+//! if result.is_sfx() {
 //!     println!("SFX detected: {}", result.summary());
-//!     println!("Archive offset: {:?}", result.data_offset);
-//!     println!("Stub type: {:?}", result.stub_type);
-//!     println!("Archive format: {:?}", result.archive_format);
+//!     println!("Archive offset: {:?}", result.data_offset());
+//!     println!("Stub type: {:?}", result.stub_type());
+//!     println!("Archive format: {:?}", result.archive_format());
 //! }
 //!
 //! // Open SFX archive directly
@@ -38,12 +38,12 @@
 //! ```
 
 pub mod detection;
+pub(crate) mod limits;
 pub mod result;
-pub mod signatures;
+pub(crate) mod signatures;
 pub mod stub_types;
 
 // Re-export public types
 pub use detection::detect_sfx;
-pub use result::SfxDetectionResult;
-pub use signatures::{Signature, find_first_signature, scan_for_signatures};
+pub use result::{SfxConfidence, SfxDetectionResult};
 pub use stub_types::StubType;

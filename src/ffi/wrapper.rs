@@ -7,20 +7,42 @@ use crate::error::{ArchiveError, ArchiveWarning, Result};
 use crate::ffi::unrar::*;
 use crate::format::ArchiveFormat;
 use crate::options::{ProgressCallback, RateLimiter};
+use crate::password::Password;
 use crate::security::sanitize_entry_path;
-use secstr::SecStr;
+use once_cell::sync::OnceCell;
 use std::ffi::CString;
-use std::ops::ControlFlow;
 use std::os::raw::{c_int, c_uint};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::common::{TempDirGuard, normalize_path};
+use super::common::normalize_path;
 use tempfile::NamedTempFile;
 
 /// Seconds between Windows FILETIME epoch (1601-01-01) and Unix epoch (1970-01-01)
 const FILETIME_UNIX_EPOCH_DIFF_SECS: u64 = 11_644_473_600;
+
+/// Convert a Windows FILETIME (high+low 32-bit halves, 100-ns ticks since
+/// 1601-01-01 UTC) into a `SystemTime`, or `None` for pre-1970 timestamps
+/// rather than collapsing them to UNIX_EPOCH (R0069-0030). Returns `None`
+/// when both halves are zero so callers don't have to pre-check for
+/// "missing timestamp". Sub-second ticks are preserved as nanoseconds
+/// instead of being truncated away (R0076-0069).
+fn filetime_to_system_time(low: u32, high: u32) -> Option<SystemTime> {
+    if low == 0 && high == 0 {
+        return None;
+    }
+    let ticks = (high as u64) << 32 | (low as u64);
+    let secs = ticks / 10_000_000;
+    if secs < FILETIME_UNIX_EPOCH_DIFF_SECS {
+        // Pre-epoch — surface as "unknown" instead of clamping to 1970-01-01.
+        return None;
+    }
+    // Each tick is 100 ns; the remainder is < 10^7, so `* 100` stays below
+    // one second in nanoseconds and cannot overflow u32 (R0076-0069).
+    let subsec_nanos = (ticks % 10_000_000) as u32 * 100;
+    Some(UNIX_EPOCH + std::time::Duration::new(secs - FILETIME_UNIX_EPOCH_DIFF_SECS, subsec_nanos))
+}
 
 /// Process-wide serialization lock for UnRAR FFI calls.
 ///
@@ -31,16 +53,100 @@ const FILETIME_UNIX_EPOCH_DIFF_SECS: u64 = 11_644_473_600;
 /// CRC / header corruption observed in concurrent-use testing.
 ///
 /// The lock is acquired at small scopes (one `unsafe { ffi_call() }` each),
-/// never re-entrantly, so throughput is only affected when multiple threads
-/// actually contend. Poisoning is recovered by reading past the poison — each
-/// FFI call is stateless with respect to the poisoned thread's archive
-/// handle, so there is no cross-contamination risk.
+/// so throughput is only affected when multiple threads actually contend.
+/// Poisoning is recovered by reading past the poison — each FFI call is
+/// stateless with respect to the poisoned thread's archive handle, so there
+/// is no cross-contamination risk.
 static UNRAR_LOCK: Mutex<()> = Mutex::new(());
 
+thread_local! {
+    /// Set while this thread holds [`UNRAR_LOCK`]. The R0080-0022
+    /// `UCM_PROCESSDATA` trampoline runs the caller's progress callback
+    /// *while the lock is held*; because the mutex is non-reentrant, a
+    /// callback that starts another UnRAR operation on the same thread would
+    /// re-acquire the lock and deadlock the whole process permanently. This
+    /// sentinel lets [`unrar_lock`] detect same-thread re-entry and return a
+    /// typed error instead (R0081-0063).
+    static IN_UNRAR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// RAII guard returned by [`unrar_lock`]. Owns the process-wide
+/// [`UNRAR_LOCK`] mutex guard and clears the thread-local re-entrancy
+/// sentinel when dropped (R0081-0063).
+struct UnrarLockGuard {
+    _guard: MutexGuard<'static, ()>,
+}
+
+impl Drop for UnrarLockGuard {
+    fn drop(&mut self) {
+        IN_UNRAR.set(false);
+    }
+}
+
 /// Acquire the UnRAR FFI lock, recovering from poison.
+///
+/// Rejects same-thread re-entry with a typed error rather than
+/// self-deadlocking (R0081-0063): the `UCM_PROCESSDATA` trampoline invokes
+/// caller code (the progress callback) while this lock is held, so a callback
+/// that attempts another UnRAR operation on the same thread would otherwise
+/// block forever on the non-reentrant mutex. `try_lock` is deliberately *not*
+/// used — legitimate cross-thread contention must still block, because
+/// UnRAR's global state is not thread-safe and the mutex exists to serialize
+/// it; turning that contention into a spurious error would be wrong. A
+/// thread-local sentinel distinguishes the two cases.
 #[inline]
-fn unrar_lock() -> MutexGuard<'static, ()> {
-    UNRAR_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+fn unrar_lock() -> Result<UnrarLockGuard> {
+    if IN_UNRAR.get() {
+        return Err(ArchiveError::operation_blocked(
+            crate::error::ops::EXTRACT,
+            "re-entrant UnRAR access detected: a progress callback (or other code running during extraction) attempted another archive operation on the same thread; this is unsupported and would deadlock",
+        ));
+    }
+    // Mark the thread as holding the lock before we block on acquisition;
+    // the sentinel is thread-local, so it only ever gates *this* thread's
+    // re-entry and never interferes with legitimate cross-thread blocking.
+    IN_UNRAR.set(true);
+    let guard = UNRAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(UnrarLockGuard { _guard: guard })
+}
+
+/// Identity of the archive file captured at [`UnrarArchive`] construction,
+/// used to detect a swap-under-us before recovery metadata is re-parsed
+/// from a fresh open (R0080-0061). Unix-only: `(dev, ino)`. On other
+/// platforms this is a zero-sized marker and revalidation is skipped —
+/// mirroring the `modification::LockedFileIdentity` approach.
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct UnrarFileIdentity(crate::fs_identity::InodeId);
+
+#[cfg(not(unix))]
+#[expect(
+    dead_code,
+    reason = "non-Unix zero-sized identity marker; drift revalidation is Unix-only, so this variant is never constructed off-Unix"
+)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct UnrarFileIdentity;
+
+/// Capture `path`'s `(dev, ino)` identity. Best-effort: a `stat` failure
+/// simply disables the later drift check rather than blocking `open`.
+/// Returns `None` on non-Unix.
+///
+/// UnRAR is a path-only backend: the SDK's `RAROpenArchiveEx` takes a
+/// pathname and cannot accept a descriptor, so an owned-fd hand-off is
+/// impossible here regardless of platform. This by-name capture +
+/// re-`stat` comparison is the strongest guard available (R0080-0061;
+/// see [`crate::fs_identity`] for why the fd hand-off was rejected for
+/// the fd-capable libarchive backend too).
+#[cfg(unix)]
+fn capture_file_identity(path: &Path) -> Option<UnrarFileIdentity> {
+    std::fs::metadata(path)
+        .ok()
+        .map(|m| UnrarFileIdentity(crate::fs_identity::InodeId::from_metadata(&m)))
+}
+
+#[cfg(not(unix))]
+fn capture_file_identity(_path: &Path) -> Option<UnrarFileIdentity> {
+    None
 }
 
 /// Safe wrapper around UnRAR archive handle
@@ -48,20 +154,42 @@ fn unrar_lock() -> MutexGuard<'static, ()> {
 /// Automatically closes archive on drop (RAII pattern)
 pub struct UnrarArchive {
     handle: RARHandle,
-    path: String,
-    password: Option<SecStr>,
+    path: PathBuf,
+    password: Option<Password>,
     /// Archive header flags (includes solid, volume, locked flags)
     flags: c_uint,
+    /// Memoised full listing (R0079-0001 / OI-0065-003). UnRAR handles
+    /// are exhausted after one header walk, so `list_files` populates
+    /// this cell via a dedicated fresh handle; every later call shares
+    /// the cached view via `Arc::clone` regardless of how `self.handle`
+    /// has been positioned in between.
+    listing: OnceCell<std::sync::Arc<Vec<ArchiveEntry>>>,
+    /// File identity (`(dev, ino)` on Unix) captured at open, used to
+    /// detect a swap-under-us before re-parsing recovery metadata from a
+    /// fresh open of `self.path` (R0080-0061). `None` when identity could
+    /// not be captured, or on non-Unix where the drift check is skipped.
+    identity: Option<UnrarFileIdentity>,
 }
+
+// SAFETY: `handle` is a raw UnRAR SDK handle owned exclusively by this
+// struct — created in `open_with_mode`, used only inside `&self`/`&mut
+// self` method scopes (never stored elsewhere), and closed exactly once
+// in `Drop`. The handle carries no thread-affine state; the SDK's
+// mutable *global* state is serialised behind `UNRAR_LOCK` around every
+// FFI call, so moving the owner to another thread is sound. All other
+// fields are `Send`, so this impl only restores what the raw pointer
+// suppressed; the auto-derived `!Sync` is kept, so `&UnrarArchive`
+// still cannot be shared across threads (R0079-0015).
+unsafe impl Send for UnrarArchive {}
 
 impl UnrarArchive {
     /// Open RAR/RAR5 archive with specific mode
     fn open_with_mode(path: impl AsRef<Path>, mode: c_uint) -> Result<Self> {
-        let path_str = path.as_ref().to_string_lossy().to_string();
+        let path_buf = path.as_ref().to_path_buf();
 
-        // Try opening with UTF-8 path first
-        let c_path = CString::new(path_str.clone())
-            .map_err(|_| ArchiveError::invalid_path(&path_str, "Contains null byte"))?;
+        // CString preserves raw bytes on Unix (AD 0064). Windows wide-char
+        // path support deferred to OI-0065-001.
+        let c_path = crate::ffi::common::path_to_cstring_checked(&path_buf)?;
 
         unsafe {
             let mut open_data = RAROpenArchiveDataEx {
@@ -70,18 +198,48 @@ impl UnrarArchive {
                 ..Default::default()
             };
 
-            let _guard = unrar_lock();
+            let _guard = unrar_lock()?;
+
+            // R0081-0064: capture the file identity *before* the native open
+            // and re-verify it *after*, both under the lock, so a swap between
+            // capturing identity and binding the handle is detected. Capturing
+            // after the open (as before) would bind the handle to the bytes
+            // seen at open while recording identity for whatever the file was
+            // afterwards, defeating the recovery-metadata revalidation that
+            // relies on this identity (R0080-0061).
+            let identity = capture_file_identity(&path_buf);
             let handle = RAROpenArchiveEx(&mut open_data);
 
             if handle.is_null() || open_data.open_result != ERAR_SUCCESS as u32 {
-                return Err(map_unrar_error(open_data.open_result as c_int, &path_str));
+                return Err(map_unrar_error(open_data.open_result as c_int, &path_buf));
+            }
+
+            // Re-stat and compare. A `None` capture (stat failure or non-Unix)
+            // skips the check, mirroring `revalidate_identity`.
+            if let Some(expected) = identity {
+                if capture_file_identity(&path_buf) != Some(expected) {
+                    // The handle was bound to whatever the open saw; close it
+                    // before surfacing the swap. We already hold the lock, so
+                    // the raw close is correctly serialized (re-acquiring would
+                    // trip the re-entrancy sentinel).
+                    RARCloseArchive(handle);
+                    return Err(ArchiveError::operation_blocked(
+                        "open",
+                        format!(
+                            "archive path {} identity changed during open; refusing to bind a handle whose recorded identity may not match the opened bytes",
+                            path_buf.display()
+                        ),
+                    ));
+                }
             }
 
             Ok(Self {
                 handle,
-                path: path_str,
+                path: path_buf,
                 password: None,
                 flags: open_data.flags,
+                listing: OnceCell::new(),
+                identity,
             })
         }
     }
@@ -102,12 +260,12 @@ impl UnrarArchive {
             .map_err(|_| ArchiveError::password("Password contains null byte"))?;
 
         unsafe {
-            let _guard = unrar_lock();
+            let _guard = unrar_lock()?;
             RARSetPassword(archive.handle, c_password.as_ptr());
         }
 
         // Store password for fresh handle creation
-        archive.password = Some(SecStr::from(password));
+        archive.password = Some(Password::new(password));
 
         Ok(archive)
     }
@@ -117,8 +275,8 @@ impl UnrarArchive {
     /// UnRAR handles get exhausted after list_files(), so extraction operations
     /// need a fresh handle. This creates a new handle with the same path/password.
     fn fresh_handle(&self) -> Result<Self> {
-        if let Some(pwd_str) = crate::options::password_as_str(&self.password)? {
-            Self::open_with_password(&self.path, pwd_str)
+        if let Some(pw) = self.password.as_ref() {
+            Self::open_with_password(&self.path, pw.as_str())
         } else {
             Self::open(&self.path)
         }
@@ -128,7 +286,7 @@ impl UnrarArchive {
     pub fn read_header(&self) -> Result<Option<ArchiveEntry>> {
         unsafe {
             let mut header = RARHeaderDataEx::default();
-            let _guard = unrar_lock();
+            let _guard = unrar_lock()?;
             let result = RARReadHeaderEx(self.handle, &mut header);
             drop(_guard);
 
@@ -145,7 +303,7 @@ impl UnrarArchive {
     /// Skip current entry (move to next)
     pub fn skip_entry(&self) -> Result<()> {
         unsafe {
-            let _guard = unrar_lock();
+            let _guard = unrar_lock()?;
             let result = RARProcessFile(self.handle, RAR_SKIP, std::ptr::null(), std::ptr::null());
 
             if result == ERAR_SUCCESS {
@@ -156,12 +314,53 @@ impl UnrarArchive {
         }
     }
 
-    /// List all files in archive with CRC32
-    pub fn list_files(&self) -> Result<Vec<ArchiveEntry>> {
+    /// List all files in archive with CRC32.
+    ///
+    /// Repeat-safe (R0079-0001): the walk runs on a dedicated fresh
+    /// handle and the result is memoised, so every call returns the
+    /// full listing regardless of call order. Walking `self.handle`
+    /// directly would exhaust it after one pass, making any second
+    /// listing silently empty.
+    pub fn list_files(&self) -> Result<std::sync::Arc<Vec<ArchiveEntry>>> {
+        self.list_files_budgeted(None)
+    }
+
+    /// Budgeted listing (OI-0080-003). `budget = Some(n)` aborts the header
+    /// walk once more than `n` entries are seen. UnRAR reads headers one at a
+    /// time (`read_header` + `skip_entry`), so this is a true streaming early
+    /// abort — it stops reading further headers rather than only bounding our
+    /// `Vec`. The budget applies only to the first materialization; a cache
+    /// hit ignores it, and an aborted parse does not populate `listing`.
+    pub fn list_files_budgeted(
+        &self,
+        budget: Option<usize>,
+    ) -> Result<std::sync::Arc<Vec<ArchiveEntry>>> {
+        self.listing
+            .get_or_try_init(|| {
+                self.fresh_handle()?
+                    .walk_entries(budget)
+                    .map(std::sync::Arc::new)
+            })
+            .map(std::sync::Arc::clone)
+    }
+
+    /// Walk this handle's headers from its current position into a
+    /// listing. Exhausts the handle — callers must hold a fresh one
+    /// (see [`Self::fresh_handle`]).
+    fn walk_entries(&self, budget: Option<usize>) -> Result<Vec<ArchiveEntry>> {
         let mut entries = Vec::new();
         let mut index = 0;
 
         while let Some(mut entry) = self.read_header()? {
+            // OI-0080-003: true streaming early abort — once we already hold
+            // `budget` entries and another header is present, stop before
+            // pushing/skipping the rest so UnRAR never reads past the
+            // budget-th record.
+            if let Some(budget) = budget {
+                if entries.len() >= budget {
+                    return Err(crate::security::too_many_entries_parsed(budget));
+                }
+            }
             entry.id = index;
             entries.push(entry);
             self.skip_entry()?;
@@ -171,8 +370,8 @@ impl UnrarArchive {
         Ok(entries)
     }
 
-    /// Get archive path
-    pub fn path(&self) -> &str {
+    /// Get archive path (preserves raw bytes per AD 0064)
+    pub fn path(&self) -> &Path {
         &self.path
     }
 
@@ -223,6 +422,40 @@ impl UnrarArchive {
         self.parse_recovery_percentage()
     }
 
+    /// Revalidate that `self.path` still names the file opened at
+    /// construction, comparing a fresh `stat` against the captured
+    /// `(dev, ino)` identity (R0080-0061). Returns `OperationBlocked` on
+    /// drift so recovery metadata is never parsed from a swapped file. A
+    /// `None` captured identity (capture failed or non-Unix) skips the check.
+    #[cfg(unix)]
+    fn revalidate_identity(&self) -> Result<()> {
+        let Some(expected) = self.identity else {
+            return Ok(());
+        };
+        let meta = std::fs::metadata(&self.path)
+            .map_err(|e| ArchiveError::io("recovery-identity-revalidate", self.path.clone(), e))?;
+        let found = UnrarFileIdentity(crate::fs_identity::InodeId::from_metadata(&meta));
+        if found != expected {
+            return Err(ArchiveError::operation_blocked(
+                "recovery_percentage",
+                format!(
+                    "archive path {} identity changed since open (expected dev/ino {}/{}, found {}/{}); refusing to parse recovery metadata from a swapped file",
+                    self.path.display(),
+                    expected.0.dev,
+                    expected.0.ino,
+                    found.0.dev,
+                    found.0.ino
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn revalidate_identity(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Parse recovery percentage from RAR file structure
     ///
     /// RAR recovery records are stored as special blocks: type 0x78 in RAR4,
@@ -230,6 +463,14 @@ impl UnrarArchive {
     fn parse_recovery_percentage(&self) -> Result<Option<u8>> {
         use std::fs::File;
         use std::io::Read;
+
+        // R0080-0061: the percentage is parsed from a fresh open of
+        // `self.path`, which a non-cooperating writer could have swapped
+        // since the UnRAR handle was opened. Revalidate the identity
+        // captured at construction so the returned percentage cannot
+        // describe a different file than the flags read from the live
+        // handle. Non-Unix: skipped (no portable identity here).
+        self.revalidate_identity()?;
 
         let mut file = File::open(&self.path)
             .map_err(|e| ArchiveError::io("open", std::path::Path::new(&self.path), e))?;
@@ -244,206 +485,10 @@ impl UnrarArchive {
 
         if is_rar5 {
             // RAR5 format: parse modern block structure
-            self.parse_rar5_recovery(&mut file)
+            parse_rar5_recovery(&self.path, &mut file)
         } else {
             // RAR4 format: parse legacy block structure
-            self.parse_rar4_recovery(&mut file)
-        }
-    }
-
-    /// Parse RAR5 recovery record blocks
-    ///
-    /// RAR5 uses a new block format with variable-length headers.
-    /// Recovery records are service headers (type 3) with name "RR".
-    /// End of archive is type 5.
-    fn parse_rar5_recovery(&self, file: &mut std::fs::File) -> Result<Option<u8>> {
-        use std::io::{Read, Seek, SeekFrom};
-
-        // Skip RAR5 signature (8 bytes: "Rar!\x1A\x07\x01\x00")
-        file.seek(SeekFrom::Start(8))
-            .map_err(|e| ArchiveError::io("seek", std::path::Path::new(&self.path), e))?;
-
-        loop {
-            let block_pos = file
-                .stream_position()
-                .map_err(|e| ArchiveError::io("tell", std::path::Path::new(&self.path), e))?;
-
-            // Read enough for CRC32(4) + several max-length vints
-            let mut block_start = [0u8; 50];
-            let bytes_read = file
-                .read(&mut block_start)
-                .map_err(|e| ArchiveError::io("read", std::path::Path::new(&self.path), e))?;
-
-            if bytes_read < 7 {
-                return Ok(None);
-            }
-
-            // Parse RAR5 block header:
-            // CRC32(4) | HeaderSize(vint) | HeaderType(vint) | HeaderFlags(vint) | ...
-            // HeaderSize counts bytes from HeaderType to end of header (excludes CRC32 and itself).
-            // Data area (if HFLAGS_DATA) follows the header and is NOT in HeaderSize.
-            let (header_size, offset1) = decode_vint(&block_start[4..bytes_read])?;
-
-            let type_start = 4 + offset1;
-            if type_start >= bytes_read {
-                return Ok(None);
-            }
-            let (header_type, offset2) = decode_vint(&block_start[type_start..bytes_read])?;
-
-            let flags_start = type_start + offset2;
-            if flags_start >= bytes_read {
-                return Ok(None);
-            }
-            let (header_flags, offset3) = decode_vint(&block_start[flags_start..bytes_read])?;
-
-            // Parse optional ExtraSize and DataSize vints from the header
-            let mut next_field = flags_start + offset3;
-            if header_flags & 0x0001 != 0 && next_field < bytes_read {
-                // HFLAGS_EXTRA: skip ExtraSize vint
-                let (_, extra_vint_len) = decode_vint(&block_start[next_field..bytes_read])?;
-                next_field += extra_vint_len;
-            }
-            let mut data_area_size: u64 = 0;
-            if header_flags & 0x0002 != 0 && next_field < bytes_read {
-                // HFLAGS_DATA: parse DataSize vint
-                let (ds, _) = decode_vint(&block_start[next_field..bytes_read])?;
-                data_area_size = ds;
-            }
-
-            // End of archive (type 5)
-            if header_type == 5 {
-                return Ok(None);
-            }
-
-            // Service header (type 3) — recovery records are service blocks named "RR"
-            if header_type == 3 {
-                // Compute offset of remaining header content after standard fields
-                let header_overhead = (offset2 + offset3) as u64;
-                let remaining = header_size.saturating_sub(header_overhead);
-
-                // Seek to start of type-specific header content
-                let content_pos = block_pos + 4 + offset1 as u64 + header_overhead;
-                file.seek(SeekFrom::Start(content_pos))
-                    .map_err(|e| ArchiveError::io("seek", std::path::Path::new(&self.path), e))?;
-
-                let read_size = remaining.min(1024) as usize;
-                let mut rec_data = vec![0u8; read_size];
-                file.read_exact(&mut rec_data)
-                    .map_err(|e| ArchiveError::io("read", std::path::Path::new(&self.path), e))?;
-
-                // Check for "RR" service name in the header content
-                if rec_data.windows(2).any(|w| w == b"RR") {
-                    // Recovery record found — scan for percentage value (1-15%)
-                    for &byte in rec_data.iter().take(64) {
-                        if (1..=15).contains(&byte) {
-                            return Ok(Some(byte));
-                        }
-                    }
-                    // Recovery record exists but couldn't determine percentage
-                    return Ok(None);
-                }
-            }
-
-            // Skip to next block: CRC(4) + HeaderSize_vint(offset1) + header(header_size) + data(data_area_size)
-            let next_block = block_pos + 4 + offset1 as u64 + header_size + data_area_size;
-            file.seek(SeekFrom::Start(next_block))
-                .map_err(|e| ArchiveError::io("seek", std::path::Path::new(&self.path), e))?;
-        }
-    }
-
-    /// Parse RAR4 recovery record blocks
-    ///
-    /// RAR4 uses a legacy block format with fixed-size headers.
-    /// Recovery records have block type 0x78.
-    fn parse_rar4_recovery(&self, file: &mut std::fs::File) -> Result<Option<u8>> {
-        use std::io::{Read, Seek, SeekFrom};
-
-        // RAR4 signature is 7 bytes: "Rar!\x1A\x07\x00"
-        // After signature comes the main archive header, then file/service blocks
-
-        // Seek past signature (already read 16 bytes, go back to start of blocks at offset 7)
-        file.seek(SeekFrom::Start(7))
-            .map_err(|e| ArchiveError::io("seek", std::path::Path::new(&self.path), e))?;
-
-        // Parse blocks until we find recovery record (0x78) or EOF
-        loop {
-            // Read RAR4 block header (7 bytes minimum)
-            // Format: HEAD_CRC(2) | HEAD_TYPE(1) | HEAD_FLAGS(2) | HEAD_SIZE(2)
-            let mut block_header = [0u8; 7];
-            let bytes_read = file
-                .read(&mut block_header)
-                .map_err(|e| ArchiveError::io("read", std::path::Path::new(&self.path), e))?;
-
-            if bytes_read < 7 {
-                // End of file
-                return Ok(None);
-            }
-
-            let _head_crc = u16::from_le_bytes([block_header[0], block_header[1]]);
-            let head_type = block_header[2];
-            let head_flags = u16::from_le_bytes([block_header[3], block_header[4]]);
-            let head_size = u16::from_le_bytes([block_header[5], block_header[6]]);
-
-            // Check if this is a recovery record block (type 0x78)
-            if head_type == 0x78 {
-                // Recovery record found
-                // The data starts after the header
-                let data_size = head_size.saturating_sub(7); // Subtract header size
-
-                // Read recovery record data
-                let mut rec_data = vec![0u8; data_size.min(1024) as usize];
-                file.read_exact(&mut rec_data)
-                    .map_err(|e| ArchiveError::io("read", std::path::Path::new(&self.path), e))?;
-
-                // RAR4 recovery record structure:
-                // Bytes 0-3: Total blocks
-                // Bytes 4-7: Recovery blocks
-                // Percentage = (recovery_blocks / total_blocks) * 100
-                if rec_data.len() >= 8 {
-                    let total_blocks =
-                        u32::from_le_bytes([rec_data[0], rec_data[1], rec_data[2], rec_data[3]]);
-                    let recovery_blocks =
-                        u32::from_le_bytes([rec_data[4], rec_data[5], rec_data[6], rec_data[7]]);
-
-                    if total_blocks > 0 {
-                        // Prevent integer overflow - cap at 100%
-                        let percentage =
-                            ((recovery_blocks as u64 * 100) / total_blocks as u64).min(100) as u8;
-                        return Ok(Some(percentage));
-                    }
-                }
-
-                // Could not determine exact percentage
-                return Ok(None);
-            }
-
-            // Skip to next block.
-            // head_size includes the 7-byte basic header.
-            // LONG_BLOCK flag (0x8000) means an ADD_SIZE (u32) data area follows the header.
-            let mut skip = (head_size as i64) - 7;
-            if head_flags & 0x8000 != 0 && head_size >= 11 {
-                // ADD_SIZE is at header bytes 7-10 (right after basic header)
-                let mut add_bytes = [0u8; 4];
-                file.read_exact(&mut add_bytes)
-                    .map_err(|e| ArchiveError::io("read", std::path::Path::new(&self.path), e))?;
-                let add_size = u32::from_le_bytes(add_bytes);
-                // We already read 4 bytes of ADD_SIZE from the remaining header
-                skip = (head_size as i64) - 11 + add_size as i64;
-            }
-            if skip > 0 {
-                file.seek(SeekFrom::Current(skip))
-                    .map_err(|e| ArchiveError::io("seek", std::path::Path::new(&self.path), e))?;
-            }
-
-            // Check for end of archive marker (type 0x7B)
-            if head_type == 0x7B {
-                return Ok(None);
-            }
-
-            // Check for volume end (flag 0x8000)
-            if (head_flags & 0x8000) != 0 {
-                return Ok(None);
-            }
+            parse_rar4_recovery(&self.path, &mut file)
         }
     }
 
@@ -453,44 +498,125 @@ impl UnrarArchive {
         dest_path: &std::path::Path,
         progress: Option<&mut Box<dyn ProgressCallback>>,
     ) -> Result<Vec<ArchiveWarning>> {
-        self.extract_all_with_options(dest_path, progress, true)
+        self.extract_all_with_options(dest_path, progress, true, true, true, None, None, None)
     }
 
+    /// Extract all files with options. When `selection` is `Some`, only entries
+    /// whose positional index (matching `list_files()` order) is in the set
+    /// are materialized; RAR's sequential format means non-selected entries
+    /// are still traversed but their payload is skipped.
+    ///
+    /// `preserve_permissions` / `preserve_times == false` are honoured by
+    /// normalising the staged file after UnRAR writes it (R0080-0023), and
+    /// `max_file_size` / `max_total_size` bound the actual decoded bytes
+    /// per entry and archive-wide from inside the UnRAR data callback
+    /// (R0080-0008 / R0080-0022).
+    ///
+    /// The walk is bound to the AD 0065 cached listing: every consumed
+    /// positional index must still name the entry that listing (and the
+    /// safety gate above it) validated, and the visited count must match
+    /// the listing length at EOF. An archive rewritten on disk between
+    /// listing and extraction fails closed with a `Format` error instead
+    /// of materializing attacker-chosen entries (R0001-0019).
+    #[allow(clippy::too_many_arguments)]
     pub fn extract_all_with_options(
         &self,
         dest_path: &std::path::Path,
-        mut progress: Option<&mut Box<dyn ProgressCallback>>,
+        progress: Option<&mut Box<dyn ProgressCallback>>,
         overwrite: bool,
+        preserve_permissions: bool,
+        preserve_times: bool,
+        selection: Option<&std::collections::HashSet<usize>>,
+        max_file_size: Option<u64>,
+        max_total_size: Option<u64>,
     ) -> Result<Vec<ArchiveWarning>> {
         let mut warnings: Vec<ArchiveWarning> = Vec::new();
-        // Compute total_bytes from a dedicated fresh handle. The original
-        // `self.handle` may already be EOF-positioned (e.g., after
-        // `list_files_for_limits()` during open), so calling `self.list_files()`
-        // here yields zero entries and `total_bytes == 0`, breaking progress.
+        // `list_files()` walks a dedicated fresh handle and memoises
+        // (R0079-0001), so the original `self.handle`'s position
+        // (possibly EOF after a prior walk) cannot zero out the
+        // progress total here.
+        //
+        // R0001-0019: pin the AD 0065 cached listing — the exact
+        // snapshot the safety gate validated — unconditionally (it used
+        // to be fetched only when a progress callback was supplied). The
+        // walk below re-opens `self.path` fresh, so without this the
+        // preflight and the extraction could inspect different archive
+        // contents after an on-disk swap. Every consumed positional
+        // index's path is cross-checked against this listing and the
+        // visited count is reconciled at EOF, mirroring the libarchive
+        // bulk guard (R0080-0009 / R0080-0016).
+        let listing = self.list_files()?;
         let total_bytes: u64 = if progress.is_some() {
-            let prescan = self.fresh_handle()?;
-            prescan.list_files()?.iter().filter_map(|e| e.size).sum()
+            listing
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| match selection {
+                    Some(sel) => sel.contains(idx),
+                    None => true,
+                })
+                .filter_map(|(_, e)| e.size)
+                .fold(0u64, u64::saturating_add)
         } else {
             0
         };
 
-        // Fresh handle for extraction (the pre-scan handle above is exhausted).
+        // Fresh handle for extraction (`self.handle` may be EOF-positioned).
         let fresh = self.fresh_handle()?;
 
         let abs_dest = resolve_dest_path(dest_path)?;
+        // Canonicalize the destination once — every entry's sanitize
+        // pass compares against the same stable base.
+        let canonical_dest = crate::security::canonicalize_dest_base(&abs_dest)?;
 
-        let mut bytes_processed = 0u64;
-        let mut rate_limiter = RateLimiter::new();
+        // One mutable extraction context owns the progress callback for the
+        // whole walk so cancellation polling *and* the decoded-byte caps can
+        // fire from inside `RARProcessFile`'s C decode loop, not just between
+        // entries (R0080-0022 / R0080-0008). AD 0019: the callback runs on
+        // this same lock-holding thread — no Send/Sync gymnastics needed.
+        let mut ctx = UnrarExtractContext::new(
+            crate::error::ops::EXTRACT_ALL,
+            progress,
+            total_bytes,
+            max_total_size,
+        );
+        let mut entry_idx: usize = 0;
 
         while let Some(entry) = fresh.read_header()? {
-            // Check cancellation before extracting
-            if let Some(callback) = progress.as_mut() {
-                if rate_limiter.should_call() {
-                    if let ControlFlow::Break(()) =
-                        callback.on_progress(bytes_processed, Some(total_bytes))
-                    {
-                        return Err(ArchiveError::format(None, "Extraction cancelled by user"));
-                    }
+            // Rate-limited cancellation check before extracting.
+            ctx.poll_between_entries()?;
+
+            // Selection filter: skip entries whose positional index is not in
+            // the set (RAR requires sequential traversal; non-selected entries
+            // are skipped with RAR_SKIP rather than reopening the archive per
+            // entry).
+            let current_idx = entry_idx;
+            entry_idx += 1;
+
+            // R0001-0019 drift guard: every consumed positional index
+            // must still name the entry the cached listing (and
+            // therefore the safety gate) validated. Runs before the
+            // selection and link filters so a swapped or grown archive
+            // is refused even for indices this call would otherwise
+            // skip. Extends the OI-0076-002 single-entry guard to the
+            // bulk walk.
+            match listing.get(current_idx) {
+                Some(expected) if expected.path == entry.path => {}
+                Some(expected) => {
+                    return Err(listing_drift_mismatch(
+                        current_idx,
+                        &expected.path,
+                        &entry.path,
+                    ));
+                }
+                // More live entries than the validated listing — the
+                // archive grew on disk after listing.
+                None => return Err(listing_drift_extra(current_idx, listing.len())),
+            }
+
+            if let Some(sel) = selection {
+                if !sel.contains(&current_idx) {
+                    fresh.skip_entry()?;
+                    continue;
                 }
             }
 
@@ -512,7 +638,11 @@ impl UnrarArchive {
             }
 
             // Sanitize path to prevent traversal attacks
-            let safe_path = sanitize_entry_path(&entry.path, &abs_dest)?;
+            let safe_path = crate::security::sanitize_entry_path_with_base(
+                &entry.path,
+                &abs_dest,
+                &canonical_dest,
+            )?;
 
             // Create parent directories if needed
             if let Some(parent) = safe_path.parent() {
@@ -523,15 +653,27 @@ impl UnrarArchive {
             }
 
             if entry.is_file() {
-                unrar_extract_atomic(fresh.handle, &safe_path, overwrite, &self.path)?;
+                ctx.begin_file(max_file_size);
+                unrar_extract_atomic(
+                    fresh.handle,
+                    &safe_path,
+                    overwrite,
+                    &self.path,
+                    crate::error::ops::EXTRACT_ALL,
+                    preserve_permissions,
+                    preserve_times,
+                    Some(&mut ctx),
+                )?;
+                ctx.finish_file(entry.size.unwrap_or(0));
             } else {
-                // Directories — let UnRAR create them (via RAR_EXTRACT to the path).
+                // Directories — let UnRAR create them (via RAR_EXTRACT to the
+                // path). No payload, so no callback / cap accounting is needed.
                 let safe_path_str = safe_path.to_string_lossy();
                 let dest_name_cstr = CString::new(safe_path_str.as_bytes()).map_err(|_| {
                     ArchiveError::invalid_path(safe_path_str.as_ref(), "Contains null byte")
                 })?;
                 unsafe {
-                    let _guard = unrar_lock();
+                    let _guard = unrar_lock()?;
                     let result = RARProcessFile(
                         fresh.handle,
                         RAR_EXTRACT,
@@ -542,18 +684,23 @@ impl UnrarArchive {
                         return Err(map_unrar_error(result, &self.path));
                     }
                 }
-            }
-
-            // Update progress after extraction
-            if progress.is_some() {
-                bytes_processed += entry.size.unwrap_or(0);
+                ctx.advance_declared(entry.size.unwrap_or(0));
             }
         }
 
-        // Final progress update (100%)
-        if let Some(callback) = progress.as_mut() {
-            let _ = callback.on_progress(total_bytes, Some(total_bytes));
+        // R0001-0019 cardinality guard: the fresh walk must have
+        // consumed exactly as many positional indices as the validated
+        // listing holds. Fewer live entries means the archive was
+        // truncated or rewritten after listing — refuse rather than
+        // report a short extraction as success. (The "more entries"
+        // case is caught eagerly inside the loop.)
+        if entry_idx != listing.len() {
+            return Err(listing_drift_eof(entry_idx, listing.len()));
         }
+
+        // R0070-0038: honor cancellation in the final callback the
+        // same way the per-entry path does.
+        ctx.poll_final()?;
 
         Ok(warnings)
     }
@@ -561,52 +708,182 @@ impl UnrarArchive {
     /// Extract a single file by path
     ///
     /// Creates a fresh handle to avoid state exhaustion issues.
-    pub fn extract_file(&self, file_path: &str, dest_path: &std::path::Path) -> Result<()> {
-        self.extract_file_with_options(file_path, dest_path, true)
+    ///
+    /// Returns the absolute path of the file that was actually written so
+    /// callers do not have to re-derive it from `file_path` (OI-0069-003).
+    /// UnRAR's header walk can hand back a normalised path that does not
+    /// match the caller's spelling byte-for-byte; the returned `PathBuf`
+    /// is the canonical sink so a follow-up open cannot drift.
+    pub fn extract_file(
+        &self,
+        file_path: &str,
+        dest_path: &std::path::Path,
+    ) -> Result<std::path::PathBuf> {
+        // Single-file default: preserve both permissions and times, matching
+        // the historical behaviour before the flags were threaded through
+        // (R0081-0067).
+        self.extract_file_with_options(file_path, dest_path, true, true, true)
     }
 
+    /// Same contract as [`Self::extract_file`] plus an explicit `overwrite`
+    /// flag and the `preserve_permissions` / `preserve_times` opt-outs. The
+    /// returned `PathBuf` is the absolute path the archive entry was written
+    /// to (OI-0069-003). The preservation flags are honoured by overriding the
+    /// mode/mtime UnRAR stamps on the staged file, matching the bulk path
+    /// (R0080-0023 / R0081-0067).
     pub fn extract_file_with_options(
         &self,
         file_path: &str,
         dest_path: &std::path::Path,
         overwrite: bool,
-    ) -> Result<()> {
+        preserve_permissions: bool,
+        preserve_times: bool,
+    ) -> Result<std::path::PathBuf> {
+        // R1: the declared size the core now reports is only of interest to
+        // the staging-to-memory path; the disk path keeps its `PathBuf`
+        // contract unchanged.
+        self.extract_file_core(
+            file_path,
+            dest_path,
+            overwrite,
+            preserve_permissions,
+            preserve_times,
+            crate::error::ops::EXTRACT_FILE,
+            None,
+        )
+        .map(|(path, _declared)| path)
+    }
+
+    /// Shared single-file extraction core behind
+    /// [`Self::extract_file_with_options`] and
+    /// [`Self::extract_to_memory_with_limit`]. `op` labels errors for the
+    /// calling operation (R0081-0068); `ctx`, when `Some`, installs the UnRAR
+    /// data callback so a per-entry byte cap (and/or cancellation) can abort
+    /// the decode mid-stream instead of only after the whole entry has been
+    /// written to disk (R0081-0065).
+    ///
+    /// R1: returns the written path **and** the header's declared unpacked
+    /// size (`None` when the header carries none), so the staging-to-memory
+    /// caller can hold the staged payload to the archive's own declaration
+    /// instead of only to the staged file's length.
+    #[allow(clippy::too_many_arguments)]
+    fn extract_file_core(
+        &self,
+        file_path: &str,
+        dest_path: &std::path::Path,
+        overwrite: bool,
+        preserve_permissions: bool,
+        preserve_times: bool,
+        op: &'static str,
+        ctx: Option<&mut UnrarExtractContext<'_>>,
+    ) -> Result<(std::path::PathBuf, Option<u64>)> {
+        // OI-0076-002: resolve through the shared single-entry gate
+        // first — existence, uniqueness, and link/directory policy live
+        // in validate_single_entry (the former in-method
+        // Symlink/HardLink/Directory rejections are deleted; directory
+        // entries now error at the gate, R0076-0060).
+        let listing = self.list_files()?;
+        let validated = crate::security::validate_single_entry(&listing, file_path, op)?;
+        let target_id = validated.id();
+        let validated_path = validated.path().to_string();
+
         // Create fresh handle for extraction (avoid state exhaustion)
         let fresh = self.fresh_handle()?;
 
         let abs_dest = resolve_dest_path(dest_path)?;
 
+        // R0076-0059: seek by stable listing position, never by name scan.
+        let mut entry_idx: usize = 0;
         loop {
             match fresh.read_header()? {
                 Some(entry) => {
-                    if entry.path == file_path {
-                        // Reject symlinks/hardlinks for security
-                        if entry.entry_type == EntryType::Symlink
-                            || entry.entry_type == EntryType::HardLink
-                        {
-                            return Err(ArchiveError::format(
-                                Some(ArchiveFormat::Rar),
-                                format!("Refusing to extract link entry: {}", file_path),
-                            ));
-                        }
-
-                        // Sanitize path to prevent traversal attacks
-                        let safe_path = sanitize_entry_path(&entry.path, &abs_dest)?;
-
-                        // Create parent directories if needed
-                        if let Some(parent) = safe_path.parent() {
-                            if !parent.exists() {
-                                std::fs::create_dir_all(parent)
-                                    .map_err(|e| ArchiveError::io("create_dir_all", parent, e))?;
-                            }
-                        }
-
-                        unrar_extract_atomic(fresh.handle, &safe_path, overwrite, &self.path)?;
-                        return Ok(());
-                    } else {
+                    let current_idx = entry_idx;
+                    entry_idx += 1;
+                    if current_idx != target_id {
                         // Skip this file
                         fresh.skip_entry()?;
+                        continue;
                     }
+
+                    // OI-0076-002 drift guard: the AD 0065 listing
+                    // snapshot can go stale if the archive is rewritten
+                    // on disk between listing and extraction — never
+                    // extract a mismatched entry.
+                    if entry.path != validated_path {
+                        return Err(listing_drift_mismatch(
+                            current_idx,
+                            &validated_path,
+                            &entry.path,
+                        ));
+                    }
+
+                    // R2 (DCR-006 Amendment 4): pre-decode refusal on the
+                    // *declared* size, unifying UnRAR's `Cap(n)` trigger
+                    // with ZIP's and 7z's. Those two reject when the
+                    // central-directory / TOC size exceeds the budget,
+                    // before any decode; UnRAR previously only aborted once
+                    // *decoded* bytes crossed the budget inside
+                    // `UCM_PROCESSDATA`, so an over-declaring entry that
+                    // decoded small still succeeded and an honest oversized
+                    // entry paid the decode work up to the cap first. The
+                    // message shape is `read_entry_to_memory_capped`'s
+                    // verbatim so the diagnostic reads the same on all three
+                    // staging backends.
+                    //
+                    // `RARProcessFile` is never invoked for a refused entry.
+                    // Entries whose header declares no size skip the check
+                    // (no declaration is invented — hard constraint 3) and
+                    // stay covered by the mid-decode abort, which also
+                    // remains the backstop for headers that under-declare.
+                    //
+                    // The cap read here is `ctx.entry_cap`, i.e.
+                    // `min(per-entry budget, remaining archive budget)` as
+                    // `begin_file` computed it. For the single-entry paths
+                    // that is exactly the caller's stream/memory budget; a
+                    // future caller that constructs a context carrying a
+                    // `total_remaining` would have the pre-check judge
+                    // against the combined budget, which is the correct
+                    // conservative reading.
+                    if let Some(c) = ctx.as_deref() {
+                        if let (Some(cap), Some(declared)) = (c.entry_cap, entry.size) {
+                            if declared > cap {
+                                return Err(ArchiveError::OperationBlocked {
+                                    operation: op.to_string(),
+                                    reason: format!(
+                                        "Entry '{}' declares {} bytes; exceeds the configured per-entry limit of {} bytes",
+                                        validated_path, declared, cap
+                                    ),
+                                });
+                            }
+                        }
+                    }
+
+                    // Sanitize the validated listing path to prevent
+                    // traversal attacks; the returned PathBuf is the
+                    // path actually written (OI-0069-003).
+                    let safe_path = sanitize_entry_path(&validated_path, &abs_dest)?;
+
+                    // Create parent directories if needed
+                    if let Some(parent) = safe_path.parent() {
+                        if !parent.exists() {
+                            std::fs::create_dir_all(parent)
+                                .map_err(|e| ArchiveError::io("create_dir_all", parent, e))?;
+                        }
+                    }
+
+                    unrar_extract_atomic(
+                        fresh.handle,
+                        &safe_path,
+                        overwrite,
+                        &self.path,
+                        op,
+                        preserve_permissions,
+                        preserve_times,
+                        ctx,
+                    )?;
+                    // R1: hand the header's declaration back so the caller
+                    // can hold the staged payload to it.
+                    return Ok((safe_path, entry.size));
                 }
                 None => {
                     return Err(ArchiveError::format(
@@ -623,38 +900,102 @@ impl UnrarArchive {
     /// Note: The UnRAR API requires extraction to disk first, so this method
     /// extracts to a temporary directory and reads the result into memory.
     /// This is a fundamental limitation of the UnRAR SDK.
+    ///
+    /// Concurrency: the staging directory is owned by `tempfile::TempDir`,
+    /// which generates a collision-free name and removes the entire tree
+    /// on drop (R0069-0028 / R0069-0029). The previous timestamp+pid
+    /// scheme could collide between parallel calls in the same process
+    /// and, on collision, the legacy `TempDirGuard` would unlink content
+    /// it did not create.
     pub fn extract_to_memory(&self, file_path: &str) -> Result<Vec<u8>> {
-        use std::io::Read;
-        use std::time::{SystemTime, UNIX_EPOCH};
+        self.extract_to_memory_with_limit(file_path, None)
+    }
 
-        // Use system temp directory (respects TMPDIR/TEMP environment variables)
-        // Include timestamp to avoid conflicts between parallel tests
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| std::time::Duration::from_secs(0))
-            .as_nanos();
-        let temp_base = std::env::temp_dir();
-        let temp_dir = temp_base.join(format!("unrar_mem_{}_{}", std::process::id(), timestamp));
+    /// Extract a single file to memory with an optional caller-provided
+    /// per-entry size cap.
+    ///
+    /// `max_bytes`:
+    /// - `None` — keep the legacy "anything that fits in `usize`"
+    ///   behavior. Inspection-time CRC walks pass `None` because the
+    ///   archive-level zip-bomb gate has already accepted the entry.
+    /// - `Some(cap)` — abort with `OperationBlocked` if the staged
+    ///   extracted file's actual length exceeds `cap`. This catches the
+    ///   case where a malformed RAR underreports the entry size to the
+    ///   facade's metadata gate but the decoder produces a much larger
+    ///   payload (R0072-0006). Callers in possession of an
+    ///   `ExtractionLimits::max_file_size` budget should pass it.
+    pub fn extract_to_memory_with_limit(
+        &self,
+        file_path: &str,
+        max_bytes: Option<u64>,
+    ) -> Result<Vec<u8>> {
+        self.extract_to_memory_with_limit_op(
+            file_path,
+            max_bytes,
+            crate::error::ops::EXTRACT_TO_MEMORY,
+        )
+    }
 
-        // Ensure temp directory exists
-        std::fs::create_dir_all(&temp_dir)
-            .map_err(|e| ArchiveError::io("create_temp_dir", temp_dir.clone(), e))?;
+    /// R5 (ti-581bcda4): [`Self::extract_to_memory_with_limit`] with an
+    /// explicit operation label.
+    ///
+    /// The RAR staging path raises `OperationBlocked` / `Corruption` errors
+    /// that used to be hard-labelled `extract_to_memory` even when the
+    /// caller had invoked `Archive::extract_to_stream`, contradicting the
+    /// R0071-0010 convention (the label names the public operation).
+    /// [`Self::extract_to_stream_with_limit`] passes
+    /// [`ops::EXTRACT_TO_STREAM`](crate::error::ops::EXTRACT_TO_STREAM);
+    /// every memory entry point keeps
+    /// [`ops::EXTRACT_TO_MEMORY`](crate::error::ops::EXTRACT_TO_MEMORY).
+    pub(crate) fn extract_to_memory_with_limit_op(
+        &self,
+        file_path: &str,
+        max_bytes: Option<u64>,
+        op: &'static str,
+    ) -> Result<Vec<u8>> {
+        // Owned, collision-free staging tree. Drops on success and error
+        // alike via `TempDir`'s Drop impl.
+        let temp_dir = tempfile::Builder::new()
+            .prefix("unrar_mem_")
+            .tempdir()
+            .map_err(|e| ArchiveError::io("create_temp_dir", std::env::temp_dir(), e))?;
 
-        // RAII guard ensures cleanup on all exit paths (success or error)
-        let _guard = TempDirGuard::new(temp_dir.clone());
+        // R0081-0065: wire a cap-only extract context so the per-entry byte
+        // budget aborts the decode mid-stream (via the `UCM_PROCESSDATA`
+        // callback) instead of only rejecting the finished tempfile after it
+        // has been fully written to disk. No progress callback and no
+        // archive-wide budget here — just the per-entry cap. `None` keeps the
+        // legacy uncapped inspection-walk behaviour.
+        // R5 (ti-581bcda4): `op`, so a cap abort raised while serving
+        // `extract_to_stream` is labelled with that operation.
+        let mut cap_ctx = max_bytes.map(|cap| {
+            let mut c = UnrarExtractContext::new(op, None, 0, None);
+            c.begin_file(Some(cap));
+            c
+        });
 
-        // Open a fresh archive handle to avoid state issues
-        let fresh = if let Some(pwd_str) = crate::options::password_as_str(&self.password)? {
-            Self::open_with_password(&self.path, pwd_str)?
-        } else {
-            Self::open(&self.path)?
-        };
-
-        // Extract using the fresh handle
-        fresh.extract_file(file_path, &temp_dir)?;
-
-        // Read file into memory (use sanitized path to locate extracted file)
-        let extracted_path = sanitize_entry_path(file_path, &temp_dir)?;
+        // Extract and trust the path the core returns — UnRAR may normalise
+        // the entry path differently from the caller's spelling, so
+        // re-deriving it via `sanitize_entry_path(file_path, ...)` can drift
+        // to a sibling that was never written (OI-0069-003).
+        //
+        // R0001-0057: call the core on `self`. `extract_file_core` opens its
+        // own fresh handle for the walk and only uses the receiver for the
+        // memoised `list_files()` snapshot and `self.path`, so pre-opening a
+        // handle here bought nothing but a wasted native open and an extra
+        // trip through the process-wide UnRAR lock.
+        // R5 (ti-581bcda4): `op`, not the hard-coded memory label.
+        // R1: `declared_from_listing` is the header's unpacked size (`None`
+        // when the header carries none).
+        let (extracted_path, declared_from_listing) = self.extract_file_core(
+            file_path,
+            temp_dir.path(),
+            true,
+            true,
+            true,
+            op,
+            cap_ctx.as_mut(),
+        )?;
         let mut file = std::fs::File::open(&extracted_path)
             .map_err(|e| ArchiveError::io("open_extracted", extracted_path.clone(), e))?;
 
@@ -663,29 +1004,49 @@ impl UnrarArchive {
             .map_err(|e| ArchiveError::io("stat_extracted", extracted_path.clone(), e))?;
         let len = metadata.len();
 
-        if len > usize::MAX as u64 {
-            return Err(ArchiveError::OperationBlocked {
-                operation: crate::error::ops::EXTRACT_TO_MEMORY.to_string(),
-                reason: format!(
-                    "File '{}' is too large to buffer in memory: {} bytes",
-                    file_path, len
-                ),
-            });
+        // R0072-0006: enforce the caller-supplied per-entry cap before
+        // allocating. The facade precheck uses metadata; if the decoder
+        // wrote more bytes than promised, we stop here instead of
+        // committing the over-sized payload.
+        if let Some(cap) = max_bytes {
+            if len > cap {
+                return Err(ArchiveError::operation_blocked(
+                    // R5 (ti-581bcda4): caller's operation label.
+                    op,
+                    format!(
+                        "File '{}' decoded to {} bytes; exceeds the configured per-entry limit of {} bytes",
+                        file_path, len, cap
+                    ),
+                ));
+            }
         }
 
-        let mut buffer = Vec::new();
-        buffer
-            .try_reserve(len as usize)
-            .map_err(|_| ArchiveError::OperationBlocked {
-                operation: crate::error::ops::EXTRACT_TO_MEMORY.to_string(),
-                reason: format!("Unable to allocate {} bytes for file '{}'", len, file_path),
-            })?;
+        // R1 (DCR-006 Amendment 4): hold the staged payload to the
+        // *listing's* declaration, not only to its own length. The bounded
+        // read below compares the staged file against `len` — the staged
+        // file's own metadata — so a RAR entry that decoded short (or long)
+        // relative to its header sailed through here and only surfaced at
+        // read time, via the facade's `with_exact_size` wrapper, and only
+        // under `DeclaredSize`. Checking against the header makes RAR
+        // truncation and over-production call-time `Corruption`, exactly
+        // like ZIP's and 7z's `require_exact` staging, and makes the
+        // DCR-006 Amendment 4 classification table honest for all three
+        // staging backends.
+        //
+        // Applied only when the header actually declares a size; for
+        // `None`-size entries the facade's read-time exactness check stays
+        // the sole authority (hard constraint 3 — no invented declaration).
+        check_staged_length(file_path, op, len, declared_from_listing)?;
 
-        file.read_to_end(&mut buffer)
-            .map_err(|e| ArchiveError::io("read_extracted", extracted_path, e))?;
-
-        // Guard handles cleanup on drop
-        Ok(buffer)
+        // Shared bounds contract (R0072-0006 / R0075-0059): the staged
+        // file must deliver exactly the bytes its metadata declared — a
+        // racing append or truncation against the process-private
+        // staging tree surfaces as corruption instead of silent
+        // over/under-read. `temp_dir` drops at return, removing the
+        // entire staging tree.
+        //
+        // R5 (ti-581bcda4): `op` is the caller's operation label.
+        crate::ffi::common::read_entry_to_memory_bounded(&mut file, len, file_path, op, None, true)
     }
 
     /// Extract a single file to a stream
@@ -697,18 +1058,28 @@ impl UnrarArchive {
         &self,
         file_path: &str,
     ) -> Result<crate::streaming::StreamingExtractor> {
-        use std::io::Cursor;
+        self.extract_to_stream_with_limit(file_path, None)
+    }
 
-        // For simplicity and to avoid path issues, just use extract_to_memory
-        // and wrap in a cursor. This still provides the streaming API.
-        let data = self.extract_to_memory(file_path)?;
-        let size = data.len() as u64;
-        let reader = Box::new(Cursor::new(data));
-
-        Ok(crate::streaming::StreamingExtractor::new(
-            reader,
-            Some(size),
-        ))
+    /// Streaming variant of [`Self::extract_to_memory_with_limit`].
+    ///
+    /// Same RAR-staging caveat: the payload is materialized to disk
+    /// before the cursor wraps it, so `max_bytes` is applied to the
+    /// actual decoded length, not just the metadata-declared one
+    /// (R0072-0006).
+    pub fn extract_to_stream_with_limit(
+        &self,
+        file_path: &str,
+        max_bytes: Option<u64>,
+    ) -> Result<crate::streaming::StreamingExtractor> {
+        // R5 (ti-581bcda4): every refusal on this path names
+        // `extract_to_stream`, the operation the caller invoked.
+        let data = self.extract_to_memory_with_limit_op(
+            file_path,
+            max_bytes,
+            crate::error::ops::EXTRACT_TO_STREAM,
+        )?;
+        Ok(crate::streaming::StreamingExtractor::from_bytes(data))
     }
 
     /// Test archive integrity without extracting to disk
@@ -721,17 +1092,28 @@ impl UnrarArchive {
         // Open a fresh handle for testing (preserves password for encrypted archives)
         let fresh = self.fresh_handle()?;
 
+        // Count of entries actually submitted to RAR_TEST, for the
+        // partial-progress error if cursor recovery later fails (R0080-0020).
+        let mut tested: usize = 0;
+
         while let Some(entry) = fresh.read_header()? {
-            // Skip directories
-            if entry.is_directory() {
+            // R0070-0053: directories and link entries are not part of
+            // the regular-file payload, and extraction policy skips
+            // them. Including them in the integrity walk would
+            // exercise RAR's link-target metadata path instead of the
+            // payload CRC32.
+            if entry.is_directory()
+                || matches!(entry.entry_type, EntryType::Symlink | EntryType::HardLink)
+            {
                 fresh.skip_entry()?;
                 continue;
             }
+            tested += 1;
 
             // Test the file using RAR_TEST mode
             unsafe {
                 // Serialize UnRAR FFI calls (global state is not thread-safe).
-                let _guard = unrar_lock();
+                let _guard = unrar_lock()?;
                 let result = RARProcessFile(
                     fresh.handle,
                     RAR_TEST, // Test mode - verifies CRC32 without extracting
@@ -740,15 +1122,46 @@ impl UnrarArchive {
                 );
 
                 if result != ERAR_SUCCESS {
-                    // Test failed - add to failed list
-                    failed_files.push(entry.path.clone());
-
-                    // Continue testing other files instead of failing immediately
-                    // Skip to next entry
-                    if result != ERAR_BAD_DATA {
-                        // If it's not a CRC error, we still need to skip
-                        continue;
+                    // R0080-0021: classify the RAR_TEST failure through the
+                    // shared error map instead of treating every non-success
+                    // as a damaged file. A wrong/missing password or an
+                    // I/O-shaped SDK fault is a whole-operation error, not
+                    // per-entry CRC corruption, so surface it immediately and
+                    // let the caller retry/diagnose. Only a data- or
+                    // archive-integrity failure counts as a damaged entry we
+                    // record and keep walking past.
+                    match result {
+                        ERAR_BAD_DATA | ERAR_BAD_ARCHIVE => {
+                            failed_files.push(entry.path.clone());
+                        }
+                        _ => return Err(map_unrar_error(result, &self.path)),
                     }
+
+                    // R0075-0060: force an explicit RAR_SKIP so the next
+                    // `read_header` lands on the following entry rather than
+                    // re-reading or stalling on this one.
+                    let skip_result =
+                        RARProcessFile(fresh.handle, RAR_SKIP, std::ptr::null(), std::ptr::null());
+                    if skip_result != ERAR_SUCCESS {
+                        // R0080-0020: the recovery skip failed, so the handle
+                        // can no longer be advanced and the remaining entries
+                        // cannot be tested. Return a typed error carrying how
+                        // many entries were tested and the damaged files found
+                        // so far — never an `Ok` list the caller would read as
+                        // a complete integrity result.
+                        return Err(ArchiveError::operation_blocked(
+                            crate::error::ops::VALIDATE_INTEGRITY,
+                            format!(
+                                "RAR integrity walk could not advance past a damaged entry in {} after testing {} entr{} (recovery skip failed: {}); damaged files found so far: [{}]",
+                                self.path.display(),
+                                tested,
+                                if tested == 1 { "y" } else { "ies" },
+                                map_unrar_error(skip_result, &self.path),
+                                failed_files.join(", ")
+                            ),
+                        ));
+                    }
+                    continue;
                 }
             }
         }
@@ -760,58 +1173,116 @@ impl UnrarArchive {
 impl Drop for UnrarArchive {
     fn drop(&mut self) {
         unsafe {
-            // Drop still runs on panic paths — recovering from poison is important.
-            let _guard = unrar_lock();
+            // Drop still runs on panic paths — recovering from poison is
+            // important. `unrar_lock()` only reports re-entrancy when this same
+            // thread already holds `UNRAR_LOCK` (in which case the close is
+            // still correctly serialized); either way the handle must be
+            // closed, so ignore the guard result rather than leak it or skip
+            // the close (R0081-0063).
+            let _lock = unrar_lock();
             RARCloseArchive(self.handle);
         }
     }
 }
 
+/// Lowest `unp_ver` value UnRAR reports for a RAR5-family file header.
+///
+/// `ReadHeader50` (arcread.cpp) never forwards the archived algorithm
+/// byte: it maps the header's 6-bit algorithm field onto one of three
+/// sentinels — `VER_PACK5` (50), `VER_PACK7` (70) or `VER_UNKNOWN`
+/// (9999), all defined in headers.hpp. `ReadHeader15` instead stores the
+/// raw archived byte (`hd->UnpVer=Raw.Get1()`), which every real RAR4-era
+/// writer emits as 10/13/15/20/26/29/36 — all below 50. `>= 50` is
+/// therefore the format discriminator, and it keeps working for a future
+/// `VER_PACK8`.
+const RAR5_MIN_UNP_VER: u32 = 50;
+
+/// Decode the Unix permission bits out of a RAR file header's attribute
+/// field, choosing the unpacking by archive format.
+///
+/// RAR5 stores `st_mode` unshifted in the file header's Attributes vint
+/// (`arcread.cpp` `ReadHeader50`: `hd->FileAttr=(uint)Raw.GetV()`), while
+/// RAR4 packs it into the upper 16 bits of a 32-bit word (`ReadHeader15`:
+/// `hd->FileAttr=Raw.Get4()`). `dll.cpp` forwards both verbatim
+/// (`D->FileAttr=hd->FileAttr`), so the caller must pick the shift.
+///
+/// A genuine Unix `st_mode` always carries file-type bits (`S_IFREG`
+/// `0o100000`, `S_IFDIR` `0o040000`, `S_IFLNK` `0o120000`). Their absence
+/// means the field holds no Unix mode at all, so report `None` rather
+/// than a positive claim of `0o000` — `Some(0)` asserts "this file is
+/// readable by nobody", which is strictly worse than admitting the mode
+/// is unknown (ticgit b75cafb4, 2026-08-16).
+fn unix_mode_from_file_attr(file_attr: u32, unp_ver: u32) -> Option<u32> {
+    let candidate = if unp_ver >= RAR5_MIN_UNP_VER {
+        file_attr
+    } else {
+        file_attr >> 16
+    };
+    if candidate & 0o170000 == 0 {
+        None
+    } else {
+        // Mask to permission bits; the file-type bits are already
+        // represented by `entry_type`.
+        Some(candidate & 0o7777)
+    }
+}
+
 /// Parse UnRAR header into ArchiveEntry with CRC32
 fn parse_header(header: &RARHeaderDataEx) -> Result<ArchiveEntry> {
-    // Extract filename (UTF-16 on Windows, UTF-32 on macOS)
+    // `RARHeaderDataEx` is `#[repr(C, packed)]` (R0079-0008): fields used
+    // through references (slicing, method calls, `format!` captures) must
+    // be copied to aligned locals first; plain by-value reads are fine.
+    let file_name_w = header.file_name_w;
+
+    // Decode the wide filename per the UnRAR ABI: UTF-16 on Windows,
+    // UTF-32 (4-byte `wchar_t`) on macOS, Linux, and BSD. The predicate
+    // keys on `windows` vs. not — matching `RarWchar` — so Linux/BSD no
+    // longer misdecode a 4-byte array as UTF-16 (R0080-0001).
     let file_name = {
-        #[cfg(target_os = "macos")]
+        #[cfg(not(windows))]
         {
-            // On macOS, wchar_t is UTF-32 (4 bytes per character)
+            // Off Windows, wchar_t is UTF-32 (4 bytes per character).
             let mut len = 0;
-            while len < header.file_name_w.len() && header.file_name_w[len] != 0 {
+            while len < file_name_w.len() && file_name_w[len] != 0 {
                 len += 1;
             }
-            // Convert UTF-32 to UTF-32 code points, then to String
-            let chars: Vec<char> = header.file_name_w[..len]
+            let chars: Vec<char> = file_name_w[..len]
                 .iter()
                 .filter_map(|&code| std::char::from_u32(code))
                 .collect();
             chars.iter().collect::<String>()
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
         {
-            // On other platforms, wchar_t is UTF-16 (2 bytes per character)
+            // On Windows, wchar_t is UTF-16 (2 bytes per character).
             let mut len = 0;
-            while len < header.file_name_w.len() && header.file_name_w[len] != 0 {
+            while len < file_name_w.len() && file_name_w[len] != 0 {
                 len += 1;
             }
-            String::from_utf16_lossy(&header.file_name_w[..len])
+            String::from_utf16_lossy(&file_name_w[..len])
         }
     };
 
     // Normalize path (convert backslashes to forward slashes)
     let normalized_path = normalize_path(&file_name);
 
-    // Determine entry type
-    let is_directory = (header.flags & RHDF_DIRECTORY) != 0;
+    // Determine entry type. R0075-0057: classify redirection /
+    // link entries before directories so a junction-style entry
+    // whose `RHDF_DIRECTORY` flag is set is reported as a link
+    // (matching ZIP/7z ordering and the facade's link policy).
+    let is_directory_flag = (header.flags & RHDF_DIRECTORY) != 0;
     // RAR5 redir_type: FSREDIR_UNIXSYMLINK=1, FSREDIR_WINSYMLINK=2,
     //   FSREDIR_JUNCTION=3, FSREDIR_HARDLINK=4, FSREDIR_FILECOPY=5
-    let entry_type = if is_directory {
-        EntryType::Directory
-    } else if header.redir_type == 1 || header.redir_type == 2 || header.redir_type == 3 {
+    let entry_type = if header.redir_type == 1 || header.redir_type == 2 || header.redir_type == 3 {
         EntryType::Symlink
     } else if header.redir_type == 4 || header.redir_type == 5 {
         EntryType::HardLink
+    } else if is_directory_flag {
+        EntryType::Directory
     } else {
         EntryType::File
     };
+    let is_directory = entry_type == EntryType::Directory;
 
     // Combine 64-bit sizes
     let unp_size = ((header.unp_size_high as u64) << 32) | (header.unp_size as u64);
@@ -820,18 +1291,10 @@ fn parse_header(header: &RARHeaderDataEx) -> Result<ArchiveEntry> {
     // Convert DOS timestamp to SystemTime
     let modified = dos_time_to_system_time(header.file_time);
 
-    // Use high-resolution mtime if available
-    let modified = if header.mtime_low != 0 || header.mtime_high != 0 {
-        let mtime_secs = ((header.mtime_high as u64) << 32) | (header.mtime_low as u64);
-        Some(
-            UNIX_EPOCH
-                + std::time::Duration::from_secs(
-                    (mtime_secs / 10_000_000).saturating_sub(FILETIME_UNIX_EPOCH_DIFF_SECS),
-                ),
-        )
-    } else {
-        modified
-    };
+    // Use high-resolution mtime if available, otherwise fall back to the
+    // DOS-format file_time. `filetime_to_system_time` returns None for
+    // pre-1970 FILETIMEs instead of collapsing them to UNIX_EPOCH.
+    let modified = filetime_to_system_time(header.mtime_low, header.mtime_high).or(modified);
 
     let mut entry = ArchiveEntry::new(normalized_path, 0);
     entry.entry_type = entry_type;
@@ -844,35 +1307,59 @@ fn parse_header(header: &RARHeaderDataEx) -> Result<ArchiveEntry> {
     } else {
         Some(header.file_crc)
     };
-    entry.permissions = Some(header.file_attr);
+    // R0075-0056: `header.file_attr` is host-OS-dependent. On Windows
+    // hosts (host_os == 0 || host_os == 2 — the same predicate used for
+    // the `attributes.windows` field below) it carries Windows file
+    // attributes; on Unix hosts it carries a Unix `st_mode`. Only
+    // surface the Unix permission bits in `permissions` when the entry
+    // came from a Unix-style host; Windows attribute bits land in
+    // `attributes.windows` instead.
+    //
+    // Corrected 2026-08-16 (ticgit b75cafb4): the `st_mode` *packing* is
+    // format-dependent, not unconditional. RAR5 stores the mode
+    // unshifted, RAR4 in the upper 16 bits, so the old unconditional
+    // `>> 16` decoded every RAR5 entry to `Some(0)` — e.g.
+    // `tests/fixtures/test.rar` records the Attributes vint
+    // `a4 83 02` = 33188 = 0o100644, which `>> 16` flattens to zero.
+    // `unp_ver` is the discriminator because the UnRAR DLL API exposes
+    // no archive-format field at all: `RARHeaderDataEx` has none,
+    // `RAROpenArchiveDataEx.Flags` carries no RARFMT15/RARFMT50 bit,
+    // and `dll.cpp` normalises both formats' host OS through one line
+    // (`D->HostOS = hd->HSType==HSYS_WINDOWS ? HOST_WIN32 : HOST_UNIX`)
+    // so `host_os` cannot discriminate either. See
+    // `unix_mode_from_file_attr` for the sentinel rationale.
+    //
+    // Alternatives deliberately rejected, so the next reader need not
+    // re-litigate them:
+    //   * Sniffing the `Rar!\x1A\x07\x01\x00` signature at open and
+    //     caching an `is_rar5` flag. Workable (SFX payloads are staged
+    //     from the payload offset, so the signature sits at offset 0 of
+    //     whatever `UnrarArchive` opens), but it inserts a second read
+    //     of `self.path` into `open_with_mode`'s identity window — the
+    //     window R0081-0064 reasons about byte by byte. Too much risk
+    //     for a metadata field.
+    //   * Patching the vendored unrar to export `Arc.Format`. Forks
+    //     upstream and creates rebase debt for one metadata bit.
+    //   * A "retry the other shift if this one looks wrong" heuristic.
+    //     Silent auto-correction makes the field unexplainable.
+    let is_windows_host = header.host_os == 0 || header.host_os == 2;
+    // Copies — the struct is `#[repr(C, packed)]`, so taking references
+    // into its fields is E0793.
+    let file_attr = header.file_attr;
+    let unp_ver = header.unp_ver;
+    entry.permissions = if is_windows_host {
+        None
+    } else {
+        unix_mode_from_file_attr(file_attr, unp_ver)
+    };
 
     // Phase 1: Enhanced metadata
 
-    // Creation time (ctime)
-    entry.created = if header.ctime_low != 0 || header.ctime_high != 0 {
-        let ctime_secs = ((header.ctime_high as u64) << 32) | (header.ctime_low as u64);
-        Some(
-            UNIX_EPOCH
-                + std::time::Duration::from_secs(
-                    (ctime_secs / 10_000_000).saturating_sub(FILETIME_UNIX_EPOCH_DIFF_SECS),
-                ),
-        )
-    } else {
-        None
-    };
+    // Creation time (ctime) — pre-1970 returns None instead of UNIX_EPOCH.
+    entry.created = filetime_to_system_time(header.ctime_low, header.ctime_high);
 
-    // Access time (atime)
-    entry.accessed = if header.atime_low != 0 || header.atime_high != 0 {
-        let atime_secs = ((header.atime_high as u64) << 32) | (header.atime_low as u64);
-        Some(
-            UNIX_EPOCH
-                + std::time::Duration::from_secs(
-                    (atime_secs / 10_000_000).saturating_sub(FILETIME_UNIX_EPOCH_DIFF_SECS),
-                ),
-        )
-    } else {
-        None
-    };
+    // Access time (atime) — same pre-epoch policy.
+    entry.accessed = filetime_to_system_time(header.atime_low, header.atime_high);
 
     // Encryption status
     entry.is_encrypted = (header.flags & RHDF_ENCRYPTED) != 0;
@@ -883,7 +1370,7 @@ fn parse_header(header: &RARHeaderDataEx) -> Result<ArchiveEntry> {
     // Platform-specific attributes
     use crate::entry::FileAttributes;
     entry.attributes = Some(FileAttributes {
-        windows: if header.host_os == 0 || header.host_os == 2 {
+        windows: if is_windows_host {
             Some(header.file_attr)
         } else {
             None
@@ -891,7 +1378,11 @@ fn parse_header(header: &RARHeaderDataEx) -> Result<ArchiveEntry> {
         unix_xattr: None, // UnRAR doesn't expose xattrs directly
         archive_specific: Some(format!(
             "host_os={} method={} unp_ver={}",
-            header.host_os, header.method, header.unp_ver
+            // Copies — `format!` captures by reference, which is not
+            // allowed into packed fields.
+            { header.host_os },
+            { header.method },
+            { header.unp_ver }
         )),
     });
 
@@ -929,23 +1420,438 @@ fn resolve_dest_path(dest_path: &Path) -> Result<std::path::PathBuf> {
     })
 }
 
+/// Walked entry name does not match the gate-validated listing name at
+/// the consumed index (OI-0076-002 drift guard) — never touch a
+/// mismatched entry's payload.
+fn listing_drift_mismatch(index: usize, expected: &str, found: &str) -> ArchiveError {
+    ArchiveError::format(
+        Some(ArchiveFormat::Rar),
+        format!(
+            "single-entry listing drift at index {}: expected '{}', found '{}'",
+            index, expected, found
+        ),
+    )
+}
+
+/// R0001-0019: the fresh bulk walk produced more live entries than the
+/// gate-validated listing holds — the archive grew on disk after
+/// listing. Shares the "listing drift" vocabulary of the libarchive
+/// bulk guard (R0080-0009 / R0080-0016).
+fn listing_drift_extra(index: usize, listing_len: usize) -> ArchiveError {
+    ArchiveError::format(
+        Some(ArchiveFormat::Rar),
+        format!(
+            "listing drift: archive entry index {} exceeds the validated listing length {}",
+            index, listing_len
+        ),
+    )
+}
+
+/// R0001-0019: the fresh bulk walk ended before consuming every index
+/// the gate-validated listing holds — the archive was truncated or
+/// rewritten after listing. Cardinality half of the drift guard.
+fn listing_drift_eof(visited: usize, listing_len: usize) -> ArchiveError {
+    ArchiveError::format(
+        Some(ArchiveFormat::Rar),
+        format!(
+            "listing drift: archive ended after {} entries but the validated listing holds {}",
+            visited, listing_len
+        ),
+    )
+}
+
+/// Reason the UnRAR data callback aborted an in-flight `RARProcessFile`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnrarAbort {
+    /// The caller's progress callback voted to cancel (R0080-0022).
+    Cancelled,
+    /// A per-entry or archive-wide decoded-byte cap was exceeded
+    /// (R0080-0008).
+    CapExceeded,
+    /// The UnRAR data callback reported a negative processed-length, which
+    /// signals ABI/state corruption rather than a real data block. We abort
+    /// and surface corruption instead of silently coercing the length to zero
+    /// and continuing to decode on corrupt state (R0081-0069).
+    CallbackError,
+}
+
+/// Per-extraction context handed to the UnRAR C library through
+/// `RARSetCallback`'s `LPARAM` user-data slot. The trampoline
+/// ([`unrar_process_callback`]) casts the pointer back to `&mut Self` on
+/// every `UCM_PROCESSDATA` block.
+///
+/// AD 0019: every UnRAR FFI call — including the library's synchronous
+/// invocation of our trampoline from inside `RARProcessFile` — runs on the
+/// one thread holding `UNRAR_LOCK`. The context is therefore only ever
+/// touched by a single thread at a time, so no `Send`/`Sync` bound or
+/// interior-mutability guard is required; a plain `&mut` reached through the
+/// raw pointer is sound.
+struct UnrarExtractContext<'a> {
+    /// Public operation label used when mapping an abort to an error.
+    op: &'static str,
+    /// Caller progress callback for rate-limited cancellation polling
+    /// (`None` when the caller supplied none).
+    progress: Option<&'a mut Box<dyn ProgressCallback>>,
+    /// Shared throttle for both the between-entry poll and the in-callback
+    /// poll, so a tight data stream cannot call back per block.
+    rate_limiter: RateLimiter,
+    /// Bytes accounted before the current entry (progress numerator base).
+    bytes_before: u64,
+    /// Progress denominator (sum of the selected entries' declared sizes).
+    total_bytes: u64,
+    /// Decoded bytes for the current entry so far (reset per entry).
+    entry_decoded: u64,
+    /// Effective decoded-byte ceiling for the current entry —
+    /// `min(max_file_size, remaining archive budget)` (`None` = unbounded).
+    entry_cap: Option<u64>,
+    /// Remaining archive-wide decoded-byte budget (`None` = unbounded).
+    total_remaining: Option<u64>,
+    /// Set by the trampoline when it returns `-1` to abort the current
+    /// `RARProcessFile`.
+    abort: Option<UnrarAbort>,
+}
+
+impl<'a> UnrarExtractContext<'a> {
+    fn new(
+        op: &'static str,
+        progress: Option<&'a mut Box<dyn ProgressCallback>>,
+        total_bytes: u64,
+        max_total_size: Option<u64>,
+    ) -> Self {
+        Self {
+            op,
+            progress,
+            rate_limiter: RateLimiter::new(),
+            bytes_before: 0,
+            total_bytes,
+            entry_decoded: 0,
+            entry_cap: None,
+            total_remaining: max_total_size,
+            abort: None,
+        }
+    }
+
+    /// Prepare per-entry state before extracting a file payload. The
+    /// effective per-entry ceiling is the smaller of the configured
+    /// per-file cap and whatever archive-wide budget remains, mirroring
+    /// libarchive's `min(entry_cap, remaining_total)` (R0080-0013).
+    fn begin_file(&mut self, max_file_size: Option<u64>) {
+        self.entry_decoded = 0;
+        self.abort = None;
+        self.entry_cap = min_opt(max_file_size, self.total_remaining);
+    }
+
+    /// Fold the just-extracted entry's actual decoded bytes into the
+    /// archive-wide budget, then advance the progress numerator by the
+    /// entry's declared size (keeping it on the same declared-size basis
+    /// as `total_bytes`).
+    fn finish_file(&mut self, declared_size: u64) {
+        if let Some(rem) = self.total_remaining.as_mut() {
+            *rem = rem.saturating_sub(self.entry_decoded);
+        }
+        self.advance_declared(declared_size);
+    }
+
+    /// Advance the progress numerator by an entry's declared size (used for
+    /// directories and other entries that occupy a slot in the denominator
+    /// without a decoded payload).
+    fn advance_declared(&mut self, declared_size: u64) {
+        self.bytes_before = self.bytes_before.saturating_add(declared_size);
+    }
+
+    /// Rate-limited between-entry cancellation poll. Mirrors
+    /// [`crate::ffi::common::check_extraction_cancelled`] but shares this
+    /// context's rate limiter with the in-callback poll.
+    fn poll_between_entries(&mut self) -> Result<()> {
+        if let Some(cb) = self.progress.as_mut() {
+            if self.rate_limiter.should_call() {
+                if let std::ops::ControlFlow::Break(()) =
+                    cb.on_progress(self.bytes_before, Some(self.total_bytes))
+                {
+                    return Err(ArchiveError::Cancelled { operation: self.op });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Unconditional final 100% callback (R0070-0038 parity).
+    fn poll_final(&mut self) -> Result<()> {
+        if let Some(cb) = self.progress.as_mut() {
+            if let std::ops::ControlFlow::Break(()) =
+                cb.on_progress(self.total_bytes, Some(self.total_bytes))
+            {
+                return Err(ArchiveError::Cancelled { operation: self.op });
+            }
+        }
+        Ok(())
+    }
+
+    /// Handle one `UCM_PROCESSDATA` block: account decoded bytes, enforce
+    /// the byte cap, then run the rate-limited cancellation poll. Returns
+    /// the C callback code (`1` continue, `-1` abort). Only ever called on
+    /// the lock-holding thread (AD 0019).
+    fn on_process_data(&mut self, block: u64) -> c_int {
+        self.entry_decoded = self.entry_decoded.saturating_add(block);
+
+        if let Some(cap) = self.entry_cap {
+            if self.entry_decoded > cap {
+                self.abort = Some(UnrarAbort::CapExceeded);
+                return -1;
+            }
+        }
+
+        if let Some(cb) = self.progress.as_mut() {
+            if self.rate_limiter.should_call() {
+                let processed = self
+                    .bytes_before
+                    .saturating_add(self.entry_decoded)
+                    .min(self.total_bytes);
+                if let std::ops::ControlFlow::Break(()) =
+                    cb.on_progress(processed, Some(self.total_bytes))
+                {
+                    self.abort = Some(UnrarAbort::Cancelled);
+                    return -1;
+                }
+            }
+        }
+        1
+    }
+
+    /// Translate a recorded abort into the typed error the facade expects.
+    /// Cancellation becomes [`ArchiveError::Cancelled`]; a cap violation
+    /// becomes the same `OperationBlocked` shape every other backend uses
+    /// for byte-cap breaches (R0080-0008). Returns `None` when the callback
+    /// did not abort (an ordinary decode failure maps via
+    /// [`map_unrar_error`] instead).
+    fn take_abort_error(&mut self, archive_path: &Path) -> Option<ArchiveError> {
+        match self.abort.take() {
+            Some(UnrarAbort::Cancelled) => Some(ArchiveError::Cancelled { operation: self.op }),
+            Some(UnrarAbort::CapExceeded) => Some(ArchiveError::operation_blocked(
+                self.op,
+                format!(
+                    "RAR entry in {} decoded {} bytes, exceeding the configured extraction limit of {} bytes",
+                    archive_path.display(),
+                    self.entry_decoded,
+                    self.entry_cap.unwrap_or(0)
+                ),
+            )),
+            // R0081-0069: a negative processed-length surfaced by the
+            // trampoline is neither a byte-cap breach nor a cancellation — it
+            // is ABI/state corruption, so map it to a corruption error.
+            Some(UnrarAbort::CallbackError) => Some(ArchiveError::corruption(
+                archive_path.display().to_string(),
+                "UnRAR data callback reported a negative processed-length; aborting to avoid masking ABI/state corruption",
+            )),
+            None => None,
+        }
+    }
+}
+
+/// Hold a staged RAR payload to the size its file header declared.
+///
+/// R1 (DCR-006 Amendments 4 and 5): the bounded read that follows compares the
+/// staged file against its own metadata, so a payload that decoded short or
+/// long *relative to its header* used to sail through and surface only at read
+/// time, and only under `StreamBound::DeclaredSize`. Checking it here makes RAR
+/// truncation and over-production a call-time [`ArchiveError::Corruption`],
+/// matching ZIP's and 7z's `require_exact` staging.
+///
+/// `declared == None` (a header that states no size) returns `Ok(())`: no
+/// declaration is invented, and the facade's read-time exactness check remains
+/// the sole authority for those entries.
+///
+/// Extracted from the call site so the decision is unit-testable — tripping it
+/// end to end would need a RAR whose header lies about its unpacked size, which
+/// cannot be produced without byte-patching a fixture and recomputing its
+/// header CRC.
+fn check_staged_length(
+    file_path: &str,
+    op: &'static str,
+    staged_len: u64,
+    declared: Option<u64>,
+) -> Result<()> {
+    if let Some(declared) = declared {
+        if staged_len != declared {
+            return Err(ArchiveError::corruption(
+                file_path,
+                format!(
+                    "{}: staged payload is {} bytes, listing declares {}",
+                    op, staged_len, declared
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `min` over two optional ceilings: `None` means "unbounded", so the result
+/// is bounded whenever either input is.
+fn min_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (None, None) => None,
+    }
+}
+
+/// Panic-safe UnRAR data-callback trampoline (R0080-0022).
+///
+/// Registered via [`RARSetCallback`] for the duration of a single
+/// `RARProcessFile`; `user_data` is the `*mut UnrarExtractContext` we
+/// registered alongside it. The Rust body runs inside
+/// [`std::panic::catch_unwind`] and returns `-1` on panic so an unwind can
+/// never cross the C frame (which would be undefined behaviour).
+///
+/// AD 0019: UnRAR invokes this synchronously from `RARProcessFile` on the
+/// lock-holding thread, so the context is single-threaded despite being
+/// reached through a raw pointer.
+unsafe extern "C" fn unrar_process_callback(
+    msg: c_uint,
+    user_data: isize,
+    _p1: isize,
+    p2: isize,
+) -> c_int {
+    let outcome = std::panic::catch_unwind(|| {
+        if msg != UCM_PROCESSDATA || user_data == 0 {
+            // Only data blocks are handled; every other message (volume
+            // change, password prompt, large-dict notice) keeps UnRAR's
+            // default behaviour by returning a non-abort code.
+            return 1;
+        }
+        // SAFETY: `user_data` is the context pointer registered just before
+        // this `RARProcessFile` call; it outlives the call and is only
+        // touched on this thread (AD 0019).
+        let ctx = unsafe { &mut *(user_data as *mut UnrarExtractContext<'_>) };
+        // R0081-0069: a negative processed-length is not a real data block —
+        // it signals ABI/state corruption. Record a callback abort and return
+        // -1 so the operation fails with a typed corruption error via
+        // `take_abort_error`, instead of coercing the length to zero and
+        // continuing to decode on corrupt state.
+        if p2 < 0 {
+            ctx.abort = Some(UnrarAbort::CallbackError);
+            return -1;
+        }
+        ctx.on_process_data(p2 as u64)
+    });
+    outcome.unwrap_or(-1)
+}
+
+/// Apply the `preserve_*` opt-outs (R0080-0023) to a staged RAR output and
+/// flush it durably before install (R0080-0024).
+///
+/// UnRAR always stamps the archive's mode and mtime onto the file it writes,
+/// so honouring `preserve_permissions == false` / `preserve_times == false`
+/// means *overriding* what UnRAR applied:
+///
+/// * permissions off → reset to the staging default the shared atomic writer
+///   produces when it preserves nothing (`NamedTempFile`'s `0o600`, matching
+///   `write_entry_atomically` with `unix_mode == None`).
+/// * times off → stamp the current time, since the payload is already on disk
+///   carrying the archive mtime UnRAR set.
+///
+/// On Unix the archive mode may be read-only, which would block the
+/// read/write reopen needed to set the mtime, so the mode is captured, forced
+/// reopen-friendly, then reapplied through the handle. Finally `sync_all`
+/// flushes the payload plus any metadata just changed.
+fn finalize_staged_file(
+    temp_path: &Path,
+    preserve_permissions: bool,
+    preserve_times: bool,
+) -> Result<()> {
+    // Capture the mode UnRAR applied and force a mode we can definitely
+    // reopen read/write. We own this just-created O_EXCL temp, so a
+    // path-based chmod is both permitted (owner) and safe from symlink swaps
+    // (no other name resolves to this inode).
+    #[cfg(unix)]
+    let final_mode: u32 = {
+        use std::os::unix::fs::PermissionsExt;
+        let applied = std::fs::metadata(temp_path)
+            .map_err(|e| ArchiveError::io("stat_staged", temp_path.to_path_buf(), e))?
+            .permissions()
+            .mode()
+            & 0o7777;
+        std::fs::set_permissions(temp_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| ArchiveError::io("set_permissions", temp_path.to_path_buf(), e))?;
+        // preserve → restore UnRAR's mode; opt-out → keep the NamedTempFile
+        // staging default (0o600), mirroring the shared atomic writer when it
+        // preserves no `unix_mode` (R0080-0023).
+        if preserve_permissions { applied } else { 0o600 }
+    };
+    #[cfg(not(unix))]
+    let _ = preserve_permissions;
+
+    let staged = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(temp_path)
+        .map_err(|e| ArchiveError::io("open_staged", temp_path.to_path_buf(), e))?;
+
+    // R0080-0023: opt out of time preservation by overriding UnRAR's archive
+    // mtime with the current time. A later `chmod` only touches ctime, so it
+    // does not disturb this mtime.
+    if !preserve_times {
+        staged
+            .set_modified(SystemTime::now())
+            .map_err(|e| ArchiveError::io("set_times", temp_path.to_path_buf(), e))?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        staged
+            .set_permissions(std::fs::Permissions::from_mode(final_mode))
+            .map_err(|e| ArchiveError::io("set_permissions", temp_path.to_path_buf(), e))?;
+    }
+
+    // R0080-0024: flush data and the metadata we may have just changed before
+    // the caller renames the sibling into place.
+    staged
+        .sync_all()
+        .map_err(|e| ArchiveError::io("fsync_staged", temp_path.to_path_buf(), e))?;
+    Ok(())
+}
+
 /// Atomically extract a single RAR file entry to `safe_path`.
 ///
 /// UnRAR writes the file directly via `RARProcessFile`, so we cannot share
 /// `AtomicOutputFile` (which owns the file handle). We mirror its semantics
-/// by giving UnRAR a sibling tempfile path; on success the tempfile is
-/// renamed into place via `persist`/`persist_noclobber`. On any failure the
+/// by giving UnRAR a sibling tempfile path; on success the staged file is
+/// finalised ([`finalize_staged_file`]) and renamed into place via
+/// `rename_with_overwrite` / `persist_noclobber`. On any failure the
 /// `TempPath` drops and removes the partial file, so the destination is
 /// never left half-extracted.
+///
+/// When `ctx` is `Some`, an UnRAR data callback is installed for the
+/// duration of the `RARProcessFile` call so caller cancellation and the
+/// decoded-byte caps can abort mid-entry (R0080-0022 / R0080-0008); it is
+/// cleared before the handle is used again. AD 0019: the callback fires on
+/// this same lock-holding thread, so the raw context pointer is never shared
+/// across threads.
+///
+/// Metadata: UnRAR stamps the entry's modification time (`SetCloseFileTime`)
+/// and attributes (`SetFileAttr` → `chmod` on Unix) onto the staged file.
+/// `preserve_permissions` / `preserve_times == false` are honoured by
+/// [`finalize_staged_file`], which overrides those stamps (R0080-0023). The
+/// staged file is then `fsync`ed and, after the rename, the parent directory
+/// is synced (R0080-0024).
+#[allow(clippy::too_many_arguments)]
 fn unrar_extract_atomic(
     handle: RARHandle,
     safe_path: &Path,
     overwrite: bool,
-    archive_path: &str,
+    archive_path: &Path,
+    op: &'static str,
+    preserve_permissions: bool,
+    preserve_times: bool,
+    mut ctx: Option<&mut UnrarExtractContext<'_>>,
 ) -> Result<()> {
     if !overwrite && safe_path.exists() {
         return Err(ArchiveError::OperationBlocked {
-            operation: "extract".to_string(),
+            // R0081-0068: use the caller's operation label instead of a
+            // hard-coded "extract" so single-file vs. bulk callers keep
+            // their own context.
+            operation: op.to_string(),
             reason: format!("Destination file already exists: {}", safe_path.display()),
         });
     }
@@ -963,52 +1869,141 @@ fn unrar_extract_atomic(
     let dest_name_cstr = CString::new(temp_path_str.as_bytes())
         .map_err(|_| ArchiveError::invalid_path(temp_path_str.as_ref(), "Contains null byte"))?;
 
-    unsafe {
-        let _guard = unrar_lock();
-        let result = RARProcessFile(
+    let result = unsafe {
+        let _guard = unrar_lock()?;
+        // Install the progress/cancellation callback for the duration of this
+        // single `RARProcessFile`. AD 0019: the trampoline runs on this same
+        // lock-holding thread, so the raw context pointer is never shared
+        // across threads.
+        if let Some(ctx) = ctx.as_deref_mut() {
+            RARSetCallback(
+                handle,
+                Some(unrar_process_callback),
+                ctx as *mut UnrarExtractContext<'_> as isize,
+            );
+        }
+        let r = RARProcessFile(
             handle,
             RAR_EXTRACT,
             std::ptr::null(),
             dest_name_cstr.as_ptr(),
         );
-        if result != ERAR_SUCCESS {
-            return Err(map_unrar_error(result, archive_path));
+        // Clear the callback before the handle is used elsewhere / closed.
+        RARSetCallback(handle, None, 0);
+        r
+    };
+
+    if result != ERAR_SUCCESS {
+        // If the callback aborted for a known reason, surface that
+        // (cancellation / cap violation) instead of UnRAR's generic
+        // user-break code.
+        if let Some(ctx) = ctx {
+            if let Some(err) = ctx.take_abort_error(archive_path) {
+                return Err(err);
+            }
         }
+        return Err(map_unrar_error(result, archive_path));
     }
 
+    // R0080-0023 / R0080-0024: apply the `preserve_*` opt-outs and flush the
+    // staged payload durably before install. The temp is a just-created
+    // O_EXCL sibling (`NamedTempFile`), so reopening it by path cannot follow
+    // a symlink an attacker planted — no other name resolves to this inode.
+    finalize_staged_file(&temp_path, preserve_permissions, preserve_times)?;
+
     if overwrite {
-        #[cfg(windows)]
-        if safe_path.exists() {
-            let _ = std::fs::remove_file(safe_path);
+        // R0070-0019: route the cross-platform replace through the
+        // shared `rename_with_overwrite` helper. Previously the
+        // Windows fork did `remove_file` + `persist`, which leaves
+        // the destination missing if `persist` fails. The shared
+        // helper uses `MoveFileExW` on Windows so the swap is
+        // atomic and the original survives a persist failure.
+        let temp_pathbuf_ref = temp_path.to_path_buf();
+        let owned = temp_path.keep().map_err(|e| {
+            ArchiveError::io(
+                "persist_temp",
+                temp_pathbuf_ref.clone(),
+                std::io::Error::other(e.to_string()),
+            )
+        })?;
+        if let Err(e) = crate::ffi::common::rename_with_overwrite(&owned, safe_path) {
+            let _ = std::fs::remove_file(&owned);
+            return Err(e);
         }
-        temp_path
-            .persist(safe_path)
-            .map_err(|e| ArchiveError::io("rename", safe_path.to_path_buf(), e.error))?;
     } else {
         temp_path
             .persist_noclobber(safe_path)
             .map_err(|e| ArchiveError::io("rename", safe_path.to_path_buf(), e.error))?;
     }
 
+    // R0080-0024: fsync the parent directory so the freshly renamed entry is
+    // durably observable across crash recovery (both install branches).
+    crate::ffi::common::sync_parent_dir(safe_path)?;
+
     Ok(())
 }
 
 /// Map UnRAR error code to ArchiveError
-fn map_unrar_error(code: c_int, path: &str) -> ArchiveError {
+fn map_unrar_error(code: c_int, path: &Path) -> ArchiveError {
+    let path_display = path.display().to_string();
     match code {
         ERAR_NO_MEMORY => ArchiveError::format(Some(ArchiveFormat::Rar), "Out of memory"),
         ERAR_BAD_DATA => ArchiveError::corruption(
-            path.to_string(),
+            path_display,
             "CRC32 checksum verification failed - archive is corrupted",
         ),
         ERAR_BAD_ARCHIVE => {
             ArchiveError::format(Some(ArchiveFormat::Rar), "Not a valid RAR archive")
         }
         ERAR_UNKNOWN_FORMAT => ArchiveError::format(None, "Unknown archive format"),
+        // `ERAR_EOPEN` covers any open failure — missing file, permission
+        // denied, path encoding issue. Surface it as a generic I/O open
+        // error (`Other`) so callers don't see misleading `NotFound`
+        // for permission failures (R0069-0031). If the path actually
+        // doesn't exist, the OS still gets a chance to surface that via
+        // a separate `stat` round-trip on the caller side.
         ERAR_EOPEN => ArchiveError::io(
             "open",
-            path.to_string(),
-            std::io::Error::from_raw_os_error(2), // ENOENT
+            path.to_path_buf(),
+            std::io::Error::other(format!(
+                "UnRAR ERAR_EOPEN: cannot open archive at {}",
+                path_display
+            )),
+        ),
+        // I/O-shaped SDK failures map to `ArchiveError::Io` with the
+        // failing operation named, preserving retryable I/O classification
+        // instead of collapsing to a generic format error (R0080-0051).
+        ERAR_EREAD => ArchiveError::io(
+            "read",
+            path.to_path_buf(),
+            std::io::Error::other(format!(
+                "UnRAR ERAR_EREAD: read failed for {}",
+                path_display
+            )),
+        ),
+        ERAR_EWRITE => ArchiveError::io(
+            "write",
+            path.to_path_buf(),
+            std::io::Error::other(format!(
+                "UnRAR ERAR_EWRITE: write failed for {}",
+                path_display
+            )),
+        ),
+        ERAR_ECREATE => ArchiveError::io(
+            "create",
+            path.to_path_buf(),
+            std::io::Error::other(format!(
+                "UnRAR ERAR_ECREATE: cannot create output for {}",
+                path_display
+            )),
+        ),
+        ERAR_ECLOSE => ArchiveError::io(
+            "close",
+            path.to_path_buf(),
+            std::io::Error::other(format!(
+                "UnRAR ERAR_ECLOSE: close failed for {}",
+                path_display
+            )),
         ),
         ERAR_MISSING_PASSWORD => ArchiveError::password("Password required"),
         ERAR_BAD_PASSWORD => ArchiveError::password("Wrong password"),
@@ -1019,46 +2014,484 @@ fn map_unrar_error(code: c_int, path: &str) -> ArchiveError {
     }
 }
 
-/// Decode RAR5 variable-length integer (vint)
+/// Outcome of trying to completely fill a buffer from a reader.
+enum FillOutcome {
+    /// The reader was at EOF before any byte was read (a clean block
+    /// boundary).
+    Eof,
+    /// The buffer was filled completely.
+    Full,
+    /// EOF arrived after some — but not all — bytes were read.
+    Partial,
+}
+
+/// Read up to `buf.len()` bytes, distinguishing a clean EOF at the start
+/// (zero bytes available — a valid end of the block chain) from a
+/// truncated read (some bytes available, then EOF — corruption). Unlike
+/// `read_exact`, a boundary EOF is reported as [`FillOutcome::Eof`]
+/// rather than an error, so block walkers can stop without treating
+/// truncation as "nothing here" (R0080-0052 / R0080-0059).
+fn fill_or_eof<R: std::io::Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<FillOutcome> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    if filled == 0 {
+        Ok(FillOutcome::Eof)
+    } else if filled == buf.len() {
+        Ok(FillOutcome::Full)
+    } else {
+        Ok(FillOutcome::Partial)
+    }
+}
+
+/// Parse RAR5 recovery record blocks.
 ///
-/// RAR5 uses LEB128-style encoding:
-/// - Each byte contributes 7 bits of data
-/// - High bit (0x80) is continuation flag: 1 = more bytes follow, 0 = last byte
-/// - Bytes are in little-endian order (least significant 7 bits first)
+/// Walks the RAR5 block chain via streaming vint reads
+/// ([`read_rar5_vint`]) so blocks with arbitrary header sizes are
+/// handled correctly (R0075-0061 — the previous fixed 50-byte prefix
+/// returned `None` for blocks whose vint fields ran past that window).
+/// Recovery records are service blocks (type 3) with name `"RR"`;
+/// end-of-archive is type 5. Generic over `Read + Seek` so unit tests
+/// can drive the walk with synthetic block sequences; `archive_path`
+/// is only used for error context.
 ///
-/// Returns (decoded_value, bytes_consumed)
-fn decode_vint(data: &[u8]) -> Result<(u64, usize)> {
+/// The percentage value itself is extracted heuristically — RAR5 pins
+/// the recovery percentage to a specific extra-area record, but the
+/// public spec doesn't fix that record's offset within the service
+/// header's content. We tighten the previous "scan first 1024 bytes for
+/// any value in 1..=15" pattern (R0075-0062) to scan only the bytes
+/// *after* the verified `"RR"` name, which rejects accidental matches in
+/// unrelated fields.
+fn parse_rar5_recovery<R: std::io::Read + std::io::Seek>(
+    archive_path: &Path,
+    file: &mut R,
+) -> Result<Option<u8>> {
+    use std::io::SeekFrom;
+
+    // Archive length, used to reject block offsets that run past the end
+    // of the file before seeking to them (R0080-0055).
+    let file_len = file
+        .seek(SeekFrom::End(0))
+        .map_err(|e| ArchiveError::io("seek", archive_path, e))?;
+
+    // Skip RAR5 signature (8 bytes: "Rar!\x1A\x07\x01\x00")
+    file.seek(SeekFrom::Start(8))
+        .map_err(|e| ArchiveError::io("seek", archive_path, e))?;
+
+    loop {
+        let block_pos = file
+            .stream_position()
+            .map_err(|e| ArchiveError::io("tell", archive_path, e))?;
+
+        // CRC32(4) | HeaderSize(vint) | header_body.
+        // A clean zero-byte read at a block boundary means the walk ran
+        // off the end without finding a recovery record; a partial read
+        // (or any other I/O error) is truncation/corruption and must not
+        // masquerade as "no recovery record" (R0080-0052).
+        let mut crc_buf = [0u8; 4];
+        match fill_or_eof(file, &mut crc_buf)
+            .map_err(|e| ArchiveError::io("read", archive_path, e))?
+        {
+            FillOutcome::Eof => return Ok(None),
+            FillOutcome::Full => {}
+            FillOutcome::Partial => {
+                return Err(ArchiveError::corruption(
+                    archive_path.display().to_string(),
+                    "RAR5 block header truncated inside CRC field",
+                ));
+            }
+        }
+
+        // The CRC bytes were consumed, so a malformed or truncated
+        // header-size vint here is corruption, not "no recovery record"
+        // (R0080-0053).
+        let header_size = read_rar5_vint(file)?;
+        // header_body_start: position right after the HeaderSize vint —
+        // i.e. the byte where HeaderType begins. Used both to compute
+        // next_block (block_pos + crc(4) + vint_len(HeaderSize) +
+        // header_size + data) and to bound how much of this header we may
+        // inspect.
+        let header_body_start = file
+            .stream_position()
+            .map_err(|e| ArchiveError::io("tell", archive_path, e))?;
+        let header_size_vint_len = header_body_start - (block_pos + 4);
+
+        // R0081-0071: verify the RAR5 header checksum before treating any
+        // field as authoritative. The vendored UnRAR's `GetCRC50` computes the
+        // standard CRC32 over everything after the 4-byte CRC field — the
+        // HeaderSize vint bytes plus the `header_size`-byte header body — and
+        // compares it to the leading `crc_buf`. Bound the region by the
+        // archive length first so a bogus HeaderSize cannot drive a huge read.
+        let crc_region_len = header_size_vint_len
+            .checked_add(header_size)
+            .ok_or_else(|| {
+                ArchiveError::corruption(
+                    archive_path.display().to_string(),
+                    "RAR5 header size overflowed",
+                )
+            })?;
+        let crc_region_end = (block_pos + 4).checked_add(crc_region_len).ok_or_else(|| {
+            ArchiveError::corruption(
+                archive_path.display().to_string(),
+                "RAR5 header extends past the addressable range",
+            )
+        })?;
+        if crc_region_end > file_len {
+            return Err(ArchiveError::corruption(
+                archive_path.display().to_string(),
+                "RAR5 header extends past end of archive",
+            ));
+        }
+        file.seek(SeekFrom::Start(block_pos + 4))
+            .map_err(|e| ArchiveError::io("seek", archive_path, e))?;
+        let mut crc_region = vec![0u8; crc_region_len as usize];
+        file.read_exact(&mut crc_region)
+            .map_err(|e| ArchiveError::io("read", archive_path, e))?;
+        if crc32fast::hash(&crc_region) != u32::from_le_bytes(crc_buf) {
+            return Err(ArchiveError::corruption(
+                archive_path.display().to_string(),
+                "RAR5 block header CRC mismatch",
+            ));
+        }
+        // Resume parsing the header body from just after the HeaderSize vint.
+        file.seek(SeekFrom::Start(header_body_start))
+            .map_err(|e| ArchiveError::io("seek", archive_path, e))?;
+
+        let header_type = read_rar5_vint(file)?;
+        let header_flags = read_rar5_vint(file)?;
+
+        // Optional ExtraSize / DataSize vints in the standard header tail.
+        let _extra_area_size = if header_flags & 0x0001 != 0 {
+            read_rar5_vint(file)?
+        } else {
+            0
+        };
+        let data_area_size = if header_flags & 0x0002 != 0 {
+            read_rar5_vint(file)?
+        } else {
+            0
+        };
+
+        // End-of-archive marker
+        if header_type == 5 {
+            return Ok(None);
+        }
+
+        if header_type == 3 {
+            // Service header. Read the remaining header bytes (up to
+            // 4 KiB) into memory and look for the "RR" name.
+            let consumed_in_header = file
+                .stream_position()
+                .map_err(|e| ArchiveError::io("tell", archive_path, e))?
+                .saturating_sub(header_body_start);
+            // A header declaring fewer bytes than we have already consumed
+            // is corrupt; reject it rather than saturating to an empty
+            // tail and parsing from a bogus boundary (R0080-0054).
+            if consumed_in_header > header_size {
+                return Err(ArchiveError::corruption(
+                    archive_path.display().to_string(),
+                    "RAR5 service header declares fewer bytes than already consumed",
+                ));
+            }
+            let remaining = header_size - consumed_in_header;
+            let read_cap = remaining.min(4096) as usize;
+            let mut tail = vec![0u8; read_cap];
+            file.read_exact(&mut tail)
+                .map_err(|e| ArchiveError::io("read", archive_path, e))?;
+
+            // Find the "RR" name. RAR5 service headers carry a
+            // length-prefixed name; the "RR" bytes appear as a contiguous
+            // pair within the type-specific portion of the header.
+            // Restrict the percentage scan to the bytes *after* that match
+            // so unrelated header fields can't trigger a false positive
+            // (R0075-0062).
+            if let Some(rr_at) = tail.windows(2).position(|window| window == b"RR") {
+                let after_rr = &tail[rr_at + 2..];
+                // The percentage is conventionally a 1-byte field in
+                // 1..=15 within the recovery extra-area record. We scan
+                // the first 32 bytes after "RR" — far tighter than the
+                // previous 64-byte scan over the entire header.
+                for &byte in after_rr.iter().take(32) {
+                    if (1..=15).contains(&byte) {
+                        return Ok(Some(byte));
+                    }
+                }
+                return Ok(None);
+            }
+        }
+
+        // Compute the next block's starting offset:
+        //   block_pos + crc32(4) + vint_len(header_size) + header_size + data.
+        // Every component is attacker-controlled, so add with overflow
+        // checks, demand strict forward progress, and reject offsets past
+        // the archive end before seeking (R0080-0055 / R0080-0056).
+        let next_block = block_pos
+            .checked_add(4)
+            .and_then(|v| v.checked_add(header_size_vint_len))
+            .and_then(|v| v.checked_add(header_size))
+            .and_then(|v| v.checked_add(data_area_size))
+            .ok_or_else(|| {
+                ArchiveError::corruption(
+                    archive_path.display().to_string(),
+                    "RAR5 next-block offset overflowed",
+                )
+            })?;
+        if next_block <= block_pos {
+            return Err(ArchiveError::corruption(
+                archive_path.display().to_string(),
+                "RAR5 block did not advance (non-monotonic next-block offset)",
+            ));
+        }
+        if next_block > file_len {
+            return Err(ArchiveError::corruption(
+                archive_path.display().to_string(),
+                "RAR5 block extends past end of archive",
+            ));
+        }
+        file.seek(SeekFrom::Start(next_block))
+            .map_err(|e| ArchiveError::io("seek", archive_path, e))?;
+    }
+}
+
+/// Parse RAR4 recovery record blocks.
+///
+/// RAR4 uses a legacy block format with fixed-size headers.
+/// Recovery records have block type 0x78. Generic over `Read + Seek`
+/// so unit tests can drive the walk with synthetic block sequences;
+/// `archive_path` is only used for error context.
+fn parse_rar4_recovery<R: std::io::Read + std::io::Seek>(
+    archive_path: &Path,
+    file: &mut R,
+) -> Result<Option<u8>> {
+    use std::io::SeekFrom;
+
+    // RAR4 signature is 7 bytes: "Rar!\x1A\x07\x00"
+    // After signature comes the main archive header, then file/service blocks
+
+    // R0081-0072: capture the archive length once so the ADD_SIZE data-area
+    // skip can be bounded (mirroring the RAR5 walk after R0080-0055) rather
+    // than seeking blindly past EOF.
+    let file_len = file
+        .seek(SeekFrom::End(0))
+        .map_err(|e| ArchiveError::io("seek", archive_path, e))?;
+
+    // Seek past signature (already read 16 bytes, go back to start of blocks at offset 7)
+    file.seek(SeekFrom::Start(7))
+        .map_err(|e| ArchiveError::io("seek", archive_path, e))?;
+
+    // Parse blocks until we find recovery record (0x78) or EOF
+    loop {
+        // Read RAR4 block header (7 bytes minimum)
+        // Format: HEAD_CRC(2) | HEAD_TYPE(1) | HEAD_FLAGS(2) | HEAD_SIZE(2)
+        let mut block_header = [0u8; 7];
+        match fill_or_eof(file, &mut block_header)
+            .map_err(|e| ArchiveError::io("read", archive_path, e))?
+        {
+            // A clean boundary EOF ends the walk; a partial header is
+            // truncation/corruption, not a silent stop (R0080-0059).
+            FillOutcome::Eof => return Ok(None),
+            FillOutcome::Full => {}
+            FillOutcome::Partial => {
+                return Err(ArchiveError::corruption(
+                    archive_path.display().to_string(),
+                    "RAR4 block header truncated",
+                ));
+            }
+        }
+
+        let head_crc = u16::from_le_bytes([block_header[0], block_header[1]]);
+        let head_type = block_header[2];
+        let head_flags = u16::from_le_bytes([block_header[3], block_header[4]]);
+        let head_size = u16::from_le_bytes([block_header[5], block_header[6]]);
+
+        // A RAR4 block header is at minimum the 7-byte basic header; a
+        // smaller declared size is corruption and would make the skip
+        // arithmetic below underflow into a bogus or backward seek
+        // (R0080-0060).
+        if head_size < 7 {
+            return Err(ArchiveError::corruption(
+                archive_path.display().to_string(),
+                "RAR4 block header smaller than 7-byte minimum",
+            ));
+        }
+
+        // R0081-0070: buffer the rest of the header (everything after the
+        // 7-byte basic header, up to `head_size`) and verify HEAD_CRC before
+        // trusting any field or seek decision. The vendored UnRAR's `GetCRC15`
+        // is the low 16 bits of the standard CRC32 over the header from
+        // HEAD_TYPE to the end of the `head_size`-byte header (the data area
+        // that follows a LONG_BLOCK is not covered). A truncated header here
+        // is corruption, not a clean stop.
+        let mut header_rest = vec![0u8; (head_size - 7) as usize];
+        file.read_exact(&mut header_rest)
+            .map_err(|e| ArchiveError::io("read", archive_path, e))?;
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&block_header[2..7]);
+        hasher.update(&header_rest);
+        if (hasher.finalize() & 0xFFFF) as u16 != head_crc {
+            return Err(ArchiveError::corruption(
+                archive_path.display().to_string(),
+                "RAR4 block header CRC mismatch",
+            ));
+        }
+
+        // Recovery record block (type 0x78). Its recovery counts live in the
+        // header bytes just read.
+        if head_type == 0x78 {
+            // RAR4 recovery record structure:
+            // Bytes 0-3: Total blocks
+            // Bytes 4-7: Recovery blocks
+            // Percentage = (recovery_blocks / total_blocks) * 100
+            if header_rest.len() >= 8 {
+                let total_blocks = u32::from_le_bytes([
+                    header_rest[0],
+                    header_rest[1],
+                    header_rest[2],
+                    header_rest[3],
+                ]);
+                let recovery_blocks = u32::from_le_bytes([
+                    header_rest[4],
+                    header_rest[5],
+                    header_rest[6],
+                    header_rest[7],
+                ]);
+
+                if total_blocks > 0 {
+                    // Prevent integer overflow - cap at 100%
+                    let percentage =
+                        ((recovery_blocks as u64 * 100) / total_blocks as u64).min(100) as u8;
+                    return Ok(Some(percentage));
+                }
+            }
+
+            // Could not determine exact percentage
+            return Ok(None);
+        }
+
+        // A LONG_BLOCK (0x8000) carries a 4-byte ADD_SIZE data area following
+        // the header; every other block has no data area. The header bytes
+        // (including the ADD_SIZE field) were already consumed above, so only
+        // the data area still needs skipping.
+        let data_area: u64 = if head_flags & 0x8000 != 0 {
+            // LONG_BLOCK: the 4-byte ADD_SIZE field lives right after the
+            // basic header, so the header must be at least 11 bytes. A smaller
+            // size with the flag set is corruption (R0080-0060).
+            if head_size < 11 {
+                return Err(ArchiveError::corruption(
+                    archive_path.display().to_string(),
+                    "RAR4 long block header smaller than 11-byte minimum",
+                ));
+            }
+            u32::from_le_bytes([
+                header_rest[0],
+                header_rest[1],
+                header_rest[2],
+                header_rest[3],
+            ]) as u64
+        } else {
+            0
+        };
+
+        // R0081-0072: bound the data-area seek by the archive length before
+        // seeking (like the RAR5 walk after R0080-0055). Forward progress is
+        // already guaranteed by the `head_size >= 7` / `>= 11` guards, which
+        // advance the cursor by at least the header size each iteration.
+        let after_header = file
+            .stream_position()
+            .map_err(|e| ArchiveError::io("tell", archive_path, e))?;
+        let next_offset = after_header.checked_add(data_area).ok_or_else(|| {
+            ArchiveError::corruption(
+                archive_path.display().to_string(),
+                "RAR4 next-block offset overflowed",
+            )
+        })?;
+        if next_offset > file_len {
+            return Err(ArchiveError::corruption(
+                archive_path.display().to_string(),
+                "RAR4 block extends past end of archive",
+            ));
+        }
+        file.seek(SeekFrom::Start(next_offset))
+            .map_err(|e| ArchiveError::io("seek", archive_path, e))?;
+
+        // Check for end of archive marker (type 0x7B)
+        if head_type == 0x7B {
+            return Ok(None);
+        }
+
+        // NOTE: HEAD_FLAGS bit 0x8000 is LONG_BLOCK ("ADD_SIZE present"),
+        // not a volume-end marker — every RAR4 file header sets it.
+        // Treating it as a terminator killed the walk at the first file
+        // block, before the trailing 0x78 recovery record (R0079-0025).
+        // Termination is the 0x7B end-of-archive block above or EOF.
+    }
+}
+
+/// Streaming variant of [`decode_vint`] that pulls one byte at a time
+/// from a `Read`. Used by RAR5 block-walking code that no longer
+/// pre-loads a fixed-size header prefix (R0075-0061): the vint
+/// continues until the high bit clears or 10 bytes have been read,
+/// whichever comes first.
+///
+/// On EOF mid-vint the function surfaces the underlying I/O error
+/// rather than returning a partial value.
+pub(crate) fn read_rar5_vint<R: std::io::Read>(reader: &mut R) -> Result<u64> {
     let mut value = 0u64;
     let mut shift: u32 = 0;
-    let mut bytes_consumed = 0;
+    for _ in 0..10 {
+        let mut buf = [0u8; 1];
+        reader.read_exact(&mut buf).map_err(|e| {
+            ArchiveError::format(Some(ArchiveFormat::Rar5), format!("RAR5 vint read: {}", e))
+        })?;
+        let byte = buf[0];
+        let data_bits = u64::from(byte & 0x7F);
 
-    for &byte in data {
-        bytes_consumed += 1;
-        let data_bits = (byte & 0x7F) as u64;
-
-        if shift < 64 {
-            value |= data_bits.checked_shl(shift).unwrap_or(0);
+        if shift >= 64 {
+            return Err(ArchiveError::format(
+                Some(ArchiveFormat::Rar5),
+                "Invalid vint encoding: shift would exceed u64 width",
+            ));
+        }
+        match data_bits.checked_shl(shift) {
+            Some(v) => value |= v,
+            None => {
+                return Err(ArchiveError::format(
+                    Some(ArchiveFormat::Rar5),
+                    "Invalid vint encoding: shift overflow on data bits",
+                ));
+            }
         }
 
-        if (byte & 0x80) == 0 {
-            return Ok((value, bytes_consumed));
+        if byte & 0x80 == 0 {
+            return Ok(value);
         }
         shift += 7;
-
-        if bytes_consumed >= 10 {
-            break;
-        }
     }
 
     Err(ArchiveError::format(
         Some(ArchiveFormat::Rar5),
-        "Invalid vint encoding: too many bytes or unexpected EOF",
+        "Invalid vint encoding: exceeds 10-byte cap",
     ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+
+    /// R0079-0015: the narrow `unsafe impl Send` on the FFI-handle owner
+    /// must keep compiling — `Archive`'s `Send` is derived from it.
+    #[test]
+    fn test_unrar_archive_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<UnrarArchive>();
+    }
 
     #[test]
     fn test_dos_time_conversion() {
@@ -1066,5 +2499,634 @@ mod tests {
         let dos_time = (2024 - 1980) << 25 | 1 << 21 | 15 << 16 | 14 << 11 | 30 << 5;
         let sys_time = dos_time_to_system_time(dos_time);
         assert!(sys_time.is_some());
+    }
+
+    /// R0076-0069: FILETIME conversion must keep the 100-ns sub-second
+    /// ticks instead of truncating to whole seconds.
+    #[test]
+    fn filetime_conversion_preserves_subsecond_ticks() {
+        // Unix epoch + 1.5 s expressed as 100-ns FILETIME ticks.
+        let ticks = (FILETIME_UNIX_EPOCH_DIFF_SECS + 1) * 10_000_000 + 5_000_000;
+        let t = filetime_to_system_time(ticks as u32, (ticks >> 32) as u32)
+            .expect("post-epoch timestamp converts");
+        assert_eq!(
+            t.duration_since(UNIX_EPOCH).unwrap(),
+            std::time::Duration::new(1, 500_000_000)
+        );
+    }
+
+    /// R0076-0069: the existing contract is unchanged — `None` for the
+    /// all-zero "missing" encoding and for pre-Unix-epoch values, even
+    /// when sub-second ticks are present.
+    #[test]
+    fn filetime_conversion_none_for_zero_and_pre_epoch() {
+        assert!(filetime_to_system_time(0, 0).is_none());
+        // One tick past 1601-01-01 is far before the Unix epoch.
+        assert!(filetime_to_system_time(1, 0).is_none());
+        // Just below the epoch boundary, with a non-zero sub-second part.
+        let ticks = FILETIME_UNIX_EPOCH_DIFF_SECS * 10_000_000 - 1;
+        assert!(filetime_to_system_time(ticks as u32, (ticks >> 32) as u32).is_none());
+    }
+
+    /// R0001-0019: the bulk drift guard's three refusals are all typed
+    /// `Format` errors tagged as RAR, so a swapped, grown, or truncated
+    /// archive fails closed with a diagnosable message instead of
+    /// extracting attacker-chosen entries.
+    #[test]
+    fn listing_drift_errors_are_rar_format_errors() {
+        for err in [
+            listing_drift_mismatch(3, "docs/a.txt", "docs/evil.txt"),
+            listing_drift_extra(7, 5),
+            listing_drift_eof(2, 5),
+        ] {
+            assert!(
+                matches!(
+                    err,
+                    ArchiveError::Format {
+                        format: Some(ArchiveFormat::Rar),
+                        ..
+                    }
+                ),
+                "expected a RAR format error, got {:?}",
+                err
+            );
+        }
+    }
+
+    /// R0001-0019: each drift refusal names the offending index and the
+    /// two sides being compared, so the operator can tell a swap from a
+    /// grow from a truncation.
+    #[test]
+    fn listing_drift_messages_identify_the_mismatch() {
+        let swapped = listing_drift_mismatch(3, "docs/a.txt", "docs/evil.txt").to_string();
+        assert!(swapped.contains("index 3"), "{}", swapped);
+        assert!(swapped.contains("docs/a.txt"), "{}", swapped);
+        assert!(swapped.contains("docs/evil.txt"), "{}", swapped);
+
+        let grew = listing_drift_extra(7, 5).to_string();
+        assert!(grew.contains('7') && grew.contains('5'), "{}", grew);
+
+        let truncated = listing_drift_eof(2, 5).to_string();
+        assert!(
+            truncated.contains('2') && truncated.contains('5'),
+            "{}",
+            truncated
+        );
+    }
+
+    /// R0076-0069: whole-second timestamps still convert exactly.
+    #[test]
+    fn filetime_conversion_whole_seconds() {
+        let ticks = (FILETIME_UNIX_EPOCH_DIFF_SECS + 42) * 10_000_000;
+        let t = filetime_to_system_time(ticks as u32, (ticks >> 32) as u32)
+            .expect("post-epoch timestamp converts");
+        assert_eq!(
+            t.duration_since(UNIX_EPOCH).unwrap(),
+            std::time::Duration::from_secs(42)
+        );
+    }
+
+    /// Build a zeroed `RARHeaderDataEx` carrying an ASCII name, so the
+    /// name decode in `parse_header` has real input. Fields are written
+    /// by value only — the struct is `#[repr(C, packed)]`.
+    fn header_with_name(name: &str) -> RARHeaderDataEx {
+        let mut header = RARHeaderDataEx::default();
+        let mut wide = [0 as RarWchar; 1024];
+        for (slot, ch) in wide.iter_mut().zip(name.chars()) {
+            *slot = ch as RarWchar;
+        }
+        header.file_name_w = wide;
+        header
+    }
+
+    /// ticgit b75cafb4: RAR5 stores `st_mode` unshifted in the file
+    /// header's Attributes vint, so the decode must NOT apply the RAR4
+    /// `>> 16`. `33188` is the exact value hand-decoded from
+    /// `tests/fixtures/test.rar` (vint `a4 83 02`).
+    #[test]
+    fn rar5_unix_mode_is_read_unshifted() {
+        assert_eq!(unix_mode_from_file_attr(33188, 50), Some(0o644));
+        // VER_PACK7 sentinel — a RAR7 body inside the RAR5 container.
+        assert_eq!(unix_mode_from_file_attr(0o100755, 70), Some(0o755));
+        // Directory: S_IFDIR instead of S_IFREG, same unshifted layout.
+        assert_eq!(unix_mode_from_file_attr(0o40755, 50), Some(0o755));
+        // VER_UNKNOWN (9999) is still a RAR5 header per headers.hpp.
+        assert_eq!(unix_mode_from_file_attr(0o120777, 9999), Some(0o777));
+    }
+
+    /// The branch no fixture in this repo can reach — every committed
+    /// `.rar` starts with the RAR5 signature, and producing a RAR4
+    /// archive needs the proprietary `rar` binary. RAR4 packs `st_mode`
+    /// into the upper 16 bits (`ReadHeader15`: `hd->FileAttr=Raw.Get4()`),
+    /// and its `unp_ver` is the raw archived byte, which real writers
+    /// emit as 10/13/15/20/26/29/36.
+    #[test]
+    fn rar4_unix_mode_is_read_shifted() {
+        for unp_ver in [10u32, 13, 15, 20, 26, 29, 36] {
+            assert_eq!(
+                unix_mode_from_file_attr(0o100644 << 16, unp_ver),
+                Some(0o644),
+                "unp_ver {unp_ver} must take the RAR4 shifted decode"
+            );
+        }
+        assert_eq!(unix_mode_from_file_attr(0o40755 << 16, 29), Some(0o755));
+    }
+
+    /// ticgit b75cafb4's core complaint: `Some(0)` is a positive claim
+    /// that nobody may read the file, which is strictly worse than
+    /// admitting the mode is unknown. A field with no `S_IFMT` bits
+    /// holds no Unix mode, so it reports `None`.
+    ///
+    /// This also covers RAR5's `HSYS_UNKNOWN` host: `dll.cpp` folds it
+    /// into the Unix arm (`HSType==HSYS_WINDOWS ? HOST_WIN32 :
+    /// HOST_UNIX`), so without the guard those entries would receive a
+    /// fabricated mode.
+    #[test]
+    fn no_file_type_bits_reports_none_not_mode_zero() {
+        // A RAR5 attribute misread with the RAR4 shift degrades to
+        // `None`, never `Some(0)` — this is the exact regression.
+        assert_eq!(unix_mode_from_file_attr(33188, 29), None);
+        assert_eq!(unix_mode_from_file_attr(0, 50), None);
+        assert_eq!(unix_mode_from_file_attr(0, 29), None);
+        // A DOS attribute word (FILE_ATTRIBUTE_ARCHIVE) carries no type
+        // bits under either unpacking.
+        assert_eq!(unix_mode_from_file_attr(0x20, 50), None);
+        assert_eq!(unix_mode_from_file_attr(0x20, 29), None);
+    }
+
+    /// End-to-end through `parse_header`: the format-aware unpack is
+    /// actually wired in, and the Windows-host branch is unchanged.
+    #[test]
+    fn parse_header_unpacks_permissions_by_format() {
+        // (a) RAR5 Unix host — the `tests/fixtures/test.rar` shape.
+        let mut rar5 = header_with_name("test_file.txt");
+        rar5.host_os = 3; // HOST_UNIX
+        rar5.unp_ver = 50; // VER_PACK5
+        rar5.file_attr = 33188; // 0o100644, unshifted
+        let entry = parse_header(&rar5).expect("RAR5 Unix header parses");
+        assert_eq!(entry.permissions, Some(0o644));
+        assert_eq!(
+            entry.attributes.as_ref().and_then(|a| a.windows),
+            None,
+            "a Unix host must not populate the Windows attribute field"
+        );
+
+        // (b) RAR4 Unix host — the shifted packing.
+        let mut rar4 = header_with_name("test_file.txt");
+        rar4.host_os = 3;
+        rar4.unp_ver = 29; // VER_PACK, RAR 2.9/3.x
+        rar4.file_attr = 0o100644 << 16;
+        let entry = parse_header(&rar4).expect("RAR4 Unix header parses");
+        assert_eq!(entry.permissions, Some(0o644));
+
+        // (c) Windows host — unchanged: no permissions, attributes kept.
+        let mut win = header_with_name("test_file.txt");
+        win.host_os = 2; // HOST_WIN32
+        win.unp_ver = 50;
+        win.file_attr = 0x20; // FILE_ATTRIBUTE_ARCHIVE
+        let entry = parse_header(&win).expect("Windows header parses");
+        assert_eq!(entry.permissions, None);
+        assert_eq!(
+            entry.attributes.as_ref().and_then(|a| a.windows),
+            Some(0x20)
+        );
+    }
+
+    #[test]
+    fn rar5_vint_one_byte() {
+        // Single-byte vint: high bit clear, payload is the lower 7 bits.
+        let mut cursor = Cursor::new(vec![0x05u8]);
+        assert_eq!(read_rar5_vint(&mut cursor).unwrap(), 5);
+        assert_eq!(cursor.position(), 1);
+    }
+
+    #[test]
+    fn rar5_vint_zero() {
+        let mut cursor = Cursor::new(vec![0x00u8]);
+        assert_eq!(read_rar5_vint(&mut cursor).unwrap(), 0);
+    }
+
+    #[test]
+    fn rar5_vint_two_bytes() {
+        // 0x81 = 10000001 → continuation set, payload 0x01.
+        // 0x01 = 00000001 → high bit clear, payload 0x01.
+        // Decoded: 1 | (1 << 7) = 0x81.
+        let mut cursor = Cursor::new(vec![0x81, 0x01]);
+        assert_eq!(read_rar5_vint(&mut cursor).unwrap(), 0x81);
+        assert_eq!(cursor.position(), 2);
+    }
+
+    #[test]
+    fn rar5_vint_max_10_bytes() {
+        // Ten bytes where only the last clears the high bit: a valid
+        // (boundary-case) encoding. The plan calls this out as the
+        // upper limit on byte count.
+        let mut bytes = vec![0xFFu8; 9];
+        bytes.push(0x7F);
+        let mut cursor = Cursor::new(bytes);
+        let v = read_rar5_vint(&mut cursor).expect("10-byte vint should decode");
+        // No specific value assertion — we care that it accepts.
+        // The decoded value fills 64 bits so must be >= 1.
+        assert!(v != 0);
+    }
+
+    #[test]
+    fn rar5_vint_reject_more_than_10_bytes() {
+        // 10 continuation bytes followed by a terminator → exceeds cap.
+        let mut bytes = vec![0xFFu8; 10];
+        bytes.push(0x01);
+        let mut cursor = Cursor::new(bytes);
+        assert!(read_rar5_vint(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn rar5_vint_reject_eof_mid_continuation() {
+        // High bit set on the only byte → continuation expected but
+        // stream is exhausted.
+        let mut cursor = Cursor::new(vec![0x80u8]);
+        assert!(read_rar5_vint(&mut cursor).is_err());
+    }
+
+    /// R0079-0001: the listing must be repeat-safe — a second walk on
+    /// the same handle used to return zero entries because the UnRAR
+    /// handle was EOF-positioned after the first.
+    #[test]
+    fn rar_list_files_repeat_safe() {
+        let path = crate::test_utils::fixture("test.rar");
+        let archive = UnrarArchive::open(&path).expect("open RAR fixture");
+
+        let first = archive.list_files().expect("first listing");
+        let second = archive.list_files().expect("second listing");
+
+        assert!(!first.is_empty(), "first walk must see entries");
+        assert!(!second.is_empty(), "second walk must see entries");
+        assert_eq!(first.len(), second.len(), "listings must match");
+    }
+
+    /// R0079-0001: even after `self.handle` has been exhausted by a
+    /// direct header walk (the `is_encrypted()` / `list_files_for_limits`
+    /// call pattern), `list_files` must still return the full listing.
+    #[test]
+    fn rar_list_files_full_after_handle_exhausted() {
+        let path = crate::test_utils::fixture("test.rar");
+        let archive = UnrarArchive::open(&path).expect("open RAR fixture");
+
+        while archive.read_header().expect("walk header").is_some() {
+            archive.skip_entry().expect("skip entry");
+        }
+
+        let listing = archive.list_files().expect("listing after exhaustion");
+        assert!(
+            !listing.is_empty(),
+            "exhausted primary handle must not produce an empty listing"
+        );
+    }
+
+    /// Assemble a RAR4 block with a valid HEAD_CRC. `body` is everything
+    /// after the 7-byte basic header (for a LONG_BLOCK that includes the
+    /// 4-byte ADD_SIZE field); `data` is the optional data area that follows
+    /// the header and is *not* covered by HEAD_CRC. HEAD_CRC is the low 16
+    /// bits of the standard CRC32 over HEAD_TYPE..end-of-header, matching the
+    /// vendored UnRAR's `GetCRC15` (R0081-0070).
+    fn rar4_block(head_type: u8, head_flags: u16, body: &[u8], data: &[u8]) -> Vec<u8> {
+        let head_size = 7u16 + body.len() as u16;
+        let mut after_crc = Vec::new();
+        after_crc.push(head_type);
+        after_crc.extend_from_slice(&head_flags.to_le_bytes());
+        after_crc.extend_from_slice(&head_size.to_le_bytes());
+        after_crc.extend_from_slice(body);
+        let head_crc = (crc32fast::hash(&after_crc) & 0xFFFF) as u16;
+
+        let mut block = head_crc.to_le_bytes().to_vec();
+        block.extend_from_slice(&after_crc);
+        block.extend_from_slice(data);
+        block
+    }
+
+    /// Synthetic RAR4 block sequence: signature, main header, one
+    /// LONG_BLOCK (0x8000) file header with packed data, then a
+    /// recovery record block (type 0x78) declaring 5/100 blocks.
+    fn synthetic_rar4_with_recovery() -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"Rar!\x1A\x07\x00"); // RAR4 signature
+
+        // Main archive header (type 0x73), head_size 13.
+        buf.extend_from_slice(&rar4_block(0x73, 0, &[0u8; 6], &[]));
+
+        // File header (type 0x74) with LONG_BLOCK set: head_size 32,
+        // ADD_SIZE 5 → 21 remaining header bytes + 5 data bytes.
+        let mut file_body = Vec::new();
+        file_body.extend_from_slice(&5u32.to_le_bytes()); // ADD_SIZE
+        file_body.extend_from_slice(&[0u8; 21]); // rest of file header
+        buf.extend_from_slice(&rar4_block(0x74, 0x8000, &file_body, &[0xAB; 5]));
+
+        // Recovery record (type 0x78): head_size 15 → 8 data bytes read
+        // as total_blocks / recovery_blocks.
+        let mut rec_body = Vec::new();
+        rec_body.extend_from_slice(&100u32.to_le_bytes()); // total blocks
+        rec_body.extend_from_slice(&5u32.to_le_bytes()); // recovery blocks
+        buf.extend_from_slice(&rar4_block(0x78, 0, &rec_body, &[]));
+
+        buf
+    }
+
+    /// Assemble a minimal RAR5 block: the 4-byte HEAD_CRC over the
+    /// HeaderSize vint plus `body`, then those bytes. `body` begins at
+    /// HeaderType. HEAD_CRC is the standard CRC32 of the HeaderSize-vint bytes
+    /// plus the body, matching the vendored UnRAR's `GetCRC50` (R0081-0071).
+    /// Only single-byte HeaderSize vints (body up to 127 bytes) are encoded,
+    /// which is all these tests require.
+    fn rar5_block(body: &[u8]) -> Vec<u8> {
+        assert!(body.len() < 0x80, "test helper only encodes 1-byte vints");
+        let size_vint = [body.len() as u8]; // HeaderSize as a 1-byte vint
+        let mut crc_region = Vec::new();
+        crc_region.extend_from_slice(&size_vint);
+        crc_region.extend_from_slice(body);
+        let crc = crc32fast::hash(&crc_region);
+
+        let mut block = crc.to_le_bytes().to_vec();
+        block.extend_from_slice(&crc_region);
+        block
+    }
+
+    /// R0079-0025: HEAD_FLAGS 0x8000 is LONG_BLOCK, not a terminator —
+    /// the scan must walk past file headers to the trailing recovery
+    /// record instead of returning `None` at the first file block.
+    #[test]
+    fn rar4_recovery_scan_passes_long_block_file_headers() {
+        let mut cursor = Cursor::new(synthetic_rar4_with_recovery());
+        let pct = parse_rar4_recovery(Path::new("synthetic.rar"), &mut cursor)
+            .expect("synthetic RAR4 walk");
+        assert_eq!(pct, Some(5));
+    }
+
+    /// R0079-0025: the walk still terminates on the 0x7B end-of-archive
+    /// block (and at EOF) — a recovery block after the end marker is
+    /// not reached.
+    #[test]
+    fn rar4_recovery_scan_stops_at_end_of_archive_block() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"Rar!\x1A\x07\x00"); // RAR4 signature
+
+        // End-of-archive block (type 0x7B), head_size 7.
+        buf.extend_from_slice(&rar4_block(0x7B, 0, &[], &[]));
+
+        // Recovery block after the end marker — must not be reached.
+        let mut rec_body = Vec::new();
+        rec_body.extend_from_slice(&100u32.to_le_bytes());
+        rec_body.extend_from_slice(&5u32.to_le_bytes());
+        buf.extend_from_slice(&rar4_block(0x78, 0, &rec_body, &[]));
+
+        let mut cursor = Cursor::new(buf);
+        let pct = parse_rar4_recovery(Path::new("synthetic.rar"), &mut cursor)
+            .expect("synthetic RAR4 walk");
+        assert_eq!(pct, None);
+    }
+
+    /// R0079-0025: EOF without a recovery block resolves to `Ok(None)`.
+    #[test]
+    fn rar4_recovery_scan_none_at_eof() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"Rar!\x1A\x07\x00"); // RAR4 signature
+
+        // Main archive header only, head_size 13.
+        buf.extend_from_slice(&rar4_block(0x73, 0, &[0u8; 6], &[]));
+
+        let mut cursor = Cursor::new(buf);
+        let pct = parse_rar4_recovery(Path::new("synthetic.rar"), &mut cursor)
+            .expect("synthetic RAR4 walk");
+        assert_eq!(pct, None);
+    }
+
+    #[test]
+    fn rar5_vint_known_values() {
+        // Pin a handful of known encodings so future refactors can't
+        // silently change the decoded value.
+        let cases: &[(&[u8], u64)] = &[
+            (&[0x00], 0),
+            (&[0x05], 5),
+            (&[0x7F], 0x7F),
+            (&[0x80, 0x01], 0x80),
+            (&[0x81, 0x01], 0x81),
+            (&[0xFF, 0x7F], 0x3FFF),
+            (&[0xFF, 0xFF, 0xFF, 0x01], 0x3F_FFFF),
+        ];
+        for (bytes, expected) in cases {
+            let mut cursor = Cursor::new(bytes.to_vec());
+            let v = read_rar5_vint(&mut cursor).expect("stream decode");
+            assert_eq!(v, *expected, "encoding {:x?}", bytes);
+        }
+    }
+
+    /// R0080-0052: a clean end of the RAR5 block chain (zero bytes at a
+    /// block boundary) resolves to `Ok(None)`, not an error.
+    #[test]
+    fn rar5_recovery_clean_eof_is_none() {
+        let mut cursor = Cursor::new(b"Rar!\x1A\x07\x01\x00".to_vec());
+        let pct = parse_rar5_recovery(Path::new("synthetic.rar"), &mut cursor)
+            .expect("clean end of block chain is not an error");
+        assert_eq!(pct, None);
+    }
+
+    /// R0080-0052: a CRC field truncated mid-read is corruption, never a
+    /// silent "no recovery record".
+    #[test]
+    fn rar5_recovery_truncated_crc_is_corruption() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"Rar!\x1A\x07\x01\x00"); // RAR5 signature
+        buf.extend_from_slice(&[0u8, 0]); // only 2 of the 4 CRC bytes
+        let mut cursor = Cursor::new(buf);
+        let err = parse_rar5_recovery(Path::new("synthetic.rar"), &mut cursor)
+            .expect_err("a truncated CRC field must be corruption");
+        assert!(matches!(err, ArchiveError::Corruption { .. }));
+    }
+
+    /// R0080-0055: a header_size that makes the next-block offset overflow
+    /// u64 is rejected as corruption rather than wrapping to an attacker
+    /// chosen offset.
+    #[test]
+    fn rar5_recovery_next_block_overflow_is_corruption() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"Rar!\x1A\x07\x01\x00"); // RAR5 signature
+        buf.extend_from_slice(&[0u8; 4]); // block CRC32
+        buf.extend_from_slice(&[0xFFu8; 9]); // header_size vint continuation bytes
+        buf.push(0x01); // vint terminator -> decodes to u64::MAX
+        buf.push(0x01); // header_type = 1 (neither service nor end)
+        buf.push(0x00); // header_flags = 0 (no extra/data areas)
+        let mut cursor = Cursor::new(buf);
+        let err = parse_rar5_recovery(Path::new("synthetic.rar"), &mut cursor)
+            .expect_err("an overflowing next-block offset must be corruption");
+        assert!(matches!(err, ArchiveError::Corruption { .. }));
+    }
+
+    /// R0080-0059: a partially-read RAR4 block header is corruption, not a
+    /// clean EOF that silently ends the scan.
+    #[test]
+    fn rar4_recovery_partial_block_header_is_corruption() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"Rar!\x1A\x07\x00"); // RAR4 signature (7 bytes)
+        buf.extend_from_slice(&[0u8, 0, 0x73]); // only 3 of the 7 header bytes
+        let mut cursor = Cursor::new(buf);
+        let err = parse_rar4_recovery(Path::new("synthetic.rar"), &mut cursor)
+            .expect_err("a partial block header must be corruption, not clean EOF");
+        assert!(matches!(err, ArchiveError::Corruption { .. }));
+    }
+
+    /// R0080-0060: a RAR4 head_size below the 7-byte minimum is rejected as
+    /// corruption before any skip arithmetic.
+    #[test]
+    fn rar4_recovery_undersized_header_is_corruption() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"Rar!\x1A\x07\x00"); // RAR4 signature (7 bytes)
+        buf.extend_from_slice(&[0u8, 0]); // HEAD_CRC
+        buf.push(0x73); // HEAD_TYPE (main header)
+        buf.extend_from_slice(&0u16.to_le_bytes()); // HEAD_FLAGS
+        buf.extend_from_slice(&3u16.to_le_bytes()); // HEAD_SIZE = 3 (< 7 minimum)
+        let mut cursor = Cursor::new(buf);
+        let err = parse_rar4_recovery(Path::new("synthetic.rar"), &mut cursor)
+            .expect_err("head_size below 7 must be corruption");
+        assert!(matches!(err, ArchiveError::Corruption { .. }));
+    }
+
+    /// R0081-0063: a second `unrar_lock()` on the same thread returns a typed
+    /// error instead of deadlocking on the non-reentrant mutex. A `try_lock`
+    /// would instead break legitimate cross-thread contention, so the guard
+    /// uses a thread-local sentinel.
+    #[test]
+    fn unrar_lock_rejects_same_thread_reentry() {
+        let outer = unrar_lock().expect("first lock acquires");
+        assert!(
+            matches!(unrar_lock(), Err(ArchiveError::OperationBlocked { .. })),
+            "a second same-thread unrar_lock must be rejected, not deadlock"
+        );
+        drop(outer);
+        // The sentinel is cleared on drop, so a fresh acquisition succeeds.
+        assert!(
+            unrar_lock().is_ok(),
+            "lock must re-acquire once the outer guard is dropped"
+        );
+    }
+
+    /// R0081-0070: a RAR4 block whose HEAD_CRC does not match the header bytes
+    /// is rejected as corruption before any field is trusted.
+    #[test]
+    fn rar4_recovery_bad_header_crc_is_corruption() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"Rar!\x1A\x07\x00"); // RAR4 signature
+        let mut block = rar4_block(0x73, 0, &[0u8; 6], &[]);
+        block[0] ^= 0xFF; // corrupt the stored HEAD_CRC
+        buf.extend_from_slice(&block);
+
+        let mut cursor = Cursor::new(buf);
+        let err = parse_rar4_recovery(Path::new("synthetic.rar"), &mut cursor)
+            .expect_err("a bad HEAD_CRC must be corruption");
+        assert!(matches!(err, ArchiveError::Corruption { .. }));
+    }
+
+    /// R0081-0072: a LONG_BLOCK whose ADD_SIZE data area runs past the end of
+    /// the archive is rejected as corruption instead of seeking blindly past
+    /// EOF and reporting "no recovery record".
+    #[test]
+    fn rar4_recovery_add_size_past_eof_is_corruption() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"Rar!\x1A\x07\x00"); // RAR4 signature
+        // File header (LONG_BLOCK) declaring a 4 KiB data area not present.
+        let mut file_body = Vec::new();
+        file_body.extend_from_slice(&4096u32.to_le_bytes()); // ADD_SIZE
+        file_body.extend_from_slice(&[0u8; 21]); // rest of file header
+        buf.extend_from_slice(&rar4_block(0x74, 0x8000, &file_body, &[]));
+
+        let mut cursor = Cursor::new(buf);
+        let err = parse_rar4_recovery(Path::new("synthetic.rar"), &mut cursor)
+            .expect_err("an ADD_SIZE past EOF must be corruption");
+        assert!(matches!(err, ArchiveError::Corruption { .. }));
+    }
+
+    /// R0081-0071: a RAR5 block with a valid HEAD_CRC is accepted, so the walk
+    /// proceeds to interpret the header (here an end-of-archive marker, which
+    /// resolves to `Ok(None)`).
+    #[test]
+    fn rar5_recovery_valid_header_crc_end_of_archive() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"Rar!\x1A\x07\x01\x00"); // RAR5 signature
+        buf.extend_from_slice(&rar5_block(&[0x05, 0x00])); // header_type 5 (EOA), flags 0
+
+        let mut cursor = Cursor::new(buf);
+        let pct = parse_rar5_recovery(Path::new("synthetic.rar"), &mut cursor)
+            .expect("a valid header CRC must be accepted");
+        assert_eq!(pct, None);
+    }
+
+    /// R0081-0071: a RAR5 block whose HEAD_CRC does not match the header is
+    /// rejected as corruption before the header is treated as authoritative.
+    #[test]
+    fn rar5_recovery_bad_header_crc_is_corruption() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"Rar!\x1A\x07\x01\x00"); // RAR5 signature
+        let mut block = rar5_block(&[0x05, 0x00]);
+        block[0] ^= 0xFF; // corrupt the stored CRC
+        buf.extend_from_slice(&block);
+
+        let mut cursor = Cursor::new(buf);
+        let err = parse_rar5_recovery(Path::new("synthetic.rar"), &mut cursor)
+            .expect_err("a bad header CRC must be corruption");
+        assert!(matches!(err, ArchiveError::Corruption { .. }));
+    }
+}
+
+#[cfg(test)]
+mod staged_length_tests {
+    use super::check_staged_length;
+    use crate::error::{ArchiveError, ops};
+
+    /// The failing side of the R1 staged-length hardening. Before this test
+    /// the check shipped with accept-side coverage only, and that accept-side
+    /// test passed identically without the check present — so nothing pinned
+    /// the behaviour the DCR-006 Amendment 4 classification table depends on.
+    #[test]
+    fn staged_payload_shorter_than_the_declaration_is_corruption() {
+        let err = check_staged_length("payload.bin", ops::EXTRACT_TO_STREAM, 512, Some(4096))
+            .expect_err("a short staged payload must not be accepted");
+        assert!(
+            matches!(err, ArchiveError::Corruption { .. }),
+            "truncation must be Corruption, got: {err:?}"
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("staged payload is 512 bytes, listing declares 4096"),
+            "the error must name both counts, got: {text}"
+        );
+        assert!(
+            text.contains(ops::EXTRACT_TO_STREAM),
+            "the error must name the caller's operation (R5), got: {text}"
+        );
+    }
+
+    #[test]
+    fn staged_payload_longer_than_the_declaration_is_corruption() {
+        let err = check_staged_length("payload.bin", ops::EXTRACT_TO_MEMORY, 8192, Some(4096))
+            .expect_err("an over-produced staged payload must not be accepted");
+        assert!(matches!(err, ArchiveError::Corruption { .. }));
+        assert!(
+            err.to_string()
+                .contains("staged payload is 8192 bytes, listing declares 4096")
+        );
+    }
+
+    #[test]
+    fn staged_payload_matching_the_declaration_is_accepted() {
+        check_staged_length("payload.bin", ops::EXTRACT_TO_STREAM, 4096, Some(4096))
+            .expect("an exact match must pass");
+    }
+
+    /// Hard constraint 3: a header that declares no size gets no invented
+    /// declaration here — the facade's read-time exactness check stays the
+    /// sole authority for those entries.
+    #[test]
+    fn an_undeclared_size_invents_no_declaration() {
+        check_staged_length("payload.bin", ops::EXTRACT_TO_STREAM, 4096, None)
+            .expect("no declaration means nothing to violate");
+        check_staged_length("payload.bin", ops::EXTRACT_TO_STREAM, 0, None)
+            .expect("an empty staged payload is equally undeclared");
     }
 }
