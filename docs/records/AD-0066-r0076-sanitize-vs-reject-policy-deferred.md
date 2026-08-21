@@ -139,3 +139,103 @@ default lossy-repair baseline is unchanged, and no code path reads the
 flag to reject rather than repair. Wiring the behaviour (and its
 regression test, `tests/integration/strict_path_rejection.rs`) stays
 OI-0076-003 item 1 work. Status remains: Accepted; behaviour deferred.
+
+## Amendment (2026-08-21, OI-0076-005 — `ArchivePathPolicy` stays ambient, gains a thread scope)
+
+Two updates: one correction to the 2026-07-22 amendment, and the decision
+on where the write-side naming policy lives.
+
+### Correction: strict-reject is wired, not just plumbed
+
+The 2026-07-22 amendment said "the field is plumbed but
+`normalize_entry_components` does not yet branch on it". That is no longer
+true. `src/security.rs` now carries a `UnsafePathPolicy { Repair, Reject }`
+selected by `UnsafePathPolicy::from_limits`, `normalize_entry_components`
+takes it, and under `Reject` it returns
+`OperationBlocked { operation: EXTRACT, reason: "unsafe path components in
+entry '…': … (ExtractionLimits::reject_unsafe_paths is set)" }` before any
+rewrite happens — the variant and wording this record fixed. `Repair`
+remains the default, so the baseline this record ratified is unchanged.
+The deferral recorded on 2026-07-22 is therefore closed; what stays open is
+only whatever OI-0076-003 tracks separately.
+
+### Decision: keep the ambient policy, add a thread-scoped override, do *not* move it to per-operation options
+
+`ArchivePathPolicy` (AD 0044's write-side naming rules) was reachable only
+through `set_archive_path_policy`, a process-wide `AtomicU8`. The routed
+question was whether to move it to a per-operation options field instead.
+
+**Decided: keep it ambient, and add `with_archive_path_policy(policy, f)` —
+a thread-scoped override that shadows the process-wide default for the
+duration of the closure and restores the previous state on the way out,
+including while unwinding from a panic.** `archive_path_policy()` now
+resolves innermost-thread-scope → process-wide default → `Portable`.
+
+Why not per-operation options:
+
+- **The write path takes no options.** `add_file_from_data`,
+  `add_file_from_path_as`, `add_directory`, `add_entry`,
+  `add_directory_entry` and `remove_entry` each take a name and (sometimes)
+  data — nothing else. A policy field means either a signature change on
+  all six public methods plus their `ModifyArchive`/`WriteArchive`
+  counterparts, or a parallel `*_with_policy` method for each. That is a
+  wide, permanent API cost.
+- **What it would buy is already bought.** The reason to want per-operation
+  granularity is the two-consumers hazard below, and the hazard is
+  per-*thread* in practice: every write-side validation runs synchronously
+  on the thread that made the call, so a thread scope confines the choice
+  exactly as tightly as an argument would for any realistic consumer, at
+  zero API cost. A genuinely per-entry mix of policies within one archive
+  is not a use case anyone has asked for — the policy describes the
+  archive's intended portability, which is a property of the archive.
+- **It is a naming knob, not a security gate.** Both policies refuse
+  empty, NUL, absolute-per-host, `.` and `..` names. `Host` only stops
+  refusing names that a *different* host could not represent (`C:/x`,
+  `n:stream`, `CON`). The extraction-side sanitiser is untouched by either
+  value. So the blast radius of getting the policy wrong is a portability
+  regression in an archive you authored, not an escape.
+- **Precedent.** AD 0019's process-wide UnRAR mutex already establishes
+  that this crate accepts process-global state where the alternative is a
+  worse API. The difference is that the mutex has one correct value and
+  this has two, which is precisely why the scoped form was added rather
+  than leaving only the latch.
+
+### The two-consumers hazard, recorded so nobody rediscovers it
+
+`set_archive_path_policy` is **process-wide mutable state in a library**.
+Two consumers linked into one process share one slot and the last writer
+wins, silently:
+
+- Library A calls `set_archive_path_policy(Host)` during its
+  initialisation. Application B, in the same process, now finds that its
+  own `add_file_from_data("CON", …)` succeeds where it used to be
+  rejected — B's archives quietly gain names that no Windows consumer can
+  extract, and nothing in B's code changed.
+- The mirror case: A sets `Portable` back (or is loaded second and never
+  sets anything after B set `Host`), and B's deliberately host-specific
+  writes start failing with `InvalidPath` for reasons that are nowhere in
+  B's call stack.
+- Neither is detectable from the API: the setter returns the *previous*
+  value, so a caller can observe that someone else had changed it, but
+  only if it happens to look, and there is no notification.
+
+The mitigation is a documented convention, not a mechanism:
+`set_archive_path_policy` is for an **application's** own start-up, called
+once, before any archive is written. **Library code must use
+`with_archive_path_policy`** — the scoped form cannot be observed by
+another thread and cannot outlive its own closure, so two libraries using
+it cannot interfere. The rustdoc on both functions now says this, and the
+setter's docs name the hazard directly.
+
+Residual, accepted: an application that calls the process-wide setter
+still perturbs libraries that read the ambient policy without scoping. The
+scoped form makes the correct pattern available and cheap; it does not
+make the incorrect one impossible. Making it impossible requires deleting
+`set_archive_path_policy`, which would leave applications with no way to
+set a default at all — rejected as a worse trade.
+
+### Verification
+
+`src/security.rs` tests cover scope-and-restore, nesting, restore-on-panic,
+non-propagation to spawned threads, and scope-wins-over-process-default.
+All are `#[serial_test::serial]` because they touch the global slot.

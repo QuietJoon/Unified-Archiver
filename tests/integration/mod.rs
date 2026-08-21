@@ -26,6 +26,7 @@ pub mod readonly_codec_formats;
 pub mod selective_extraction_link_warnings;
 pub mod sfx_detection;
 pub mod sfx_false_positives;
+pub mod sfx_in_place_open;
 pub mod sfx_staging_progress;
 pub mod single_entry_defense_parity;
 pub mod streaming_memory;

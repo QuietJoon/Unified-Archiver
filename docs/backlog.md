@@ -65,6 +65,28 @@ forwarder is present in `impl ReadBackend for ZipArchive` in `src/backend.rs`,
 against `61426550` below, which said the single-traversal rewrite "did not land" when it had.
 OI-0001-009 is consequently closed here rather than carried as a Type 1 item.
 
+**2026-08-21 reconciliation.** Again not a scan: a pass over both registers against the two commits
+of 2026-08-21, with every claim checked by reading the tree rather than the commit message or the
+closing ticket comment. Eighteen entries were discharged and moved to "Closed since the previous
+run"; six were narrowed in place because only part of the work landed; one new Type 1 entry was
+filed for work the owner queued (`095eee`, AD 0057's D10 half). Three closing claims did **not**
+survive first-hand checking, and saying so is the point of the pass:
+
+* **`f84b31d1` (listing-drift guards) is closed and the fix is not in the tree.** All five guard
+  sites still compare the normalised entry name alone; there is no fingerprint helper anywhere in
+  `src/`. Its entry below stays as written.
+* **`642488a0` (external RAR) hardened the shell-out without closing either design hole
+  OI-0076-006 names** — no output staging, no no-overwrite flag, and no path-shaping policy at all.
+* **`9cc3d714` (directory metadata) landed for the libarchive writer only.** `ZipWriter` still has
+  no metadata-carrying directory emit, so ZIP directory entries are present but mode-less and
+  mtime-less.
+
+Two rules from the previous run were applied deliberately here. First, the 2026-08-16 lesson that a
+`ticgit:<id>` says nothing about whether the ticket's work landed generalises the other way too: a
+*closed* ticket says no more than an open one, and all three findings above are closed tickets.
+Second, an entry is discharged only when the property it describes is false against the tree — not
+when a ticket comment, a commit message or a changelog entry says it is.
+
 Classification:
 1. **Not blocked, no prior decision needed** — ready to implement.
 2. **Needs decision/discussion next** — a design/product/API choice must be made first.
@@ -79,6 +101,12 @@ previous run" below. Three items here were filed on 2026-08-07 by the `manual/` 
 review, which fixed everything it found inside `manual/` and could not touch `docs/` under
 that skill's one-way rule; the third of those (the manual staleness check) landed on 2026-08-16
 and moved to "Closed since the previous run" on 2026-08-17, leaving two.
+
+**2026-08-21:** a third entry joins them — AD 0057's D10 half (`095eee`). It is type 1 rather than
+type 2 because the owner already ruled on it ("queue and do it", 2026-08-20); it is the one of the
+three "Residual AD deferral targets" halves that was queued rather than retired or reduced to
+bookkeeping. The two `manual/` items are unchanged and both were re-confirmed refuted by the
+2026-08-17 pass; they stay only until `write-diataxis-manual` closes its own tickets.
 
 ### `docs/API_REFERENCE.md` cites the retired record id "AD 0027"
 - **Type:** 1
@@ -104,6 +132,67 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
   `decision-review-2026-07-19.md` and the 2026-04-29 deferred-OI plan read as dated
   historical documents that may be intentionally immutable the way records are.
   **Landed 2026-08-12:** 21 citations retargeted to `MADR-0027` across the ten live reference documents, and `config-surface.md`'s stale `Option<SecStr>` corrected in the same pass. Records, the dated historical documents and the regenerable `docs/investigation/` tree were deliberately left. The entry stays until `d8262f20` is closed by its filer, which is `write-diataxis-manual`'s call, not this command's.
+
+### AD 0057's D10 half: large-file refactors and the `#[cfg(test)]` move-out (ticgit `095eee`)
+- **Type:** 1
+- **Verified:** yes — ticket read first-hand 2026-08-21 (`open` / `new`, priority 3); the owner's
+  ruling is recorded on it as "queue and do it" (2026-08-20)
+- **Sources:** ticgit:095eee, docs/records/AD-0057-r0068-d10-large-file-refactor-deferred.md,
+  docs/architecture/decision-review-2026-07-19.md
+- **First seen:** 2026-08-21
+- **Last seen:** 2026-08-21
+- **Description:** Move the `#[cfg(test)]` modules out of the large production files into sibling
+  `tests.rs` children following the `src/inspection.rs` + `src/inspection/tests.rs` precedent, and
+  either perform AD 0057's D10 large-file refactors or restate them with a concrete trigger. AD 0057
+  is then amended with what was done and what stays deferred.
+- **Background:** Type 1 rather than Type 2 because the decision has been made — this is the third
+  of the three orphaned deferral targets the retired "Residual AD deferral targets" entry carried,
+  and it is the one the owner queued rather than retired. The AD 0052 half was ruled and closed
+  (`0a1e54f8`); the AD 0055 half was ruled bookkeeping and discharged by an amendment on that
+  record. The ticket's own scale note is the thing to plan around: `src/ffi/wrapper.rs` and
+  `src/ffi/zip_wrapper.rs` both carry substantial inline test modules, so the move-out is the bulk
+  of the work, and its acceptance criterion is that no test is lost or silently disabled — compare
+  test counts before and after, which is the same trap OI-0056-010 was filed for. The current
+  baseline to compare against is 38 suites / 1865 passed / 0 failed / 13 ignored (1833 was the pre-change baseline; the
+  figure first recorded here was that baseline rather than the observed run).
+  **Filed with its work already in flight (2026-08-21):** at the time this entry was written the
+  working tree already held untracked `src/ffi/wrapper/{tests.rs,staged_length_tests.rs}` and
+  `src/ffi/sevenz_wrapper/tests.rs` with roughly 2,700 lines removed from
+  `wrapper.rs` / `sevenz_wrapper.rs` / `zip_wrapper.rs` — i.e. the move-out is being done
+  concurrently and is uncommitted. The entry is filed anyway rather than skipped, because the
+  ticket is open and an unfiled item is invisible; but it is stated here so this file does not
+  repeat the 2026-08-16 mistake of describing as pending something the tree already carries. Whoever
+  commits the move-out should discharge this entry in the same pass and record the before/after test
+  counts, which is the only part of the acceptance criteria a later reader cannot reconstruct.
+  **Landed 2026-08-21, and here are those counts.** The move-out is complete and lossless. Per-module
+  totals after, each matching the count in the file it moved to: `ffi::wrapper` 37 (33 in
+  `wrapper/tests.rs` plus 4 in `wrapper/staged_length_tests.rs`), `ffi::zip_wrapper` 34
+  (`zip_wrapper/tests.rs`), `ffi::sevenz_wrapper` 23 (`sevenz_wrapper/tests.rs`) — 94 tests in four
+  new children, no test lost and none silently disabled. Nothing was widened from private to
+  `pub(crate)` to make a move compile, which the ticket forbade because it enlarges the internal
+  surface by stealth.
+  One follow-on the same review caught: the wave that emptied those three FFI files *added* a
+  126-line inline `#[cfg(test)]` block to `src/archive.rs` — a named D10 large-file target — on the
+  opposite principle. It is now `src/archive/in_place_payload_tests.rs`; `archive::` reports 69
+  passed before and after with the same 4 in-place tests, and the excision was 3 lines added and 136
+  removed, so nothing else moved with it.
+  **What is left of D10 is not uniformly deferred, and the record is precise about which part is
+  not.** AD 0057's amendment states the trigger: the two `src/ffi/zip_wrapper.rs` seams "may land
+  as soon as a reviewer has bandwidth, since they depend on neither D2 nor D9" — the raw
+  central-directory value layer (`RawRecord`, `RawCentralDirectory`, the exact central-directory
+  read), which does not touch the `ZipArchive` facade at all, and the AES/CRC-exemption cluster
+  (the AES extra-field constants, the vendor-version probe, the CRC exemption predicate, the
+  counted CRC drain). Those two are ready to implement and belong in this Type 1 section.
+  Genuinely deferred, and waiting on named work rather than on bandwidth: `src/ffi/wrapper.rs`
+  (2496 production LOC, the largest remaining offender, first in the queue once D2 clears) and
+  everything else, all of which waits for D2's backend-enum reshape and D9's libarchive wrapper
+  split. `src/ffi/sevenz_wrapper.rs` is explicitly **not** to be split mechanically — nearly its
+  whole production half is one `impl` block, so the concern boundaries have to be named inside
+  that impl first, which is D2/D4 work; splitting on the trailing free functions would produce a
+  file that is smaller without being clearer. `src/archive.rs` stays oversized and stays deferred;
+  only its test block left.
+  The reason the refactors were not mixed into the move-out: a judgement-heavy refactor inside a
+  mechanical move makes both unreviewable.
 
 ### `module-map.md` lists a `pub(crate)` module as an sfx re-export
 - **Type:** 1
@@ -148,31 +237,6 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
 - **Background:** The ambiguity in item 1 is real (7z AES has no auth tag) — the decision is how to
   *express* it, typed or documented. Item 2 needs one upstream fact first: whether
   `sevenz-rust2::for_each_entries` re-syncs the solid cursor after a short callback read.
-
-### Zstd leading skippable frames undetectable (OI-0080-008)
-- **Type:** 2
-- **Verified:** yes — `detect_from_bytes` + `is_extension_fallback` read directly, 2026-08-07
-- **Sources:** ticgit:75db9f0f, docs/project/open-issues.md (OI-0080-008), R0080-0075,
-  src/format.rs
-- **First seen:** 2026-08-07 (recovered by `/indy-review-cleanup`; never routed)
-- **Description:** RFC 8878 permits a skippable frame first; detection matches only the zstd magic
-  and `Zst` is absent from the extension-fallback set, so such a file opens by no path at all.
-- **Background:** Two candidate fixes with different truncated-file behaviour (skip frames while
-  probing vs. add `Zst` to the fallback set) — pick deliberately, and confirm libarchive's zstd
-  filter bids on the prefix before detection promises extraction.
-
-### Test lanes that silently self-disable (OI-0056-010)
-- **Type:** 2
-- **Verified:** yes — both test files read directly, 2026-08-07
-- **Sources:** ticgit:37182812, docs/project/open-issues.md (OI-0056-010), R0056-0037, R0056-0064,
-  tests/integration/streaming_memory.rs, tests/integration/performance_baseline.rs
-- **First seen:** 2026-08-07 (recovered by `/indy-review-cleanup`; Review 0056 routed 2 of its 130
-  findings, neither of these)
-- **Description:** Fixtures built with the external `zip` CLI skip silently when it is missing;
-  the perf baseline prints ✓/✗ instead of asserting its 1.2 threshold.
-- **Background:** The CLI half is mechanical (`concurrency.rs` already shows the library-native
-  pattern). The perf half needs a call: assert in a controlled bench lane, or demote out of
-  `tests/`. Nothing catches the host-dependent skip today — the repo still has no CI (OI-0065-001).
 
 ### Feature-first footprint split and facade crates (OI-0058-001)
 - **Type:** 2
@@ -236,18 +300,35 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
 - **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
 - **Sources:** docs/project/open-issues.md#OI-0076-006, ticgit:642488a0
 - **First seen:** 2026-08-04
-- **Last seen:** 2026-08-17
+- **Last seen:** 2026-08-21
 - **Description:** Close two design holes in `RarCreator` (external WinRAR-CLI creation mode).
 - **Background:** Design-level fix routed in Review 0076; needs a design decision on the
   corrected contract (including what v0.4 promises about cwd/flag handling) before
   implementation.
+- **Narrowed 2026-08-21 — and this is a closed ticket whose entry does NOT discharge.**
+  `642488a0` is closed, and what it landed is real: `src/external/rar/` split into argv /
+  discovery / version / exit / runner / session / error; arguments assembled as a `Vec<OsString>`
+  with a `--` sentinel and leading-dash paths re-rooted, so there is no command string and no
+  quoting layer to get wrong; un-passable arguments (interior NUL, an empty password that would make
+  `rar` block on a prompt, CR/LF in a password, an empty entry list) refused up front; passwords
+  redacted in every diagnostic; exit codes mapped to typed variants with an unrecognised code
+  treated as failure; `BinaryNotFound` (carrying the searched paths) kept distinct from
+  unsupported-version and `UnsupportedPlatform`; and a stub-runner contract lane that needs no
+  proprietary binary. **Neither of the two design holes this entry exists for is closed.**
+  Verified by reading `src/external/rar/session.rs` and `argv.rs`: `create_archive` re-checks output
+  existence immediately before the spawn and its own comment says that "narrows the window rather
+  than closing it (staging to an exclusive tempfile is tracked separately in OI-0076-006)"; and
+  `CreateRequest` carries no cwd or base-path field, no `-ep`/`-ep1` switch is emitted, and grepping
+  `src/external/` for path-shaping language finds nothing — so R0076-0073's leak of host layout into
+  the archive is untouched, and `tests/integration/external_rar_layout.rs` does not exist. Still
+  needs the same design decision it always needed: what archive layout does v0.4 promise.
 
 ### Typed multipart volume parser (OI-0080-004)
 - **Type:** 2
 - **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
 - **Sources:** docs/project/open-issues.md#OI-0080-004, ticgit:513f99fc
 - **First seen:** 2026-08-04
-- **Last seen:** 2026-08-17
+- **Last seen:** 2026-08-21
 - **Description:** Replace the name-heuristic `detect_multipart` with a typed volume parser that
   validates sequence continuity and reports gaps; decide the 7z `.001` routing.
 - **Background:** This is AD 0013's explicitly-deferred "Option 2." `MultipartLayout::Multi`
@@ -255,33 +336,45 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
   `MultipartLayout` API evolution (a v0.4 API change) and whether numeric splits route before
   the `supports_multipart` capability gate. Innovation I3 recommends pairing it with the
   SFX-detection collapse to stop a third heuristic round.
+- **Narrowed 2026-08-21 (ticgit `513f99fc`, closed):** the typed model landed as **additive
+  public API with no in-crate consumer**, so this entry survives as its unfinished half.
+  `src/format/multipart.rs` now holds `VolumeScheme` / `VolumeName` / `Volume` / `VolumeSet`,
+  `parse_volume_name`, `parse_volume_set` and `VolumeSet::defects() -> &[VolumeSetDefect]` — a defect
+  *list*, deliberately, so a caller learns which volume is missing and learns about more than one
+  problem per set. (`continuity_defects` is the private function that computes the list; `defects` is
+  the public accessor, so cite that one when writing against this API.) What remains is what the decision was actually about:
+  `Archive::detect_multipart` in `src/inspection.rs` still runs its own sibling scan with the old
+  string predicates and never calls the parser, so the crate now holds two implementations of "is
+  this a volume name"; and the 7z `.001` routing question (R0080-0093) is untouched. Verified by
+  grepping all of `src/` for `parse_volume_set`, `continuity_defects` and `VolumeSet`: outside that
+  module and its tests child the only hit is an unrelated `VolumeSetSize` local in the vendored
+  UnRAR C++ sources. Still type 2 for the same reason as before — migrating `detect_multipart` is a
+  `MultipartLayout` API change, and the `.001` routing is a capability-gate decision.
 
 ### Manifest-based recursive creation (OI-0080-005)
 - **Type:** 2
 - **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
 - **Sources:** docs/project/open-issues.md#OI-0080-005, ticgit:330f3851
 - **First seen:** 2026-08-04
-- **Last seen:** 2026-08-17
+- **Last seen:** 2026-08-21
 - **Description:** Replace the validate-walk + emit-walk split with a single manifest-driven
   traversal; also define root-preservation semantics (R0081-0046).
 - **Background:** Two independent `WalkDir` traversals allow a TOCTOU between validation and
   emission. Needs a design decision on fd-pinning depth (open-at-validation vs path+identity
   revalidation) and couples to the v0.4 backend-trait work.
-
-### Typed compression-option builder invariants (OI-0081-002)
-- **Type:** 2
-- **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
-- **Sources:** docs/project/open-issues.md#OI-0081-002, ticgit:165103b8
-- **First seen:** 2026-08-04
-- **Last seen:** 2026-08-17
-- **Description:** Introduce a `WritableFormat` (or fallible constructor) so
-  `LibarchiveCompressionOptions::new` cannot be built for a non-writable format.
-- **Background:** The dead 7z password setter was removed and the over-absolute "cannot be
-  constructed" claim softened. The remaining libarchive gap needs an API design decision
-  (restricted-format enum vs fallible constructor). Note that the writable set grew on
-  2026-08-04 — `TarZst` / `TarLz4` / `TarLzma` are creatable now — so any `WritableFormat`
-  enumeration must be derived from `ArchiveFormat::can_create()`, not hand-listed. Revisit the
-  7z password setter only if encrypted creation lands (see below).
+- **Narrowed 2026-08-21 (ticgit `330f3851`, closed) to Required Action 4 only.** The single-walk
+  manifest landed: `src/creation/manifest.rs` builds one `SourceManifest` (path, kind, size, mtime,
+  unix mode, and inode identity on Unix), reserves every entry in the write-mode namespace as it
+  records it, and is replayed by a backend-agnostic `write_into`, so neither writer re-walks. The
+  fd-pinning depth question was decided the cheaper way and documented as such — path + identity
+  revalidation immediately before each source reaches the backend, with the module stating plainly
+  that the *set* is pinned and the verify-to-open window is narrowed rather than closed. Each drift
+  class gets its own error so a caller restoring a backup can tell them apart. **What is left is the
+  root-preservation semantics (R0081-0046):** when the added directory is a filesystem root the
+  relative path strips to empty and the root entry is skipped, and nothing in `src/creation.rs` or
+  `src/creation/manifest.rs` mentions R0081-0046 or a root case — the manifest model inherited the
+  behaviour without ruling on it. Synthesize a stable archive name, or document the drop. That is
+  the whole remaining scope of this entry.
 
 ### Encrypted-archive creation behind an explicit opt-in (OI-0081-006)
 - **Type:** 2
@@ -300,37 +393,6 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
   and git archaeology established that MADR-0007's "Implemented" claim never shipped — so the
   opt-in is greenfield work, not a regression repair).
 
-### Stream-checksum module framing (AD 0010, review candidate R7)
-- **Type:** 2
-- **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
-- **Sources:** ticgit:9a50951d
-- **First seen:** 2026-08-04
-- **Last seen:** 2026-08-17
-- **Description:** Decide what `stream_crc.rs` is for: narrow it to "read stored checksum"
-  (finishing or cutting XZ), promote it to a real `verify_stream()` that recomputes, or retire
-  it through a deprecation cycle.
-- **Background:** The module is marketed as an integrity feature but only *reads stored*
-  checksums without verifying; XZ is permanently half-built (check-type only, no value); it has
-  zero internal consumers (`lib.rs` re-exports it and nothing else calls it); and reviews keep
-  landing correctness patches on it (bzip2 bit-scan in R0079/R0080). AD-0010 is still `active`
-  with no amendment, and its own Consequences admit the XZ gap. This was the one revert
-  candidate from the 2026-07-19 review that the approved program did not cover — full removal
-  is breaking, so the framing choice is the owner's.
-
-### `CompressionOptions::split_size` is accepted but ignored (DEF-002)
-- **Type:** 2
-- **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
-- **Sources:** docs/project/stub-manifest.md, ticgit:9713ff01
-- **First seen:** 2026-08-04
-- **Last seen:** 2026-08-17
-- **Description:** Decide whether at least one writer honours `split_size`, or the field is
-  removed / made to hard-error.
-- **Background:** `stub-manifest.md` DEF-002 is still Open: the field exists on the public
-  options struct and every writer silently ignores it. MADR-0028 rejected re-raising it as
-  "already tracked", mitigated only by a rustdoc caveat. Silently accepting a size that does
-  nothing contradicts the crate's loud-failure posture, but implementing split creation is a
-  significant feature (and interacts with the typed multipart parser above). Owner call.
-
 ### Residual ZIP-modify caveats (DEF-005)
 - **Type:** 2
 - **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
@@ -345,55 +407,6 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
   `#[ignore]`-gated any more. Encrypted-ZIP re-encryption is already "rejected" and now couples
   to OI-0081-006; ZIP64 coverage is a test-scale decision (multi-GiB fixtures); journaling is a
   design commitment. Each needs an explicit accept-or-close ruling rather than more drift.
-
-### Residual AD deferral targets (AD 0052 / AD 0055 / AD 0057)
-- **Type:** 2
-- **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
-- **Sources:** docs/project/open-issues.md, ticgit:176503b7
-- **First seen:** 2026-08-04
-- **Last seen:** 2026-08-17
-- **Description:** Rule on three orphaned deferral targets: AD 0052's promised `validate()`
-  hook, AD 0055's `ValidatedSource` invariant, and AD 0057's D10 large-file refactor.
-- **Background:** D1 shipped without AD 0052's `validate()` hook — either land it or retire it
-  formally ("first-op validation + the AD 0065 listing cache is the harmonised contract").
-  `ValidatedSource` does not enforce the invariant it names (R0070-0008 is still live) while
-  OI-0076-002 shipped a working `ValidatedEntry` token — converging them changes a shipped
-  v2-api type. AD 0057's D10 deferral partly lapsed when the R5 split broke
-  `libarchive_wrapper.rs` into 596 / 2,227 / 963 LOC, so its remaining scope needs restating.
-  The 2026-08-04 amendments on AD 0052, AD 0055 and AD 0053 now state each orphaned target in
-  the records themselves, so the decision is documented but still unmade. All three are design
-  calls, not hygiene.
-
-### Omnibus closure-record form (AD 0067 family)
-- **Type:** 2
-- **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
-- **Sources:** ticgit:84b43805
-- **First seen:** 2026-08-04
-- **Last seen:** 2026-08-17
-- **Description:** Decide whether to keep the "one AD records N dispositions" closure form
-  (AD 0051 / 0059 / 0060 / 0067) or split future closures into citable per-disposition records.
-- **Background:** The 2026-07-19 review found the omnibus form fails citability at wide-review
-  volume — AD 0061 is the control case that works because its scope is bounded. This is a
-  process decision that shapes every future review gate, and it interacts with the record-store
-  write-path item below.
-
-### Review-command write paths still target the retired stores
-- **Type:** 2
-- **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
-- **Sources:** ticgit:6875469d
-- **First seen:** 2026-08-04
-- **Last seen:** 2026-08-17
-- **Description:** Decide how `/indy-review-gate`, `/indy-review-prune` and
-  `/indy-review-cleanup` should address the record store now that it is `docs/records/` with
-  typed prefixes.
-- **Background:** Those commands live in `~/.claude/commands/` (user-global, shared across
-  projects) and hardcode `docs/decisions/` for new MADRs plus
-  `docs/project/design-change-records/` for DCRs — both now redirect stubs holding only index
-  files. The next review gate would write records into a retired store, and the prune command
-  would move files into a `docs/decisions/archive/` that nothing reads. Fixing it globally could
-  break other projects that still use `docs/decisions/`; the alternatives are a project-local
-  command override, store autodetection via `docs/records/index.yaml`, or a documented
-  per-project variable. Owner's call because the files are outside this repo.
 
 ### OKF v0.2 documentation migration continuation
 - **Type:** 2
@@ -421,7 +434,7 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
 - **Verified:** yes — Review 0001 finding (R0001-0020), gate-accepted, user-routed track
 - **Sources:** docs/project/open-issues.md#OI-0001-002, reviews/reviewed/0001.md#R0001-0020, ticgit:f84b31d1
 - **First seen:** 2026-08-09
-- **Last seen:** 2026-08-17
+- **Last seen:** 2026-08-21
 - **Description:** All five backend drift guards validate a positional index by normalised path
   alone; entry type, declared size, CRC and encryption status are in the cached snapshot and never
   compared. An archive rewritten to keep names while replacing payloads passes every guard.
@@ -431,6 +444,20 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
   a hard `OperationBlocked` on legitimate archives — the live walk must normalise every participating
   field exactly as `parse_entry` does, per backend, and that agreement has to be demonstrated rather
   than assumed.
+- **Ticket closed, work not landed (2026-08-21).** `f84b31d1` was closed `resolved` with the
+  comment "The comparison is widened to the fields that make an entry the same entry". Checked
+  first-hand against the tree by reading every guard site, and it is not: libarchive's bulk walk
+  compares `listing.get(idx).path` against the normalised walked pathname and nothing else; its four
+  single-entry seeks and the streaming search go through `listing_drift_mismatch(index, expected,
+  found)`, whose parameters are an index and two **names**; ZIP's `check_listing_drift` compares
+  `zip.name_for_index(target_id)` normalised against `validated_path`; 7z's visit-order check and
+  both single-entry guards compare the normalised name; UnRAR's `extract_file_core` and bulk walk
+  use the same name-only pair. There is no fingerprint helper anywhere in `src/` — no hit for
+  `fingerprint` or `entry_matches`, and no guard site reads a cached entry's `size`, `crc32`,
+  `entry_type` or encryption flag — which is exactly Required Actions 1 and 3. Neither commit
+  message of 2026-08-21 mentions this work. Nothing is half-landed, so there is nothing to revert:
+  the entry stands as written and its "Impact if deferred" reading is still the accurate exposure.
+  Reopening the ticket, or filing a successor, is its closer's call.
 
 ### ZIP duplicate-collapse guard is neither source-atomic nor applied across the API (OI-0001-003)
 - **Type:** 2
@@ -439,7 +466,7 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
   reviews/reviewed/0001.md#R0001-0030,
   docs/records/DCR-009-collapse-dual-zip-to-single-zip-crate-backend.md, ticgit:25285d67
 - **First seen:** 2026-08-09
-- **Last seen:** 2026-08-17
+- **Last seen:** 2026-08-21
 - **Description:** `scan_duplicate_names` reads the central-directory offset from the cached handle
   then opens the path independently (not source-atomic), and `reject_if_duplicate` guards only the
   by-name single-entry paths while listing, counts, by-id and bulk extraction and integrity all
@@ -451,27 +478,27 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
   calls. R0001-0027/0028/0029 (landed this run) hardened the scan's error handling and replaced the
   `names.is_empty()` escape hatch with duplicate-record accounting — that makes the guard sound where
   it applies without widening where it applies.
-
-### Write-side path validation is host-dependent rather than archive-portable (OI-0001-004)
-- **Type:** 2
-- **Verified:** yes — Review 0001 finding (R0001-0040), gate-accepted, user-routed track
-- **Sources:** docs/project/open-issues.md#OI-0001-004, reviews/reviewed/0001.md#R0001-0040, ticgit:9c00264f
-- **First seen:** 2026-08-09
-- **Last seen:** 2026-08-17
-- **Description:** `validate_archive_internal_path` delegates to host `Path::components`, so on Unix
-  `C:`, `CON` and `name:stream` are ordinary components and an archive created there can carry names
-  that are unsafe or ambiguous for a Windows extractor.
-- **Background:** Medium severity. All three desktop platforms are first-class, so cross-platform
-  archive exchange is the normal case. Needs decision because tightening the rules would start
-  rejecting a Unix user archiving a legitimate `aux.txt`; a warning-and-allow tier may be the right
-  middle. AD-0064 governs non-UTF-8 names and does not reach this.
+- **Narrowed 2026-08-21 (ticgit `25285d67`, closed) to the record half.** Both code defects are
+  closed the way this entry's own analysis prescribed — one index, not more guard calls.
+  `ZipArchive` memoises a single `RawCentralDirectory` holding every physically stored record with
+  its raw name bytes, the crate-side indices each maps to, the deduped length, the ambiguous-name
+  set, and an `any_undetected` flag decided by counting rather than by `duplicate_names.is_empty()`.
+  It is read through `with_cached_file`, the descriptor the cached handle already owns, so the second
+  `File::open` is gone and the scan and the extractor read one source. Three gates consult it:
+  `reject_if_duplicate` (by-name), `reject_if_collapsed` (bulk extraction, integrity, id-addressed
+  stream) and `reject_if_unlocalizable` (listing, deliberately the narrow gate, so a localizable
+  ambiguity still lists and the refusal text's "address the entry by id" advice stays reachable).
+  **What is left is Required Action 3:** `DCR-009` carries exactly one amendment, dated 2026-08-12
+  for R0001-0027/0028/0029, whose closing paragraph still says this residual "is untouched by any of
+  the above and is tracked as OI-0001-003" — a sentence the code has now falsified. The resulting
+  scope is unrecorded. Records are content-immutable, so this is an owner action, not a rewrite.
 
 ### Recursive creation drops metadata for nonempty directories (OI-0001-010)
 - **Type:** 2
 - **Verified:** yes — Review 0001 finding (R0001-0074), gate-accepted, user-routed track
 - **Sources:** docs/project/open-issues.md#OI-0001-010, reviews/reviewed/0001.md#R0001-0074, ticgit:9cc3d714
 - **First seen:** 2026-08-09
-- **Last seen:** 2026-08-17
+- **Last seen:** 2026-08-21
 - **Description:** Neither writer emits directory entries for nonempty directories, ZIP emits leaf
   directories without source metadata, and the empty-root fallback uses backend defaults — so a
   directory tree does not round-trip its modes or times.
@@ -480,86 +507,19 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
   created archive — moving existing test expectations and invalidating consumers' stored checksums.
   The accepted directory-metadata caveat on record covers modification mode, not creation, so
   creation has no covering decision. Pair with a DCR; consider holding for v0.4.
-
-
-### `CodecUnavailable` and its install-instruction table are never constructed
-- **Type:** 2
-- **Verified:** yes — gated manual-review finding, triaged 2026-08-06
-- **Sources:** ticgit:98abe283, src/error.rs, src/ffi/libarchive_wrapper/writer.rs
-- **First seen:** 2026-08-05
-- **Last seen:** 2026-08-17
-- **Description:** `ArchiveError::CodecUnavailable`, its public constructor, and the whole per-
-  platform `get_codec_install_instructions` table are dead: no production path constructs the
-  variant.
-- **Background:** The one situation it exists for — a libarchive built without the zstd or lz4
-  write filter, hit by `Archive::create` for `TarZst`/`TarLz4` — surfaces instead as a generic
-  `ArchiveError::Format` from the writer's filter-registration check, so the caller gets no codec
-  name and none of the carefully maintained install guidance, and any caller matching on
-  `CodecUnavailable` never matches. It needs a decision because both directions are defensible:
-  construct the variant at the filter-registration failure path so the instructions reach the
-  caller, or delete the variant, constructor and table as dead public surface. Whichever is
-  chosen, the manual's codec-availability guidance and `how-to/operator/en/install-native-
-  dependencies.md` follow the outcome.
-
-
-### Crate-root re-export gaps: `RateLimiter`, `ArchiveWarning`, `ResultWithWarnings`
-- **Type:** 2
-- **Verified:** yes — gated manual-review finding, triaged 2026-08-06
-- **Sources:** ticgit:44d81e5f, src/lib.rs, src/options.rs, src/error.rs
-- **First seen:** 2026-08-05
-- **Last seen:** 2026-08-17
-- **Description:** `RateLimiter` is the only public item of `src/options.rs` missing from the
-  crate-root re-export block, and `ArchiveWarning`/`ResultWithWarnings` appear in public `Archive`
-  signatures without being re-exported either.
-- **Background:** `use unified_archive::RateLimiter` does not compile; callers must reach
-  `unified_archive::options::RateLimiter`. Worse for the other two: `extract_all` returns
-  `Result<ResultWithWarnings<()>>` and `check_symlinks` returns `Result<Vec<ArchiveWarning>>`, so
-  a caller handling the return of a root-path method has to import from
-  `unified_archive::error::…` while every other type in the same signature has a root path. It is
-  a decision rather than a fix because the alternative is legitimate — declaring the module path
-  the intended import surface for these three — and because adding root re-exports is a permanent
-  public-API commitment. Note the pending interaction with `28d0d2c3`: if `ArchiveWarning` gains a
-  variant for skipped unsupported entries, doing both in one release keeps the churn to a single
-  breaking window.
-
-
-### `ExtractionLimits::max_sfx_payload_size` is dead configuration
-- **Type:** 2
-- **Verified:** yes — gated manual-review finding, triaged 2026-08-06
-- **Sources:** ticgit:1dfb92d6, src/security.rs, src/archive.rs, src/sfx/limits.rs
-- **First seen:** 2026-08-05
-- **Last seen:** 2026-08-17
-- **Description:** The field and its builder setter are public and documented as the ceiling on
-  the payload an SFX file may stage to disk, and are read by nobody. A caller hardening against
-  hostile self-extracting archives lowers the cap and gets no protection, silently.
-- **Background:** The actual gate in `stage_sfx_payload` compares against
-  `crate::sfx::limits::MAX_SFX_PAYLOAD_SIZE`, a plain alias of
-  `security::DEFAULT_MAX_SFX_PAYLOAD_SIZE` (16 GiB), and no SFX entry point — `open_sfx`,
-  `open_with_sfx_progress`, `open_at_offset` — accepts an `ExtractionLimits` at all, so there is
-  nowhere for the caller's value to enter. The decision is whether to plumb `ExtractionLimits`
-  into the `open_sfx`/`open_at_offset` family (a signature change across the SFX surface) or to
-  document the field as reported-but-not-enforced with a deferral note, the way
-  `reject_unsafe_paths` is handled. Priority 2 because a silently ineffective security setter is
-  worse than an absent one: it invites a caller to believe they are protected.
-
-
-### `LICENSE` copyright holder still names the project's former identity
-- **Type:** 2
-- **Verified:** yes — gated manual-review finding; owner/legal decision, not a defect
-- **Sources:** ticgit:a095e711, LICENSE, Cargo.toml
-- **First seen:** 2026-08-05
-- **Last seen:** 2026-08-17
-- **Description:** `LICENSE` opens with `Copyright (c) 2025 7zip-RBinding Contributors`, a name
-  that appears nowhere else in the repository, while `Cargo.toml` declares `authors = ["YongJoon
-  Joe"]` and the crate publishes as `unified-archive`.
-- **Background:** A downstream consumer reading LICENSE cannot tell who grants the MIT permission,
-  and the name matches no copyright claim any packaging metadata makes. This is an owner decision
-  and not hygiene: only the rights holder can say who holds the copyright and from which year, and
-  the answer could legitimately be "YongJoon Joe", "the unified-archive contributors", or a
-  deliberate retention of the predecessor project's attribution if this crate is a continuation of
-  it. Picking one is a legal-attribution call, which is why it was surfaced rather than changed
-  during the 2026-08-06 documentation-hygiene batch. Unrelated to the vendored UnRAR licence,
-  whose own reproduction requirement is separately satisfied.
+- **Narrowed 2026-08-21 (ticgit `9cc3d714`, closed) — one writer, not both.** Required Action 1
+  landed by way of the single-walk manifest: every recorded directory is emitted from the manifest
+  in walk order carrying the mtime and unix mode the one walk observed, the empty-root fallback is
+  gone, and namespace suppression still fires exactly once per entry. Verified by reading
+  `src/creation.rs`: `test_add_directory_recursive_preserves_nonempty_directory_metadata` builds a
+  TAR through libarchive and asserts the non-empty directory's mtime within a one-second tolerance
+  and its `0o750` mode on Unix. **The ZIP half did not land, and the test that pins ZIP says so in
+  its own doc comment:** `ZipWriter` has no metadata-carrying directory emit, so ZIP directory
+  entries land with default `FileOptions` — present, but mode-less and mtime-less. The closing
+  ticket comment reads as if both writers were covered. Actions 3 (a DCR plus the affected creation
+  record) is also outstanding, for a change that alters the entry count and byte content of every
+  recursively created archive. Remaining scope: the `ZipWriter` directory-metadata emit, and the
+  record.
 
 
 ### Libarchive integrity cannot separate an operational I/O failure from archive corruption
@@ -584,54 +544,12 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
   rather than growing a second classifier.
 
 
-### Modify rewrite silently drops symlink, hardlink and special entries
-- **Type:** 2
-- **Verified:** yes — gated manual-review finding, triaged 2026-08-06 as needs-decision
-- **Sources:** ticgit:208978e9, src/modification.rs, docs/records/MADR-0005-r051-early-link-
-  rejection-in-modify.md
-- **First seen:** 2026-08-05
-- **Last seen:** 2026-08-17
-- **Description:** `commit_changes` replays retained entries through a loop that skips any entry
-  for which `rewrite_drops_entry_type` is true — `Symlink`, `HardLink`, `Other` — so a modify
-  round-trip silently deletes them from the archive.
-- **Background:** This is data loss, not a policy skip: extraction refuses to *materialise* a link
-  for security reasons and warns, whereas a modify rewrite drops it from the output with no
-  warning channel at all. It is also the reason MADR-0005 was archived on 2026-08-07 with its
-  ruling recorded as INVERTED — the record rejected exactly the behaviour the tree now has. The
-  decision owed is what a rewrite should do with an entry it cannot faithfully reproduce: refuse
-  the commit, preserve the entry verbatim through a raw copy, or drop it with a warning. Related
-  to DEF-005 (residual ZIP-modify caveats) and to `28d0d2c3` (there is no warning variant that
-  would fit).
-
-
-### No `ArchiveWarning` variant for entries skipped because their kind is unsupported
-- **Type:** 2
-- **Verified:** yes — reopen verified 2026-08-09 during the Review 0001 batch
-- **Sources:** ticgit:28d0d2c3, src/error.rs, docs/records/DCR-010-extraction-rejects-special-
-  entries.md, docs/records/MADR-0010-r052-extraction-warnings-result-with-warnings.md
-- **First seen:** 2026-08-09
-- **Last seen:** 2026-08-17
-- **Description:** R0001-0001 and R0001-0022 made libarchive and 7z reject FIFOs, sockets and
-  device nodes. Both skips are silent, because `ArchiveWarning` has `SkippedSymlink` and
-  `SkippedHardLink` and nothing describing an unsupported entry kind.
-- **Background:** Emitting a link variant for a device node would assert something false about the
-  archive's contents to exactly the caller most likely to be auditing it, which is worse than
-  silence in a security-sensitive library — so the fix was deliberately deferred rather than
-  bodged. It matters because MADR-0010's own decision driver is "callers need to know what was
-  skipped — silent data loss is unacceptable", and DCR-010 plus MADR-0010's paired amendment both
-  record that the new skip class regressed against that principle. The ZIP backend has skipped
-  `EntryType::Other` silently since R0081-0077, so all three backends are consistently silent. The
-  decision is the variant's shape and whether `ArchiveWarning` is `#[non_exhaustive]` (which
-  determines whether adding it is additive); bundling it with `44d81e5f`'s re-export question
-  keeps the churn to one breaking window.
-
-
 ### Repository hygiene: machine-specific tracked config and convention violations
 - **Type:** 2
 - **Verified:** yes — gated manual-review finding, triaged 2026-08-06
 - **Sources:** ticgit:aa37c64f
 - **First seen:** 2026-08-05
-- **Last seen:** 2026-08-17
+- **Last seen:** 2026-08-21
 - **Description:** A cluster of hygiene items from the 2026-08-05 manual pass: machine-specific
   configuration tracked in git, convention violations against the project's own documented
   standards, and misleading example output. Three of its sub-items landed on 2026-08-06; the rest
@@ -643,27 +561,14 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
   violation is actually the preferred layout, is a call the owner has to make before anything can
   be moved or deleted. The triage note on the ticket records which sub-items were confirmed, which
   were refuted, and what each is waiting on.
-
-
-### Three API behaviours that contradict their documented contract
-- **Type:** 2
-- **Verified:** yes — gated manual-review finding, triaged 2026-08-06
-- **Sources:** ticgit:9bdf2ca1, src/extraction.rs, src/ffi/zip_wrapper.rs, src/modification.rs
-- **First seen:** 2026-08-05
-- **Last seen:** 2026-08-17
-- **Description:** Three independent contract violations: `ExtractionOptions::progress` is
-  silently ignored by `Archive::extract_file` with no rustdoc note; an encrypted ZIP entry read
-  with no password surfaces as `Format` rather than `Password`, unlike RAR and 7z; and
-  `Archive::add_entry_from_reader` promises a `Corruption` error on a declared-versus-actual
-  length mismatch that no code path produces.
-- **Background:** The second is the most consequential: a unified facade exists so that "password
-  required" is detectable by error variant regardless of format, and ZIP breaks that. The first is
-  a documentation asymmetry — the in-memory and streaming siblings explicitly document that they
-  ignore `progress`, so a caller attaching one to a single-file extraction reasonably expects it
-  to work. The third is a promise in two rustdoc blocks with no implementation behind it. Each
-  needs its own small decision (honour or document; remap or keep `Format` for genuinely malformed
-  entries; implement the check or drop the promise), which is why they travel together as one
-  needs-decision ticket rather than three fixes.
+- **One of the three remaining owner calls is discharged 2026-08-21:** `build.rs` no longer emits
+  its unconditional Windows `cargo:warning` on builds where the libarchive link actually succeeded,
+  so the warning stops firing on working builds instead of being silenced. That is the outcome this
+  entry preferred — it said the warning "should probably disappear with OI-0065-001's discovery work
+  rather than be silenced first" — and it is a narrowing rather than a closure, since the warning is
+  still the discovery block's only signal where the link fails. The two tracked-config calls (the
+  `.cargo/config.toml` target-dir pin and the `.unified-archive.toml` temp-dir pin) are untouched
+  and remain the owner's.
 
 
 ### UnRAR callback answers volume-change with a non-abort code, risking an unbounded retry
@@ -671,7 +576,7 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
 - **Verified:** yes — gated manual-review finding, triaged 2026-08-06
 - **Sources:** ticgit:d3cfceed, src/ffi/wrapper.rs
 - **First seen:** 2026-08-05
-- **Last seen:** 2026-08-17
+- **Last seen:** 2026-08-21
 - **Description:** The UnRAR callback answers `UCM_CHANGEVOLUME` with a code that is not an abort,
   so a multipart set with a missing volume can drive the library into a retry loop instead of
   failing.
@@ -684,6 +589,13 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
   but an unbounded loop inside an FFI callback is a hang rather than an error, and it happens
   under the process-wide UnRAR mutex (AD-0019), so it would block every other archive operation in
   the process.
+- **Dependency update 2026-08-21:** the typed volume-set parser this entry was waiting to lean on
+  landed (`513f99fc`, closed) — `VolumeSet::defects()` can now say which volume is missing
+  before anything is opened. But it landed as additive public API that no open or extract path calls,
+  so the "refuse up front rather than rely on the callback" option is available in API form only and
+  would still need wiring. The decision this entry owes is unchanged, and its exposure is unchanged:
+  an unbounded loop inside an FFI callback is a hang rather than an error, and it happens while the
+  process-wide UnRAR mutex is held.
 
 
 ### Unreachable arms and guards that document behaviour callers can never observe
@@ -691,7 +603,7 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
 - **Verified:** yes — gated manual-review finding, triaged 2026-08-06
 - **Sources:** ticgit:9909d449
 - **First seen:** 2026-08-05
-- **Last seen:** 2026-08-17
+- **Last seen:** 2026-08-21
 - **Description:** A cluster of match arms, guards and error paths that cannot be reached, each of
   which documents behaviour a caller can never observe. Left open because deleting a defensive
   branch and deleting a genuine invariant look identical from the outside.
@@ -702,46 +614,17 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
   distinction has to be made per site, by someone willing to rule on which invariants are
   guaranteed by construction and which are merely believed. The ticket's triage records what was
   confirmed unreachable versus what only appeared so.
+- **Partly addressed 2026-08-21, incidentally rather than as this ticket's work.** Two of the
+  cluster's members are gone as side effects of other passes: an `assert!(!cfg!(windows))` inside the
+  external-RAR `UnsupportedPlatform` arm was `assert!(true)` off Windows and unreachable on it — it
+  documented an expectation instead of checking one — and is now expressed as
+  `#[cfg(not(windows))]` on the arm, where it cannot rot; and `examples/detect_sfx.rs` dropped a
+  "Confirmed" line that could only ever print "No", because the production detector never returns
+  `SfxConfidence::Confirmed`. Neither was a ruling on the cluster, and the ticket's central question
+  is untouched: which of the remaining arms are guaranteed-by-construction and which are merely
+  believed, decided per site. The `src/sfx/` Stage-3 `_` fallback is still an accepted documented
+  residual.
 
-
-### `reject_unsafe_paths` ships a security setter whose behaviour is unimplemented
-- **Type:** 2
-- **Verified:** yes — gated manual-review finding, triaged 2026-08-06
-- **Sources:** ticgit:0d98ed8c, src/security.rs, docs/records/AD-0066-r0076-sanitize-vs-reject-
-  policy-deferred.md
-- **First seen:** 2026-08-05
-- **Last seen:** 2026-08-17
-- **Description:** `ExtractionLimits` exposes a `reject_unsafe_paths` setter that does not change
-  behaviour: extraction always sanitises rather than rejecting, whatever the flag says.
-- **Background:** AD-0066 records the deferral deliberately — the strict-reject policy is queued
-  for v0.4 and the current "lossy repair" baseline is the accepted behaviour until then — so this
-  is not an oversight. What makes it a live problem is that the setter is public and reads as a
-  security control, so the two documentation examples using `reject_unsafe_paths(true)` look like
-  copy-pasteable hardening posture; both gained a caveat on 2026-08-06, but the setter itself
-  still lies by existing. The decision is whether to implement the flag now, remove it until v0.4
-  can honour it, or keep it with an unmistakable doc marker. It is the same shape of problem as
-  `1dfb92d6` (`max_sfx_payload_size`), and the two should be answered the same way.
-
-
-### `validate_archive_internal_path` does not reject non-leading "." segments
-- **Type:** 2
-- **Verified:** yes — gated manual-review finding, triaged 2026-08-06
-- **Sources:** ticgit:f5e91841, src/security.rs, docs/records/AD-0044-validate-archive-internal-
-  paths-at-facade-boundary.md
-- **First seen:** 2026-08-05
-- **Last seen:** 2026-08-17
-- **Description:** The write-side validator rejects `..` traversal, absolute prefixes, NUL bytes
-  and empty strings, but accepts a `.` segment that is not leading — so `a/./b` passes into an
-  archive — while AD-0044 is read as promising that names round-trip cleanly through
-  `sanitize_entry_path`.
-- **Background:** The practical stakes are modest: extraction's `normalize_entry_components`
-  filters `Component::CurDir` out, so `a/./b` extracts to `a/b` and nothing escapes the
-  destination. What is wrong is the contract — the write boundary claims to reject names the
-  extraction side would not honour verbatim, and this is one it does not honour verbatim. The
-  decision is whether to tighten the validator (rejecting a name some producers legitimately emit)
-  or to narrow AD-0044's claim to what it actually guarantees. Related: R0001-0072 landed on
-  2026-08-09 and closed the mirror-image gap, where the extraction sanitiser accepted a NUL the
-  write validator rejected.
 
 ---
 
@@ -795,6 +678,26 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
   pursue it, the placeholder should be restated as accepted-permanent and AD 0040's ceiling
   documented as a design consequence rather than a temporary limit — which is a real outcome, not
   a non-answer.
+  **Narrowed 2026-08-21: the ZIP half is built, so the Verified line above is stale.** ZIP now opens
+  in place — `Archive::open_at_offset` hands the backend the caller's own file with no copy when three
+  gates agree: a `PK\x03\x04` local file header sits exactly at `offset`, the `zip` crate's own
+  `ZipArchive::offset()` resolves to the same value (built the same way the wrapper builds it, so
+  agreement here means agreement there), and the open then succeeds. Any disagreement returns
+  `Ok(None)` and the caller falls back to staging, so the strict path cannot silently mis-open.
+  `PayloadSource::{InPlace, Staged}` records which happened and `Archive::payload_access()` is its
+  public projection, which is how a caller now tells whether the AD 0040 ceiling applied at all.
+  `PayloadSource::InPlace` deliberately keeps the `offset` so `payload_size_for_ratio` — the
+  compression-ratio denominator — stays on the payload instead of widening to `stub + payload`
+  (R0069-0006), which would dilute the zip-bomb gate.
+  **What remains is the decision, and it is most of the original scope:** 7z, RAR, TAR and ISO each
+  need their own offset-aware path and libarchive needs a callback-based reader, so the ruling asked
+  for above is unchanged — pursue it per backend, or restate the placeholder as accepted-permanent
+  and document AD 0040's ceiling as a design consequence for the staging backends. AD 0040 already
+  carries the amendment saying the ceiling bounds a copy and therefore cannot bind an in-place open,
+  so that half of the documentation outcome is done either way.
+  Two tickets track this one deferral — `1ddc37ec` (2026-08-20, filed from `mvp-scope.md`) and
+  `5858e17b` (2026-08-16) — and they are duplicates of each other. Whoever rules on it should
+  collapse them rather than answer twice.
 
 ---
 
@@ -805,7 +708,7 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
 - **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
 - **Sources:** docs/project/open-issues.md#OI-0069-002, ticgit:84b324d1
 - **First seen:** 2026-08-04
-- **Last seen:** 2026-08-17
+- **Last seen:** 2026-08-21
 - **Description:** `ValidatedSource` is constructed before the fresh listing, so the type-level
   invariant its name claims is not enforced; migrating the two internal callers
   (`commit_changes`, `entry_crc32_for_digest`) to construct it from `&ReadArchive` is queued for
@@ -818,13 +721,21 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
   `2026-04-29-deferred-oi-closure.md` banner was corrected the same day.
 - **Blocked by:** the v0.4 `ReadArchive` threading through `ModifyArchive`'s commit path and the
   manifest-digest helper (OI-0069-002's own sequencing: after AD 0053 D2).
+- **Bookkeeping closed 2026-08-21, the work is not.** The umbrella "Residual AD deferral targets"
+  entry that used to sit above this one is discharged, and its AD 0055 third was ruled bookkeeping
+  rather than a decision: AD 0055 now carries a dated amendment naming **this ticket** as where the
+  residual lives, so a reader of that record no longer files a duplicate, and
+  `docs/project/open-issues.md#OI-0069-002` carries the same pointer on its status line. Nothing
+  about the work or the blocker changed — `84b324d1` was re-verified `open` / `blocked` on
+  2026-08-21, and the convergence-versus-retirement choice for the token itself stays an open v0.4
+  design question rather than a queued task.
 
 ### Security & durability boundary refactors (OI-0076-003, items 1/2/5/6)
 - **Type:** 3
 - **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
 - **Sources:** docs/project/open-issues.md#OI-0076-003, ticgit:3f7dfa37
 - **First seen:** 2026-08-04
-- **Last seen:** 2026-08-17
+- **Last seen:** 2026-08-21
 - **Description:** Four remaining hardening items: parent-creation race re-canonicalise
   (R0076-0005); `O_NOFOLLOW` no-follow open (R0076-0014); staging unlink→reopen-by-name race
   (R0076-0045); `commit_changes` phase split (R0076-0089).
@@ -834,6 +745,13 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
   Innovation I6 established that `archive_read_open_fd` cannot deliver it, because libarchive's
   read handle is iterator-shaped and shared fd offsets would corrupt concurrent readers;
   item 6 couples to the AD 0053 D2 `ModifyArchive` handle.
+- **Blocker dissolved for item 1 (2026-08-21):** its recorded coupling was "the AD 0066 v0.4
+  strict-path flag", and that flag shipped — `ExtractionLimits::reject_unsafe_paths` is now enforced
+  by `check_entry_paths_safe` in `src/security.rs`, which refuses a hostile archive before a
+  destination directory is created or a byte is decoded, with the default `false` returning
+  immediately so the lossy-repair baseline pays nothing. The parent-creation race / re-canonicalise
+  work (R0076-0005) is therefore no longer waiting on a decision elsewhere; nothing of item 1 itself
+  landed. Items 2, 5 and 6 are blocked exactly as before, so the entry stays type 3.
 
 ### True bounded-memory streaming for non-libarchive backends (DEF-004)
 - **Type:** 3
@@ -975,7 +893,7 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
 - **Unfiled:** recorded here rather than ticketed — it is a coverage gap in an already-landed
   change, and its prerequisite is an existing ticket
 - **First seen:** 2026-08-13
-- **Last seen:** 2026-08-17
+- **Last seen:** 2026-08-21
 - **Description:** Digest and stream exactness assume libarchive materialises sparse holes as
   zeros. If some reader returned only the stored data blocks, an exact bound would read that as
   truncation and produce a false `Corruption`. DCR-011 names a sparse-TAR test as the tripwire for
@@ -993,6 +911,12 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
   urgency — the risk is hypothetical, no real-world variant has tripped it, and the recorded
   response if one ever does is to gate exactness on non-sparse entries rather than ship a false
   `Corruption`.
+- **Restated 2026-08-21:** the lane no longer skips at runtime — under OI-0056-010 it is
+  `#[ignore]`d with the reason and the exact command line, on the principle that a lane which
+  returns early reports success having tested nothing. That is the honest shape, and it does not
+  change this entry: the risk is still unmitigated on a bsdtar host, and the two ways to close it are
+  still a committed sparse-TAR fixture (the cleaner answer, since it removes the CLI dependency
+  entirely) or a CI job on a GNU-tar host, which is blocked on there being any CI at all.
 
 ---
 
@@ -1001,10 +925,21 @@ and moved to "Closed since the previous run" on 2026-08-17, leaving two.
 Twenty-three tickets tagged `finding,manual` were filed by the manual-writing pass on 2026-08-05,
 after the scan that produced the classification above. All were triaged against the tree on
 2026-08-06; the ten text-only ones were fixed and closed the same day, and three items inside
-`aa37c6` landed too (see `docs/log.md`). The thirteen below stay open, each annotated on its ticket
-with what was confirmed, what was refuted, and what it is waiting on. Live list: `ti list --open`
-(plain `ti list` truncates to terminal rows — that truncation is why the first triage pass saw only
-twenty of the twenty-three).
+`aa37c6` landed too (see `docs/log.md`). The thirteen below stayed open at that point, each annotated
+on its ticket with what was confirmed, what was refuted, and what it is waiting on. Live list:
+`ti list --open` (plain `ti list` truncates to terminal rows — that truncation is why the first
+triage pass saw only twenty of the twenty-three).
+
+**Update 2026-08-21 — ten of the thirteen are now closed, so this list is kept as the intake
+record rather than as a live queue.** Closed and discharged (each has a bullet under "Closed since
+the previous run"): `9bdf2c`, `04ba48`, `627738`, `208978`, `11bf15`, `f5e918`, `0d98ed`, `1dfb92`,
+`98abe2`, `44d81e`. **Still open: three** — `d3cfce` (the UnRAR volume-change callback), `9909d4`
+(the unreachable-arms cluster, two of its members removed incidentally, the ruling still owed) and
+`aa37c6` (repository hygiene, one of its three remaining owner calls discharged). Each of those
+three keeps its own entry in the sections above, carrying a dated 2026-08-21 note. The two items
+the batch surfaced rather than decided are closed as well: `a095e711` (LICENSE attribution,
+resolved by the rights holder naming himself) and `dd119253` (the record-id-to-subject check,
+resolved as `tests/record_citations_test.rs`, which is the gate this very pass runs).
 
 **Type 1-shaped but behaviour-changing** (tagged `code-behaviour` — no design choice pending, but
 each changes what the code does, so none was in the hygiene batch):
@@ -1022,38 +957,216 @@ each changes what the code does, so none was in the hygiene batch):
 
 **Needs a ruling first** (tagged `needs-decision`):
 
-- `208978` — the modify rewrite drops symlink, hardlink and special entries. Refuse, warn, or
-  re-emit? The lossiness is now documented in `Limitations.md` and the user manual either way.
-- `11bf15` — `MAX_COMMENT_SIZE` is a public constant nothing reads and nothing can feed. Document
-  non-enforcement, delete it (semver break), or implement a check with no reachable input.
-- `f5e918` — `validate_archive_internal_path` rejects a leading `./` but accepts `dir/./file.txt`,
-  and AD 0044 documents the opposite. Keep and reword, reject everywhere, or accept everywhere;
-  AD 0044 needs an appended amendment whichever way it goes.
-- `0d98ed` — `reject_unsafe_paths` records intent and enforces nothing (already documented as
-  deferred in five places). Wire it through the sanitiser, or rule the deferral sufficient.
-- `9909d4` — six confirmed-unreachable arms and guards. Delete, keep as defensive guards, or make
-  them explicit `unreachable!`.
-- `1dfb92` — `ExtractionLimits::max_sfx_payload_size` is dead configuration; same shape as the two
-  above (code change or semver-breaking removal, not prose).
-- `98abe2` — `ArchiveError::CodecUnavailable` and its per-platform install table are never
-  constructed: a libarchive missing the zstd/lz4 write filter surfaces as a generic `Format` error.
-  Wire the variant up at the filter-registration site, or delete it (semver break).
-- `44d81e` — crate-root re-export gaps: `RateLimiter`, and `ArchiveWarning` / `ResultWithWarnings`,
-  which appear in root-method signatures but must be imported from `unified_archive::error`.
-  Additive and non-breaking, but it is a public-surface question that interacts with OI-0058-001.
-- `aa37c6` — repository hygiene, partly landed. The `mod.rs` convention violation and the two
-  misleading examples are fixed; what remains is three owner calls: the tracked
-  `.cargo/config.toml` build target-dir pin (observation only by the ticket's own scope), the
-  tracked `.unified-archive.toml` temp-dir pin (test-harness-only, with an env override and a
-  system fallback, pinned to this owner's scratch volume), and the unconditional Windows
-  `cargo:warning` in `build.rs`, which should probably disappear with OI-0065-001's discovery work
-  rather than be silenced first.
+**Reconciled against `ti show` on 2026-08-21: nine of the eleven ids this block listed are now
+closed/resolved.** They are struck below rather than deleted, because this file is what
+`ti-pick-next` reads and a bare deletion loses the fact that the question was answered — but do not
+re-open them, and do not treat them as available work.
 
-Two items the batch surfaced rather than decided are filed separately: `a095e711` (LICENSE
-copyright attribution) and `dd119253` (a record-id ↔ subject check, since an existence check
-passes on every mis-resolving `AD 00NN` — they are all real records).
+- `9909d4` — six confirmed-unreachable arms and guards. Delete, keep as defensive guards, or make
+  them explicit `unreachable!`. **Still open, still needs the ruling.**
+- `aa37c6` — repository hygiene, and now down to two owner calls, not three. The `mod.rs`
+  convention violation, the two misleading examples, and the unconditional Windows `cargo:warning`
+  in `build.rs` are all fixed — the last of those now fires only on builds where the link did not
+  succeed. What remains is the tracked `.cargo/config.toml` build target-dir pin (observation only
+  by the ticket's own scope) and the tracked `.unified-archive.toml` temp-dir pin
+  (test-harness-only, with an env override and a system fallback, pinned to this owner's scratch
+  volume). **Still open.**
+
+Ruled and shipped, no longer decisions:
+
+- ~~`208978`~~ modify rewrite drops symlink/hardlink/special entries — ruled **warn**, not refuse
+  and not re-emit; `ArchiveWarning::SkippedUnsupportedEntry` carries the path, kind and reason.
+- ~~`11bf15`~~ `MAX_COMMENT_SIZE` enforced nothing while `SECURITY.md` claimed it was applied.
+- ~~`f5e918`~~ `validate_archive_internal_path` accepted `dir/./file.txt` — ruled **reject in every
+  position**; the root cause was `Path::components()` eating interior and trailing `.`, so the
+  validator now splits on `/` itself. AD 0044 carries the dated amendment.
+- ~~`0d98ed`~~ `reject_unsafe_paths` — ruled **wire it**, to AD 0066's own specification including
+  the error it named; `check_entry_paths_safe` is where it binds, and the `false` default keeps the
+  lossy baseline bit-for-bit.
+- ~~`1dfb92`~~ `max_sfx_payload_size` dead configuration — ruled **wire it additively**;
+  `stage_sfx_payload` takes the ceiling and three `*_with_limits` entry points source it from the
+  caller, so the limits-free entry points are unchanged.
+- ~~`98abe2`~~ `CodecUnavailable` and its install table were never constructed — now raised at the
+  write-filter registration site, and the table lookup upper-cases its key so libarchive's
+  lower-case filter names reach their real per-platform arm.
+- ~~`44d81e`~~ crate-root re-export gaps — `RateLimiter`, `ArchiveWarning`, `ResultWithWarnings` and
+  `WritableFormat` are all at the root now.
+- ~~`a095e711`~~ LICENSE copyright attribution.
+- ~~`dd119253`~~ record-id ↔ subject check.
+
+All nine are described in `CHANGELOG.md`'s `[Unreleased]` section, which is the migration-facing
+account of what changed and in which direction.
 
 ## Closed since the previous run
+
+Discharged 2026-08-21 by the reconciliation described in the header. Eighteen entries are removed
+from the live sections rather than restated; each verdict below was derived by reading the tree, not
+the commit message and not the closing ticket comment. **Every one of these tickets is closed** —
+unlike the 2026-08-17 batch, where the backlog item was discharged while the ticket stayed open. Six
+further entries were *narrowed* instead of discharged and stay in the sections above with a dated
+note, three of them because a closed ticket's claim did not survive checking: `f84b31d1`
+(listing-drift), `642488a0` (external RAR) and `9cc3d714` (directory metadata, libarchive only).
+
+Public knobs that were documented, settable, and read by nobody:
+
+- **`ExtractionLimits::max_sfx_payload_size` was dead configuration** (`1dfb92d6`) — wired, and the
+  signature question was answered additively rather than by a breaking change. `stage_sfx_payload`
+  takes the ceiling as a parameter and three new entry points (`open_sfx_with_limits`,
+  `open_with_sfx_progress_and_limits`, `open_at_offset_with_limits`) source it from the caller's
+  limits; the three limits-free entry points keep today's default, and
+  `default_sfx_cap_matches_extraction_limits_default` pins the default against the `pub(crate)` alias
+  that used to be the only thing the gate compared with. The exposure this entry named — only a
+  caller who *lowered* the cap was betrayed, silently — is closed.
+- **`reject_unsafe_paths` shipped a security setter that enforced nothing** (`0d98ed8c`) — wired, to
+  AD 0066's own specification including the error it named. `check_entry_paths_safe` in
+  `src/security.rs` is where the flag binds: one pass over the entries about to be materialized,
+  before a destination directory exists or a byte is decoded, reporting the offending name rather
+  than a laundered one. Default `false` returns `Ok(())` immediately, so the lossy-repair baseline is
+  bit-for-bit unchanged — which is why `test_reject_unsafe_paths_default_repairs` keeps passing when
+  the strict branch is disabled and `test_reject_unsafe_paths_blocks_unsafe_entries` fails, the
+  right shape for a flag test.
+- **`CodecUnavailable` and its per-platform install table were never constructed** (`98abe283`) —
+  wired at the libarchive write-filter registration site, so a build missing the zstd / lz4 / lzma
+  write filter now names the codec instead of surfacing a generic `Format` error. The instruction
+  lookup also stopped missing: it matches on an upper-cased key, so libarchive's lower-case filter
+  names ("xz", "lzma", "bzip2") reach their real per-platform arm rather than the generic fallback.
+  The entry offered "wire it or delete it as dead public surface"; wiring won.
+- **Crate-root re-export gaps** (`44d81e5f`) — `RateLimiter`, `ArchiveWarning` and
+  `ResultWithWarnings` are re-exported at the crate root, so a caller handling `extract_all`'s
+  `ResultWithWarnings` or `check_symlinks`'s `Vec<ArchiveWarning>` no longer imports from
+  `unified_archive::error` while every other type in the same signature has a root path. The
+  interaction this entry flagged was honoured: `ArchiveWarning` gained its new variant in the *same*
+  release, keeping the churn to one breaking window. A gap of the same class was found and closed in
+  the follow-up pass — `WritableFormat` was the argument type of a public root constructor without
+  being at the root itself.
+- **`CompressionOptions::split_size` accepted but ignored (DEF-002)** (`9713ff01`) — discharged
+  because the premise was stale, and that is worth recording rather than quietly dropping.
+  `CompressionOptions::validate` already refuses a `split_size` with `OperationBlocked` naming
+  DEF-002, so the field is not silently accepted; the entry's "silently accepting a size that does
+  nothing contradicts the crate's loud-failure posture" no longer describes the code. Nothing was
+  implemented and split creation remains unbuilt — the difference is that it now fails loudly, which
+  is the outcome the entry asked for as its cheap alternative.
+
+Silent losses made loud, and contracts made true:
+
+- **Modify rewrite silently dropped symlink, hardlink and special entries** (`208978e9`) — resolved
+  as **warn**, the owner's ruling, and not as refuse-the-commit or re-emit. `commit_changes` now
+  emits `ArchiveWarning::SkippedUnsupportedEntry { path, kind, reason }` per dropped entry instead of
+  skipping in silence. This is the one where the record was already ahead of the code: MADR-0005 was
+  archived with its ruling recorded as INVERTED because the tree had exactly the behaviour the record
+  rejected, and the tree has now moved to where the record was.
+- **No `ArchiveWarning` variant for entries skipped because their kind is unsupported**
+  (`28d0d2c3`) — resolved, and its shape question answered the way the entry argued for: one variant
+  carrying the kind **and** a reason, so "dropped during modify" and "unsupported kind on extract"
+  stay distinguishable at a match site rather than being flattened into a link variant that would
+  assert something false about a device node to exactly the caller most likely to be auditing it.
+  The libarchive and 7z extraction allowlists emit it; the entry's own note that all three backends
+  were consistently silent is now false in the good direction.
+- **Three API behaviours that contradicted their documented contract** (`9bdf2ca1`) — all three
+  closed, each the way it deserved. `ExtractionOptions::progress` is honoured by
+  `Archive::extract_file` (it was the one disk-writing entry point that dropped the callback and,
+  unlike its in-memory and streaming siblings, did not document the omission). An encrypted ZIP entry
+  read with no password now yields `Password`, matching RAR's `ERAR_MISSING_PASSWORD` and 7z's
+  `PasswordRequired` and matching what `docs/API_REFERENCE.md` promises — only the
+  missing-credential condition moved; a wrong password and a malformed entry keep their variants.
+  And the declared-versus-actual length mismatch now goes through one
+  `ArchiveError::declared_length_mismatch(path, declared, actual)` on all three commit routes, so
+  `match err { Corruption { .. } => … }` finally fires where DCR-011 said it would; detection was
+  never the problem, classification was. This one also discharges the residual the 2026-08-17 run
+  filed against the AE-2 entry: the password-less AES digest call's `Format`-instead-of-`Password`
+  mislabel was this ticket's, and it is gone.
+
+Validator and record-store hygiene:
+
+- **Write-side path validation was host-dependent rather than archive-portable (OI-0001-004)**
+  (`9c00264f`) — resolved by making the validator *platform-independent* rather than
+  platform-aware, which is not the resolution AD 0044's own revisit trigger anticipated. The root
+  cause was the input, not the check: `Path::components()` **eats** interior and trailing `.`
+  segments, so the `CurDir` arm only ever fired for a leading `./`, and on Unix it hands back `C:/x`
+  as two ordinary segments. The name is now split on `/` after backslash normalisation and judged
+  per segment on every host, with `ArchivePathPolicy::Portable` as the default and an explicit
+  `Host` opt-out. AD 0044 carries the dated amendment. Two residuals are stated rather than buried:
+  no DCR was written for a real behaviour change, and the host opt-in is a process-wide switch that
+  two consumers in one process share.
+- **`validate_archive_internal_path` did not reject non-leading "." segments** (`f5e91841`) —
+  discharged by the same change, and by the harder of the two answers it offered: the validator was
+  tightened rather than AD 0044's claim narrowed. `.` is refused in every position, so
+  `add_file_from_data("a/./b", …)` no longer passes validation, gets written verbatim, and comes back
+  out of this crate's own extractor as `a/b`.
+- **Omnibus closure-record form (AD 0067 family)** (`84b43805`) — decided, as **AD 0069**: closure
+  is recorded in focused records and `index.yaml`'s `reviews:` arrays are the machine-readable
+  routing. The control case the entry named held up — the failure is scale, not the form as such —
+  and the evidence is concrete: AD 0067's routing table jumps from R0076-0049 to R0076-0052, with
+  R0076-0051 in no row, no `Source` line and no summary count, and the same gap in its `index.yaml`
+  `reviews:` array. AD 0069 also states rather than implies the limit: completeness stays
+  unverifiable while the review files live outside the repository.
+- **Review-command write paths still targeted the retired stores** (`6875469d`) — resolved as the
+  project-local mapping rather than by editing user-global command definitions, which would have
+  affected every project on the machine. `CLAUDE.md` now records that the review commands live in
+  `~/.claude/commands/` and still name `docs/decisions/` and
+  `docs/project/design-change-records/`, that both were consolidated into `docs/records/` on
+  2026-07-23, and that every new record goes to `docs/records/` and is registered in
+  `docs/records/index.yaml` — where a run in this repository reads it first.
+- **Stream-checksum module framing (AD 0010, candidate R7)** (`9a50951d`) — the owner's framing call
+  was made, and it was neither "narrow it" nor "retire it": the module keeps its purpose and is split
+  along the three concerns it was carrying. `digest.rs` holds the I/O-free value and search layer,
+  `codec.rs` plus `codec/{gzip,bzip2,xz}.rs` the per-format framing, `detect.rs` the six-byte probe
+  and routing; the root keeps the module doc and the re-exports and no logic. Every child is private
+  and every public item keeps its historic `stream_crc::…` path, so the split is not observable from
+  outside the crate. The substantive decision rides with it: `UnexpectedEof` on a fixed-size framing
+  read is `Format` at every layer through one shared `framing_read_error`, reversing the earlier
+  "`Io` is the safer direction" — `Io` is the class callers retry, and inviting a retry on a
+  permanently short file is the more damaging misreport. AD 0010 carries the amendment. Observable
+  change: bzip2 under 4 bytes and xz under 12 bytes now report `Format`.
+- **Residual AD deferral targets (AD 0052 / AD 0055 / AD 0057)** (`176503b7`) — discharged as an
+  entry because all three halves have moved on, though the ticket itself is still open and blocked.
+  **AD 0052:** ruled and closed (`0a1e54f8`) — the deferral is retired, first-operation validation is
+  now the official contract, and the cheap probe landed as `validate()` on `ReadBackend`, `Archive`
+  and `ReadArchive`, deliberately *not* named `validate_integrity()`. The deferral could be retired
+  rather than paid off because AD 0065's frozen listing cache dissolved the redundant-parse cost it
+  was deferred for, and the cheapness claim is proven by allocation identity (`validate()` then
+  `list_files()` returns the same `Vec` and the same `Arc`), not by timing. **AD 0055:** ruled
+  bookkeeping, discharged by a dated amendment on that record naming ticket `84b324d1` as where the
+  construction-order residual lives, so a reader stops filing duplicates; the entry for the work
+  itself remains in Type 3. **AD 0057:** queued by the owner and filed as its own Type 1 entry
+  above (`095eee`).
+- **Test lanes that silently self-disabled (OI-0056-010)** (`371828`) — both halves resolved, and
+  wider than the entry asked. Library-native fixtures replaced the CLI wherever one could be built
+  in process; the lanes that genuinely need an external tool are `#[ignore]`d with the reason **and**
+  the exact command, on the stated principle that an `#[ignore]` nobody can run is indistinguishable
+  from a deleted test. The perf file was split: the controlled half asserts the SC-010 `<= 1.2` ratio
+  in the default lane, the wall-clock half is `#[ignore]`d with its command, and the print-only
+  `UA_PRINT_PERF_BASELINE` opt-in that "asserted nothing, so it could not fail in either direction"
+  is gone. Vacuity floors were added where a lane iterates a fixture set. The ignored count rose from
+  6 to 13, which is the honest direction — those are lanes that used to pass while skipping.
+  **Residual, reported not fixed:** `tests/integration/extraction.rs` still has four silent skips on
+  a *missing fixture* ("Skipping {}: fixture not found"). Tracked fixtures, so absence means a broken
+  checkout rather than a host difference, but the lane still reports success having tested nothing.
+- **Zstd leading skippable frames undetectable (OI-0080-008)** (`75db9f0f`) — resolved by the
+  skip-the-prefix branch, and `Zst` was deliberately **not** added to the extension-fallback set,
+  because content-based detection is the policy and that set is small on purpose. `zstd_frame_offset`
+  walks the prefix by each frame's stored length — an exact jump, never a scan — with a frame budget
+  so a crafted chain cannot loop, and returns `None` when the probe window ends inside the prefix, so
+  a short or garbage buffer stays undetected rather than being guessed. Required Action 2 was
+  honoured: libarchive 3.8.9's zstd read filter was confirmed to bid on the skippable magic before
+  detection promised an extraction. That confirmation is a recorded hand check against one linked
+  build, not a lane, and no fixture in the repository carries such a prefix.
+- **Typed compression-option builder invariants (OI-0081-002)** (`165103b8`) — resolved with both
+  branches the action offered. `WritableFormat` is a newtype whose invariant is
+  `inner.can_create() == true`, **derived from `can_create()` rather than hand-listed** — which is
+  the constraint this entry attached after the writable set grew on 2026-08-04, and it is enforced by
+  tests that fail if any constant or the `ALL` slice stops agreeing. `CompressionOptions` and
+  `LibarchiveCompressionOptions` both gained `for_writable` (infallible) and `try_new` (fallible);
+  the loose `LibarchiveCompressionOptions::new` is `#[deprecated(since = "0.4.0")]` rather than
+  removed. The entry's second action was answered too, in the direction it predicted:
+  `CompressionOptions::password` is deprecated because every value it can produce is rejected by
+  `Archive::create`, with the deprecation explicitly scheduled to lift when OI-0081-006's opt-in
+  ships. Two callers stay on the loose path on purpose, with recorded reasons — one because
+  `WritableFormat` cannot express `Rar` at all, so migrating the test would delete its subject.
+- **`LICENSE` copyright holder named the project's former identity** (`a095e711`) — resolved by the
+  rights holder, which is what this entry said it needed. `LICENSE` now names the actual holder; the
+  "7zip-RBinding Contributors" line was left over from a rename `CHANGELOG.md` records as complete,
+  not a deliberate retention of a predecessor's attribution.
 
 Completed 2026-08-17, all four filed and resolved in the same run at the owner's direction
 ("register all of them, then resolve them"). The six entries the previous revision carried for

@@ -637,6 +637,19 @@ pub enum ArchivePathPolicy {
 static ARCHIVE_PATH_POLICY: std::sync::atomic::AtomicU8 =
     std::sync::atomic::AtomicU8::new(ArchivePathPolicy::Portable as u8);
 
+thread_local! {
+    /// Thread-scoped override installed by [`with_archive_path_policy`].
+    ///
+    /// `None` means "defer to the process-wide default". A thread-local is
+    /// the right granularity: every write-side validation runs
+    /// synchronously on the thread that called `add_file_from_data` /
+    /// `add_entry` / …, so a scope installed around one library's creation
+    /// session cannot be observed by another library writing on a
+    /// different thread (AD 0066 amendment, 2026-08-21).
+    static ARCHIVE_PATH_POLICY_SCOPE: std::cell::Cell<Option<ArchivePathPolicy>> =
+        const { std::cell::Cell::new(None) };
+}
+
 fn policy_from_u8(raw: u8) -> ArchivePathPolicy {
     if raw == ArchivePathPolicy::Host as u8 {
         ArchivePathPolicy::Host
@@ -645,16 +658,33 @@ fn policy_from_u8(raw: u8) -> ArchivePathPolicy {
     }
 }
 
-/// The [`ArchivePathPolicy`] the write-side facade currently enforces.
+/// Read the thread-scoped override, tolerating a destroyed TLS slot
+/// (which can only happen while a thread is being torn down, where no
+/// archive write is in flight).
+fn scoped_archive_path_policy() -> Option<ArchivePathPolicy> {
+    ARCHIVE_PATH_POLICY_SCOPE
+        .try_with(std::cell::Cell::get)
+        .unwrap_or(None)
+}
+
+/// The [`ArchivePathPolicy`] the write-side facade enforces **on the
+/// calling thread**.
+///
+/// Resolution order: the innermost [`with_archive_path_policy`] scope on
+/// this thread, else the process-wide default last set by
+/// [`set_archive_path_policy`], else [`ArchivePathPolicy::Portable`].
 #[must_use]
 pub fn archive_path_policy() -> ArchivePathPolicy {
+    if let Some(scoped) = scoped_archive_path_policy() {
+        return scoped;
+    }
     policy_from_u8(ARCHIVE_PATH_POLICY.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Opt the whole process out of (or back into) archive-portable name
 /// validation, returning the policy that was in effect.
 ///
-/// This is the documented escape hatch for callers who deliberately want
+/// This is the start-up escape hatch for callers who deliberately want
 /// host naming rules on the write path: `add_file_from_data`,
 /// `add_file_from_path_as`, `add_directory`, `add_entry`,
 /// `add_directory_entry` and `remove_entry` all validate through
@@ -664,10 +694,72 @@ pub fn archive_path_policy() -> ArchivePathPolicy {
 /// is unaffected, and `.`/`..`/absolute names stay refused under either
 /// policy.
 ///
-/// Being process-wide, it should be set once before any archive is
-/// written rather than toggled around individual calls.
+/// # Prefer [`with_archive_path_policy`] in library code
+///
+/// This setter is **process-wide mutable state in a library**: two
+/// consumers linked into one process share the single slot, so the last
+/// writer wins and neither is told. A library that flips it to
+/// [`ArchivePathPolicy::Host`] during its own initialisation silently
+/// widens what *every other* consumer's write calls accept, and a
+/// consumer that sets it back to [`ArchivePathPolicy::Portable`] silently
+/// starts rejecting names the first one depends on. The hazard is bounded
+/// — this is a naming knob, and traversal / absolute / NUL names stay
+/// refused under both policies — but it is real, and it is why
+/// [`with_archive_path_policy`] exists.
+///
+/// Use this only from an application's own start-up, once, before any
+/// archive is written. Library code that needs host naming for *its own*
+/// archives should wrap its creation session in
+/// [`with_archive_path_policy`] instead, which confines the choice to the
+/// calling thread and restores the previous state on the way out.
 pub fn set_archive_path_policy(policy: ArchivePathPolicy) -> ArchivePathPolicy {
     policy_from_u8(ARCHIVE_PATH_POLICY.swap(policy as u8, std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Run `f` with `policy` in effect for the current thread, restoring the
+/// previous state afterwards — including on panic.
+///
+/// This is the per-consumer form of [`set_archive_path_policy`]. The
+/// write-side APIs take no policy argument, so the policy has to be
+/// ambient; making the override thread-scoped is what keeps two
+/// independent consumers in one process from overwriting each other's
+/// choice. Every write-side validation happens synchronously on the
+/// thread that made the call, so wrapping a whole creation session is
+/// enough:
+///
+/// ```no_run
+/// use unified_archive::security::{ArchivePathPolicy, with_archive_path_policy};
+/// use unified_archive::{Archive, CompressionOptions};
+///
+/// # fn main() -> Result<(), unified_archive::ArchiveError> {
+/// with_archive_path_policy(ArchivePathPolicy::Host, || {
+///     let mut creator = Archive::create("host-named.zip", CompressionOptions::default())?;
+///     // `CON` is refused under the portable default, accepted here.
+///     creator.add_file_from_data("CON", b"host-specific name")?;
+///     creator.finish()
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Scopes nest: an inner call shadows an outer one for its duration. The
+/// override does **not** propagate to threads spawned inside `f` — those
+/// see the process-wide default, which is the conservative direction.
+pub fn with_archive_path_policy<T, F: FnOnce() -> T>(policy: ArchivePathPolicy, f: F) -> T {
+    struct RestoreScope(Option<ArchivePathPolicy>);
+
+    impl Drop for RestoreScope {
+        fn drop(&mut self) {
+            let _ = ARCHIVE_PATH_POLICY_SCOPE.try_with(|slot| slot.set(self.0));
+        }
+    }
+
+    let _restore = RestoreScope(
+        ARCHIVE_PATH_POLICY_SCOPE
+            .try_with(|slot| slot.replace(Some(policy)))
+            .unwrap_or(None),
+    );
+    f()
 }
 
 /// Windows reserved device names. A file whose *stem* is one of these
@@ -1914,6 +2006,103 @@ mod tests {
 
         host_verdict.expect("host policy must accept 'CON' through the facade validator");
         assert!(validate_archive_internal_path("CON").is_err());
+        assert_eq!(archive_path_policy(), ArchivePathPolicy::Portable);
+    }
+
+    /// The scoped form is the per-consumer answer to the process-wide
+    /// setter: it changes what the facade accepts for the duration of the
+    /// closure and restores the previous state on the way out, so two
+    /// consumers in one process cannot clobber each other's choice
+    /// (AD 0066 amendment, 2026-08-21).
+    #[test]
+    #[serial_test::serial]
+    fn test_with_archive_path_policy_scopes_and_restores() {
+        assert_eq!(archive_path_policy(), ArchivePathPolicy::Portable);
+        assert!(validate_archive_internal_path("CON").is_err());
+
+        let inside = with_archive_path_policy(ArchivePathPolicy::Host, || {
+            assert_eq!(archive_path_policy(), ArchivePathPolicy::Host);
+            validate_archive_internal_path("CON")
+        });
+        inside.expect("scoped host policy must accept 'CON'");
+
+        assert_eq!(archive_path_policy(), ArchivePathPolicy::Portable);
+        assert!(validate_archive_internal_path("CON").is_err());
+    }
+
+    /// Nested scopes shadow, and the inner scope's exit hands control back
+    /// to the outer one rather than to the process-wide default.
+    #[test]
+    #[serial_test::serial]
+    fn test_with_archive_path_policy_nests() {
+        with_archive_path_policy(ArchivePathPolicy::Host, || {
+            assert_eq!(archive_path_policy(), ArchivePathPolicy::Host);
+            with_archive_path_policy(ArchivePathPolicy::Portable, || {
+                assert_eq!(archive_path_policy(), ArchivePathPolicy::Portable);
+            });
+            assert_eq!(
+                archive_path_policy(),
+                ArchivePathPolicy::Host,
+                "leaving the inner scope must restore the outer one"
+            );
+        });
+        assert_eq!(archive_path_policy(), ArchivePathPolicy::Portable);
+    }
+
+    /// A panic inside the closure must not leave the override latched —
+    /// otherwise a caller's error path would silently widen every later
+    /// write on that thread.
+    #[test]
+    #[serial_test::serial]
+    fn test_with_archive_path_policy_restores_on_panic() {
+        let panicked = std::panic::catch_unwind(|| {
+            with_archive_path_policy(ArchivePathPolicy::Host, || {
+                panic!("boom");
+            })
+        });
+        assert!(panicked.is_err(), "the panic must propagate");
+        assert_eq!(
+            archive_path_policy(),
+            ArchivePathPolicy::Portable,
+            "the scope guard must restore the policy while unwinding"
+        );
+    }
+
+    /// The scope is thread-local, so a second thread keeps seeing the
+    /// process-wide default. This is the property that makes the scoped
+    /// form safe for two independent consumers in one process.
+    #[test]
+    #[serial_test::serial]
+    fn test_with_archive_path_policy_does_not_leak_across_threads() {
+        with_archive_path_policy(ArchivePathPolicy::Host, || {
+            assert_eq!(archive_path_policy(), ArchivePathPolicy::Host);
+            let other = std::thread::spawn(archive_path_policy)
+                .join()
+                .expect("worker thread must not panic");
+            assert_eq!(
+                other,
+                ArchivePathPolicy::Portable,
+                "another thread must not observe this thread's scope"
+            );
+        });
+    }
+
+    /// The scope wins over the process-wide setter while it is active, and
+    /// the setter's value is what the scope falls back to.
+    #[test]
+    #[serial_test::serial]
+    fn test_scope_overrides_process_wide_default() {
+        let previous = set_archive_path_policy(ArchivePathPolicy::Host);
+        let scoped = with_archive_path_policy(ArchivePathPolicy::Portable, archive_path_policy);
+        let after = archive_path_policy();
+        set_archive_path_policy(previous);
+
+        assert_eq!(scoped, ArchivePathPolicy::Portable);
+        assert_eq!(
+            after,
+            ArchivePathPolicy::Host,
+            "the process-wide value must be what the scope falls back to"
+        );
         assert_eq!(archive_path_policy(), ArchivePathPolicy::Portable);
     }
 

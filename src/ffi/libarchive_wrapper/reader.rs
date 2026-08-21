@@ -843,6 +843,35 @@ impl LibarchiveArchive {
     ///
     /// Encapsulates: archive_read_new, null check, support_format_all,
     /// support_filter_all, open_filename, error check with archive_read_free on failure.
+    ///
+    /// # Why this backend still cannot start at a byte offset
+    ///
+    /// Ticket `1ddc37ec` made SFX payloads readable in place — with no
+    /// tempfile copy — but only for ZIP, because the `zip` crate
+    /// resolves prepended data on its own. libarchive is the
+    /// higher-value target (it covers the whole TAR family plus ISO),
+    /// and it cannot be reached the same way: the only entry point
+    /// bound here is `archive_read_open_filename`, whose position 0 is
+    /// the file's position 0. A pre-`lseek`ed descriptor does not help
+    /// either — libarchive's own fd reader seeks with absolute
+    /// `SEEK_SET` offsets, so a seek to logical 0 would land on the
+    /// stub, which breaks every seek-dependent format (ZIP, ISO)
+    /// outright and leaves the streaming ones depending on undefined
+    /// rewind behaviour.
+    ///
+    /// The supported route is a client-callback reader: `open`/`read`/
+    /// `skip`/`seek`/`close` callbacks over a `File` that add the
+    /// payload offset to every absolute position, installed with
+    /// `archive_read_set_callback_data`,
+    /// `archive_read_set_{open,read,skip,seek,close}_callback`, and
+    /// opened with `archive_read_open1` instead of
+    /// `archive_read_open_filename`. None of those symbols are bound
+    /// yet, and the declaration-site rule in `src/ffi/libarchive.rs`
+    /// (mechanically enforced by `declaration_site_tests`, which fails
+    /// any other file under `src/` that opens a foreign-function block)
+    /// requires them to be declared there — so that file, not this one,
+    /// is where the work starts. Until then every libarchive-backed
+    /// SFX payload is staged to a tempfile under the AD 0040 ceiling.
     pub(super) unsafe fn open_read_handle(c_path: &std::ffi::CStr) -> Result<*mut Archive> {
         let archive = unsafe { archive_read_new() };
         if archive.is_null() {

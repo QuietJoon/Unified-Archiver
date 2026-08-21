@@ -118,3 +118,43 @@ change to shipped internal call paths (`modification.rs::commit_changes`,
 enforcement gap and the convergence question; it does not rule. The D3 decision itself —
 replace `_unchecked` comment contracts with a capability token — still governs; the record
 stays **active**.
+
+## Amendment (2026-08-21, the D3 residual is tracked as its own ticket — do not file it twice)
+
+Bookkeeping only. Nothing above is reversed, narrowed or re-decided: the D3 decision still
+governs, the enforcement gap the 2026-08-04 amendment records is still real, and this record
+stays **active**. What changes is where a reader is sent next.
+
+**The deferral this record carries is not untracked.** The 2026-08-04 amendment leaves two things
+open — the remaining `ValidatedSource` call sites (`modification.rs::commit_changes`,
+`inspection.rs::entry_crc32_for_digest`, the by-id digest stream) and the construction-order
+residual that sits behind the same unenforced invariant it reports as R0070-0008 — and the second
+of those is R0069-0063, the last unlanded sub-item of OI-0069-002's nine. **That residual has had
+its own TicGit ticket since 2026-08-12: `84b324d1`, "ValidatedSource construction order
+(OI-0069-002 residual, R0069-0063)".**
+Verified first-hand on 2026-08-21 rather than taken on trust: `ti show 84b324d1` reports
+`Status: open`, `State: blocked`, priority 3, tags `OI-0069-002, R0069-0063, api, reopen, v0.4,
+verified`, and its `Source` line already names this record alongside
+`docs/project/open-issues.md#OI-0069-002`. Its acceptance criteria are the two this record wants
+— `ValidatedSource` cannot be constructed before its validating checks have run, and the
+`_unchecked` naming and the token type tell the same story at every call site — and its recorded
+blocker is the one this record's Consequences predicted and the 2026-08-04 amendment found
+unfulfilled: the reordering is only coherent once the legacy `Archive` sum type is retired and the
+typed handles are the sole facade, which is v0.4 work.
+
+**So this record should stop reading as an untracked deferral.** A reader who reaches the "Open
+v0.4 design question" paragraph above and files a ticket for it files a duplicate. The question is
+held; it is not answered, and this amendment does not answer it either.
+
+**Context on the umbrella ticket.** `84b324d1` is the narrow residual. The wider "rule on three
+orphaned deferral targets" item — TicGit `176503b7`, carried in `docs/backlog.md` as "Residual AD
+deferral targets" until the 2026-08-21 reconciliation discharged that entry — covered AD 0052,
+this record and AD 0057 together. Two of its three halves have
+since moved out: the AD 0052 half was ruled and closed (`0a1e54f8`; the deferral is retired, the
+cheap `validate()` probe landed, and AD 0052 carries the 2026-08-21 amendment that says so), and
+the AD 0057 half **landed in this same change set** under its own ticket (`095eee`, owner-ruled
+2026-08-20 "queue and do
+it"). What remains under `176503b7` is this record's half, which the owner ruled is bookkeeping —
+this amendment — rather than a decision. The convergence-versus-retirement choice for the token
+itself stays where the 2026-08-04 amendment put it: an open v0.4 design question, whose
+construction-order component is `84b324d1`.

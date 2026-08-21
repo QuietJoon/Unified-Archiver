@@ -36,6 +36,62 @@ pub(crate) enum ArchiveBackend {
     Libarchive(Box<LibarchiveArchive>),
 }
 
+/// How an archive that does **not** start at byte zero of the file the
+/// caller named is reached (ticket `1ddc37ec`).
+///
+/// An SFX file is `[stub program][archive bytes]`. Two ways to hand the
+/// archive bytes to a backend:
+///
+/// * [`Self::Staged`] — copy `file_len - offset` bytes into a tempfile
+///   and open that. Works for every backend, and is why the AD 0040
+///   payload ceiling exists: the copy is a disk write driven by
+///   user-supplied input.
+/// * [`Self::InPlace`] — hand the backend the original file and let it
+///   start reading at `offset`. Nothing is copied, so no ceiling
+///   applies.
+///
+/// The public projection of this distinction is [`PayloadAccess`],
+/// returned by [`Archive::payload_access`].
+pub(crate) enum PayloadSource {
+    /// Payload copied into a tempfile (AD 0040 ceiling applied). The
+    /// [`tempfile::TempPath`] deletes the copy when the `Archive` drops.
+    Staged(tempfile::TempPath),
+    /// Payload read directly out of the caller's file, starting at
+    /// `offset`. No bytes were copied and no ceiling was consulted.
+    InPlace {
+        /// Byte offset within the caller's file where the archive
+        /// begins. Kept so size accounting that must exclude the stub —
+        /// [`Archive::payload_size_for_ratio`], the compression-ratio
+        /// denominator — stays on the payload rather than silently
+        /// widening to `stub + payload` (R0069-0006).
+        offset: u64,
+    },
+}
+
+/// Whether an [`Archive`]'s bytes were copied to a tempfile before the
+/// backend saw them, or are being read straight out of the file the
+/// caller named.
+///
+/// This is the caller-visible half of the AD 0040 payload ceiling: the
+/// ceiling bounds a *copy*, so it binds on [`Self::Staged`] and cannot
+/// bind on [`Self::InPlace`]. Read it with
+/// [`Archive::payload_access`] when the distinction matters — a caller
+/// that budgets temp-volume space, or one that wants to know whether
+/// [`crate::ExtractionLimits::max_sfx_payload_size`] had anything to
+/// say about the handle it just got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PayloadAccess {
+    /// No copy was made. Either an ordinary archive opened at offset
+    /// zero, or an offset/SFX open that the backend could serve from
+    /// the original file. The AD 0040 staging ceiling did not apply.
+    InPlace,
+    /// The archive bytes were copied into a tempfile before opening,
+    /// under the AD 0040 staging ceiling
+    /// ([`crate::ExtractionLimits::max_sfx_payload_size`]). The copy is
+    /// removed when the `Archive` drops.
+    Staged,
+}
+
 /// Handle to an opened archive file
 ///
 /// Provides unified access to inspection, extraction, creation, and modification
@@ -133,10 +189,16 @@ pub struct Archive {
     pub(crate) modifications: Option<crate::modification::ModificationTracker>,
     /// Modification options (Modify mode only). `None` means defaults are used.
     pub(crate) mod_options: Option<crate::modification::ModificationOptions>,
-    /// Backing temp file for archives opened at a non-zero offset
-    /// (see [`Archive::open_at_offset`]). The [`tempfile::TempPath`] is dropped
-    /// with the `Archive`, removing the temp copy of the embedded payload.
-    /// `None` for archives opened from a real on-disk file.
+    /// How the embedded payload of an archive opened at a non-zero
+    /// offset is reached — see [`PayloadSource`] and
+    /// [`Archive::open_at_offset`]. `None` for an archive opened from a
+    /// real on-disk file at offset zero, which is the overwhelming
+    /// majority of handles.
+    ///
+    /// [`PayloadSource::Staged`] owns the [`tempfile::TempPath`] holding
+    /// the copied payload; it is dropped with the `Archive`, removing
+    /// the copy. [`PayloadSource::InPlace`] owns no file at all — the
+    /// backend reads the original file starting at the recorded offset.
     ///
     /// `path` retains the caller-facing outer path so [`Archive::path`] and
     /// multipart-sibling discovery still see the original SFX/installer
@@ -144,8 +206,17 @@ pub struct Archive {
     /// preflight) must route through [`Archive::source_path_for_reopen`]
     /// so the staged payload is used as the actual archive source —
     /// reopening from `path` would target the outer executable instead
-    /// (R0071-0001).
-    pub(crate) _backing_tempfile: Option<tempfile::TempPath>,
+    /// (R0071-0001). For an in-place handle `path` *is* the source, so
+    /// that helper returns it unchanged.
+    ///
+    /// **Field name.** Retained as `_backing_tempfile` even though the
+    /// type is no longer a bare tempfile: `src/creation.rs` and
+    /// `src/modification.rs` build `Archive` with struct literals that
+    /// name this field (`_backing_tempfile: None`, which still compiles
+    /// against the `Option`), and renaming it there is outside this
+    /// change's file ownership. Renaming to `payload_source` is a
+    /// mechanical follow-up.
+    pub(crate) _backing_tempfile: Option<PayloadSource>,
     /// Advisory file lock held across a Modify session (MADR-0009, MADR-0016).
     /// The `File` handle holds an exclusive `flock`/`LockFileEx` for the
     /// archive path and releases on drop. `None` outside Modify mode.
@@ -207,6 +278,13 @@ const _: fn() = || {
 /// and the encrypted-SFX staging path behind
 /// [`Archive::open_encrypted`].
 ///
+/// It bounds a *copy*, so it is consulted only on the staging path.
+/// An open that reads the payload in place
+/// ([`Archive::try_open_in_place`]) never reaches
+/// [`stage_sfx_payload`] and is admitted regardless of this value or
+/// of a caller-supplied one — [`Archive::payload_access`] is how a
+/// caller tells the two apart (ticket `1ddc37ec`).
+///
 /// This is the *default* of
 /// [`ExtractionLimits::max_sfx_payload_size`], read through the
 /// `crate::sfx::limits` alias so the SFX size-relationship
@@ -223,6 +301,10 @@ const DEFAULT_SFX_PAYLOAD_CAP: Cap = Cap::Limited(crate::sfx::limits::MAX_SFX_PA
 /// [`Archive::open_at_offset_with_format_hint`] and
 /// [`Archive::open_sfx_payload_for_encrypted`] so the staging policy
 /// lives in one place.
+///
+/// Reached only when no backend can read the payload where it already
+/// lies — see [`Archive::try_open_in_place`], which is tried first and
+/// bypasses this function (and therefore this ceiling) entirely.
 ///
 /// `max_payload` is the AD 0040 staging ceiling **as the caller
 /// configured it** — [`ExtractionLimits::max_sfx_payload_size`], which
@@ -776,8 +858,19 @@ impl Archive {
     /// Open a self-extracting archive (SFX) for reading
     ///
     /// Convenience method that detects SFX and forwards to `open_at_offset()`.
-    /// The embedded payload is materialized into a temporary file and then
-    /// opened through the normal archive pipeline.
+    ///
+    /// # In place, or staged
+    ///
+    /// A ZIP payload behind an SFX-shaped path (one with an executable
+    /// extension — `.exe`, `.sh`, ...) is read **in place**: the backend
+    /// opens the file you named and starts at the detected offset, so
+    /// nothing is copied and no ceiling applies. Everything else — every
+    /// other payload format, and a ZIP payload behind a path that does
+    /// not look executable — is copied ("staged") into a temporary file
+    /// first, which is then opened through the normal archive pipeline
+    /// and deleted when the returned handle drops.
+    /// [`Archive::payload_access`] reports which one you got, and
+    /// [`Archive::open_at_offset`] documents the exact conditions.
     ///
     /// # Returns
     /// - `Err(ArchiveError::Format)` if the file is not an SFX
@@ -794,11 +887,12 @@ impl Archive {
     ///
     /// # Staging ceiling
     ///
-    /// The payload copy is capped at
+    /// When the payload *is* staged, the copy is capped at
     /// [`ExtractionLimits::default`]'s
     /// [`max_sfx_payload_size`](ExtractionLimits::max_sfx_payload_size)
     /// (AD 0040). Use [`Archive::open_sfx_with_limits`] to supply your
-    /// own ceiling.
+    /// own ceiling. The ceiling bounds a copy, so it does not apply to
+    /// an in-place open.
     pub fn open_sfx(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_sfx_progress(path, None)
     }
@@ -810,6 +904,11 @@ impl Archive {
     /// happens before any listing exists to apply the entry-count,
     /// size, or ratio gates to. Those still apply later, on the
     /// extraction call made against the returned handle.
+    ///
+    /// A ceiling bounds a copy, so it has nothing to say about a payload
+    /// that is never copied: a ZIP payload opened in place is admitted
+    /// whatever this value is. Check [`Archive::payload_access`] if that
+    /// distinction matters to you.
     ///
     /// ```no_run
     /// use unified_archive::{Archive, Cap, ExtractionLimits};
@@ -828,16 +927,31 @@ impl Archive {
     /// Open a self-extracting archive while observing or cancelling
     /// the staging copy (R0075-0003).
     ///
-    /// `Archive::open` on an SFX copies the embedded archive payload
-    /// into a tempfile so the underlying backend can re-open it at
-    /// offset zero. For multi-GB installers that copy is observable;
-    /// pass an [`SfxStagingProgress`](crate::SfxStagingProgress) hook
-    /// to surface running-byte progress and (optionally) cancel the
-    /// copy partway through.
+    /// `Archive::open` on an SFX whose payload has to be staged copies
+    /// that payload into a tempfile so the underlying backend can
+    /// re-open it at offset zero. For multi-GB installers that copy is
+    /// observable; pass an
+    /// [`SfxStagingProgress`](crate::SfxStagingProgress) hook to
+    /// surface running-byte progress and (optionally) cancel the copy
+    /// partway through.
     ///
     /// Returns [`ArchiveError::Cancelled`]
     /// with `operation == "sfx_staging"` when the callback signals
     /// cancellation; the partial tempfile is dropped automatically.
+    ///
+    /// # The hook is silent when there is no copy
+    ///
+    /// When the payload is read in place — a ZIP payload behind a path
+    /// with an executable extension, per [`Archive::open_at_offset`]
+    /// (ticket `1ddc37ec`) — no bytes move, so the callback is **never
+    /// invoked** (not even once with a zero total) and there is nothing
+    /// for it to cancel. That is the intended outcome: the copy this
+    /// hook exists to watch did not happen. Callers driving a progress
+    /// bar off it should treat "no emissions, `Ok` returned" as instant
+    /// completion, and can confirm with [`Archive::payload_access`].
+    /// Every input that still stages (the TAR family, ISO, 7z, RAR, and
+    /// any ZIP payload the in-place conditions decline) emits exactly as
+    /// before.
     ///
     /// `path` must be an SFX. Non-SFX inputs surface the same error
     /// as [`Archive::open_sfx`].
@@ -862,6 +976,10 @@ impl Archive {
     /// without the callback ever firing. Only
     /// [`ExtractionLimits::max_sfx_payload_size`] participates — see
     /// [`Archive::open_sfx_with_limits`].
+    ///
+    /// Both are inert on an in-place open, where there is no copy to
+    /// bound, watch, or cancel — see
+    /// [`Archive::open_with_sfx_progress`].
     pub fn open_with_sfx_progress_and_limits(
         path: impl AsRef<Path>,
         progress: Option<crate::options::SfxStagingProgress>,
@@ -871,9 +989,13 @@ impl Archive {
     }
 
     /// Single implementation behind every SFX open: detect, bind the
-    /// staging copy to the detection open's identity, then stage the
-    /// payload under `max_payload`. The public entry points differ only
-    /// in where that ceiling and the progress hook come from.
+    /// payload open to the detection open's identity, then either read
+    /// the payload in place or stage it under `max_payload`. The public
+    /// entry points differ only in where that ceiling and the progress
+    /// hook come from.
+    ///
+    /// The name is historical — since ticket `1ddc37ec` this does not
+    /// always stage.
     fn open_sfx_staged(
         path_ref: &Path,
         progress: Option<crate::options::SfxStagingProgress>,
@@ -936,11 +1058,48 @@ impl Archive {
     ///
     /// Opens an archive that doesn't start at byte 0 of the file — primarily
     /// SFX payloads, where the archive data is embedded after an executable
-    /// stub. The payload is materialized into a temporary file that is removed
-    /// when the returned [`Archive`] is dropped.
+    /// stub.
     ///
-    /// `offset == 0` is equivalent to [`Archive::open`] and avoids the copy.
+    /// `offset == 0` is equivalent to [`Archive::open`].
     /// Offsets greater than or equal to the file's length return an error.
+    ///
+    /// # In place, or staged (ticket `1ddc37ec`)
+    ///
+    /// Two ways to reach the embedded archive, and
+    /// [`Archive::payload_access`] tells you which one you got:
+    ///
+    /// * **In place** — the backend opens `path` and starts reading at
+    ///   `offset`. Nothing is copied and no ceiling applies. Requires
+    ///   all three of: a ZIP payload (the only backend that can do this
+    ///   today), an SFX-shaped `path` (executable extension), and
+    ///   agreement between `offset` and where the ZIP's own
+    ///   end-of-central-directory record says the archive starts.
+    /// * **Staged** — otherwise, `file_len - offset` bytes are copied
+    ///   into a temporary file that is removed when the returned
+    ///   [`Archive`] is dropped, and the AD 0040 ceiling bounds that
+    ///   copy. This is the path for the TAR family, ISO, 7z and RAR
+    ///   payloads, and for any input the in-place gates decline.
+    ///
+    /// The observable archive is the same either way — the same
+    /// entries, the same [`Archive::path`], the same
+    /// [`Archive::format`], the same extraction results — and so is the
+    /// ratio denominator, which excludes the stub on both paths. What
+    /// differs is the disk cost, the ceiling, and one exposure:
+    ///
+    /// # Snapshot exposure
+    ///
+    /// A staged handle reads a private copy taken at open time, so a
+    /// later rewrite of `path` cannot change what it sees. An in-place
+    /// handle keeps reading `path` itself, so between this call and the
+    /// first operation that parses the archive (AD 0065 freezes the
+    /// listing at *first observation*, not at open) a concurrent
+    /// rewrite of that file is visible — exactly as it is for an
+    /// ordinary [`Archive::open`] of any archive. The
+    /// detection→open inode revalidation still applies, so a
+    /// same-pathname *replacement* up to the open is refused; what is
+    /// no longer copied out of harm's way is the payload itself. Read
+    /// the archive promptly, or accept the same exposure every
+    /// non-SFX open already has.
     ///
     /// # Arguments
     /// * `path` - Path to the file containing the archive
@@ -958,11 +1117,12 @@ impl Archive {
     ///
     /// # Staging ceiling
     ///
-    /// `file_len - offset` bytes are copied, capped at
-    /// [`ExtractionLimits::default`]'s
+    /// When the payload is staged, the `file_len - offset` bytes copied
+    /// are capped at [`ExtractionLimits::default`]'s
     /// [`max_sfx_payload_size`](ExtractionLimits::max_sfx_payload_size)
     /// (AD 0040). Use [`Archive::open_at_offset_with_limits`] to
-    /// tighten (or lift) that ceiling.
+    /// tighten (or lift) that ceiling. An in-place open copies nothing,
+    /// so the ceiling cannot bind on it.
     pub fn open_at_offset(path: impl AsRef<Path>, offset: u64) -> Result<Self> {
         Self::open_at_offset_with_format_hint(path.as_ref(), offset, DEFAULT_SFX_PAYLOAD_CAP, None)
     }
@@ -977,7 +1137,10 @@ impl Archive {
     /// returned handle.
     ///
     /// `offset == 0` short-circuits to [`Archive::open`] and copies
-    /// nothing, so the ceiling is not consulted there.
+    /// nothing, so the ceiling is not consulted there. Neither is it
+    /// consulted on an in-place open — see
+    /// [`Archive::open_at_offset`], and [`Archive::payload_access`] to
+    /// find out which path a handle took.
     ///
     /// ```no_run
     /// use unified_archive::{Archive, Cap, ExtractionLimits};
@@ -1051,6 +1214,23 @@ impl Archive {
             return Self::open(path_ref);
         }
 
+        // Ticket 1ddc37ec: before committing to a copy, ask whether a
+        // backend can read the payload where it already lies. Only the
+        // ZIP reader can today (see `try_open_in_place`), and only for
+        // an SFX-shaped input; everything else falls through to staging
+        // with the AD 0040 ceiling in force.
+        if let Some(archive) = Self::try_open_in_place(path_ref, offset, format_hint)? {
+            // OI-0081-001: the in-place backend reopened `path_ref` by
+            // name, exactly as `Archive::open` does after detection, so
+            // it gets the same post-construction revalidation. Nothing
+            // was copied, so there is no copy-source open to bind
+            // instead.
+            if let Some(expected) = expected_identity {
+                revalidate_read_identity("open_sfx", path_ref, expected)?;
+            }
+            return Ok(archive);
+        }
+
         // OI-0081-001: `expected_identity` (`Some` only on the
         // detection-bound SFX path) is revalidated at the copy-source
         // open inside `stage_sfx_payload`.
@@ -1065,8 +1245,119 @@ impl Archive {
         )?;
         let mut archive = Self::open(&temp_path)?;
         archive.path = path_ref.to_path_buf();
-        archive._backing_tempfile = Some(temp_path);
+        archive._backing_tempfile = Some(PayloadSource::Staged(temp_path));
         Ok(archive)
+    }
+
+    /// Open the archive embedded at `offset` **without copying it**,
+    /// or return `Ok(None)` when that cannot be proven safe and the
+    /// caller should fall back to staging (ticket `1ddc37ec`).
+    ///
+    /// # Which backend
+    ///
+    /// ZIP only, today. The `zip` crate resolves prepended data itself:
+    /// it derives the archive's start from the end-of-central-directory
+    /// record and folds that offset into every local-header position
+    /// (`ZipArchive::offset()` reports it), and this crate's ZIP wrapper
+    /// already reads its raw central-directory index from the absolute
+    /// `central_directory_start()`. So handing the wrapper the *outer*
+    /// file is enough — no new reader plumbing, no copy, and no AD 0040
+    /// ceiling because nothing is written.
+    ///
+    /// libarchive (the TAR family and ISO), 7z and RAR still stage. See
+    /// the note on `LibarchiveArchive::open_read_handle` for what
+    /// libarchive would need.
+    ///
+    /// # The three gates, and why each one exists
+    ///
+    /// 1. **Format.** A `format_hint` naming any format other than
+    ///    [`ArchiveFormat::Zip`] declines immediately; `None` (the
+    ///    raw-offset entry points, which have no detection behind them)
+    ///    falls through to the byte check. Either way the four bytes at
+    ///    `offset` must be a ZIP local file header (`PK\x03\x04`). An
+    ///    archive with no entries starts with its EOCD instead; that
+    ///    degenerate case stages, which costs a copy of a few dozen
+    ///    bytes.
+    /// 2. **Offset agreement.** The `zip` crate is asked, through the
+    ///    same default configuration the wrapper uses, where *it*
+    ///    thinks the archive starts. If that disagrees with `offset`,
+    ///    reading in place would hand back a different archive than the
+    ///    caller addressed, so the answer is "stage" — staging slices
+    ///    at exactly the caller's offset. This costs one throwaway
+    ///    central-directory parse (metadata only, no payload decode)
+    ///    against a copy of up to the whole payload.
+    /// 3. **SFX-shaped name.** The outer path must carry an executable
+    ///    extension. This is not cosmetic. When the caller supplies a
+    ///    password, extraction reopens the archive through
+    ///    [`Archive::open_encrypted`] (`reopen_with_password_if_set`)
+    ///    against [`Archive::source_path_for_reopen`] — the staged
+    ///    tempfile for a staged handle, but the outer file for an
+    ///    in-place one. `open_encrypted` resolves an embedded payload
+    ///    only through its SFX fallback, and an executable extension is
+    ///    what admits a file to that fallback. Without this gate,
+    ///    `open_at_offset("blob.bin", n)` followed by a
+    ///    password-bearing extraction would fail where staging
+    ///    succeeded. Lifting it needs an offset-aware reopen in
+    ///    `src/extraction.rs`.
+    ///
+    /// Any I/O or parse failure here also returns `Ok(None)`: the
+    /// staging path is then responsible for producing the error, so a
+    /// bad offset keeps reporting exactly what it reported before.
+    fn try_open_in_place(
+        path_ref: &Path,
+        offset: u64,
+        format_hint: Option<ArchiveFormat>,
+    ) -> Result<Option<Self>> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        // Gate 1a: a non-ZIP hint is a definite decline.
+        if !matches!(format_hint, None | Some(ArchiveFormat::Zip)) {
+            return Ok(None);
+        }
+        // Gate 3: SFX-shaped outer name (see the doc comment).
+        if !crate::format::extension_suggests_executable(path_ref) {
+            return Ok(None);
+        }
+
+        const LOCAL_FILE_HEADER: &[u8; 4] = b"PK\x03\x04";
+        let Ok(mut file) = std::fs::File::open(path_ref) else {
+            return Ok(None);
+        };
+        // Gate 1b: a ZIP entry stream must begin exactly at `offset`.
+        if file.seek(SeekFrom::Start(offset)).is_err() {
+            return Ok(None);
+        }
+        let mut magic = [0u8; 4];
+        if file.read_exact(&mut magic).is_err() || &magic != LOCAL_FILE_HEADER {
+            return Ok(None);
+        }
+
+        // Gate 2: the `zip` crate's own view of where the archive
+        // starts must agree with the caller's offset. Built with
+        // `ZipArchive::new`, i.e. the same default `ArchiveOffset`
+        // resolution the wrapper's `open_zip` uses, so agreement here
+        // means agreement there.
+        let probe = match zip::ZipArchive::new(std::io::BufReader::new(&mut file)) {
+            Ok(probe) => probe,
+            Err(_) => return Ok(None),
+        };
+        if probe.offset() != offset {
+            return Ok(None);
+        }
+        drop(probe);
+        drop(file);
+
+        // The wrapper opens `path_ref` itself and re-derives the same
+        // offset; `path` is already the caller-facing path, so nothing
+        // has to be patched up afterwards.
+        let zip = ZipArchive::open(path_ref)?;
+        let mut archive = Self::new_read(
+            ArchiveBackend::ZipReader(Box::new(zip)),
+            path_ref.to_path_buf(),
+            ArchiveFormat::Zip,
+        );
+        archive._backing_tempfile = Some(PayloadSource::InPlace { offset });
+        Ok(Some(archive))
     }
 
     /// Stage an SFX payload to a tempfile and open it via
@@ -1108,7 +1399,7 @@ impl Archive {
         )?;
         let mut archive = Self::open_encrypted(&temp_path, password)?;
         archive.path = path_ref.to_path_buf();
-        archive._backing_tempfile = Some(temp_path);
+        archive._backing_tempfile = Some(PayloadSource::Staged(temp_path));
         Ok(Some(archive))
     }
 
@@ -1580,20 +1871,65 @@ impl Archive {
     /// path. Always present and stable for the lifetime of the
     /// `Archive` (R0071-0001).
     pub(crate) fn source_path_for_reopen(&self) -> &Path {
-        self._backing_tempfile
-            .as_deref()
-            .unwrap_or(self.path.as_path())
+        match &self._backing_tempfile {
+            Some(PayloadSource::Staged(temp)) => temp,
+            // Nothing was copied: the caller's own file *is* the source,
+            // and the backend re-derives the payload offset from it.
+            Some(PayloadSource::InPlace { .. }) | None => self.path.as_path(),
+        }
+    }
+
+    /// Whether this handle's bytes were copied to a tempfile before the
+    /// backend saw them, or are read straight out of the file
+    /// [`Archive::path`] names.
+    ///
+    /// The answer is [`PayloadAccess::InPlace`] for every ordinary
+    /// archive (nothing to copy) and for an SFX/offset open that a
+    /// backend could serve from the original file;
+    /// [`PayloadAccess::Staged`] when the embedded payload was copied
+    /// out under the AD 0040 ceiling
+    /// ([`crate::ExtractionLimits::max_sfx_payload_size`]).
+    ///
+    /// Why it is public: the ceiling bounds a copy, so it binds on one
+    /// of these and cannot bind on the other. Without a way to ask,
+    /// "did my `max_sfx_payload_size` have any effect on this handle?"
+    /// is unanswerable — and the answer decides whether a multi-GB SFX
+    /// needs temp-volume headroom.
+    ///
+    /// ```no_run
+    /// use unified_archive::{Archive, archive::PayloadAccess};
+    ///
+    /// let archive = Archive::open_sfx("installer.exe")?;
+    /// match archive.payload_access() {
+    ///     PayloadAccess::InPlace => println!("read in place; no temp space used"),
+    ///     PayloadAccess::Staged => println!("payload copied to a tempfile"),
+    /// }
+    /// # Ok::<(), unified_archive::ArchiveError>(())
+    /// ```
+    pub fn payload_access(&self) -> PayloadAccess {
+        match &self._backing_tempfile {
+            Some(PayloadSource::Staged(_)) => PayloadAccess::Staged,
+            Some(PayloadSource::InPlace { .. }) | None => PayloadAccess::InPlace,
+        }
     }
 
     /// Compressed-size denominator for ratio gates. For SFX archives
-    /// this is the staged payload tempfile size (excluding outer-
-    /// executable stub bytes); for ordinary archives it's the file
-    /// size on disk (R0069-0006).
+    /// this is the embedded payload's size — the staged tempfile's
+    /// length, or, for an in-place handle, the source file's length
+    /// minus the payload offset. Outer-executable stub bytes are
+    /// excluded either way: counting them would inflate the denominator
+    /// and quietly loosen the zip-bomb ratio gate by the size of the
+    /// stub (R0069-0006). For ordinary archives it's the file size on
+    /// disk.
     pub(crate) fn payload_size_for_ratio(&self) -> Result<u64> {
         let path = self.source_path_for_reopen();
-        std::fs::metadata(path)
+        let len = std::fs::metadata(path)
             .map(|m| m.len())
-            .map_err(|e| ArchiveError::io("stat archive", path.to_path_buf(), e))
+            .map_err(|e| ArchiveError::io("stat archive", path.to_path_buf(), e))?;
+        match &self._backing_tempfile {
+            Some(PayloadSource::InPlace { offset }) => Ok(len.saturating_sub(*offset)),
+            Some(PayloadSource::Staged(_)) | None => Ok(len),
+        }
     }
 
     /// Finish and close archive (for Write mode)
@@ -1754,6 +2090,9 @@ pub mod mode_split;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod in_place_payload_tests;
 
 /// R0076-0074 / R0076-0075: the executable-extension SFX fallback must
 /// surface BOTH the primary detection failure and the SFX probe

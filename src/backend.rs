@@ -73,6 +73,21 @@
 //!   registry that owns both `ArchiveFormat::can_*` predicates and
 //!   the `ArchiveBackend` constructor pointers would ensure they
 //!   stay in sync; needs the `v2-api` feature gate from D2.
+//! - **Offset-capable opens are not a trait capability yet** (ticket
+//!   `1ddc37ec`). Reading an archive that begins partway into a file
+//!   (an SFX payload) is a per-backend property, not a shared one: the
+//!   ZIP reader can do it because the `zip` crate resolves prepended
+//!   data itself, so `Archive::try_open_in_place` hands that backend
+//!   the outer file and skips the payload copy entirely. libarchive, 7z
+//!   and UnRAR cannot, so `Archive` copies the payload to a tempfile
+//!   for them (which is what the AD 0040 ceiling bounds). The routing
+//!   therefore lives in `Archive`, keyed on the detected payload
+//!   format, rather than behind a `ReadBackend` method. A
+//!   `fn open_at_offset(path, offset) -> Option<Self>` capability on
+//!   the read trait would move the decision to the backends that can
+//!   answer it — worth doing once a second backend can, since one
+//!   `Some` arm and three `None` arms is a worse shape than the
+//!   current single call site.
 //!
 //! These do not have individual ADRs because the open-issue surface
 //! they share (D1/D2 backend trait + Archive split) already has AD

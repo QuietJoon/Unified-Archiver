@@ -90,3 +90,85 @@ consequence is now resolved for callers that construct their own
 `ExtractionLimits`. Threading a caller-supplied `max_sfx_payload_size`
 through `open_at_offset` itself (which currently takes no limits argument)
 remains future work.
+
+## Amendment (2026-08-21, ticket `1ddc37ec` — the ceiling is a consequence of staging)
+
+This decision was written as if the payload copy were unavoidable, and
+the ceiling as if it were a property of SFX payloads. Neither holds any
+more, and the distinction now has to be stated because the two halves of
+the read surface behave differently.
+
+**The ceiling bounds a copy, not a format.** Nothing about ZIP, RAR, 7z
+or TAR requires 16 GiB. The number exists because
+`Archive::open_at_offset()` wrote `file_len - offset` bytes into the
+caller's temp directory before any backend saw them, and an unbounded
+disk write driven by user-supplied input needed a bound. Where there is
+no write, the bound has nothing to bind.
+
+**Which paths still stage.** A ZIP payload behind an SFX-shaped path
+(executable extension) is now read **in place**: `Archive::try_open_in_place`
+hands the ZIP backend the caller's own file and the `zip` crate resolves
+the prepended-stub offset itself, folding it into every local-header
+position. No bytes are copied and the ceiling is not consulted. Every
+other read of an embedded payload still stages under the ceiling:
+
+| Payload | Path | Ceiling in force |
+|---|---|---|
+| ZIP, SFX-shaped outer path, offset agreed by the ZIP's own EOCD | in place | no — nothing is written |
+| ZIP, any gate declined (non-executable outer name; offset the EOCD disagrees with; no local-file-header signature at the offset) | staged | yes |
+| TAR family, ISO, and the standalone codecs (libarchive) | staged | yes |
+| 7z, RAR | staged | yes |
+| encrypted payloads via `Archive::open_encrypted` | staged | yes |
+
+The libarchive case is the valuable one still outstanding — it covers the
+whole TAR family plus ISO — and it is blocked on binding libarchive's
+client-callback reader (`archive_read_open1` plus the
+`archive_read_set_*_callback` family), which the declaration-site rule
+confines to `src/ffi/libarchive.rs`. The reasoning is recorded next to
+`LibarchiveArchive::open_read_handle`, including why a pre-`lseek`ed
+descriptor is not a substitute.
+
+**A caller can tell which one they got.** `Archive::payload_access()`
+returns `PayloadAccess::{InPlace, Staged}`. This is deliberately public:
+the answer decides whether a multi-GB SFX needs temp-volume headroom,
+and whether a lowered `ExtractionLimits::max_sfx_payload_size` had any
+effect on the handle just returned. Callers that budget temp space, or
+that lowered the cap expecting a refusal, must read it rather than infer
+it — a cap of 16 bytes admits a 10 GB in-place ZIP, because zero bytes
+were staged.
+
+**What did not change.** The caller-configured cap is still honoured
+wherever staging happens (`*_with_limits` entry points thread
+`max_sfx_payload_size` into `stage_sfx_payload`; the limits-free entry
+points pass the documented default). Rejection still happens before the
+tempfile is created, so an over-cap payload still leaves no partial
+copy. The detection→open identity binding (OI-0081-001 / R0001-0002)
+applies to the in-place path too — the in-place backend reopens the
+pathname by name, so it is revalidated against the detection open's
+identity exactly as `Archive::open` is.
+
+**One consequence beyond the ceiling.** For an in-place handle the
+backend's source file is the whole SFX, stub included, so
+`payload_size_for_ratio()` — the denominator of the compression-ratio
+gate — subtracts the payload offset. Leaving it as the whole-file length
+would have diluted the ratio by the size of the stub and quietly
+loosened a zip-bomb gate (R0069-0006).
+
+**One exposure the staged copy used to buy, stated so it is not
+rediscovered as a defect.** Staging copies the payload at open time, so
+a staged handle is immune to a later rewrite of the outer file. An
+in-place handle reads that file for the whole life of the handle, and
+AD 0065 freezes the listing at *first observation* rather than at open —
+so a concurrent rewrite between the two is visible. This is not a new
+class of exposure: it is exactly what every ordinary `Archive::open` of
+an on-disk archive already has, and the detection→open identity
+revalidation (OI-0081-001) still refuses a same-pathname replacement up
+to the open. It is recorded here because the staged path's immunity was
+an unstated side effect of the copy, and the copy is what went away.
+
+**Revisit trigger, restated.** The original trigger "the temp-file
+hand-off is replaced by a streaming API (would make this decision
+obsolete)" has now fired for exactly one backend. This decision becomes
+obsolete when the last staging path is gone; until then it governs the
+staged paths listed above, and the table is the authoritative statement
+of where that is.

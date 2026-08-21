@@ -6,8 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > **Release status.** Versions are listed newest-first. Three git tags exist — `v0.1.0`,
-> `v0.1.1`, and `v0.3.1` — and **no version of this crate has ever been published to a public
-> registry.** Two of the headings below therefore do not mean what a reader would assume:
+> `v0.1.1`, and `v0.4.0` — and **no version of this crate has ever been published to a public
+> registry.** (`v0.3.1` was tagged and then deleted; `0.3.1` keeps its section below because
+> the changes it names are all in history.) Two of the headings below therefore do not mean what a reader would assume:
 >
 > - **`0.2.0`** was a `Cargo.toml`-only bump (`8de7c77`, 2026-04-27). It was never tagged and
 >   never shipped.
@@ -18,6 +19,276 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > `0.3.0` (`e5c1ce2`, 2026-04-28) was likewise an untagged, unpublished bump, and has no
 > section of its own: its changes are recorded under 0.3.1 below, which is why that section
 > spans everything since 0.2.0.
+
+## [Unreleased]
+
+> **This will be 0.5.0, and the bump is forced.** Two independent reasons: `ArchiveEntry` became
+> `#[non_exhaustive]`, and several operations changed which `ArchiveError` variant they return.
+> 0.5.0 is not a number chosen here — every deprecation-timeline block already in the tree names
+> 0.5.0 as the next stop, and the three `#[deprecated(since = …)]` attributes below are set to it.
+>
+> `Cargo.toml` still reads `0.4.0` and is deliberately left alone. Bumping it before the tag is
+> what produced the phantom versions the header above has to apologise for, and one item is still
+> owed before 0.5.0 can honestly be cut — see **Still owed**.
+>
+> **How to read the Breaking list.** Nothing here changes a signature: code that compiled against
+> 0.4.0 still compiles, except for the `#[non_exhaustive]` item. The rest are *behavioural* —
+> calls that returned `Ok` now return `Err`, or return a different `ArchiveError` variant, so a
+> caller matching on variants is the one who has to act.
+
+### Breaking
+
+- **`ArchiveEntry` is `#[non_exhaustive]`.** External code can no longer build it with a struct
+  literal or destructure/match it exhaustively; both now fail to compile. The fields stay `pub`
+  and readable, so field *access* is unaffected. *Migration:* construct through
+  `ArchiveEntry::file(path, id)` / `dir_at` / `symlink_at` / `hardlink_at` and finish with
+  `.build()` — or `.build_checked()`, which refuses an empty path and any combination that
+  contradicts the entry's own kind, such as a directory carrying a size — and add `..` to any
+  pattern that matched every field. The struct is a *listing* type whose field set tracks what archive formats
+  carry, so every metadata addition so far has been a silent break for anyone holding a literal;
+  the attribute converts that into a compile error at the one place it can be fixed.
+
+- **Creating or modifying an archive now refuses entry names it used to accept.** This is the
+  break most likely to bite, and it has a case with no escape hatch, so it is worth reading in
+  full. The archive-internal path validator delegated to `Path::components()`, and std eats
+  segments the validator was written to catch — verified by experiment: `a/./b` and `a/b/.` both
+  come back as `[a, b]`, so an interior or trailing `.` was invisible, and on Unix `C:/x` comes
+  back as `[C:, x]`, so a drive prefix passed as an ordinary segment. The check now splits on `/`
+  and judges each segment itself.
+  - Refused **regardless of policy**: `.` and `..` in *any* position, absolute prefixes, NUL
+    bytes, empty strings and empty segments.
+  - Refused additionally under the new default `ArchivePathPolicy::Portable`: Windows reserved
+    device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, case-insensitive, with
+    or without an extension), segments ending in `.` or a space, drive-letter prefixes, and `:`
+    anywhere in a segment.
+
+  It applies on the **write side only** — `Archive::create*` and the `commit_changes` path — not
+  to extraction. And it applies to *retained* entries too: `commit_changes` re-validates every
+  pre-existing entry it is about to re-emit and refuses the whole commit with `OperationBlocked`
+  if any fails, before creating a temp file. So **an archive written by another tool that contains
+  such a name can no longer be modified at all.** *Migration:* `set_archive_path_policy(
+  ArchivePathPolicy::Host)` relaxes the portable-only rules for callers who deliberately want host
+  grammar — but it does **not** relax `.` and `..`, so an archive carrying `a/./b` cannot be
+  modified under either policy. For that case, rename the entry through the modification API
+  instead of retaining it, or extract and recreate.
+
+- **`ExtractionLimits::max_sfx_payload_size` is enforced now, where before it was ignored.** In
+  0.4.0 the field was stored, defaulted and readable, and no staging code consulted it: the
+  SFX/offset staging copy was bounded by `sfx::limits::MAX_SFX_PAYLOAD_SIZE`, a hardwired alias of
+  the 16 GiB default, whatever the caller configured. The caller's value now governs, with
+  consequences in both directions — set **below** 16 GiB it was silently ignored and is now
+  honoured, so a staging open that used to succeed can fail; set **above** 16 GiB it was silently
+  capped and now is not.
+
+- **That ceiling does not bind on an in-place open, by design.** It bounds a *copy*; where the
+  backend reads the archive straight out of the file the caller named there is no copy and nothing
+  for the ceiling to bound (AD 0040, amended). It is therefore not a file-size guard and must not
+  be used as one. *To tell the two apart:* read the new
+  `Archive::payload_access() -> PayloadAccess`. `Staged` is exactly the case the ceiling applied
+  to — and the case that consumed temp-volume space — and `InPlace` is exactly the case it did
+  not. Budget off that, not off the limit value.
+
+- **A declared-versus-actual length mismatch is `ArchiveError::Corruption` on all three commit
+  routes.** It promised `Corruption` and delivered two other variants depending on which backend
+  committed: ZIP raised `Format` ("over-produced" / "under-produced"), libarchive raised `Io`
+  ("Stream length mismatch"). Detection was never broken, classification was — so
+  `match err { Corruption { .. } => … }` fired on no backend at all. All three routes now call one
+  `ArchiveError::declared_length_mismatch(path, declared, actual)`, which carries both numbers and
+  says which direction it went. *Migration:* stop matching on `Format`/`Io` for this condition, and
+  stop matching on the `"Stream length mismatch"` string — the message is gone.
+
+- **An encrypted ZIP entry opened without a password is `ArchiveError::Password`, not `Format`.**
+  RAR already yielded `Password` (via `ERAR_MISSING_PASSWORD`) and 7z already did (via
+  `Error::PasswordRequired`), and `docs/API_REFERENCE.md` promised `Password`, so ZIP was the lone
+  outlier. Only the missing-credential condition moved: a *wrong* password and a malformed entry
+  keep the variants they had.
+
+- **A libarchive build without the zstd / lz4 / lzma write filter now raises
+  `ArchiveError::CodecUnavailable`, not a generic `Format`.** The variant, its constructor and a
+  per-platform install-instruction table all existed and no production path constructed them. The
+  write-filter registration site raises it now, naming the codec, so `codec_install_instructions`
+  finally reaches the caller it was written for. The lookup also stopped missing: it matches on an
+  upper-cased key, so libarchive's lower-case filter names (`xz`, `lzma`, `bzip2`) reach their real
+  per-platform arm instead of the generic fallback.
+
+- **Truncation on a short compressed stream is `Format`, not `Io`.** Concretely: a bzip2 stream
+  under 4 bytes or an xz stream under 12 bytes, the latter reachable through
+  `extract_stream_checksum`. The per-format helpers mapped every read failure including
+  `UnexpectedEof` to `Io` while the auto-detect probe already reported the same truncation as
+  `Format`. The asymmetry is resolved toward `Format` rather than `Io`, and the reasoning is the
+  point: `Io` is the class callers treat as operational and retryable, so labelling a permanently
+  short file `Io` invites a retry that can never succeed. One `framing_read_error` now decides for
+  all six production call sites — two each in `gzip` and `bzip2`, one each in `xz` and `detect`;
+  every other `io::ErrorKind` keeps
+  `Io` with its operation label and source. AD-0010, *Unified Stream Checksum Extraction*,
+  carries the dated amendment under the heading "truncation is a `Format` error at every layer".
+
+- **Not a break, contrary to how it was recorded.** `ArchiveWarning` gained the
+  `SkippedUnsupportedEntry` variant, and `b778c2a`'s footer called that breaking. It is not:
+  `ArchiveWarning` and `ArchiveError` are both already `#[non_exhaustive]`, so a downstream match
+  has an unreachable arm and cannot be broken by a new variant. Noted here so nobody plans a
+  migration around it.
+
+### Added
+
+- **`Archive::validate()`** — asks whether the handle refers to a usable archive, for the cost of
+  the first parse and no more. `Archive::open` parses nothing on most backends, so `Ok` from
+  `open()` never meant the input was a valid archive; a corrupt ZIP opened fine and failed later,
+  at whatever call first needed the contents. `validate()` forces that parse and reports the
+  verdict, and because AD 0065's frozen listing cache keeps the result, a later `list_files` is
+  served from it rather than parsed again — that is what makes this cheap rather than a second
+  pass, and it is pinned by a test asserting three pointer identities (same `Vec`, same `Arc`, and
+  both cache layers empty after `open`). Returns the format error for a corrupt, truncated,
+  misdetected or missing input, and `ArchiveError::WriteModeOnly` for a write-mode handle, where
+  there is nothing to validate until `finish` has run. This makes first-operation validation a
+  stated contract instead of an accident of when parsing happens; libarchive stays the eager
+  exception it has been since R0001-0012. Distinct from `validate_integrity()`, which is a full
+  per-entry walk — a different cost class and a different question.
+- **`security`: an archive-path policy** — `ArchivePathPolicy::{Portable, Host}`,
+  `set_archive_path_policy`, `archive_path_policy`, `with_archive_path_policy` (scoped, for tests)
+  and `validate_archive_internal_path_as`, which checks against an explicit policy rather than the
+  ambient one. See the Breaking entry above for what each policy refuses.
+- **`options`: `WritableFormat`** — a newtype that can only hold a format this crate can create,
+  with checked construction and per-format constants (`ZIP`, `SEVEN_ZIP`, `TAR`, `TAR_GZIP`,
+  `TAR_BZIP2`, `TAR_XZ`, `TAR_ZST`, `TAR_LZ4`, `TAR_LZMA`, `ALL`). `CompressionOptions` and
+  `LibarchiveCompressionOptions` both gained `for_writable(WritableFormat)` — unrejectable by
+  construction — and `try_new(ArchiveFormat)` for a format known only at runtime, so a
+  non-creatable format is refused where it is written rather than carried to the create call. Also
+  `password_ref`, `split_size`, `has_progress`.
+- **`format::multipart`** — a typed parser for split/multi-volume sets: `VolumeSet`, `Volume`,
+  `VolumeName`, `VolumeScheme`, `VolumeSetDefect`, `VolumeSetReport`, with `parse_volume_name`,
+  `parse_volume_set`, `parse_volume_set_for` and the set queries `is_complete`, `defects`, `paths`,
+  `expected_name`, `to_layout`. `defects` returns a list rather than a bool on purpose: a caller
+  who cannot open a set needs to know *which* volume is missing.
+- **`entry`**: `build_checked` on the builder — the fallible finish that enforces the entry-kind
+  invariants `build` cannot — plus `symlink_at` / `try_symlink_at` / `hardlink_at` /
+  `try_hardlink_at`, and the `entry_type`, `id`, `path`, `is_encrypted` accessors — the read path
+  that `#[non_exhaustive]` makes the supported one.
+- **`error`**: `EntrySkipReason` and `UnsupportedEntryKind` (with `from_unix_mode`, which returns
+  `None` for a mode carrying no format bits rather than guessing), the
+  `ArchiveError::declared_length_mismatch` constructor, the
+  `ArchiveWarning::{skipped_unsupported_entry, dropped_unsupported_entry}` constructors, and
+  `codec_install_instructions`.
+- **`archive`**: `open_sfx_with_limits`, `open_with_sfx_progress_and_limits` and
+  `open_at_offset_with_limits` — the limits-taking forms of the three SFX/offset opens, which is
+  how a caller's `max_sfx_payload_size` reaches the staging copy. The three limits-free entry
+  points keep the previous default, so they are unaffected. Plus `PayloadAccess` and
+  `payload_access`.
+- **Crate-root re-exports**: `ArchiveWarning`, `ResultWithWarnings`, `RateLimiter` and
+  `WritableFormat`. The first two appear in public `Archive` method signatures, so callers were
+  reaching into `unified_archive::error` for types the facade hands them; the last was the argument
+  type of a root-level constructor that lived one module down.
+- **`external::rar` is now seven child modules** — `argv`, `discovery`, `error`, `exit`, `runner`,
+  `session`, `version` — where it was one file with everything private. **Read the gate before
+  reading the list:** `pub mod external` is behind
+  `#[cfg(all(target_os = "windows", feature = "external-rar-create"))]`, and
+  `external-rar-create` is *not* a default feature, so for every default-feature consumer and
+  every non-Windows consumer none of this is public API. Where it does exist it offers the
+  `CommandRunner` trait and `SystemRunner`, so a caller can supply their own process launcher (job
+  objects, sandboxes, custom timeouts); `redact_argv` and `REDACTED_PASSWORD_ARG`, so a password
+  never reaches a log or an error message; `preview_argv`, so the exact argv can be displayed
+  before it runs, with no un-redacted accessor by design; `RarExit`; `RarCliError` with
+  `remediation`, `is_binary_unavailable`, `is_binary_unusable` and `is_password_failure` — binary
+  absent and binary too old are distinct, because a caller handling the first installs something
+  and the second upgrades it; `RarVersion` / `RarFlavor` / `parse_banner`; and the discovery
+  surface (`find_rar_binary`, `vet_program`, `external_rar_supported`,
+  `SHELL_INTERPRETED_EXTENSIONS`). `StubRunner`, `StubResponse` and `StubCall` are **not** part of
+  that surface — they are `#[cfg(test)]`, "a seam, not public surface" as the module puts it. The
+  contract tests reach them only by compiling the source files into their own binary with
+  `#[path]`, which turns `cfg(test)` back on locally; a downstream crate cannot do that and should
+  write its own `CommandRunner` double.
+
+### Changed
+
+- **`ExtractionLimits::reject_unsafe_paths` enforces something.** It recorded intent and gated
+  nothing. Set `true`, the pre-extraction gate now blocks an archive carrying an unsafe entry name
+  with `OperationBlocked`, whose reason names the entry and what is wrong with it — "unsafe path
+  components in entry '…': … (ExtractionLimits::reject_unsafe_paths is set)" — instead of letting
+  the lossy sanitiser rewrite it. The default stays `false`, which keeps AD 0066's
+  lossy-repair baseline byte-for-byte — so this changes nothing for a caller who does not opt in.
+- **Losing an entry is no longer silent.** A modify round-trip *deleted* symlinks, hard links and
+  special entries: `commit_changes` replayed retained entries through a loop that skipped anything
+  the rewrite could not represent, and said nothing. Extraction had the same hole in the other
+  direction — the libarchive and 7z kind allowlists skipped FIFOs, sockets and device nodes
+  silently, because `ArchiveWarning` had `SkippedSymlink` and `SkippedHardLink` and nothing for a
+  kind. Both now emit `ArchiveWarning::SkippedUnsupportedEntry { path, kind, reason }`, with the
+  reason field keeping "dropped during modify" and "unsupported kind on extract" distinguishable at
+  a match site. The ruling was warn — not refuse, and not re-emit.
+- **`ExtractionOptions::progress` is honoured by `extract_file`.** It was the one disk-writing
+  entry point that dropped the callback, and unlike its in-memory and streaming siblings it did not
+  document the omission.
+- **A zstd file with a leading skippable frame opens.** Detection matched only the bare frame
+  magic, while RFC 8878 permits skippable frames (`0x184D2A50`–`0x184D2A5F`) anywhere including
+  first, and `Zst` is absent from the extension-fallback set — so such a file ended as "Unknown
+  archive format" on every path. Detection now skips leading skippable frames using their declared
+  length, bounded so a crafted file cannot loop. `Zst` was deliberately *not* added to the
+  extension fallback: content-based detection is the policy and that set is small on purpose.
+- **Recursive creation observes the filesystem once.** It builds a manifest in a single walk and
+  writes from the manifest, instead of re-deriving the file set while writing, and it no longer
+  drops directory metadata for nonempty directories.
+- **Test lanes can no longer pass without testing.** A lane that returned early when a fixture was
+  missing reported success having tested nothing — worse than a failure, because it is invisible.
+  Every such lane now either runs and can fail, or is `#[ignore]`d with the reason *and* the exact
+  command to run it; lanes that iterate a fixture set gained vacuity floors, so an empty glob fails
+  rather than passes. The ignored count rose from 6 to 13, which is the honest direction: those are
+  lanes that used to pass while skipping. The perf sentinel went the other way and now runs in the
+  default lane.
+
+### Deprecated
+
+All three carry `since = "0.5.0"`. They were written as `since = "0.4.0"`, which named a release
+that does not contain them — `v0.4.0` is tagged at `2c7f349`, before either change landed, so a
+caller on 0.4.0 would never see the warning the attribute promised.
+
+- **`ArchiveEntry::symlink`** → `ArchiveEntry::symlink_at(path, id, target).build()`, which returns
+  a builder so the remaining metadata can be set in the same expression instead of by field
+  assignment — the mutation path `#[non_exhaustive]` closes. Removed in 0.6.0.
+- **`LibarchiveCompressionOptions::new`** → `for_writable` or `try_new`. It accepts a format
+  libarchive cannot create and defers the rejection to `create_libarchive`. Removed in 0.6.0.
+- **`CompressionOptions::password`** — *suspended, not sunset.* Encrypted creation is not supported
+  (MADR-0027), so every value this produces is rejected by `Archive::create`; there is nothing to
+  migrate to and no deadline. The attribute comes off, not the method, when the opt-in of
+  OI-0081-006 ships.
+
+### Fixed
+
+- **`cargo doc` is warning-free again.** Three rustdoc warnings shipped in `4f521e0` because that
+  change's gate counted clippy warnings and never ran `cargo doc`. Two were public docs linking to
+  private items (`SourceManifest`, `RawCentralDirectory`), which render as dead links for anyone
+  reading the published docs; the third was a redundant explicit link target.
+- **One assertion that could never fail is gone.** `assert!(!cfg!(windows))` inside a match arm was
+  `assert!(true)` off Windows and unreachable on it, so it documented an expectation rather than
+  checking one. The arm is `#[cfg(not(windows))]` instead, which states the same thing where it
+  cannot rot.
+- `build.rs` stops emitting its Windows libarchive warning on builds where the link succeeded.
+- `examples/detect_sfx.rs` drops a "Confirmed" line that could only ever print "No", because the
+  production detector never returns `SfxConfidence::Confirmed`.
+- `LICENSE` names the actual rights holder; the "7zip-RBinding Contributors" line was left over
+  from a rename `CHANGELOG.md` records as complete, not a deliberate retention.
+
+### Internal
+
+- `src/stream_crc.rs` split into `digest` (values and the I/O-free bit scan), `codec` plus
+  `codec/{gzip,bzip2,xz}` (framing) and `detect` (the six-byte probe and routing), with the root
+  holding the module doc and re-exports and no logic. Every child is private and every public item
+  keeps its historic `stream_crc::…` path, so no public surface moved.
+- AD-0057's test move-out: 94 tests left `src/ffi/{wrapper,zip_wrapper,sevenz_wrapper}.rs` for four
+  new child modules — `ffi::wrapper` 37, `ffi::zip_wrapper` 34, `ffi::sevenz_wrapper` 23 — and the
+  126-line inline block that had just been added to `src/archive.rs`, itself a named large-file
+  target, followed it into `src/archive/in_place_payload_tests.rs`. Nothing was widened from
+  private to `pub(crate)` to make a move compile.
+
+### Still owed before 0.5.0 can be tagged
+
+- **`CompressionOptions::new` and `ArchiveEntry::new` were supposed to gain `#[deprecated]` in
+  0.5.0** and have not. Their own doc blocks say so: "0.4.x — kept, un-attributed … 0.5.0 — gains
+  `#[deprecated]`", the stated reason being that the crate still calls them from its own code and
+  the gate is warning-free. They still do — 139 code call sites for `CompressionOptions::new` (84
+  in `src/` less 2 that are doc comments, plus 57 in `tests/`) and 48 for `ArchiveEntry::new`
+  (44 + 4). Attaching the attribute without migrating those turns the gate red, so the migration is
+  the work, and it is deliberately not bundled into this change set: mixing a ~190-site mechanical
+  rewrite into a semver-relevant change makes both unreviewable. Either that migration lands before
+  the tag, or this timeline slips by one minor and says so.
 
 ## [0.4.0] - 2026-08-17
 

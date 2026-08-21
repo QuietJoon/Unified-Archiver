@@ -186,12 +186,41 @@ pub enum CompressionLevel {
 /// preflight a value built the loose way; see that method for which
 /// invariants stay runtime checks and why.
 ///
-/// R0076-0095: NOT marked `#[non_exhaustive]` because R0075-0081 explicitly
-/// preserves struct-literal source-compat for v0.3 — examples and v0.3
-/// callers construct this via the public-fields shape. Tightening the
-/// envelope is queued behind the v0.4 deprecation cycle alongside the
-/// format-specific builders (`ZipCompressionOptions` etc., already
-/// landed) becoming the primary API. Tracked under OI-0076-005.
+/// # Encapsulation timeline (OI-0076-005)
+///
+/// This type is still the flat public-field bag R0075-0081 froze for the
+/// 0.3 line, and R0076-0095 recorded why: struct-literal source-compat.
+/// That freeze now has an end date.
+///
+/// - **0.4.x (now)** — fields stay `pub`; every field also has a read
+///   accessor ([`format`](method@Self::format),
+///   [`level`](method@Self::level),
+///   [`split_size`](method@Self::split_size),
+///   [`password_ref`](Self::password_ref),
+///   [`has_progress`](Self::has_progress)). Write new code against the
+///   accessors and the checked constructors: that code needs no edit
+///   when the fields are demoted.
+/// - **0.5.0** — every field becomes non-`pub` and the struct becomes
+///   `#[non_exhaustive]`. Three of them are demoted because *mutation is
+///   what breaks an invariant*: `password` and `split_size` are the two
+///   whose validity depends on the format and which no backend can honour
+///   today, so assigning them is the only way to turn a valid value into
+///   one [`Self::validate_for_format`] refuses; and `format` itself,
+///   because reassigning it after construction is exactly what defeats
+///   the [`WritableFormat`] invariant [`Self::for_writable`] and
+///   [`Self::try_new`] establish. `level` and `progress` carry no
+///   cross-field invariant and are demoted only for uniformity.
+/// - **0.6.0** — [`Self::new`] is removed; construct through
+///   [`Self::for_writable`], [`Self::try_new`], or a typed builder.
+///
+/// The demotion is not in 0.4.x because in-tree struct literals still
+/// name `password` and `split_size` field-by-field
+/// (`examples/create_archive.rs`, `examples/modify_archive.rs`) and
+/// others build the value with `..Default::default()`, which Rust also
+/// refuses once any field is private (`src/lib.rs` crate docs,
+/// `tests/integration/backend_caching_baseline.rs`). Those call sites
+/// migrate to the accessors and the typed builders in the same change
+/// that demotes the fields.
 pub struct CompressionOptions {
     /// Output archive format
     pub format: ArchiveFormat,
@@ -213,6 +242,11 @@ pub struct CompressionOptions {
     /// encrypted-creation request is unrepresentable there (R0081-0005).
     /// The field returns to being meaningful when the opt-in lands
     /// (OI-0081-006).
+    ///
+    /// **Becomes non-`pub` in 0.5.0** (OI-0076-005). Read it through
+    /// [`Self::password_ref`]. Mutating it is what turns a valid value
+    /// into one `Archive::create` refuses, which is why it is the field
+    /// being demoted rather than merely documented.
     pub password: Option<Password>,
 
     /// Split archive into parts (bytes per part).
@@ -221,6 +255,13 @@ pub struct CompressionOptions {
     /// backend implements end-to-end split-volume creation (DEF-002), so
     /// `Some(_)` is wrong for every format, not just some of them. The
     /// typed builders omit the field entirely.
+    ///
+    /// **Becomes non-`pub` in 0.5.0** (OI-0076-005), read through
+    /// [`Self::split_size`](method@Self::split_size). No setter replaces
+    /// it: DEF-002 makes every `Some(_)` invalid for every format, so
+    /// there is no argument worth accepting. When split-volume creation
+    /// ships, the knob returns on the typed builder for the format that
+    /// implements it, not on this shared bag.
     pub split_size: Option<u64>,
 
     /// Progress callback
@@ -369,6 +410,19 @@ impl CompressionOptions {
     /// [`Self::for_writable`] (format known at compile time) or
     /// [`Self::try_new`] (format known at runtime) to have that
     /// rejected at construction instead (OI-0081-002).
+    ///
+    /// # Deprecation timeline (OI-0076-005)
+    ///
+    /// - **0.4.x** — kept, un-attributed. The crate itself calls this
+    ///   from `src/modification.rs` and `src/creation.rs` and from ~25
+    ///   integration-test sites; a `#[deprecated]` attribute would emit
+    ///   in-crate warnings and this crate's gate is warning-free. The
+    ///   attribute lands in the same change that migrates those sites.
+    /// - **0.5.0** — gains `#[deprecated]`.
+    /// - **0.6.0** — removed. Migrate to [`Self::for_writable`] when the
+    ///   format is a literal and [`Self::try_new`] when it is computed;
+    ///   both reject a read-only format at construction instead of at the
+    ///   create call.
     pub fn new(format: ArchiveFormat) -> Self {
         Self {
             format,
@@ -417,9 +471,47 @@ impl CompressionOptions {
         Ok(Self::for_writable(WritableFormat::new(format)?))
     }
 
-    /// Get the archive format
+    /// Get the archive format.
+    ///
+    /// Accessor for [`Self::format`](field@Self::format); see the
+    /// type-level encapsulation timeline for why new code should prefer
+    /// it over the field.
     pub fn format(&self) -> ArchiveFormat {
         self.format
+    }
+
+    /// The requested compression level. Accessor for
+    /// [`Self::level`](field@Self::level).
+    pub fn level(&self) -> CompressionLevel {
+        self.level
+    }
+
+    /// The requested split size in bytes per part. Accessor for
+    /// [`Self::split_size`](field@Self::split_size).
+    ///
+    /// Always rejected by [`crate::Archive::create`] today (DEF-002), so a
+    /// `Some(_)` here means the value will not create an archive.
+    pub fn split_size(&self) -> Option<u64> {
+        self.split_size
+    }
+
+    /// The configured creation password, if any. Read accessor for
+    /// [`Self::password`](field@Self::password).
+    ///
+    /// Named `password_ref` because `password` is the (deprecated)
+    /// builder setter. Always rejected by [`crate::Archive::create`]
+    /// today (MADR-0027), so a `Some(_)` here means the value will not
+    /// create an archive.
+    pub fn password_ref(&self) -> Option<&Password> {
+        self.password.as_ref()
+    }
+
+    /// Whether a progress callback is attached. Accessor for
+    /// [`Self::progress`](field@Self::progress) — the callback itself is
+    /// a `&mut`-invoked trait object, so only its presence is
+    /// observable, which is also all `Debug` reports.
+    pub fn has_progress(&self) -> bool {
+        self.progress.is_some()
     }
 
     /// Set the encryption password, consuming and returning `self`.
@@ -440,9 +532,17 @@ impl CompressionOptions {
     /// refused (MADR-0027 as amended 2026-07-20), and the setter becomes
     /// meaningful again — with the deprecation lifted — when the
     /// explicit opt-in tracked as OI-0081-006 ships.
+    ///
+    /// **Deliberately carries no removal version** (OI-0076-005). Unlike
+    /// [`Self::new`] and [`LibarchiveCompressionOptions::new`], which are
+    /// scheduled out, this deprecation is *suspended, not sunset*: the
+    /// method stays through 0.5.0 and 0.6.0 and the attribute comes off
+    /// when OI-0081-006 lands. A caller seeing this warning has nothing
+    /// to migrate to and no deadline to meet — the signal is only "this
+    /// cannot work yet".
     #[deprecated(
-        since = "0.4.0",
-        note = "encrypted creation is not supported (MADR-0027): every value this produces is rejected by Archive::create. The deprecation lifts when the opt-in of OI-0081-006 ships."
+        since = "0.5.0",
+        note = "encrypted creation is not supported (MADR-0027): every value this produces is rejected by Archive::create. No removal date — the deprecation lifts when the opt-in of OI-0081-006 ships."
     )]
     pub fn password(mut self, password: impl Into<String>) -> Self {
         self.password = Some(Password::new(password));
@@ -634,9 +734,17 @@ impl LibarchiveCompressionOptions {
     /// create call. Migrate to [`Self::for_writable`] when the format is
     /// a literal, or [`Self::try_new`] when it is computed. Behaviour is
     /// unchanged for callers that keep using it.
+    ///
+    /// **Removed in 0.6.0** (OI-0076-005). It has no *production* call
+    /// sites left — the only two remaining are deliberate
+    /// `#[allow(deprecated)]` pins asserting that the loose
+    /// constructor keeps accepting a non-creatable format — so the
+    /// deadline is the downstream migration window rather
+    /// than an internal one: deprecated since 0.5.0, present through
+    /// 0.5.0, gone in 0.6.0.
     #[deprecated(
-        since = "0.4.0",
-        note = "accepts non-creatable formats and defers the rejection to Archive::create_libarchive; use LibarchiveCompressionOptions::for_writable or ::try_new (OI-0081-002)"
+        since = "0.5.0",
+        note = "accepts non-creatable formats and defers the rejection to Archive::create_libarchive; use LibarchiveCompressionOptions::for_writable or ::try_new (OI-0081-002). Removed in 0.6.0."
     )]
     pub fn new(format: ArchiveFormat) -> Self {
         Self {
@@ -1081,6 +1189,34 @@ mod tests {
         #[allow(deprecated)]
         let loose = LibarchiveCompressionOptions::new(ArchiveFormat::Rar);
         assert_eq!(loose.format(), ArchiveFormat::Rar);
+    }
+
+    // ── OI-0076-005: read accessors mirror the fields ──
+
+    #[test]
+    fn compression_options_accessors_agree_with_the_fields() {
+        let mut opts = CompressionOptions::for_writable(WritableFormat::TAR_XZ);
+        assert_eq!(opts.format(), opts.format);
+        assert_eq!(opts.level(), opts.level);
+        assert_eq!(opts.split_size(), opts.split_size);
+        assert!(opts.password_ref().is_none());
+        assert!(!opts.has_progress());
+
+        opts.level = CompressionLevel::Ultra;
+        opts.split_size = Some(4096);
+        opts.password = Some("pw".into());
+        opts.progress = Some(Box::new(|_p: u64, _t: Option<u64>| {
+            std::ops::ControlFlow::Continue(())
+        }));
+
+        assert_eq!(opts.level(), CompressionLevel::Ultra);
+        assert_eq!(opts.split_size(), Some(4096));
+        assert_eq!(opts.password_ref().map(Password::as_str), Some("pw"));
+        assert!(opts.has_progress());
+
+        // `has_progress` is the observable half of the field, and it is
+        // what `strip_progress` clears.
+        assert!(!opts.strip_progress().has_progress());
     }
 
     #[test]

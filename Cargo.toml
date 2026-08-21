@@ -42,7 +42,12 @@ cc = "1"
 default = ["rar-support"]
 rar-support = []  # RAR/RAR5 support (requires UnRAR license compliance)
 external-rar-create = []  # RAR creation via external WinRAR CLI (Windows only)
-v2-api = []  # D2 typed-handle split (ReadArchive / WriteArchive / ModifyArchive); additive in v0.3, enabled-by-default in v0.4
+# D2 typed-handle split (ReadArchive / WriteArchive / ModifyArchive). Additive since v0.3 and
+# still opt-in: the planned v0.4 default flip is BLOCKED, not forgotten. AD 0058 ordering
+# constraint 2 forbids flipping default features until the `read-minimal` and `full` profiles
+# have CI coverage, and this repository has no CI (ticgit 1340e9). OI-0058-001 / ticgit a0503f
+# also wants Stage 1 feature gating committed before the flip.
+v2-api = []
 
 [[example]]
 name = "inspect_archive"

@@ -365,7 +365,8 @@ impl Archive {
     /// # One observation of the source tree (OI-0080-005)
     ///
     /// The tree is walked **once**. That single walk builds a
-    /// [`SourceManifest`] — every entry with its path, kind, size,
+    /// `SourceManifest` (a crate-internal type, so this name is not a
+    /// link) — every entry with its path, kind, size,
     /// mtime, unix mode and (on Unix) inode identity — reserves each
     /// archive path in the facade's `write_namespace` tracker as it
     /// goes, and rejects symlinks / special files (R0080-0033) and the

@@ -54,7 +54,7 @@ status: active
 | Item | Reason |
 |---|---|
 | ISO format creation | Read-only via libarchive; no write support in scope |
-| In-place `open_at_offset` (no tempfile copy) | The shipped implementation (AD 0040) copies the payload tail to a tempfile (capped at 16 GiB) before backend dispatch. True in-place offset-aware backend opening — which would remove that copy — remains deferred. |
+| In-place `open_at_offset` for every backend | **Partly shipped 2026-08-21** (ticket `1ddc37ec`): a ZIP payload behind an SFX stub is now opened in place — no tempfile copy, and the AD 0040 ceiling does not apply to it. libarchive (TAR family, ISO), 7z and RAR still copy the payload tail to a tempfile before backend dispatch, under that ceiling. Extending the in-place path to those backends stays out of scope; for libarchive it needs client-callback reader symbols declared in `src/ffi/libarchive.rs` (see the note on `LibarchiveArchive::open_read_handle`). `Archive::payload_access()` reports which path a handle took. |
 | ~~SecStr migration for all password fields~~ | **Resolved 2026-04-17** (OI-0057-003): `ExtractionOptions.password` and `CompressionOptions.password` are `Option<SecStr>` with zeroize-on-drop; decoded only at the FFI boundary. |
 | Split archive creation | `split_size` field exists but ignored; multi-part creation remains deferred (originally targeted v0.2.0; the v0.2.0 release shipped without it — R0071-0020). |
 | True streaming extraction | Native backends (ZipReader, SevenZ, UnRAR) buffer full entries; true streaming limited to libarchive. Current non-libarchive path: extract-to-memory + Cursor wrapper. ZipReader is the sole ZIP backend (DCR-009) and provides buffered decryption for encrypted ZIP. |
@@ -82,5 +82,5 @@ status: active
 
 | Placeholder | Location | Justification |
 |---|---|---|
-| In-place `open_at_offset` (no tempfile copy) | `src/archive.rs` | DEF-001 closed 2026-04-18: `Archive::open_at_offset()` ships a tempfile-backed implementation (16 GiB payload ceiling per AD 0040). A true in-place offset-aware backend opening that avoids the tempfile copy is still a future item. |
+| In-place `open_at_offset` for the staging backends | `src/archive.rs` (`Archive::try_open_in_place`) | DEF-001 closed 2026-04-18 with a tempfile-backed implementation (16 GiB payload ceiling per AD 0040). Ticket `1ddc37ec` (2026-08-21) removed the copy for ZIP payloads behind an SFX-shaped path: the `zip` crate resolves prepended data itself, so the backend reads the caller's own file at the payload offset. What remains deferred is narrower than the original placeholder — offset-aware opening for libarchive, 7z and RAR, and lifting the SFX-shaped-path gate (which exists because the password-aware extraction reopen in `src/extraction.rs` resolves an embedded payload only through the SFX route). |
 | `split_size` | `src/options.rs` (CompressionOptions) | Field reserved for future multi-part creation; not currently honored by writers |

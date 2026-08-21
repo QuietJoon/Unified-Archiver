@@ -68,7 +68,50 @@ pub struct FileAttributes {
 /// Metadata for a single file or directory within an archive
 ///
 /// This structure provides consistent metadata across all archive formats.
+///
+/// # Reading is the common case; construction goes through the builder
+///
+/// Every listing call *returns* `ArchiveEntry` values, so the type is read
+/// far more often than it is built. Both shapes are supported, and they
+/// are deliberately asymmetric (OI-0076-005):
+///
+/// - **Reading** stays ergonomic. Each field is public *and* has a
+///   same-named accessor ([`path`](method@Self::path),
+///   [`size`](method@Self::size), [`entry_type`](method@Self::entry_type),
+///   …). New code should prefer the accessors: they are the shape that
+///   survives the field demotion this type is queued for (see below), so
+///   a call site written against `entry.size()` needs no edit when
+///   `entry.size` stops being public.
+/// - **Construction** is narrowing. The struct is `#[non_exhaustive]`, so
+///   downstream crates can no longer build it with a struct literal or a
+///   `..spread`; use [`ArchiveEntry::file`], [`ArchiveEntry::dir_at`],
+///   [`ArchiveEntry::symlink_at`], [`ArchiveEntry::hardlink_at`] (or their
+///   `try_*` counterparts) and finish with
+///   [`ArchiveEntryBuilder::build`] / [`ArchiveEntryBuilder::build_checked`].
+///
+/// # Why construction is being funnelled
+///
+/// The public fields let a caller assemble an entry that contradicts its
+/// own `entry_type`: a `Directory` carrying a `size`, a `Symlink` with no
+/// `link_target`, a `File` that has one. Nothing rejects those today, and
+/// the backends never produce them, so the malformed shapes only ever
+/// arrive from caller-built values. Routing construction through the
+/// builder gives the invariant a single place to live —
+/// [`ArchiveEntryBuilder::build_checked`] enforces it now, and the
+/// unchecked [`ArchiveEntryBuilder::build`] is what keeps existing call
+/// sites compiling meanwhile (tracked as `ArchiveEntryBuilder can
+/// construct entries that violate entry-kind invariants`).
+///
+/// **Field demotion is queued for 0.5.0.** The fields whose *mutation*
+/// can break the entry-kind invariant — `size`, `compressed_size`,
+/// `entry_type`, `link_target`, `path`, `id` — become non-`pub` then, read
+/// through the accessors. The purely descriptive ones (`modified`,
+/// `created`, `accessed`, `crc32`, `permissions`, `is_encrypted`,
+/// `comment`, `attributes`, `raw_path`) carry no cross-field invariant, so
+/// they are demoted for uniformity only and reading them through the
+/// accessors is all a caller needs to do to be ready.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ArchiveEntry {
     /// Full path within archive (UTF-8, forward slashes)
     pub path: String,
@@ -96,7 +139,7 @@ pub struct ArchiveEntry {
     /// FILE_ATTRIBUTE_*) before populating this field, so callers can
     /// rely on `permissions & !0o7777 == 0` (R0075-0024 / 0044 / 0045
     /// / 0056 / 0079). Windows-only attributes live in
-    /// [`Self::attributes`]`.windows`.
+    /// [`Self::attributes`](field@Self::attributes)`.windows`.
     ///
     /// `None` when the source archive doesn't carry permission
     /// information (raw gzip / bzip2 / xz / zst / lz4 / lzma streams,
@@ -254,9 +297,94 @@ impl ArchiveEntryBuilder {
         self
     }
 
-    /// Finalize the builder into an [`ArchiveEntry`].
+    /// Finalize the builder into an [`ArchiveEntry`] without checking
+    /// cross-field consistency.
+    ///
+    /// Kept unchecked so existing call sites keep compiling and keep
+    /// behaving; use [`Self::build_checked`] when you want the entry-kind
+    /// invariants enforced (OI-0076-005).
     pub fn build(self) -> ArchiveEntry {
         self.inner
+    }
+
+    /// Finalize the builder, rejecting an entry that contradicts its own
+    /// [`EntryType`] (OI-0076-005).
+    ///
+    /// This is the single place the entry-kind invariant lives. The rules
+    /// are the ones every backend already satisfies, stated so a
+    /// caller-built entry can be held to them too:
+    ///
+    /// - the path must not be empty;
+    /// - [`EntryType::Directory`] carries no `size`, no
+    ///   `compressed_size` and no `link_target`;
+    /// - [`EntryType::Symlink`] and [`EntryType::HardLink`] must carry a
+    ///   `link_target`;
+    /// - [`EntryType::File`] carries no `link_target`.
+    ///
+    /// [`EntryType::Other`] is unconstrained — it exists precisely for
+    /// entry kinds this crate does not model, so there is no invariant to
+    /// assert about it.
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveError::InvalidPath`](crate::ArchiveError::InvalidPath)
+    /// naming the field combination that was refused.
+    ///
+    /// ```
+    /// use unified_archive::ArchiveEntry;
+    ///
+    /// // A directory with a size contradicts its own kind.
+    /// assert!(ArchiveEntry::dir_at("d/", 0).size(10).build_checked().is_err());
+    /// // A symlink built through the typed entry point always has a target.
+    /// assert!(ArchiveEntry::symlink_at("l", 1, "t").build_checked().is_ok());
+    /// ```
+    pub fn build_checked(self) -> std::result::Result<ArchiveEntry, crate::ArchiveError> {
+        match entry_kind_violation(&self.inner) {
+            None => Ok(self.inner),
+            Some(reason) => Err(crate::ArchiveError::invalid_path(
+                self.inner.path.clone(),
+                reason,
+            )),
+        }
+    }
+}
+
+/// Describe how `entry` contradicts its own [`EntryType`], or `None` when
+/// the combination is consistent. Backing check for
+/// [`ArchiveEntryBuilder::build_checked`].
+fn entry_kind_violation(entry: &ArchiveEntry) -> Option<&'static str> {
+    if entry.path.is_empty() {
+        return Some("ArchiveEntry path must not be empty");
+    }
+    match entry.entry_type {
+        EntryType::Directory => {
+            if entry.size.is_some() {
+                Some("a Directory entry must not carry a size")
+            } else if entry.compressed_size.is_some() {
+                Some("a Directory entry must not carry a compressed_size")
+            } else if entry.link_target.is_some() {
+                Some("a Directory entry must not carry a link_target")
+            } else {
+                None
+            }
+        }
+        EntryType::Symlink | EntryType::HardLink => {
+            if entry.link_target.is_none() {
+                Some("a Symlink / HardLink entry must carry a link_target")
+            } else {
+                None
+            }
+        }
+        EntryType::File => {
+            if entry.link_target.is_some() {
+                Some("a File entry must not carry a link_target")
+            } else {
+                None
+            }
+        }
+        // `Other` is the escape hatch for entry kinds this crate does not
+        // model (devices, FIFOs, sockets); there is no invariant to assert.
+        _ => None,
     }
 }
 
@@ -293,10 +421,13 @@ impl ArchiveEntry {
     ///
     /// Path is not validated; pass through [`Self::try_dir_at`] when
     /// you need the empty-path check. The infallible constructors
-    /// ([`Self::file`], [`Self::dir_at`], [`Self::new`],
-    /// [`Self::directory`]) share one policy: they assume the caller
-    /// supplies a non-empty path, and the `try_*` variants are the
-    /// single gate that enforces the empty-path invariant (R0081-0004).
+    /// ([`Self::file`], [`Self::dir_at`], [`Self::symlink_at`],
+    /// [`Self::hardlink_at`], [`Self::new`], [`Self::directory`]) share
+    /// one policy: they assume the caller supplies a non-empty path, and
+    /// the `try_*` variants are the single gate that enforces the
+    /// empty-path invariant (R0081-0004). [`ArchiveEntryBuilder::build_checked`]
+    /// re-checks it at the other end for callers who took the infallible
+    /// route.
     pub fn dir_at(path: impl Into<String>, id: usize) -> ArchiveEntryBuilder {
         ArchiveEntryBuilder {
             inner: Self::with_type(path.into(), id, EntryType::Directory),
@@ -321,24 +452,105 @@ impl ArchiveEntry {
         Ok(Self::dir_at(path, id))
     }
 
+    /// Begin building a symlink-typed entry (OI-0076-005).
+    ///
+    /// Takes the target up front, so `entry_type == Symlink` with
+    /// `link_target == None` is unrepresentable through this path — the
+    /// invariant [`ArchiveEntryBuilder::build_checked`] enforces is
+    /// satisfied by construction. Path is not validated; use
+    /// [`Self::try_symlink_at`] for the empty-path check.
+    pub fn symlink_at(
+        path: impl Into<String>,
+        id: usize,
+        target: impl Into<String>,
+    ) -> ArchiveEntryBuilder {
+        let mut inner = Self::with_type(path.into(), id, EntryType::Symlink);
+        inner.link_target = Some(target.into());
+        ArchiveEntryBuilder { inner }
+    }
+
+    /// Begin building a symlink-typed entry, rejecting empty paths.
+    /// Fallible counterpart to [`Self::symlink_at`].
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveError::InvalidPath`](crate::ArchiveError::InvalidPath)
+    /// when `path` is empty.
+    pub fn try_symlink_at(
+        path: impl Into<String>,
+        id: usize,
+        target: impl Into<String>,
+    ) -> std::result::Result<ArchiveEntryBuilder, crate::ArchiveError> {
+        let path = path.into();
+        if path.is_empty() {
+            return Err(crate::ArchiveError::invalid_path(
+                "",
+                "ArchiveEntry path must not be empty",
+            ));
+        }
+        Ok(Self::symlink_at(path, id, target))
+    }
+
+    /// Begin building a hardlink-typed entry (OI-0076-005). Mirrors
+    /// [`Self::symlink_at`]: the target is required at construction, so
+    /// the kind invariant cannot be violated through this path.
+    pub fn hardlink_at(
+        path: impl Into<String>,
+        id: usize,
+        target: impl Into<String>,
+    ) -> ArchiveEntryBuilder {
+        let mut inner = Self::with_type(path.into(), id, EntryType::HardLink);
+        inner.link_target = Some(target.into());
+        ArchiveEntryBuilder { inner }
+    }
+
+    /// Begin building a hardlink-typed entry, rejecting empty paths.
+    /// Fallible counterpart to [`Self::hardlink_at`].
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveError::InvalidPath`](crate::ArchiveError::InvalidPath)
+    /// when `path` is empty.
+    pub fn try_hardlink_at(
+        path: impl Into<String>,
+        id: usize,
+        target: impl Into<String>,
+    ) -> std::result::Result<ArchiveEntryBuilder, crate::ArchiveError> {
+        let path = path.into();
+        if path.is_empty() {
+            return Err(crate::ArchiveError::invalid_path(
+                "",
+                "ArchiveEntry path must not be empty",
+            ));
+        }
+        Ok(Self::hardlink_at(path, id, target))
+    }
+
     /// Create a new file-typed archive entry. Prefer
     /// [`ArchiveEntry::file`] for new code (R0075-0078) — the builder
     /// API allows fluent setter chains and rejects empty paths via
     /// [`ArchiveEntry::try_file`].
     ///
-    /// **Marked for v0.4 deprecation.** Once the v0.4 API freeze
-    /// lands this constructor will gain `#[deprecated]` and external
-    /// callers will be expected to migrate to the builder. v0.3
-    /// keeps it un-deprecated so the existing call surface (40+
-    /// sites across the test suite + internal backends) doesn't
-    /// generate noise during the migration window.
+    /// # Deprecation timeline (OI-0076-005)
+    ///
+    /// - **0.4.x** — kept, un-attributed. The crate itself still calls
+    ///   this from four backend readers and three integration tests; a
+    ///   `#[deprecated]` attribute would emit in-crate warnings, and this
+    ///   crate's gate is warning-free. The attribute lands in the same
+    ///   change that migrates those call sites.
+    /// - **0.5.0** — gains `#[deprecated]`.
+    /// - **0.6.0** — removed. Migrate to
+    ///   `ArchiveEntry::file(path, id).build()`, which takes
+    ///   `impl Into<String>` and so accepts everything this does.
     pub fn new(path: String, id: usize) -> Self {
         Self::with_type(path, id, EntryType::File)
     }
 
     /// Create a new directory-typed archive entry. Prefer
-    /// [`ArchiveEntry::dir_at`] for new code (R0075-0078). Same v0.4
-    /// migration plan as [`Self::new`].
+    /// [`ArchiveEntry::dir_at`] for new code (R0075-0078). Same
+    /// deprecation timeline as [`Self::new`]: `#[deprecated]` in 0.5.0,
+    /// removed in 0.6.0, replaced by
+    /// `ArchiveEntry::dir_at(path, id).build()`.
     pub fn directory(path: String, id: usize) -> Self {
         Self::with_type(path, id, EntryType::Directory)
     }
@@ -347,10 +559,20 @@ impl ArchiveEntry {
     /// Stamps `link_target` directly so callers don't have to set the
     /// field after the fact, which would otherwise leave a window
     /// where `entry_type == Symlink` but `link_target == None`.
+    ///
+    /// # Deprecated in favour of the builder entry point
+    ///
+    /// [`Self::symlink_at`] gives the same guarantee and returns an
+    /// [`ArchiveEntryBuilder`], so the remaining metadata can be set in
+    /// the same expression instead of by field assignment afterwards —
+    /// which is the mutation path OI-0076-005 is closing. Behaviour is
+    /// identical; only the return type differs.
+    #[deprecated(
+        since = "0.5.0",
+        note = "use ArchiveEntry::symlink_at(path, id, target).build(), which returns a builder so metadata needs no field assignment (OI-0076-005); removed in 0.6.0"
+    )]
     pub fn symlink(path: String, id: usize, target: String) -> Self {
-        let mut entry = Self::with_type(path, id, EntryType::Symlink);
-        entry.link_target = Some(target);
-        entry
+        Self::symlink_at(path, id, target).build()
     }
 
     fn with_type(path: String, id: usize, entry_type: EntryType) -> Self {
@@ -371,6 +593,96 @@ impl ArchiveEntry {
             raw_path: None,
             id,
         }
+    }
+
+    /// The entry's path within the archive (UTF-8, forward slashes).
+    ///
+    /// Accessor for [`Self::path`](field@Self::path); see the type-level docs for why new
+    /// code should prefer it over the field.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Sequential 0-based index of this entry within the archive.
+    /// Accessor for [`Self::id`](field@Self::id).
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
+    /// Uncompressed size in bytes, `None` for directories and for
+    /// backends that do not report it. Accessor for [`Self::size`](field@Self::size).
+    pub fn size(&self) -> Option<u64> {
+        self.size
+    }
+
+    /// Compressed size in bytes. Accessor for [`Self::compressed_size`](field@Self::compressed_size).
+    pub fn compressed_size(&self) -> Option<u64> {
+        self.compressed_size
+    }
+
+    /// Last-modification time. Accessor for [`Self::modified`](field@Self::modified).
+    pub fn modified(&self) -> Option<SystemTime> {
+        self.modified
+    }
+
+    /// Creation time. Accessor for [`Self::created`](field@Self::created).
+    pub fn created(&self) -> Option<SystemTime> {
+        self.created
+    }
+
+    /// Last-access time. Accessor for [`Self::accessed`](field@Self::accessed).
+    pub fn accessed(&self) -> Option<SystemTime> {
+        self.accessed
+    }
+
+    /// CRC32 checksum when the format carries one. Accessor for
+    /// [`Self::crc32`](field@Self::crc32).
+    pub fn crc32(&self) -> Option<u32> {
+        self.crc32
+    }
+
+    /// The entry's kind. Accessor for [`Self::entry_type`](field@Self::entry_type); the
+    /// [`is_file`](Self::is_file) / [`is_directory`](Self::is_directory)
+    /// family remains the terser way to ask about one kind.
+    pub fn entry_type(&self) -> EntryType {
+        self.entry_type
+    }
+
+    /// Unix permission bits (`mode & 0o7777`) when known. Accessor for
+    /// [`Self::permissions`](field@Self::permissions), including its
+    /// `permissions & !0o7777 == 0` contract.
+    pub fn permissions(&self) -> Option<u32> {
+        self.permissions
+    }
+
+    /// Whether the entry is password-protected. Accessor for
+    /// [`Self::is_encrypted`](field@Self::is_encrypted).
+    pub fn is_encrypted(&self) -> bool {
+        self.is_encrypted
+    }
+
+    /// Per-entry comment when the format carries one. Accessor for
+    /// [`Self::comment`](field@Self::comment).
+    pub fn comment(&self) -> Option<&str> {
+        self.comment.as_deref()
+    }
+
+    /// Platform-specific attributes. Accessor for [`Self::attributes`](field@Self::attributes);
+    /// see [`FileAttributes`] for the per-backend coverage table.
+    pub fn attributes(&self) -> Option<&FileAttributes> {
+        self.attributes.as_ref()
+    }
+
+    /// Raw (possibly non-UTF-8) entry name bytes. Accessor for
+    /// [`Self::raw_path`](field@Self::raw_path); `None` means [`Self::path`](field@Self::path) is byte-exact or
+    /// the backend does not surface raw names.
+    pub fn raw_path(&self) -> Option<&[u8]> {
+        self.raw_path.as_deref()
+    }
+
+    /// Symlink / hardlink target. Accessor for [`Self::link_target`](field@Self::link_target).
+    pub fn link_target(&self) -> Option<&str> {
+        self.link_target.as_deref()
     }
 
     /// Observed stored-size fraction (`compressed_size / size`).
@@ -746,6 +1058,204 @@ mod tests {
     fn test_entry_with_large_id() {
         let entry = ArchiveEntry::new("file.txt".into(), usize::MAX);
         assert_eq!(entry.id, usize::MAX);
+    }
+
+    // ── OI-0076-005: accessors mirror the fields ──
+
+    #[test]
+    fn accessors_agree_with_the_fields_they_mirror() {
+        let now = SystemTime::now();
+        let entry = ArchiveEntry::file("dir/f.bin", 9)
+            .size(1000)
+            .compressed_size(250)
+            .modified(now)
+            .created(now)
+            .accessed(now)
+            .crc32(0xDEAD_BEEF)
+            .permissions(0o7777 | 0o40000)
+            .comment("note".into())
+            .encrypted(true)
+            .raw_path(vec![0xFF, 0xFE])
+            .attributes(FileAttributes {
+                windows: Some(0x20),
+                ..FileAttributes::default()
+            })
+            .build();
+
+        assert_eq!(entry.path(), entry.path);
+        assert_eq!(entry.id(), entry.id);
+        assert_eq!(entry.size(), entry.size);
+        assert_eq!(entry.compressed_size(), entry.compressed_size);
+        assert_eq!(entry.modified(), entry.modified);
+        assert_eq!(entry.created(), entry.created);
+        assert_eq!(entry.accessed(), entry.accessed);
+        assert_eq!(entry.crc32(), entry.crc32);
+        assert_eq!(entry.entry_type(), entry.entry_type);
+        assert_eq!(entry.permissions(), entry.permissions);
+        assert_eq!(entry.is_encrypted(), entry.is_encrypted);
+        assert_eq!(entry.comment(), entry.comment.as_deref());
+        assert_eq!(entry.raw_path(), entry.raw_path.as_deref());
+        assert_eq!(entry.link_target(), entry.link_target.as_deref());
+        assert!(entry.attributes().is_some());
+        assert_eq!(
+            entry.attributes().and_then(|a| a.windows),
+            entry.attributes.as_ref().and_then(|a| a.windows)
+        );
+
+        // The builder's permission mask is what the accessor reports, so
+        // the `permissions & !0o7777 == 0` contract holds through it too.
+        assert_eq!(entry.permissions(), Some(0o7777));
+    }
+
+    #[test]
+    fn accessors_report_none_on_a_bare_entry() {
+        let entry = ArchiveEntry::dir_at("d/", 0).build();
+        assert_eq!(entry.path(), "d/");
+        assert_eq!(entry.id(), 0);
+        assert_eq!(entry.entry_type(), EntryType::Directory);
+        assert!(entry.size().is_none());
+        assert!(entry.compressed_size().is_none());
+        assert!(entry.modified().is_none());
+        assert!(entry.created().is_none());
+        assert!(entry.accessed().is_none());
+        assert!(entry.crc32().is_none());
+        assert!(entry.permissions().is_none());
+        assert!(entry.comment().is_none());
+        assert!(entry.attributes().is_none());
+        assert!(entry.raw_path().is_none());
+        assert!(entry.link_target().is_none());
+        assert!(!entry.is_encrypted());
+    }
+
+    // ── OI-0076-005: typed link builders ──
+
+    #[test]
+    fn symlink_at_stamps_the_target_at_construction() {
+        let entry = ArchiveEntry::symlink_at("link", 4, "target/file").build();
+        assert_eq!(entry.entry_type(), EntryType::Symlink);
+        assert_eq!(entry.link_target(), Some("target/file"));
+        assert_eq!(entry.path(), "link");
+        assert_eq!(entry.id(), 4);
+    }
+
+    #[test]
+    fn hardlink_at_stamps_the_target_at_construction() {
+        let entry = ArchiveEntry::hardlink_at("hl", 5, "orig").build();
+        assert_eq!(entry.entry_type(), EntryType::HardLink);
+        assert_eq!(entry.link_target(), Some("orig"));
+    }
+
+    #[test]
+    fn try_link_builders_reject_empty_paths() {
+        assert!(ArchiveEntry::try_symlink_at("", 0, "t").is_err());
+        assert!(ArchiveEntry::try_hardlink_at("", 0, "t").is_err());
+        assert!(
+            ArchiveEntry::try_symlink_at("l", 0, "t")
+                .expect("non-empty path accepted")
+                .build_checked()
+                .is_ok()
+        );
+        assert!(
+            ArchiveEntry::try_hardlink_at("h", 0, "t")
+                .expect("non-empty path accepted")
+                .build_checked()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)] // the deprecated path must keep behaving until removal
+    fn deprecated_symlink_constructor_matches_symlink_at() {
+        let legacy = ArchiveEntry::symlink("l".into(), 2, "t".into());
+        let builder = ArchiveEntry::symlink_at("l", 2, "t").build();
+        assert_eq!(legacy.entry_type(), builder.entry_type());
+        assert_eq!(legacy.link_target(), builder.link_target());
+        assert_eq!(legacy.path(), builder.path());
+        assert_eq!(legacy.id(), builder.id());
+    }
+
+    // ── OI-0076-005: build_checked enforces the entry-kind invariants ──
+
+    #[test]
+    fn build_checked_accepts_consistent_entries() {
+        assert!(
+            ArchiveEntry::file("f", 0)
+                .size(10)
+                .compressed_size(4)
+                .build_checked()
+                .is_ok()
+        );
+        assert!(ArchiveEntry::dir_at("d/", 1).build_checked().is_ok());
+        assert!(
+            ArchiveEntry::symlink_at("l", 2, "t")
+                .build_checked()
+                .is_ok()
+        );
+        assert!(
+            ArchiveEntry::hardlink_at("h", 3, "t")
+                .build_checked()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn build_checked_rejects_a_sized_directory() {
+        let err = ArchiveEntry::dir_at("d/", 0)
+            .size(10)
+            .build_checked()
+            .expect_err("a Directory with a size must be refused");
+        assert!(
+            matches!(err, crate::ArchiveError::InvalidPath { .. }),
+            "{err:?}"
+        );
+        assert!(
+            ArchiveEntry::dir_at("d/", 0)
+                .compressed_size(3)
+                .build_checked()
+                .is_err()
+        );
+        assert!(
+            ArchiveEntry::dir_at("d/", 0)
+                .link_target("t".into())
+                .build_checked()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn build_checked_rejects_a_file_carrying_a_link_target() {
+        assert!(
+            ArchiveEntry::file("f", 0)
+                .link_target("t".into())
+                .build_checked()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn build_checked_rejects_an_empty_path() {
+        assert!(ArchiveEntry::file("", 0).build_checked().is_err());
+        assert!(ArchiveEntry::dir_at("", 0).build_checked().is_err());
+    }
+
+    #[test]
+    fn build_stays_unchecked_so_existing_call_sites_keep_behaving() {
+        // `build` is deliberately not a checked path (OI-0076-005): the
+        // migration is additive, so the shape that violates the invariant
+        // must still be constructible until callers have moved.
+        let bad = ArchiveEntry::dir_at("d/", 0).size(10).build();
+        assert_eq!(bad.size(), Some(10));
+        assert!(bad.is_directory());
+    }
+
+    #[test]
+    fn build_checked_ignores_the_other_entry_type() {
+        // `Other` models kinds this crate does not describe, so there is
+        // no invariant to assert — reachable only through the fields.
+        let mut entry = ArchiveEntry::file("special", 0).size(1).build();
+        entry.entry_type = EntryType::Other;
+        entry.link_target = Some("whatever".into());
+        assert!(entry_kind_violation(&entry).is_none());
     }
 
     #[test]

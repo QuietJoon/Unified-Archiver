@@ -62,6 +62,7 @@ records:
     title: "AD: Unified Stream Checksum Extraction"
     status: active
     file: AD-0010-unified-stream-checksum-extraction.md
+    reviews: [R0001-0075, R0069-0078, R0069-0079]
   - id: AD-0011
     type: AD
     title: "AD: Fix solid-archive parallelism check to use password-aware handle"
@@ -224,7 +225,9 @@ records:
     title: "AD 0044: Validate archive-internal paths at the creation/modification facade boundary"
     status: active
     file: AD-0044-validate-archive-internal-paths-at-facade-boundary.md
-    reviews: [R0063-0001, R0063-0006]
+    reviews: [R0063-0001, R0063-0006, R0070-0020]
+    ois: [OI-0001-004]
+    mentions: [AD-0066]
   - id: AD-0045
     type: AD
     title: "AD 0045: Reject R0063 Low-cluster doc-drift sweep; already covered by OI-0057-009 + post-v0.1.0 banners"
@@ -266,7 +269,9 @@ records:
     title: "AD 0052: Codify lazy-validation semantics for backend `open()` (Review 0068 D8)"
     status: active
     file: AD-0052-r0068-d8-codify-lazy-backend-open-validation.md
-    reviews: [R0068-0024, R0068-0025, R0068-0026, R0068-0035]
+    reviews: [R0001-0012, R0068-0024, R0068-0025, R0068-0026, R0068-0035, R0070-0001]
+    ois: [OI-0065-003, OI-0080-003]
+    mentions: [AD-0065]
   - id: AD-0053
     type: AD
     title: "AD 0053: Review 0068 Group D — design baseline for the remaining architectural pass"
@@ -287,7 +292,9 @@ records:
     title: "AD 0055: `ValidatedSource` token replaces `_unchecked` extraction (D3)"
     status: active
     file: AD-0055-r0068-d3-validated-source-token.md
-    reviews: [R0068-0039, R0068-0040]
+    reviews: [R0068-0039, R0068-0040, R0069-0063, R0070-0008, R0079-0028]
+    ois: [OI-0069-002, OI-0076-002]
+    mentions: [AD-0052, AD-0053, AD-0057, AD-0060]
   - id: AD-0056
     type: AD
     title: "AD 0056: Defer the LibarchiveArchive read/write struct split (D9 deferred)"
@@ -382,7 +389,8 @@ records:
     title: "AD 0069: Review closure is recorded in focused records, not in one omnibus routing table"
     status: active
     file: AD-0069-focused-closure-records-replace-omnibus-routing-tables.md
-    reviews: [R0076-0051]
+    reviews: [R0076-0049, R0076-0050, R0076-0051, R0076-0052]
+    mentions: [AD-0059, AD-0060, AD-0061, AD-0063, AD-0067]
   - id: DCR-001
     type: DCR
     title: "Design Change Record"

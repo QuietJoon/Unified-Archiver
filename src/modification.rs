@@ -1068,7 +1068,7 @@ impl Archive {
     /// replace, same consume-on-error semantics; read that method's
     /// documentation for all of it. The only difference is the return
     /// type: on success the caller receives a
-    /// [`ResultWithWarnings`](crate::error::ResultWithWarnings) whose
+    /// [`ResultWithWarnings`] whose
     /// `warnings` vector holds one
     /// [`ArchiveWarning::SkippedUnsupportedEntry`](crate::error::ArchiveWarning)
     /// per retained symlink / hard link / special entry the rewrite

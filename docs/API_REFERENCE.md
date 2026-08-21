@@ -1469,7 +1469,7 @@ let limits = ExtractionLimits::builder()
     .max_entry_count(Cap::Limited(10_000))
     .max_compression_ratio(CompressionRatio::whole(500)?)  // or .unlimited_compression_ratio()
     .max_sfx_payload_size(Cap::Limited(8 * 1024 * 1024 * 1024))
-    .reject_unsafe_paths(true)                    // records intent; enforcement deferred (AD 0066)
+    .reject_unsafe_paths(true)                    // enforced: blocks the archive pre-extraction (AD 0066)
     .build();
 ```
 
