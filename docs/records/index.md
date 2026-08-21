@@ -62,6 +62,7 @@ Generated view; the authoritative catalogue is [`index.yaml`](index.yaml). See [
 - [AD-0066](AD-0066-r0076-sanitize-vs-reject-policy-deferred.md) — AD 0066: Path sanitization policy — preserve current \"lossy repair\" baseline, queue strict-reject opt-in
 - [AD-0067](AD-0067-r0076-closure-and-routing-record.md) — AD 0067: Review 0076 closure and routing record
 - [AD-0068](AD-0068-reject-review-0067-duplicate-of-0066.md) — AD 0068: Reject Review 0067 as byte-identical duplicate of Review 0066 — _archived_
+- [AD-0069](AD-0069-focused-closure-records-replace-omnibus-routing-tables.md) — AD 0069: Review closure is recorded in focused records, not in one omnibus routing table
 
 ## Review-gate Decisions (MADR)
 
@@ -111,6 +112,8 @@ Generated view; the authoritative catalogue is [`index.yaml`](index.yaml). See [
 - [DCR-009](DCR-009-collapse-dual-zip-to-single-zip-crate-backend.md) — Dual ZIP backend collapsed to a single `zip`-crate backend (piz removed)
 - [DCR-010](DCR-010-extraction-rejects-special-entries.md) — Extraction rejects non-regular, non-directory entries on every backend
 - [DCR-011](DCR-011-digest-exactness-for-crc-less-entries.md) — Digest methods hold CRC-less entries to their declared size exactly
+- [DCR-012](DCR-012-content-digest-drops-per-path-occurrence-ordinal.md) — Content-multiset digest drops the per-path occurrence ordinal
+- [DCR-013](DCR-013-recursive-creation-emits-directory-metadata.md) — Recursive creation emits every directory once, carrying source metadata, on both writers
 
 ## Legacy review dispositions (DD / IG)
 

@@ -481,6 +481,14 @@ records:
     reviews: [R0001-0050]
     ois: [OI-0001-008, OI-0001-009]
     mentions: [AD-0047, DCR-011]
+  - id: DCR-013
+    type: DCR
+    title: "Recursive creation emits every directory once, carrying source metadata, on both writers"
+    status: active
+    file: DCR-013-recursive-creation-emits-directory-metadata.md
+    reviews: [R0001-0074]
+    ois: [OI-0001-010, OI-0080-005]
+    mentions: [AD-0044, DCR-010, DCR-012]
   - id: MADR-0001
     type: MADR
     title: "AD: `Archive::list_files()` skips the libarchive CRC walk"

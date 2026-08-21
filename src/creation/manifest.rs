@@ -348,7 +348,11 @@ impl SourceManifest {
                         ManifestKind::File => {
                             w.add_file_from_path(&entry.fs_path, &entry.archive_path)?
                         }
-                        ManifestKind::Dir => w.add_directory_entry(&entry.archive_path)?,
+                        ManifestKind::Dir => w.add_directory_entry_with_metadata(
+                            &entry.archive_path,
+                            entry.mtime,
+                            entry.mode,
+                        )?,
                     }
                 }
             }

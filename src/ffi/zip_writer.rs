@@ -527,9 +527,48 @@ impl ZipWriter {
 
     /// Add a single directory entry (without contents)
     pub fn add_directory_entry(&mut self, archive_path: &str) -> Result<()> {
+        // A caller who names an archive path has no filesystem entry to read
+        // metadata from, so there is nothing to carry.
+        self.add_directory_entry_with_metadata(archive_path, None, None)
+    }
+
+    /// Add a directory entry carrying the mtime and unix mode a source walk
+    /// observed (OI-0001-010).
+    ///
+    /// Counterpart to the libarchive writer's method of the same name, so
+    /// `Manifest::write_into` can hand both backends what its single walk
+    /// recorded instead of dropping it on the ZIP arm. Metadata is
+    /// best-effort in exactly the way `add_file_from_path` treats it: an
+    /// mtime outside the DOS-timestamp range is skipped rather than
+    /// clamped, and the mode is applied only on Unix, because the external
+    /// attributes are only meaningful with a Unix host indicator.
+    ///
+    /// **Precision, and why a round-trip test needs a tolerance.** A ZIP
+    /// local/central record stores the DOS timestamp, which has *2-second*
+    /// granularity -- coarser than tar's whole seconds. A directory mtime
+    /// read back out of a ZIP can therefore differ from the source by up to
+    /// two seconds without anything being wrong.
+    pub fn add_directory_entry_with_metadata(
+        &mut self,
+        archive_path: &str,
+        mtime: Option<std::time::SystemTime>,
+        mode: Option<u32>,
+    ) -> Result<()> {
         self.with_writer("add_directory_entry", |writer, _path, options, notify| {
             let dir_path = super::common::ensure_trailing_slash(archive_path);
-            writer.add_directory(&dir_path, options).map_err(|e| {
+            let mut dir_options = options;
+            if let Some(mtime) = mtime {
+                if let Some(dt) = super::common::system_time_to_zip_datetime(mtime) {
+                    dir_options = dir_options.last_modified_time(dt);
+                }
+            }
+            #[cfg(unix)]
+            if let Some(mode) = mode {
+                dir_options = dir_options.unix_permissions(mode);
+            }
+            #[cfg(not(unix))]
+            let _ = mode;
+            writer.add_directory(&dir_path, dir_options).map_err(|e| {
                 ArchiveError::format(Some(ArchiveFormat::Zip), format!("Add directory: {}", e))
             })?;
             // Directory entries contribute zero payload bytes but must

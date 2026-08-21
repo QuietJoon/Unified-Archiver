@@ -121,3 +121,59 @@ while listing, counts, by-id and bulk extraction and integrity consume the crate
 is untouched by any of the above and is tracked as OI-0001-003 (ticgit `25285d67`), together with the
 non-atomicity of the second `File::open`. Fixing it properly means a raw central-directory index that
 every operation consults, which is also what would remove the second open.
+
+## Amendment (2026-08-21, OI-0001-003 landed — the scope question is closed, and this record predicted the mechanism correctly)
+
+The 2026-08-12 amendment above ends by saying the scope question — that the guard covered only the
+by-name single-entry paths while listing, counts, by-id and bulk extraction and integrity consumed
+the `zip` crate's already-collapsed view — "is untouched by any of the above and is tracked as
+OI-0001-003 (ticgit `25285d67`), together with the non-atomicity of the second `File::open`". Both
+halves have since landed and that sentence is no longer true. It stays where it is, as this store
+requires; this amendment is the correction.
+
+It also predicted the mechanism, in the next sentence: *"Fixing it properly means a raw
+central-directory index that every operation consults, which is also what would remove the second
+open."* That is exactly what shipped — one index, not more guard calls.
+
+### What landed
+
+`ZipArchive` memoises one `RawCentralDirectory` holding every physically stored record with its raw
+name bytes, the crate-side listing indices each maps to, the deduped length, the ambiguous-name set,
+and an `any_undetected` flag. Three gates consult it, and the split between them is deliberate:
+
+* `reject_if_duplicate` — the by-name single-entry paths, which is what the original guard covered.
+* `reject_if_collapsed` — bulk extraction, the integrity walk, and the id-addressed stream: the
+  surfaces that consume the whole collapsed view and would otherwise silently omit a shadowed
+  record.
+* `reject_if_unlocalizable` — listing, and deliberately the *narrow* gate. A localizable ambiguity
+  still lists, so the refusal text's "address the entry by id" advice stays reachable instead of
+  becoming advice a caller cannot act on.
+
+`any_undetected` is decided by **counting**, not by `duplicate_names.is_empty()` (R0001-0028). The
+old heuristic disarmed itself the moment a single ordinary duplicate was attributed, so a crafted
+archive could hide an unattributable collision behind an ordinary one.
+
+### The second `File::open` is gone, and the code says so where it matters
+
+The scan reads through `ZipArchive::with_cached_file`, the descriptor the cached `RawZipArchive`
+already owns. Its own doc comment states the consequence — "It performs no `File::open` of its own;
+replacing the file at `self.path` mid-flight can no longer make the guard bless one archive while the
+extractor reads another." The only remaining `File::open` in the backend is in `open_zip`, which is
+the initial open and always was.
+
+### Where to find it now
+
+As of the same day, the value layer moved out of `src/ffi/zip_wrapper.rs` into
+`src/ffi/zip_wrapper/raw_directory.rs` under AD 0057's D10 seam work — `RawRecord`,
+`RawCentralDirectory` and its methods, and the exact central-directory read. The *building* of the
+index stayed on the facade as `ZipArchive::scan_raw_central_directory`, because it needs the cached
+descriptor. A reader following this record to `zip_wrapper.rs` looking for the struct will not find
+it there.
+
+### On why this is an amendment and not an owner action
+
+`docs/backlog.md` recorded this residual as needing an owner because "records are content-immutable,
+so this is an owner action, not a rewrite". Immutability forbids rewriting a body; this store's
+README says changes are appended as dated `## Amendment` sections, which is what this is. Nothing
+above has been altered — the falsified sentence is still there to be read, with this correction
+following it.

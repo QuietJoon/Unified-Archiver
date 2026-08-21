@@ -1098,15 +1098,22 @@ mod tests {
     /// mode the one walk observed, so the libarchive backends preserve
     /// them.
     ///
-    /// ZIP is still metadata-less for directories: `ZipWriter` has no
-    /// `add_directory_entry_with_metadata` counterpart to
-    /// `add_file_from_path`'s `last_modified_time` / `unix_permissions`
-    /// handling, so its directory entries land with the default
-    /// `FileOptions`. `test_add_directory_recursive_emits_nonleaf_zip_directory`
-    /// pins what ZIP does deliver today; extend the assertions here to
-    /// ZIP once that writer gains a metadata-carrying directory emit.
-    #[test]
-    fn test_add_directory_recursive_preserves_nonempty_directory_metadata() {
+    /// ZIP now carries it too (OI-0001-010's remaining half):
+    /// `ZipWriter::add_directory_entry_with_metadata` mirrors the
+    /// libarchive method of the same name, and `Manifest::write_into`'s ZIP
+    /// arm hands it the recorded mtime and mode instead of dropping both.
+    /// `test_add_directory_recursive_emits_nonleaf_zip_directory` still
+    /// pins that the *entry* exists; this covers what it carries.
+    ///
+    /// The tolerance differs by format and is not slack: tar stores
+    /// whole-second mtimes, a ZIP local/central record stores the DOS
+    /// timestamp with 2-second granularity. Demanding bit equality with the
+    /// filesystem stamp would fail on a correct writer.
+    fn assert_nonempty_directory_metadata_survives(
+        format: ArchiveFormat,
+        extension: &str,
+        mtime_tolerance_secs: u64,
+    ) {
         let temp = tempfile::tempdir().unwrap();
 
         let src_dir = temp.path().join("src_dir");
@@ -1120,8 +1127,8 @@ mod tests {
         }
         let source_meta = std::fs::metadata(&nonempty).unwrap();
 
-        let archive_path = temp.path().join("dir_metadata.tar");
-        let options = CompressionOptions::new(ArchiveFormat::Tar);
+        let archive_path = temp.path().join(format!("dir_metadata.{extension}"));
+        let options = CompressionOptions::new(format);
         let mut archive = Archive::create(&archive_path, options).unwrap();
         archive.add_directory_recursive(&src_dir).unwrap();
         archive.finish().unwrap();
@@ -1142,8 +1149,6 @@ mod tests {
                 )
             });
 
-        // tar stores whole-second mtimes, so compare with a tolerance
-        // instead of demanding bit equality with the filesystem stamp.
         let stored = dir_entry
             .modified
             .expect("directory entry carries no mtime");
@@ -1153,16 +1158,27 @@ mod tests {
             .or_else(|_| source_mtime.duration_since(stored))
             .unwrap();
         assert!(
-            drift.as_secs() <= 1,
-            "directory mtime drifted by {drift:?}: stored {stored:?} vs source {source_mtime:?}"
+            drift.as_secs() <= mtime_tolerance_secs,
+            "{format:?} directory mtime drifted by {drift:?} (tolerance {mtime_tolerance_secs}s): \
+             stored {stored:?} vs source {source_mtime:?}"
         );
 
         #[cfg(unix)]
         assert_eq!(
             dir_entry.permissions,
             Some(0o750),
-            "directory mode was not preserved"
+            "{format:?} directory mode was not preserved"
         );
+    }
+
+    #[test]
+    fn test_add_directory_recursive_preserves_nonempty_directory_metadata() {
+        assert_nonempty_directory_metadata_survives(ArchiveFormat::Tar, "tar", 1);
+    }
+
+    #[test]
+    fn test_add_directory_recursive_preserves_nonempty_zip_directory_metadata() {
+        assert_nonempty_directory_metadata_survives(ArchiveFormat::Zip, "zip", 2);
     }
 
     // ── finish tests ──

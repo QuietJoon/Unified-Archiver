@@ -507,8 +507,19 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   ambiguity still lists and the refusal text's "address the entry by id" advice stays reachable).
   **What is left is Required Action 3:** `DCR-009` carries exactly one amendment, dated 2026-08-12
   for R0001-0027/0028/0029, whose closing paragraph still says this residual "is untouched by any of
-  the above and is tracked as OI-0001-003" — a sentence the code has now falsified. The resulting
-  scope is unrecorded. Records are content-immutable, so this is an owner action, not a rewrite.
+  the above and is tracked as OI-0001-003" — a sentence the code has now falsified.
+  **Discharged 2026-08-21.** DCR-009 carries a second dated amendment recording what landed: the one
+  memoised index, the three gates and why they differ in width (`reject_if_unlocalizable` is
+  deliberately the narrow one, so a localizable ambiguity still lists and the "address the entry by
+  id" advice stays actionable), `any_undetected` decided by counting rather than by
+  `duplicate_names.is_empty()`, and the second `File::open` gone — the scan reads through
+  `with_cached_file` and its own doc says it opens nothing. It also notes that this record predicted
+  the mechanism correctly, and where the value layer now lives
+  (`src/ffi/zip_wrapper/raw_directory.rs`, moved the same day under AD 0057's D10 seam work).
+  The earlier reading here — that content-immutability made this an owner action rather than an
+  amendment — was wrong: immutability forbids **rewriting** a body, and the store's README says
+  changes are appended as dated `## Amendment` sections. The falsified sentence is untouched and
+  still readable; the correction follows it. Append-only, 0 deletions.
 
 ### Recursive creation drops metadata for nonempty directories (OI-0001-010)
 - **Type:** 2
@@ -537,6 +548,26 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   record) is also outstanding, for a change that alters the entry count and byte content of every
   recursively created archive. Remaining scope: the `ZipWriter` directory-metadata emit, and the
   record.
+  **Both landed 2026-08-21, so this entry discharges.** `ZipWriter::add_directory_entry_with_metadata`
+  mirrors the libarchive method of the same name, `Manifest::write_into`'s ZIP arm hands it the
+  recorded `mtime` and `mode` instead of dropping both, and the metadata-free `add_directory_entry`
+  delegates with `None, None` — kept, because a caller who names an *archive* path has no filesystem
+  entry to read metadata from, so giving it metadata would mean inventing some.
+  The test the previous note pointed at is now two tests over one helper,
+  `assert_nonempty_directory_metadata_survives(format, extension, mtime_tolerance_secs)`, so tar and
+  ZIP cannot drift apart in what they assert. The tolerances differ — 1s for tar's whole seconds, 2s
+  for ZIP's DOS timestamp — and that is a format property, not slack; tightening ZIP to 1s produces
+  an intermittent failure that looks like a race.
+  **Non-vacuity proven by revert-and-observe:** reverting the manifest's ZIP arm makes the new test
+  fail with `stored SystemTime { tv_sec: 315532800 }` — 1980-01-01, the DOS epoch, i.e. the default
+  `FileOptions` — against a source stamp of `tv_sec: 1787310585`, while the tar test keeps passing,
+  so the revert isolated the ZIP arm. `src/creation/manifest.rs` was then restored and compared
+  byte-for-byte.
+  Action 3 is done too: **DCR-013** is the covering decision this entry asked for, recording the
+  entry-count and byte-content consequences, that a stored checksum over a recursively created
+  archive must be recomputed, and one thing found while writing it — each writer still carries its
+  own `add_directory_recursive` branching on `is_leaf_dir`, the superseded leaf-only emit, with no
+  caller left in the crate.
 
 
 ### Libarchive integrity cannot separate an operational I/O failure from archive corruption

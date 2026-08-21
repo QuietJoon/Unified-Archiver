@@ -223,9 +223,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   archive format" on every path. Detection now skips leading skippable frames using their declared
   length, bounded so a crafted file cannot loop. `Zst` was deliberately *not* added to the
   extension fallback: content-based detection is the policy and that set is small on purpose.
-- **Recursive creation observes the filesystem once.** It builds a manifest in a single walk and
-  writes from the manifest, instead of re-deriving the file set while writing, and it no longer
-  drops directory metadata for nonempty directories.
+- **Recursive creation observes the filesystem once, and directory metadata survives on both
+  writers.** It builds a manifest in a single walk and writes from the manifest instead of
+  re-deriving the file set while writing. Every directory the walk observed now gets an entry
+  carrying its mtime and unix mode — not only the empty leaves, which is all the old
+  `is_leaf_dir` emit produced — and that now includes ZIP, whose arm was handing the writer's
+  default `FileOptions` and dropping both. *This changes what a recursively created archive
+  contains:* non-empty directories contribute entries where they contributed none, and a ZIP
+  directory record now carries a real DOS timestamp and, on Unix, external attributes with the
+  source mode, where before it carried the DOS epoch — 1980-01-01. **A checksum stored over a
+  recursively created archive will not match a freshly created one and must be recomputed.**
+  Archives built entry-by-entry through `add_file_from_data` / `add_file_from_path` are
+  unaffected. `Archive::add_directory(path)` stays metadata-free by construction: its caller
+  names an archive path, so there is no filesystem entry to read a mode or mtime from. DCR-013
+  is the covering record.
 - **Test lanes can no longer pass without testing.** A lane that returned early when a fixture was
   missing reported success having tested nothing — worse than a failure, because it is invisible.
   Every such lane now either runs and can fail, or is `#[ignore]`d with the reason *and* the exact
