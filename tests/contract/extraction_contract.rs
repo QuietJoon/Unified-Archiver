@@ -12,7 +12,7 @@
 mod common;
 
 use common::fixture;
-use unified_archive::{Archive, ArchiveFormat, CompressionOptions, ExtractionOptions};
+use unified_archive::{Archive, CompressionOptions, ExtractionOptions, WritableFormat};
 
 // ── Contract 1: Extract from each supported format ──
 
@@ -119,7 +119,7 @@ fn contract_extract_to_memory_matches_original() {
     let original_content = b"Hello, this is a contract test for byte-for-byte verification!";
 
     // Create
-    let options = CompressionOptions::new(ArchiveFormat::Zip);
+    let options = CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&archive_path, options).unwrap();
     archive
         .add_file_from_data("contract_test.txt", original_content)
@@ -141,7 +141,7 @@ fn contract_extract_file_matches_original() {
     let archive_path = temp.path().join("roundtrip_file.zip");
     let original = b"File content for extract_file contract test";
 
-    let options = CompressionOptions::new(ArchiveFormat::Zip);
+    let options = CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&archive_path, options).unwrap();
     archive.add_file_from_data("verify.txt", original).unwrap();
     archive.finish().unwrap();
@@ -170,7 +170,7 @@ fn contract_extract_multiple_files_match() {
         ("c.bin", &[0u8, 1, 2, 3, 255, 254, 253]),
     ];
 
-    let options = CompressionOptions::new(ArchiveFormat::Zip);
+    let options = CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&archive_path, options).unwrap();
     for (name, data) in &files {
         archive.add_file_from_data(name, data).unwrap();
@@ -309,7 +309,7 @@ fn contract_extract_filtered_only_matching() {
     let temp = tempfile::tempdir().unwrap();
     let archive_path = temp.path().join("filtered.zip");
 
-    let options = CompressionOptions::new(ArchiveFormat::Zip);
+    let options = CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&archive_path, options).unwrap();
     archive.add_file_from_data("include.txt", b"yes").unwrap();
     archive.add_file_from_data("exclude.dat", b"no").unwrap();

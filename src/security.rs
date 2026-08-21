@@ -1719,7 +1719,7 @@ mod tests {
 
     #[test]
     fn test_check_extraction_safe_normal() {
-        let mut entry = ArchiveEntry::new("file.txt".to_string(), 0);
+        let mut entry = ArchiveEntry::file("file.txt", 0).build();
         entry.size = Some(1024);
         entry.compressed_size = Some(512);
 
@@ -1730,7 +1730,7 @@ mod tests {
 
     #[test]
     fn test_check_extraction_safe_zip_bomb() {
-        let mut entry = ArchiveEntry::new("bomb.txt".to_string(), 0);
+        let mut entry = ArchiveEntry::file("bomb.txt", 0).build();
         entry.size = Some(10 * 1024 * 1024 * 1024); // 10 GB
         entry.compressed_size = Some(1024); // 1 KB - 10,000,000:1 ratio!
 
@@ -1741,7 +1741,7 @@ mod tests {
 
     #[test]
     fn test_check_extraction_safe_too_large() {
-        let mut entry = ArchiveEntry::new("huge.bin".to_string(), 0);
+        let mut entry = ArchiveEntry::file("huge.bin", 0).build();
         entry.size = Some(2 * 1024 * 1024 * 1024); // 2 GB
 
         let entries = vec![entry];
@@ -1758,9 +1758,9 @@ mod tests {
     /// instead of gating on a saturated number the archive never claimed.
     #[test]
     fn test_check_extraction_safe_rejects_total_size_overflow() {
-        let mut first = ArchiveEntry::new("a.bin".to_string(), 0);
+        let mut first = ArchiveEntry::file("a.bin", 0).build();
         first.size = Some(u64::MAX);
-        let mut second = ArchiveEntry::new("b.bin".to_string(), 1);
+        let mut second = ArchiveEntry::file("b.bin", 1).build();
         second.size = Some(1);
 
         // Every other gate is disabled so only the total-size accumulation
@@ -1785,9 +1785,9 @@ mod tests {
     /// the ratio being enforced.
     #[test]
     fn test_check_archive_ratio_rejects_total_size_overflow() {
-        let mut first = ArchiveEntry::new("a.bin".to_string(), 0);
+        let mut first = ArchiveEntry::file("a.bin", 0).build();
         first.size = Some(u64::MAX);
-        let mut second = ArchiveEntry::new("b.bin".to_string(), 1);
+        let mut second = ArchiveEntry::file("b.bin", 1).build();
         second.size = Some(1);
 
         let err = check_archive_ratio(
@@ -2117,7 +2117,7 @@ mod tests {
         let entries: Vec<_> = ["../../etc/passwd", "/etc/shadow", "./a", "a/../b"]
             .iter()
             .enumerate()
-            .map(|(id, path)| ArchiveEntry::new((*path).to_string(), id))
+            .map(|(id, path)| ArchiveEntry::file((*path).to_string(), id).build())
             .collect();
         check_extraction_safe(&entries, &limits)
             .expect("the lossy-repair baseline must accept unsafe names");
@@ -2148,7 +2148,7 @@ mod tests {
             ("a/./b", "'.'"),
             ("a/b/.", "'.'"),
         ] {
-            let entries = vec![ArchiveEntry::new(path.to_string(), 0)];
+            let entries = vec![ArchiveEntry::file(path.to_string(), 0).build()];
             let err = check_extraction_safe(&entries, &limits)
                 .expect_err("strict policy must block unsafe entry names");
             match err {
@@ -2169,12 +2169,12 @@ mod tests {
 
         // Safe names still extract under the strict policy, and a mixed
         // archive is refused as a whole.
-        let safe = vec![ArchiveEntry::new("dir/file.txt".to_string(), 0)];
+        let safe = vec![ArchiveEntry::file("dir/file.txt", 0).build()];
         check_extraction_safe(&safe, &limits).expect("safe names must pass the strict policy");
 
         let mixed = vec![
-            ArchiveEntry::new("dir/file.txt".to_string(), 0),
-            ArchiveEntry::new("../escape".to_string(), 1),
+            ArchiveEntry::file("dir/file.txt", 0).build(),
+            ArchiveEntry::file("../escape", 1).build(),
         ];
         assert!(
             check_extraction_safe(&mixed, &limits).is_err(),
@@ -2252,7 +2252,7 @@ mod tests {
     #[test]
     fn test_check_extraction_safe_too_many_entries() {
         let entries: Vec<_> = (0..1001)
-            .map(|i| ArchiveEntry::new(format!("file{}.txt", i), i))
+            .map(|i| ArchiveEntry::file(format!("file{}.txt", i), i).build())
             .collect();
 
         let limits = ExtractionLimits::builder()
@@ -2295,7 +2295,7 @@ mod tests {
                 .check_ratio(u64::MAX, 1, "File 'x'", crate::error::ops::EXTRACT)
                 .is_ok()
         );
-        let entries = [ArchiveEntry::new("x".to_string(), 0)];
+        let entries = [ArchiveEntry::file("x", 0).build()];
         assert!(check_archive_ratio(&entries, 1, &limits, crate::error::ops::EXTRACT).is_ok());
     }
 
@@ -2346,7 +2346,7 @@ mod tests {
     fn test_check_single_entry_safe_enforces_max_total_size() {
         // R0081-0025: a total cap below the per-file cap must still block a
         // single-entry extraction whose one file exceeds the total budget.
-        let mut entry = ArchiveEntry::new("big.bin".to_string(), 0);
+        let mut entry = ArchiveEntry::file("big.bin", 0).build();
         entry.size = Some(2 * 1024 * 1024); // 2 MiB
         entry.compressed_size = Some(2 * 1024 * 1024);
         let entries = vec![entry];

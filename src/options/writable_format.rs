@@ -257,6 +257,12 @@ mod tests {
         );
         // Same gate `CompressionOptions::validate_for_format` reports,
         // so preflight and construction agree.
+        //
+        // Deliberately the deprecated constructor: this assertion exists to
+        // prove the loose path still accepts a non-creatable format and
+        // defers the rejection. `WritableFormat` cannot express `Iso` at
+        // all, so migrating it would delete the test's subject.
+        #[allow(deprecated)]
         let loose = crate::options::CompressionOptions::new(ArchiveFormat::Iso);
         assert!(loose.validate_for_format().is_err());
     }

@@ -14,7 +14,7 @@
 mod common;
 
 use common::fixture;
-use unified_archive::{Archive, ArchiveError, ArchiveFormat, CompressionOptions};
+use unified_archive::{Archive, ArchiveError, ArchiveFormat, CompressionOptions, WritableFormat};
 
 // ── Contract 1: Open valid archive for each supported format ──
 
@@ -120,7 +120,7 @@ fn contract_open_nonexistent_file_returns_io_error() {
 fn contract_create_zip_archive() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("created.zip");
-    let options = CompressionOptions::new(ArchiveFormat::Zip);
+    let options = CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&path, options).expect("Should create ZIP");
     archive
         .add_file_from_data("hello.txt", b"hello")
@@ -139,7 +139,7 @@ fn contract_create_zip_archive() {
 fn contract_create_tar_archive() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("created.tar");
-    let options = CompressionOptions::new(ArchiveFormat::Tar);
+    let options = CompressionOptions::for_writable(WritableFormat::TAR);
     let mut archive = Archive::create(&path, options).expect("Should create TAR");
     archive
         .add_file_from_data("hello.txt", b"hello")
@@ -152,7 +152,7 @@ fn contract_create_tar_archive() {
 fn contract_create_tar_gz_archive() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("created.tar.gz");
-    let options = CompressionOptions::new(ArchiveFormat::TarGzip);
+    let options = CompressionOptions::for_writable(WritableFormat::TAR_GZIP);
     let mut archive = Archive::create(&path, options).expect("Should create TAR.GZ");
     archive
         .add_file_from_data("hello.txt", b"hello")
@@ -165,7 +165,7 @@ fn contract_create_tar_gz_archive() {
 fn contract_create_tar_bz2_archive() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("created.tar.bz2");
-    let options = CompressionOptions::new(ArchiveFormat::TarBzip2);
+    let options = CompressionOptions::for_writable(WritableFormat::TAR_BZIP2);
     let mut archive = Archive::create(&path, options).expect("Should create TAR.BZ2");
     archive
         .add_file_from_data("hello.txt", b"hello")
@@ -178,7 +178,7 @@ fn contract_create_tar_bz2_archive() {
 fn contract_create_tar_xz_archive() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("created.tar.xz");
-    let options = CompressionOptions::new(ArchiveFormat::TarXz);
+    let options = CompressionOptions::for_writable(WritableFormat::TAR_XZ);
     let mut archive = Archive::create(&path, options).expect("Should create TAR.XZ");
     archive
         .add_file_from_data("hello.txt", b"hello")
@@ -262,7 +262,7 @@ fn contract_close_valid_archive() {
 fn contract_finish_created_archive() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("to_finish.zip");
-    let options = CompressionOptions::new(ArchiveFormat::Zip);
+    let options = CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&path, options).unwrap();
     archive.add_file_from_data("f.txt", b"data").unwrap();
     let result = archive.finish();
@@ -290,7 +290,7 @@ fn contract_drop_created_archive_without_finish() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("dropped.zip");
     {
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&path, options).unwrap();
         archive.add_file_from_data("f.txt", b"data").unwrap();
         // Dropped without calling finish()

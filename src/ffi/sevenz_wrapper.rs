@@ -585,7 +585,7 @@ impl SevenZArchive {
 
         let modified = Self::entry_modified_time(entry);
 
-        let mut entry_parsed = ArchiveEntry::new(path, 0);
+        let mut entry_parsed = ArchiveEntry::file(path, 0).build();
         entry_parsed.entry_type = entry_type;
         entry_parsed.size = size;
         entry_parsed.compressed_size = compressed_size;

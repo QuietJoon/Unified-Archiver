@@ -533,24 +533,40 @@ impl ArchiveEntry {
     ///
     /// # Deprecation timeline (OI-0076-005)
     ///
-    /// - **0.4.x** — kept, un-attributed. The crate itself still calls
-    ///   this from four backend readers and three integration tests; a
-    ///   `#[deprecated]` attribute would emit in-crate warnings, and this
-    ///   crate's gate is warning-free. The attribute lands in the same
-    ///   change that migrates those call sites.
-    /// - **0.5.0** — gains `#[deprecated]`.
+    /// - **0.4.x** — kept, un-attributed, because the crate still called
+    ///   this itself and the gate is warning-free.
+    /// - **0.5.0** — **attributed, as of this change.** All 48 in-crate
+    ///   call sites moved to `ArchiveEntry::file(path, id).build()` first,
+    ///   with no `#[allow(deprecated)]` left behind: unlike
+    ///   [`crate::options::CompressionOptions::new`], nothing about this
+    ///   constructor is worth pinning — the builder accepts strictly more.
     /// - **0.6.0** — removed. Migrate to
     ///   `ArchiveEntry::file(path, id).build()`, which takes
     ///   `impl Into<String>` and so accepts everything this does.
+    ///
+    /// One migration note, because it bites: `new` took a concrete
+    /// `String`, so `"x".into()` inferred its target from the parameter.
+    /// [`ArchiveEntry::file`] takes `impl Into<String>`, which makes that
+    /// `.into()` ambiguous. Drop it — `"x"` is what the builder wants.
+    #[deprecated(
+        since = "0.5.0",
+        note = "use ArchiveEntry::file(path, id).build(), which takes impl Into<String> and returns a builder so metadata needs no field assignment (OI-0076-005); removed in 0.6.0"
+    )]
     pub fn new(path: String, id: usize) -> Self {
         Self::with_type(path, id, EntryType::File)
     }
 
     /// Create a new directory-typed archive entry. Prefer
     /// [`ArchiveEntry::dir_at`] for new code (R0075-0078). Same
-    /// deprecation timeline as [`Self::new`]: `#[deprecated]` in 0.5.0,
-    /// removed in 0.6.0, replaced by
-    /// `ArchiveEntry::dir_at(path, id).build()`.
+    /// deprecation timeline as [`Self::new`]: attributed in 0.5.0, removed
+    /// in 0.6.0, replaced by `ArchiveEntry::dir_at(path, id).build()`.
+    ///
+    /// This one had no in-crate call sites to migrate at all, so the
+    /// attribute cost nothing.
+    #[deprecated(
+        since = "0.5.0",
+        note = "use ArchiveEntry::dir_at(path, id).build() (OI-0076-005); removed in 0.6.0"
+    )]
     pub fn directory(path: String, id: usize) -> Self {
         Self::with_type(path, id, EntryType::Directory)
     }
@@ -779,7 +795,7 @@ mod tests {
 
     #[test]
     fn test_new_entry_defaults() {
-        let entry = ArchiveEntry::new("docs/readme.md".into(), 0);
+        let entry = ArchiveEntry::file("docs/readme.md", 0).build();
         assert_eq!(entry.path, "docs/readme.md");
         assert_eq!(entry.id, 0);
         assert_eq!(entry.entry_type, EntryType::File);
@@ -798,7 +814,7 @@ mod tests {
 
     #[test]
     fn test_new_entry_with_id() {
-        let entry = ArchiveEntry::new("file.txt".into(), 42);
+        let entry = ArchiveEntry::file("file.txt", 42).build();
         assert_eq!(entry.id, 42);
     }
 
@@ -806,7 +822,7 @@ mod tests {
 
     #[test]
     fn test_is_file() {
-        let mut entry = ArchiveEntry::new("data.bin".into(), 0);
+        let mut entry = ArchiveEntry::file("data.bin", 0).build();
         assert!(entry.is_file());
         assert!(!entry.is_directory());
         assert!(!entry.is_symlink());
@@ -818,7 +834,7 @@ mod tests {
 
     #[test]
     fn test_is_directory() {
-        let mut entry = ArchiveEntry::new("folder/".into(), 0);
+        let mut entry = ArchiveEntry::file("folder/", 0).build();
         entry.entry_type = EntryType::Directory;
         assert!(entry.is_directory());
         assert!(!entry.is_file());
@@ -828,7 +844,7 @@ mod tests {
 
     #[test]
     fn test_is_symlink() {
-        let mut entry = ArchiveEntry::new("link".into(), 0);
+        let mut entry = ArchiveEntry::file("link", 0).build();
         entry.entry_type = EntryType::Symlink;
         assert!(entry.is_symlink());
         assert!(!entry.is_file());
@@ -838,7 +854,7 @@ mod tests {
 
     #[test]
     fn test_is_hardlink() {
-        let mut entry = ArchiveEntry::new("hlink".into(), 0);
+        let mut entry = ArchiveEntry::file("hlink", 0).build();
         entry.entry_type = EntryType::HardLink;
         assert!(entry.is_hardlink());
         assert!(!entry.is_file());
@@ -848,7 +864,7 @@ mod tests {
 
     #[test]
     fn test_other_entry_type() {
-        let mut entry = ArchiveEntry::new("special".into(), 0);
+        let mut entry = ArchiveEntry::file("special", 0).build();
         entry.entry_type = EntryType::Other;
         assert!(!entry.is_file());
         assert!(!entry.is_directory());
@@ -860,7 +876,7 @@ mod tests {
 
     #[test]
     fn test_compression_ratio_normal() {
-        let mut entry = ArchiveEntry::new("data.bin".into(), 0);
+        let mut entry = ArchiveEntry::file("data.bin", 0).build();
         entry.size = Some(1000);
         entry.compressed_size = Some(400);
         let ratio = entry.compression_fraction().unwrap();
@@ -869,7 +885,7 @@ mod tests {
 
     #[test]
     fn test_compression_ratio_store() {
-        let mut entry = ArchiveEntry::new("data.bin".into(), 0);
+        let mut entry = ArchiveEntry::file("data.bin", 0).build();
         entry.size = Some(500);
         entry.compressed_size = Some(500);
         let ratio = entry.compression_fraction().unwrap();
@@ -878,7 +894,7 @@ mod tests {
 
     #[test]
     fn test_compression_ratio_zero_original() {
-        let mut entry = ArchiveEntry::new("empty.txt".into(), 0);
+        let mut entry = ArchiveEntry::file("empty.txt", 0).build();
         entry.size = Some(0);
         entry.compressed_size = Some(0);
         // Division by zero protection: should remain None
@@ -887,7 +903,7 @@ mod tests {
 
     #[test]
     fn test_compression_ratio_missing_compressed() {
-        let mut entry = ArchiveEntry::new("data.bin".into(), 0);
+        let mut entry = ArchiveEntry::file("data.bin", 0).build();
         entry.size = Some(1000);
         // compressed_size is None
         assert!(entry.compression_fraction().is_none());
@@ -895,7 +911,7 @@ mod tests {
 
     #[test]
     fn test_compression_ratio_missing_original() {
-        let mut entry = ArchiveEntry::new("data.bin".into(), 0);
+        let mut entry = ArchiveEntry::file("data.bin", 0).build();
         // size is None
         entry.compressed_size = Some(400);
         assert!(entry.compression_fraction().is_none());
@@ -903,7 +919,7 @@ mod tests {
 
     #[test]
     fn test_compression_ratio_both_missing() {
-        let entry = ArchiveEntry::new("data.bin".into(), 0);
+        let entry = ArchiveEntry::file("data.bin", 0).build();
         assert!(entry.compression_fraction().is_none());
     }
 
@@ -914,10 +930,10 @@ mod tests {
         // layer refuses as an undefined ratio (R0076-0002). The two
         // states are indistinguishable through this helper, which is why
         // its rustdoc tells callers not to use it as the bomb signal.
-        let unknown = ArchiveEntry::new("unknown.bin".into(), 0);
+        let unknown = ArchiveEntry::file("unknown.bin", 0).build();
         assert!(unknown.expansion_ratio().is_none());
 
-        let mut suspicious = ArchiveEntry::new("bomb.bin".into(), 1);
+        let mut suspicious = ArchiveEntry::file("bomb.bin", 1).build();
         suspicious.size = Some(10 * 1024 * 1024);
         suspicious.compressed_size = Some(0);
         assert!(
@@ -927,7 +943,7 @@ mod tests {
 
         // A real ratio is still reported whenever the denominator is
         // usable, so the ambiguity is confined to the `None` arm.
-        let mut known = ArchiveEntry::new("data.bin".into(), 2);
+        let mut known = ArchiveEntry::file("data.bin", 2).build();
         known.size = Some(1000);
         known.compressed_size = Some(250);
         assert!((known.expansion_ratio().unwrap() - 4.0).abs() < f64::EPSILON);
@@ -936,7 +952,7 @@ mod tests {
     #[test]
     fn test_compression_ratio_larger_compressed() {
         // Incompressible data can have ratio > 1.0
-        let mut entry = ArchiveEntry::new("random.bin".into(), 0);
+        let mut entry = ArchiveEntry::file("random.bin", 0).build();
         entry.size = Some(100);
         entry.compressed_size = Some(120);
         let ratio = entry.compression_fraction().unwrap();
@@ -1006,7 +1022,7 @@ mod tests {
 
     #[test]
     fn test_archive_entry_clone() {
-        let mut entry = ArchiveEntry::new("file.txt".into(), 5);
+        let mut entry = ArchiveEntry::file("file.txt", 5).build();
         entry.size = Some(1024);
         entry.crc32 = Some(0xDEADBEEF);
         entry.is_encrypted = true;
@@ -1026,7 +1042,7 @@ mod tests {
 
     #[test]
     fn test_entry_with_empty_path() {
-        let entry = ArchiveEntry::new(String::new(), 0);
+        let entry = ArchiveEntry::file(String::new(), 0).build();
         assert_eq!(entry.path, "");
     }
 
@@ -1050,13 +1066,13 @@ mod tests {
 
     #[test]
     fn test_entry_with_unicode_path() {
-        let entry = ArchiveEntry::new("日本語/ファイル.txt".into(), 0);
+        let entry = ArchiveEntry::file("日本語/ファイル.txt", 0).build();
         assert_eq!(entry.path, "日本語/ファイル.txt");
     }
 
     #[test]
     fn test_entry_with_large_id() {
-        let entry = ArchiveEntry::new("file.txt".into(), usize::MAX);
+        let entry = ArchiveEntry::file("file.txt", usize::MAX).build();
         assert_eq!(entry.id, usize::MAX);
     }
 
@@ -1260,7 +1276,7 @@ mod tests {
 
     #[test]
     fn test_entry_with_large_sizes() {
-        let mut entry = ArchiveEntry::new("huge.bin".into(), 0);
+        let mut entry = ArchiveEntry::file("huge.bin", 0).build();
         entry.size = Some(u64::MAX);
         entry.compressed_size = Some(u64::MAX);
         // u64::MAX / u64::MAX = 1.0

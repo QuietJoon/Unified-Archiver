@@ -17,7 +17,7 @@ mod common;
 
 use common::fixture;
 use std::io::Read;
-use unified_archive::{Archive, ArchiveFormat, CompressionOptions, StreamBound};
+use unified_archive::{Archive, CompressionOptions, StreamBound, WritableFormat};
 
 // ── Contract 1: Basic streaming reader ──
 
@@ -330,7 +330,7 @@ fn contract_streaming_roundtrip() {
     let archive_path = temp.path().join("stream_roundtrip.zip");
     let original = b"Streaming contract test content with special chars: \xc3\xa9\xc3\xa0\xc3\xbc";
 
-    let options = CompressionOptions::new(ArchiveFormat::Zip);
+    let options = CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&archive_path, options).unwrap();
     archive
         .add_file_from_data("stream_test.bin", original)

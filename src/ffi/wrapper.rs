@@ -1305,7 +1305,7 @@ fn parse_header(header: &RARHeaderDataEx) -> Result<ArchiveEntry> {
     // pre-1970 FILETIMEs instead of collapsing them to UNIX_EPOCH.
     let modified = filetime_to_system_time(header.mtime_low, header.mtime_high).or(modified);
 
-    let mut entry = ArchiveEntry::new(normalized_path, 0);
+    let mut entry = ArchiveEntry::file(normalized_path, 0).build();
     entry.entry_type = entry_type;
     entry.size = if is_directory { None } else { Some(unp_size) };
     entry.compressed_size = if is_directory { None } else { Some(pack_size) };

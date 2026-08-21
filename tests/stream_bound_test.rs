@@ -15,15 +15,15 @@ mod common;
 
 use std::io::Read;
 use unified_archive::{
-    Archive, ArchiveFormat, Cap, CompressionOptions, ExtractionLimits, ExtractionOptions,
-    StreamBound,
+    Archive, Cap, CompressionOptions, ExtractionLimits, ExtractionOptions, StreamBound,
+    WritableFormat,
 };
 
 /// Build a single-entry TAR (libarchive-backed: the only genuinely
 /// incremental stream path) whose payload is `len` bytes.
 fn write_tar(path: &std::path::Path, entry: &str, len: usize) {
-    let mut archive =
-        Archive::create(path, CompressionOptions::new(ArchiveFormat::Tar)).expect("create tar");
+    let mut archive = Archive::create(path, CompressionOptions::for_writable(WritableFormat::TAR))
+        .expect("create tar");
     archive
         .add_file_from_data(entry, &vec![b'A'; len])
         .expect("add entry");

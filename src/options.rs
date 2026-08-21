@@ -413,17 +413,37 @@ impl CompressionOptions {
     ///
     /// # Deprecation timeline (OI-0076-005)
     ///
-    /// - **0.4.x** — kept, un-attributed. The crate itself calls this
-    ///   from `src/modification.rs` and `src/creation.rs` and from ~25
-    ///   integration-test sites; a `#[deprecated]` attribute would emit
-    ///   in-crate warnings and this crate's gate is warning-free. The
-    ///   attribute lands in the same change that migrates those sites.
-    /// - **0.5.0** — gains `#[deprecated]`.
+    /// - **0.4.x** — kept, un-attributed, because the crate still called
+    ///   this itself and the gate is warning-free.
+    /// - **0.5.0** — **attributed, as of this change.** The 139 in-crate
+    ///   call sites moved first: 132 literal formats to
+    ///   [`Self::for_writable`], 7 computed ones to [`Self::try_new`]. Two
+    ///   deliberate uses remain, each carrying `#[allow(deprecated)]` and a
+    ///   comment — they assert that this constructor still accepts a
+    ///   non-creatable format and defers the rejection, which is the
+    ///   back-compat guarantee, and neither replacement can express a
+    ///   non-creatable format at all.
     /// - **0.6.0** — removed. Migrate to [`Self::for_writable`] when the
     ///   format is a literal and [`Self::try_new`] when it is computed;
     ///   both reject a read-only format at construction instead of at the
     ///   create call.
+    #[deprecated(
+        since = "0.5.0",
+        note = "accepts read-only formats and defers the rejection to Archive::create; use CompressionOptions::for_writable for a literal format or ::try_new for a computed one (OI-0081-002). Removed in 0.6.0."
+    )]
     pub fn new(format: ArchiveFormat) -> Self {
+        Self::with_defaults(format)
+    }
+
+    /// The field defaults, shared by the loose and the checked
+    /// constructors.
+    ///
+    /// Split out so [`Self::for_writable`] does not have to call
+    /// [`Self::new`] — which is deprecated, and which would make the
+    /// checked path depend on the loose one. The dependency cannot run the
+    /// other way either: `new` accepts formats `for_writable` rejects by
+    /// construction.
+    fn with_defaults(format: ArchiveFormat) -> Self {
         Self {
             format,
             level: CompressionLevel::Normal,
@@ -451,7 +471,7 @@ impl CompressionOptions {
     /// ```
     #[must_use]
     pub fn for_writable(format: WritableFormat) -> Self {
-        Self::new(format.format())
+        Self::with_defaults(format.format())
     }
 
     /// Create new compression options, rejecting a non-creatable format
@@ -552,7 +572,9 @@ impl CompressionOptions {
 
 impl Default for CompressionOptions {
     fn default() -> Self {
-        Self::new(ArchiveFormat::Zip)
+        // ZIP is creatable, so the checked constructor expresses this
+        // exactly and the default value carries the invariant.
+        Self::for_writable(WritableFormat::ZIP)
     }
 }
 
@@ -1036,7 +1058,7 @@ mod tests {
 
     #[test]
     fn test_compression_options_new() {
-        let opts = CompressionOptions::new(ArchiveFormat::SevenZip);
+        let opts = CompressionOptions::for_writable(WritableFormat::SEVEN_ZIP);
         assert_eq!(opts.format(), ArchiveFormat::SevenZip);
         assert_eq!(opts.level, CompressionLevel::Normal);
         assert!(opts.password.is_none());
@@ -1053,7 +1075,7 @@ mod tests {
 
     #[test]
     fn test_compression_options_with_password() {
-        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
         opts.password = Some("pw123".into());
         assert_eq!(opts.password.as_ref().map(Password::as_str), Some("pw123"));
     }
@@ -1065,7 +1087,7 @@ mod tests {
         // infallible accessor reads it back. Non-UTF-8 is unrepresentable
         // because construction only accepts `impl Into<String>`, so the
         // fallible `password_as_str` path (AD 0042) is gone.
-        let opts = CompressionOptions::new(ArchiveFormat::Zip).password("builder-pw");
+        let opts = CompressionOptions::for_writable(WritableFormat::ZIP).password("builder-pw");
         assert_eq!(
             opts.password.as_ref().map(Password::as_str),
             Some("builder-pw")
@@ -1083,7 +1105,7 @@ mod tests {
 
     #[test]
     fn test_compression_options_with_split_size() {
-        let mut opts = CompressionOptions::new(ArchiveFormat::SevenZip);
+        let mut opts = CompressionOptions::for_writable(WritableFormat::SEVEN_ZIP);
         opts.split_size = Some(1024 * 1024); // 1MB
         assert_eq!(opts.split_size, Some(1_048_576));
     }
@@ -1121,11 +1143,15 @@ mod tests {
                 "{format:?} is not creatable and must be rejected at construction"
             );
             // The loose constructor still builds it — that is precisely
-            // the gap the checked constructor closes.
+            // the gap the checked constructor closes, so this arm must keep
+            // using the deprecated path: it is the back-compat guarantee,
+            // not an unmigrated call site.
+            #[allow(deprecated)]
+            let loose_rejects = CompressionOptions::new(format)
+                .validate_for_format()
+                .is_err();
             assert!(
-                CompressionOptions::new(format)
-                    .validate_for_format()
-                    .is_err(),
+                loose_rejects,
                 "{format:?} must still be rejected on the loose path"
             );
         }
@@ -1176,7 +1202,7 @@ mod tests {
     fn deprecated_loose_paths_still_behave() {
         // `#[deprecated]` is a migration signal, not a behaviour change:
         // both loose paths must keep producing exactly what they did.
-        let opts = CompressionOptions::new(ArchiveFormat::Zip).password("pw");
+        let opts = CompressionOptions::for_writable(WritableFormat::ZIP).password("pw");
         assert_eq!(opts.password.as_ref().map(Password::as_str), Some("pw"));
         assert!(
             opts.validate_for_format().is_err(),
@@ -1362,8 +1388,8 @@ mod tests {
 
         let mut filter: EntryFilter = Box::new(|entry: &ArchiveEntry| entry.path.ends_with(".txt"));
 
-        let txt_entry = ArchiveEntry::new("readme.txt".into(), 0);
-        let bin_entry = ArchiveEntry::new("data.bin".into(), 1);
+        let txt_entry = ArchiveEntry::file("readme.txt", 0).build();
+        let bin_entry = ArchiveEntry::file("data.bin", 1).build();
 
         assert!(filter(&txt_entry));
         assert!(!filter(&bin_entry));

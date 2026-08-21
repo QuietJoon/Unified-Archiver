@@ -104,7 +104,7 @@ fn test_entry_is_hardlink_method() {
     // Test the is_hardlink() helper method on ArchiveEntry
     use unified_archive::entry::{ArchiveEntry, EntryType};
 
-    let mut entry = ArchiveEntry::new("test.txt".to_string(), 0);
+    let mut entry = ArchiveEntry::file("test.txt", 0).build();
     entry.entry_type = EntryType::HardLink;
 
     assert!(

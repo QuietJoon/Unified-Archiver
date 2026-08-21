@@ -25,7 +25,7 @@ use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 
-use unified_archive::{Archive, ArchiveError, ArchiveFormat, CompressionOptions, StreamBound};
+use unified_archive::{Archive, ArchiveError, CompressionOptions, StreamBound, WritableFormat};
 
 /// Digest of `tests/fixtures/test.tar` measured on the tree immediately
 /// before the R6 change landed. Exactness must not alter the value a
@@ -42,8 +42,8 @@ const HEALTHY_TAR_DIGEST: &str = "f9413c0f";
 const HEALTHY_TAR_TOTAL: u64 = 18;
 
 fn write_tar(path: &Path, entry: &str, len: usize) {
-    let mut archive =
-        Archive::create(path, CompressionOptions::new(ArchiveFormat::Tar)).expect("create tar");
+    let mut archive = Archive::create(path, CompressionOptions::for_writable(WritableFormat::TAR))
+        .expect("create tar");
     archive
         .add_file_from_data(entry, &vec![b'A'; len])
         .expect("add entry");

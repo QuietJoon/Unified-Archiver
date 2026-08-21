@@ -517,7 +517,7 @@ mod tests {
 
         // 1969-12-31T00:00:00Z — 86400 s before the epoch.
         let pre_epoch = UNIX_EPOCH - Duration::from_secs(86_400);
-        let mut meta = ArchiveEntry::new("old.txt".to_string(), 0);
+        let mut meta = ArchiveEntry::file("old.txt", 0).build();
         meta.modified = Some(pre_epoch);
 
         let mut options = crate::options::CompressionOptions::default();

@@ -8,7 +8,7 @@
 mod common;
 
 use std::fs;
-use unified_archive::{Archive, ArchiveFormat, CompressionLevel, CompressionOptions};
+use unified_archive::{Archive, CompressionLevel, CompressionOptions, WritableFormat};
 use walkdir::WalkDir;
 
 const ENTRY_COUNT: usize = 512;
@@ -26,7 +26,7 @@ fn entry_contents(index: usize) -> Vec<u8> {
 }
 
 fn build_large_zip_archive(path: &std::path::Path) {
-    let mut options = CompressionOptions::new(ArchiveFormat::Zip);
+    let mut options = CompressionOptions::for_writable(WritableFormat::ZIP);
     options.level = CompressionLevel::Store;
 
     let mut archive = Archive::create(path, options).unwrap();

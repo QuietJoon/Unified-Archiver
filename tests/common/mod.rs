@@ -53,10 +53,14 @@ pub fn cleanup(path: &PathBuf) {
 }
 
 /// Default `CompressionOptions` for tests — Normal level, no encryption, no
-/// splitting, no progress callback. Equivalent to `CompressionOptions::new`.
+/// splitting, no progress callback.
+///
+/// Goes through the checked constructor, so a non-creatable format panics
+/// here instead of building options whose only possible outcome is an error
+/// at the create call. Every caller passes Zip or SevenZip.
 #[allow(dead_code)] // Not every test binary that includes common/mod.rs uses this.
 pub fn default_compression_options(format: ArchiveFormat) -> CompressionOptions {
-    CompressionOptions::new(format)
+    CompressionOptions::try_new(format).expect("test helper is only called with creatable formats")
 }
 
 /// Default `ExtractionOptions` for tests — library defaults with the given

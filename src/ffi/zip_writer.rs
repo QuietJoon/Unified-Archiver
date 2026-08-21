@@ -830,6 +830,7 @@ fn encode_universal_time_extra(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::options::WritableFormat;
     use crate::options::{CompressionLevel, CompressionOptions};
 
     #[test]
@@ -837,7 +838,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("test_create.zip");
 
-        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
         writer
             .add_file_from_data("hello.txt", b"Hello, world!")
@@ -854,7 +855,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("test_multi.zip");
 
-        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
         writer
             .add_file_from_data("file1.txt", b"content 1")
@@ -878,7 +879,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("test_store.zip");
 
-        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
         opts.level = CompressionLevel::Store;
         let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
         writer
@@ -894,7 +895,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("test_empty_file.zip");
 
-        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
         writer.add_file_from_data("empty.txt", b"").unwrap();
         writer.finish().unwrap();
@@ -907,7 +908,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("test_dir.zip");
 
-        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
         writer.add_file_from_data("mydir/", b"").unwrap(); // Directory entry
         writer
@@ -924,7 +925,7 @@ mod tests {
         let path = tmp.path().join("test_drop.zip");
 
         {
-            let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+            let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
             let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
             writer
                 .add_file_from_data("auto.txt", b"auto finish")
@@ -961,7 +962,7 @@ mod tests {
         let path = tmp.path().join("test_zip64_reader.zip");
 
         let content: &[u8] = b"streamed content";
-        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
         writer
             .add_file_from_reader("streamed.txt", &mut &content[..])
@@ -989,7 +990,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("out.zip");
 
-        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
         writer.add_file_from_data("a.txt", b"payload").unwrap();
 
@@ -1011,7 +1012,7 @@ mod tests {
         let test_content = b"Hello from roundtrip test!";
 
         // Write
-        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
         writer
             .add_file_from_data("roundtrip.txt", test_content)
@@ -1038,7 +1039,7 @@ mod tests {
 
         // Under-production: declares 5 bytes, yields 3.
         let path_under = tmp.path().join("under.zip");
-        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut writer = ZipWriter::create(&path_under, &mut opts).unwrap();
         let meta = crate::entry::ArchiveEntry::file("short.txt", 0)
             .size(5)
@@ -1061,7 +1062,7 @@ mod tests {
 
         // Over-production: declares 2 bytes, yields 5.
         let path_over = tmp.path().join("over.zip");
-        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut writer = ZipWriter::create(&path_over, &mut opts).unwrap();
         let meta = crate::entry::ArchiveEntry::file("long.txt", 0)
             .size(2)
@@ -1089,7 +1090,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
 
         let path_under = tmp.path().join("under.zip");
-        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut writer = ZipWriter::create(&path_under, &mut opts).unwrap();
         let err = writer
             .add_file_from_reader_with_size("short.txt", &mut &b"abc"[..], 5)
@@ -1104,7 +1105,7 @@ mod tests {
         }
 
         let path_over = tmp.path().join("over.zip");
-        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut writer = ZipWriter::create(&path_over, &mut opts).unwrap();
         let err = writer
             .add_file_from_reader_with_size("long.txt", &mut &b"abcde"[..], 2)
@@ -1127,7 +1128,7 @@ mod tests {
         let path = tmp.path().join("unknown.zip");
         let content: &[u8] = b"payload of unknown declared length";
 
-        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
         // `ArchiveEntry::file` leaves `size` as `None` unless `.size()` is
         // called, so this exercises the unbounded branch.
@@ -1155,7 +1156,7 @@ mod tests {
         let path = tmp.path().join("test_comment_bound.zip");
         let limit = crate::security::MAX_COMMENT_SIZE as usize;
 
-        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
         writer.add_file_from_data("a.txt", b"payload").unwrap();
 
@@ -1184,7 +1185,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("test_finish_idempotent.zip");
 
-        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
         writer.add_file_from_data("a.txt", b"payload").unwrap();
         writer.finish().unwrap();
@@ -1205,7 +1206,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("test_finish_sticky.zip");
 
-        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut writer = ZipWriter::create(&path, &mut opts).unwrap();
         writer.add_file_from_data("a.txt", b"payload").unwrap();
 

@@ -732,6 +732,7 @@ mod tests {
     use crate::entry::EntryType;
     use crate::format::ArchiveFormat;
     use crate::options::CompressionOptions;
+    use crate::options::WritableFormat;
 
     /// Reopen `path` and assert it holds exactly `expected` as regular
     /// files — same set of archive paths, `EntryType::File` for each, and
@@ -780,7 +781,7 @@ mod tests {
     fn test_create_zip() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("test_create.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let archive = Archive::create(&path, options).unwrap();
         assert_eq!(archive.format(), ArchiveFormat::Zip);
         assert_eq!(archive.mode, ArchiveMode::Write);
@@ -791,7 +792,7 @@ mod tests {
     fn test_create_tar() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("test_create.tar");
-        let options = CompressionOptions::new(ArchiveFormat::Tar);
+        let options = CompressionOptions::for_writable(WritableFormat::TAR);
         let archive = Archive::create(&path, options).unwrap();
         assert_eq!(archive.format(), ArchiveFormat::Tar);
         assert_eq!(archive.mode, ArchiveMode::Write);
@@ -801,7 +802,7 @@ mod tests {
     fn test_create_tar_gz() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("test_create.tar.gz");
-        let options = CompressionOptions::new(ArchiveFormat::TarGzip);
+        let options = CompressionOptions::for_writable(WritableFormat::TAR_GZIP);
         let archive = Archive::create(&path, options).unwrap();
         assert_eq!(archive.format(), ArchiveFormat::TarGzip);
     }
@@ -810,7 +811,7 @@ mod tests {
     fn test_create_tar_bz2() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("test_create.tar.bz2");
-        let options = CompressionOptions::new(ArchiveFormat::TarBzip2);
+        let options = CompressionOptions::for_writable(WritableFormat::TAR_BZIP2);
         let archive = Archive::create(&path, options).unwrap();
         assert_eq!(archive.format(), ArchiveFormat::TarBzip2);
     }
@@ -819,7 +820,7 @@ mod tests {
     fn test_create_tar_xz() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("test_create.tar.xz");
-        let options = CompressionOptions::new(ArchiveFormat::TarXz);
+        let options = CompressionOptions::for_writable(WritableFormat::TAR_XZ);
         let archive = Archive::create(&path, options).unwrap();
         assert_eq!(archive.format(), ArchiveFormat::TarXz);
     }
@@ -830,7 +831,7 @@ mod tests {
     fn test_add_file_from_data_zip() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("test_add.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&path, options).unwrap();
         archive
             .add_file_from_data("hello.txt", b"Hello, World!")
@@ -843,7 +844,7 @@ mod tests {
     fn test_add_file_from_data_tar() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("test_add.tar");
-        let options = CompressionOptions::new(ArchiveFormat::Tar);
+        let options = CompressionOptions::for_writable(WritableFormat::TAR);
         let mut archive = Archive::create(&path, options).unwrap();
         archive
             .add_file_from_data("hello.txt", b"Hello, World!")
@@ -856,7 +857,7 @@ mod tests {
     fn test_add_file_from_data_empty_content() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("test_empty.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&path, options).unwrap();
         archive.add_file_from_data("empty.txt", b"").unwrap();
         archive.finish().unwrap();
@@ -867,7 +868,7 @@ mod tests {
     fn test_add_multiple_files() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("test_multi.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&path, options).unwrap();
         archive
             .add_file_from_data("file1.txt", b"Content 1")
@@ -901,7 +902,7 @@ mod tests {
         std::fs::write(&source, b"Source content").unwrap();
 
         let archive_path = temp.path().join("test_from_path.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&archive_path, options).unwrap();
         archive.add_file_from_path(&source).unwrap();
         archive.finish().unwrap();
@@ -922,7 +923,7 @@ mod tests {
         // does not report a different primary failure per input spelling.
         let temp = tempfile::tempdir().unwrap();
         let archive_path = temp.path().join("read_mode.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut writer = Archive::create(&archive_path, options).unwrap();
         writer.add_file_from_data("a.txt", b"a").unwrap();
         writer.finish().unwrap();
@@ -954,7 +955,7 @@ mod tests {
         std::fs::write(&source, b"Custom path content").unwrap();
 
         let archive_path = temp.path().join("test_custom_path.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&archive_path, options).unwrap();
         archive
             .add_file_from_path_as(&source, "custom/path.txt")
@@ -974,7 +975,7 @@ mod tests {
     fn test_add_directory_zip() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("test_dir.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&path, options).unwrap();
         archive.add_directory("mydir").unwrap();
         archive
@@ -998,7 +999,7 @@ mod tests {
     fn test_add_directory_tar() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("test_dir.tar");
-        let options = CompressionOptions::new(ArchiveFormat::Tar);
+        let options = CompressionOptions::for_writable(WritableFormat::TAR);
         let mut archive = Archive::create(&path, options).unwrap();
         archive.add_directory("mydir").unwrap();
         archive
@@ -1022,7 +1023,7 @@ mod tests {
         // (R0081-0038).
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("dedup_dir.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&path, options).unwrap();
         archive.add_directory("dup").unwrap();
         archive.add_directory("dup").unwrap();
@@ -1054,7 +1055,7 @@ mod tests {
         std::fs::write(src_dir.join("subdir/nested.txt"), b"Nested file").unwrap();
 
         let archive_path = temp.path().join("test_recursive.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&archive_path, options).unwrap();
         archive.add_directory_recursive(&src_dir).unwrap();
         archive.finish().unwrap();
@@ -1128,7 +1129,8 @@ mod tests {
         let source_meta = std::fs::metadata(&nonempty).unwrap();
 
         let archive_path = temp.path().join(format!("dir_metadata.{extension}"));
-        let options = CompressionOptions::new(format);
+        let options =
+            CompressionOptions::try_new(format).expect("both callers pass a creatable format");
         let mut archive = Archive::create(&archive_path, options).unwrap();
         archive.add_directory_recursive(&src_dir).unwrap();
         archive.finish().unwrap();
@@ -1187,7 +1189,7 @@ mod tests {
     fn test_finish_write_mode() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("test_finish.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&path, options).unwrap();
         archive
             .add_file_from_data("test.txt", b"test data")
@@ -1205,7 +1207,7 @@ mod tests {
         let content = b"Hello, roundtrip!";
 
         // Create
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&path, options).unwrap();
         archive.add_file_from_data("greeting.txt", content).unwrap();
         archive.finish().unwrap();
@@ -1227,7 +1229,7 @@ mod tests {
         let path = temp.path().join("roundtrip.tar");
         let content = b"TAR roundtrip content";
 
-        let options = CompressionOptions::new(ArchiveFormat::Tar);
+        let options = CompressionOptions::for_writable(WritableFormat::TAR);
         let mut archive = Archive::create(&path, options).unwrap();
         archive.add_file_from_data("data.txt", content).unwrap();
         archive.finish().unwrap();
@@ -1246,7 +1248,7 @@ mod tests {
     fn test_create_rejects_duplicate_file_path() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("dup_file.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&path, options).unwrap();
         archive.add_file_from_data("dup.txt", b"first").unwrap();
         let err = archive
@@ -1263,7 +1265,7 @@ mod tests {
     fn test_create_rejects_directory_then_file_at_same_path() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("dup_dir_file.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&path, options).unwrap();
         archive.add_directory("collide").unwrap();
         let err = archive
@@ -1280,7 +1282,7 @@ mod tests {
     fn test_create_rejects_file_under_existing_file() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("file_under_file.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&path, options).unwrap();
         archive.add_file_from_data("a.txt", b"leaf").unwrap();
         let err = archive
@@ -1297,7 +1299,7 @@ mod tests {
     fn test_create_accepts_file_under_explicit_directory() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("ok_dir_with_file.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&path, options).unwrap();
         archive.add_directory("nested").unwrap();
         archive
@@ -1321,7 +1323,7 @@ mod tests {
         // collision would slip through on a retry (R0001-0042).
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("undo_keeps_reservations.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&path, options).unwrap();
         archive.add_file_from_data("dir/dup.txt", b"first").unwrap();
 
@@ -1370,7 +1372,7 @@ mod tests {
         // preserved under the R0001-0042 journal).
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("undo_frees_own_keys.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&path, options).unwrap();
         archive.add_file_from_data("leaf", b"leaf").unwrap();
 
@@ -1411,7 +1413,7 @@ mod tests {
         std::os::unix::fs::symlink(src_dir.join("a.txt"), src_dir.join("link.txt")).unwrap();
 
         let archive_path = temp.path().join("recursive_undo.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&archive_path, options).unwrap();
         archive.add_directory_recursive(&src_dir).unwrap_err();
 
@@ -1441,7 +1443,7 @@ mod tests {
     fn test_add_file_from_path_rejects_output_self_ingestion() {
         let temp = tempfile::tempdir().unwrap();
         let archive_path = temp.path().join("self.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&archive_path, options).unwrap();
 
         // The output archive is a real regular file (created via O_EXCL),
@@ -1463,7 +1465,7 @@ mod tests {
     fn test_add_file_from_path_as_rejects_output_self_ingestion() {
         let temp = tempfile::tempdir().unwrap();
         let archive_path = temp.path().join("self_as.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&archive_path, options).unwrap();
 
         let err = archive
@@ -1485,7 +1487,7 @@ mod tests {
         // Destination archive lives inside the very tree being archived,
         // so the recursive walk would otherwise ingest the growing output.
         let archive_path = src_dir.join("out.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&archive_path, options).unwrap();
         let err = archive.add_directory_recursive(&src_dir).unwrap_err();
         let msg = err.to_string();
@@ -1507,7 +1509,7 @@ mod tests {
         std::os::unix::fs::symlink(src_dir.join("a.txt"), src_dir.join("link.txt")).unwrap();
 
         let archive_path = temp.path().join("out.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&archive_path, options).unwrap();
         let err = archive.add_directory_recursive(&src_dir).unwrap_err();
         assert!(
@@ -1545,7 +1547,7 @@ mod tests {
         std::fs::write(src_dir.join("nonempty/child.txt"), b"child").unwrap();
 
         let archive_path = temp.path().join("nonleaf.zip");
-        let options = CompressionOptions::new(ArchiveFormat::Zip);
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
         let mut archive = Archive::create(&archive_path, options).unwrap();
         archive.add_directory_recursive(&src_dir).unwrap();
         archive.finish().unwrap();
@@ -1582,7 +1584,7 @@ mod tests {
         std::fs::write(src_dir.join("z.txt"), b"zulu").unwrap();
 
         let doomed = src_dir.join("z.txt");
-        let mut options = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut options = CompressionOptions::for_writable(WritableFormat::ZIP);
         options.progress = Some(Box::new(move |_processed: u64, _total: Option<u64>| {
             let _ = std::fs::remove_file(&doomed);
             std::ops::ControlFlow::Continue(())
@@ -1615,7 +1617,7 @@ mod tests {
         std::fs::write(src_dir.join("z.txt"), b"zulu").unwrap();
 
         let growing = src_dir.join("z.txt");
-        let mut options = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut options = CompressionOptions::for_writable(WritableFormat::ZIP);
         options.progress = Some(Box::new(move |_processed: u64, _total: Option<u64>| {
             use std::io::Write as _;
             if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&growing) {
@@ -1649,7 +1651,7 @@ mod tests {
         std::fs::write(src_dir.join("a.txt"), b"alpha").unwrap();
 
         let latecomer = src_dir.join("zz_late.txt");
-        let mut options = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut options = CompressionOptions::for_writable(WritableFormat::ZIP);
         options.progress = Some(Box::new(move |_processed: u64, _total: Option<u64>| {
             let _ = std::fs::write(&latecomer, b"created mid-write");
             std::ops::ControlFlow::Continue(())

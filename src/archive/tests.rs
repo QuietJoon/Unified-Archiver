@@ -1,4 +1,5 @@
 use super::*;
+use crate::options::WritableFormat;
 use crate::test_utils::fixture;
 
 // ── ArchiveMode tests ──
@@ -450,7 +451,7 @@ fn test_drop_write_mode_no_panic() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("test_drop.zip");
     {
-        let options = crate::options::CompressionOptions::new(ArchiveFormat::Zip);
+        let options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
         let _archive = Archive::create(&path, options).unwrap();
         // archive dropped in Write mode - should not panic
     }

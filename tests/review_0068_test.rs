@@ -31,7 +31,7 @@ use std::io::{Read, Write};
 
 use unified_archive::{
     Archive, ArchiveError, ArchiveFormat, CompressionLevel, CompressionOptions, ExtractionOptions,
-    StreamBound,
+    StreamBound, WritableFormat,
 };
 
 // ──────────────────────────────────────────────────────────────────────
@@ -72,8 +72,11 @@ fn r0068_0078_recursive_create_tar() {
     seed_recursive_source(&temp);
     let archive_path = temp.join("rec.tar");
 
-    let mut archive =
-        Archive::create(&archive_path, CompressionOptions::new(ArchiveFormat::Tar)).unwrap();
+    let mut archive = Archive::create(
+        &archive_path,
+        CompressionOptions::for_writable(WritableFormat::TAR),
+    )
+    .unwrap();
     archive
         .add_directory_recursive(temp.join("rec_src"))
         .unwrap();
@@ -91,7 +94,7 @@ fn r0068_0078_recursive_create_tar_gzip() {
 
     let mut archive = Archive::create(
         &archive_path,
-        CompressionOptions::new(ArchiveFormat::TarGzip),
+        CompressionOptions::for_writable(WritableFormat::TAR_GZIP),
     )
     .unwrap();
     archive
@@ -111,8 +114,11 @@ fn r0068_0079_recursive_create_zip_root_preserving() {
     seed_recursive_source(&temp);
     let archive_path = temp.join("rec.zip");
 
-    let mut archive =
-        Archive::create(&archive_path, CompressionOptions::new(ArchiveFormat::Zip)).unwrap();
+    let mut archive = Archive::create(
+        &archive_path,
+        CompressionOptions::for_writable(WritableFormat::ZIP),
+    )
+    .unwrap();
     archive
         .add_directory_recursive(temp.join("rec_src"))
         .unwrap();
@@ -193,8 +199,11 @@ fn r0068_0081_open_at_offset_preserves_caller_path() {
     // offset and assert that `Archive::path()` still reports the original
     // file, not the staging tempfile.
     let payload_path = temp.join("payload.zip");
-    let mut payload =
-        Archive::create(&payload_path, CompressionOptions::new(ArchiveFormat::Zip)).unwrap();
+    let mut payload = Archive::create(
+        &payload_path,
+        CompressionOptions::for_writable(WritableFormat::ZIP),
+    )
+    .unwrap();
     payload.add_file_from_data("hello.txt", b"world").unwrap();
     payload.finish().unwrap();
     let payload_bytes = fs::read(&payload_path).expect("read payload");
@@ -237,8 +246,11 @@ fn r0068_0082_multipart_detection_surfaces_dir_io_error() {
 
     // Place a real archive inside the locked directory.
     let archive_path = locked_dir.join("archive.zip");
-    let mut a =
-        Archive::create(&archive_path, CompressionOptions::new(ArchiveFormat::Zip)).unwrap();
+    let mut a = Archive::create(
+        &archive_path,
+        CompressionOptions::for_writable(WritableFormat::ZIP),
+    )
+    .unwrap();
     a.add_file_from_data("x.txt", b"x").unwrap();
     a.finish().unwrap();
 
@@ -330,8 +342,11 @@ fn r0068_0084_empty_directory_round_trip_tar() {
     fs::create_dir_all(src.join("only_an_empty_dir")).unwrap();
     let archive_path = temp.join("empty.tar");
 
-    let mut archive =
-        Archive::create(&archive_path, CompressionOptions::new(ArchiveFormat::Tar)).unwrap();
+    let mut archive = Archive::create(
+        &archive_path,
+        CompressionOptions::for_writable(WritableFormat::TAR),
+    )
+    .unwrap();
     archive.add_directory_recursive(&src).unwrap();
     archive.finish().unwrap();
 
@@ -365,8 +380,11 @@ fn r0068_0085_recursive_create_rejects_symlinks_libarchive() {
     symlink("real.txt", src.join("link.txt")).unwrap();
 
     let archive_path = temp.join("rejected.tar");
-    let mut archive =
-        Archive::create(&archive_path, CompressionOptions::new(ArchiveFormat::Tar)).unwrap();
+    let mut archive = Archive::create(
+        &archive_path,
+        CompressionOptions::for_writable(WritableFormat::TAR),
+    )
+    .unwrap();
     let result = archive.add_directory_recursive(&src);
     assert!(
         matches!(
@@ -391,8 +409,11 @@ fn r0068_0085_recursive_create_rejects_symlinks_zip() {
     symlink("real.txt", src.join("link.txt")).unwrap();
 
     let archive_path = temp.join("rejected.zip");
-    let mut archive =
-        Archive::create(&archive_path, CompressionOptions::new(ArchiveFormat::Zip)).unwrap();
+    let mut archive = Archive::create(
+        &archive_path,
+        CompressionOptions::for_writable(WritableFormat::ZIP),
+    )
+    .unwrap();
     let result = archive.add_directory_recursive(&src);
     assert!(
         matches!(
@@ -413,8 +434,11 @@ fn r0068_0085_recursive_create_rejects_symlinks_zip() {
 fn r0068_0086_commit_changes_rejects_added_vs_added_dup() {
     let temp = common::temp_test_dir();
     let archive_path = temp.join("dup.zip");
-    let mut creator =
-        Archive::create(&archive_path, CompressionOptions::new(ArchiveFormat::Zip)).unwrap();
+    let mut creator = Archive::create(
+        &archive_path,
+        CompressionOptions::for_writable(WritableFormat::ZIP),
+    )
+    .unwrap();
     creator.add_file_from_data("seed.txt", b"seed").unwrap();
     creator.finish().unwrap();
 
@@ -436,8 +460,11 @@ fn r0068_0086_commit_changes_rejects_added_vs_added_dup() {
 fn r0068_0086_commit_changes_rejects_retained_vs_added_dup() {
     let temp = common::temp_test_dir();
     let archive_path = temp.join("dup_retained.zip");
-    let mut creator =
-        Archive::create(&archive_path, CompressionOptions::new(ArchiveFormat::Zip)).unwrap();
+    let mut creator = Archive::create(
+        &archive_path,
+        CompressionOptions::for_writable(WritableFormat::ZIP),
+    )
+    .unwrap();
     creator
         .add_file_from_data("collision.txt", b"original")
         .unwrap();
@@ -468,8 +495,11 @@ fn r0068_0087_commit_changes_refuses_to_clobber_existing_backup() {
 
     let temp = common::temp_test_dir();
     let archive_path = temp.join("backup_clobber.zip");
-    let mut creator =
-        Archive::create(&archive_path, CompressionOptions::new(ArchiveFormat::Zip)).unwrap();
+    let mut creator = Archive::create(
+        &archive_path,
+        CompressionOptions::for_writable(WritableFormat::ZIP),
+    )
+    .unwrap();
     creator.add_file_from_data("seed.txt", b"seed").unwrap();
     creator.finish().unwrap();
 
@@ -504,7 +534,7 @@ fn r0068_0087_commit_changes_refuses_to_clobber_existing_backup() {
 #[test]
 fn r0068_0088_strip_progress_drops_callback_explicitly() {
     use std::ops::ControlFlow;
-    let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+    let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
     opts.level = CompressionLevel::Fast;
     opts.progress = Some(Box::new(|_processed: u64, _total: Option<u64>| {
         ControlFlow::Continue(())
@@ -529,7 +559,7 @@ fn r0068_0088_strip_progress_drops_callback_explicitly() {
 #[test]
 fn r0068_0089_compression_ratio_alias_matches_fraction() {
     use unified_archive::ArchiveEntry;
-    let mut entry = ArchiveEntry::new("data.bin".into(), 0);
+    let mut entry = ArchiveEntry::file("data.bin", 0).build();
     entry.size = Some(1000);
     entry.compressed_size = Some(250);
 

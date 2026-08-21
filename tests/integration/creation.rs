@@ -3,7 +3,9 @@
 //! Tests the creation API for creating new archives from files and data.
 
 use std::fs;
-use unified_archive::{Archive, ArchiveError, ArchiveFormat, CompressionLevel, CompressionOptions};
+use unified_archive::{
+    Archive, ArchiveError, ArchiveFormat, CompressionLevel, CompressionOptions, WritableFormat,
+};
 
 #[test]
 fn test_format_capability_check() {
@@ -11,24 +13,29 @@ fn test_format_capability_check() {
 
     let result = Archive::create(
         temp.path().join("test.zip"),
-        CompressionOptions::new(ArchiveFormat::Zip),
+        CompressionOptions::for_writable(WritableFormat::ZIP),
     );
     assert!(result.is_ok());
 
     let result = Archive::create(
         temp.path().join("test.tar"),
-        CompressionOptions::new(ArchiveFormat::Tar),
+        CompressionOptions::for_writable(WritableFormat::TAR),
     );
     assert!(result.is_ok());
 
     let result = Archive::create(
         temp.path().join("test.tar.gz"),
-        CompressionOptions::new(ArchiveFormat::TarGzip),
+        CompressionOptions::for_writable(WritableFormat::TAR_GZIP),
     );
     assert!(result.is_ok());
 }
 
+/// Deliberately the deprecated constructor. The subject of this test is that
+/// a non-creatable format reaches `Archive::create` and is rejected *there*;
+/// `WritableFormat` cannot express `Rar` at all and `try_new` fails at
+/// construction, so either replacement would delete what is under test.
 #[test]
+#[allow(deprecated)]
 fn test_unsupported_format_rejected() {
     let temp = tempfile::tempdir().unwrap();
     let rar_opts = CompressionOptions::new(ArchiveFormat::Rar);
@@ -59,7 +66,7 @@ fn test_existing_file_rejected() {
     fs::write(&test_file, b"existing").unwrap();
 
     // Try to create archive with same name — should fail
-    let opts = CompressionOptions::new(ArchiveFormat::Zip);
+    let opts = CompressionOptions::for_writable(WritableFormat::ZIP);
     let result = Archive::create(&test_file, opts);
     assert!(result.is_err());
 }
@@ -69,7 +76,7 @@ fn test_add_file_from_data() {
     let temp = tempfile::tempdir().unwrap();
     let archive_path = temp.path().join("test_data.zip");
 
-    let opts = CompressionOptions::new(ArchiveFormat::Zip);
+    let opts = CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut creator = Archive::create(&archive_path, opts).unwrap();
 
     creator
@@ -93,7 +100,7 @@ fn test_add_file_from_path() {
     fs::write(&source, b"test content").unwrap();
 
     let archive_path = temp.path().join("test_path.zip");
-    let opts = CompressionOptions::new(ArchiveFormat::Zip);
+    let opts = CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut creator = Archive::create(&archive_path, opts).unwrap();
 
     creator.add_file_from_path(&source).unwrap();
@@ -108,7 +115,7 @@ fn test_add_file_from_path() {
 fn test_add_file_from_path_nonexistent() {
     let temp = tempfile::tempdir().unwrap();
     let archive_path = temp.path().join("test.zip");
-    let opts = CompressionOptions::new(ArchiveFormat::Zip);
+    let opts = CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut creator = Archive::create(&archive_path, opts).unwrap();
 
     assert!(creator.add_file_from_path("/nonexistent/file.txt").is_err());
@@ -121,7 +128,7 @@ fn test_add_file_from_path_as() {
     fs::write(&source, b"test content").unwrap();
 
     let archive_path = temp.path().join("test_path_as.zip");
-    let opts = CompressionOptions::new(ArchiveFormat::Zip);
+    let opts = CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut creator = Archive::create(&archive_path, opts).unwrap();
 
     creator
@@ -140,7 +147,7 @@ fn test_add_directory() {
     let temp = tempfile::tempdir().unwrap();
     let archive_path = temp.path().join("test_dir.zip");
 
-    let opts = CompressionOptions::new(ArchiveFormat::Zip);
+    let opts = CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut creator = Archive::create(&archive_path, opts).unwrap();
 
     creator.add_directory("folder1").unwrap();
@@ -165,7 +172,7 @@ fn test_add_directory_recursive() {
     fs::write(src_dir.join("subdir/file3.txt"), b"content 3").unwrap();
 
     let archive_path = temp.path().join("test_recursive.zip");
-    let opts = CompressionOptions::new(ArchiveFormat::Zip);
+    let opts = CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut creator = Archive::create(&archive_path, opts).unwrap();
 
     creator.add_directory_recursive(&src_dir).unwrap();
@@ -193,7 +200,7 @@ fn test_add_directory_recursive() {
 fn test_add_directory_recursive_nonexistent() {
     let temp = tempfile::tempdir().unwrap();
     let archive_path = temp.path().join("test.zip");
-    let opts = CompressionOptions::new(ArchiveFormat::Zip);
+    let opts = CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut creator = Archive::create(&archive_path, opts).unwrap();
 
     assert!(
@@ -208,7 +215,7 @@ fn test_empty_archive_finish() {
     let temp = tempfile::tempdir().unwrap();
     let archive_path = temp.path().join("empty.zip");
 
-    let opts = CompressionOptions::new(ArchiveFormat::Zip);
+    let opts = CompressionOptions::for_writable(WritableFormat::ZIP);
     let creator = Archive::create(&archive_path, opts).unwrap();
 
     // Empty archives are valid — finish should succeed
@@ -230,7 +237,7 @@ fn test_compression_levels() {
         let temp = tempfile::tempdir().unwrap();
         let archive_path = temp.path().join("test.zip");
 
-        let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+        let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
         opts.level = level;
 
         let mut creator = Archive::create(&archive_path, opts).unwrap();
@@ -256,7 +263,7 @@ fn test_finish_succeeds() {
     let temp = tempfile::tempdir().unwrap();
     let archive_path = temp.path().join("test_finish.zip");
 
-    let opts = CompressionOptions::new(ArchiveFormat::Zip);
+    let opts = CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut creator = Archive::create(&archive_path, opts).unwrap();
     creator.add_file_from_data("test.txt", b"content").unwrap();
 
@@ -282,7 +289,11 @@ fn test_create_compressed_tar_codec_roundtrip() {
         let temp = tempfile::tempdir().unwrap();
         let archive_path = temp.path().join(file_name);
 
-        let mut creator = Archive::create(&archive_path, CompressionOptions::new(format)).unwrap();
+        let mut creator = Archive::create(
+            &archive_path,
+            CompressionOptions::try_new(format).expect("every format in this table is creatable"),
+        )
+        .unwrap();
         creator
             .add_file_from_data("member.txt", b"compressed tar codec roundtrip")
             .unwrap();
@@ -315,7 +326,7 @@ fn test_create_tar_zst_compression_levels() {
         let temp = tempfile::tempdir().unwrap();
         let archive_path = temp.path().join("levels.tar.zst");
 
-        let mut opts = CompressionOptions::new(ArchiveFormat::TarZst);
+        let mut opts = CompressionOptions::for_writable(WritableFormat::TAR_ZST);
         opts.level = level;
 
         let mut creator = Archive::create(&archive_path, opts).unwrap();

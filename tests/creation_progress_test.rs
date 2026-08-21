@@ -5,7 +5,7 @@
 
 use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex};
-use unified_archive::{Archive, ArchiveFormat, CompressionOptions};
+use unified_archive::{Archive, CompressionOptions, WritableFormat};
 
 #[derive(Default)]
 struct Recorder {
@@ -29,7 +29,7 @@ fn progress_callback_invoked_once_per_entry_zip() {
     let path = temp.path().join("progress.zip");
 
     let recorder = Arc::new(Mutex::new(Recorder::default()));
-    let mut options = CompressionOptions::new(ArchiveFormat::Zip);
+    let mut options = CompressionOptions::for_writable(WritableFormat::ZIP);
     options.progress = Some(Recorder::callback(Arc::clone(&recorder)));
 
     let mut archive = Archive::create(&path, options).unwrap();
@@ -53,7 +53,7 @@ fn progress_callback_invoked_once_per_entry_tar() {
     let path = temp.path().join("progress.tar");
 
     let recorder = Arc::new(Mutex::new(Recorder::default()));
-    let mut options = CompressionOptions::new(ArchiveFormat::Tar);
+    let mut options = CompressionOptions::for_writable(WritableFormat::TAR);
     options.progress = Some(Recorder::callback(Arc::clone(&recorder)));
 
     let mut archive = Archive::create(&path, options).unwrap();
@@ -82,7 +82,7 @@ fn progress_callback_break_cancels_creation_zip() {
     let count = Arc::new(Mutex::new(0usize));
     let count_clone = Arc::clone(&count);
 
-    let mut options = CompressionOptions::new(ArchiveFormat::Zip);
+    let mut options = CompressionOptions::for_writable(WritableFormat::ZIP);
     options.progress = Some(Box::new(
         move |_processed: u64, _total: Option<u64>| -> ControlFlow<()> {
             let mut c = count_clone.lock().unwrap();

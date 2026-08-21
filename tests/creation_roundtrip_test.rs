@@ -3,7 +3,9 @@
 //! These tests create archives and then extract them to verify correctness.
 
 use std::fs;
-use unified_archive::{Archive, ArchiveFormat, CompressionLevel, CompressionOptions};
+use unified_archive::{
+    Archive, ArchiveFormat, CompressionLevel, CompressionOptions, WritableFormat,
+};
 
 #[path = "common/mod.rs"]
 mod common;
@@ -17,7 +19,7 @@ fn test_create_and_extract_zip() {
 
     // Create ZIP archive
     let archive_path = temp.join("test.zip");
-    let mut options = CompressionOptions::new(ArchiveFormat::Zip);
+    let mut options = CompressionOptions::for_writable(WritableFormat::ZIP);
     options.level = CompressionLevel::Normal;
 
     let mut creator = Archive::create(&archive_path, options).unwrap();
@@ -55,7 +57,7 @@ fn test_create_and_extract_targz() {
 
     // Create TAR.GZ archive
     let archive_path = temp.join("test.tar.gz");
-    let mut options = CompressionOptions::new(ArchiveFormat::TarGzip);
+    let mut options = CompressionOptions::for_writable(WritableFormat::TAR_GZIP);
     options.level = CompressionLevel::Fast;
 
     let mut creator = Archive::create(&archive_path, options).unwrap();

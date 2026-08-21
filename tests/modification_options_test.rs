@@ -11,14 +11,14 @@
 //! earlier wording pointed readers at, was resolved 2026-04-30.
 
 use std::path::PathBuf;
-use unified_archive::{Archive, ArchiveFormat, CompressionOptions, ModificationOptions};
+use unified_archive::{Archive, CompressionOptions, ModificationOptions, WritableFormat};
 
 #[path = "common/mod.rs"]
 mod common;
 
 fn fresh_zip(dir: &std::path::Path, name: &str) -> PathBuf {
     let path = dir.join(name);
-    let mut opts = CompressionOptions::new(ArchiveFormat::Zip);
+    let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&path, std::mem::take(&mut opts)).unwrap();
     archive.add_file_from_data("a.txt", b"original A").unwrap();
     archive.add_file_from_data("b.txt", b"original B").unwrap();
@@ -180,7 +180,7 @@ fn commit_rejects_retained_vs_added_duplicate_path() {
 fn compression_fraction_and_expansion_ratio_are_inverses() {
     use unified_archive::ArchiveEntry;
 
-    let mut entry = ArchiveEntry::new("data.bin".to_string(), 0);
+    let mut entry = ArchiveEntry::file("data.bin", 0).build();
     entry.size = Some(1000);
     entry.compressed_size = Some(250);
 
@@ -201,7 +201,7 @@ fn compression_fraction_and_expansion_ratio_are_inverses() {
 fn expansion_ratio_handles_zero_compressed_size() {
     use unified_archive::ArchiveEntry;
 
-    let mut entry = ArchiveEntry::new("empty.bin".to_string(), 0);
+    let mut entry = ArchiveEntry::file("empty.bin", 0).build();
     entry.size = Some(100);
     entry.compressed_size = Some(0);
     assert!(entry.expansion_ratio().is_none());

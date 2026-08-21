@@ -818,7 +818,7 @@ unsafe fn parse_entry(
     // and manifest-digest paths walk content on demand
     // (`Archive::validate_integrity`, `calculate_manifest_digest`).
 
-    let mut arch_entry = ArchiveEntry::new(path, 0);
+    let mut arch_entry = ArchiveEntry::file(path, 0).build();
     arch_entry.entry_type = entry_type;
     arch_entry.size = size;
     arch_entry.compressed_size = None; // libarchive doesn't expose this easily

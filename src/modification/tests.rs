@@ -1,4 +1,5 @@
 use super::*;
+use crate::options::WritableFormat;
 use crate::test_utils::fixture;
 
 /// Copy a fixture into a freshly-named tempfile so parallel tests each
@@ -372,7 +373,7 @@ fn test_commit_changes_no_modifications_succeeds() {
     let test_path = temp.path().join("test_commit_noop.zip");
 
     // Create a valid archive first
-    let options = crate::options::CompressionOptions::new(ArchiveFormat::Zip);
+    let options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&test_path, options).unwrap();
     archive.add_file_from_data("file.txt", b"content").unwrap();
     archive.finish().unwrap();
@@ -389,7 +390,7 @@ fn test_commit_changes_add_entry_roundtrip() {
     let temp = tempfile::tempdir().unwrap();
     let test_path = temp.path().join("test_commit_add.zip");
 
-    let options = crate::options::CompressionOptions::new(ArchiveFormat::Zip);
+    let options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&test_path, options).unwrap();
     archive
         .add_file_from_data("original.txt", b"original")
@@ -418,7 +419,7 @@ fn test_commit_changes_aborts_on_path_identity_change() {
     let archive_path = temp.path().join("identity.zip");
 
     // The archive this modify session will lock.
-    let options = crate::options::CompressionOptions::new(ArchiveFormat::Zip);
+    let options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&archive_path, options).unwrap();
     archive
         .add_file_from_data("original.txt", b"original")
@@ -427,7 +428,7 @@ fn test_commit_changes_aborts_on_path_identity_change() {
 
     // A valid but unrelated ZIP to impersonate the pathname after the swap.
     let impostor_src = temp.path().join("impostor.zip");
-    let imp_options = crate::options::CompressionOptions::new(ArchiveFormat::Zip);
+    let imp_options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut impostor = Archive::create(&impostor_src, imp_options).unwrap();
     impostor
         .add_file_from_data("impostor.txt", b"do not touch")
@@ -463,7 +464,7 @@ fn test_commit_changes_remove_entry_roundtrip() {
     let temp = tempfile::tempdir().unwrap();
     let test_path = temp.path().join("test_commit_remove.zip");
 
-    let options = crate::options::CompressionOptions::new(ArchiveFormat::Zip);
+    let options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&test_path, options).unwrap();
     archive.add_file_from_data("keep.txt", b"keep").unwrap();
     archive.add_file_from_data("remove.txt", b"remove").unwrap();
@@ -489,7 +490,7 @@ fn test_commit_changes_rejects_file_under_existing_file() {
     // before any temp archive is written.
     let temp = tempfile::tempdir().unwrap();
     let test_path = temp.path().join("conflict_file_under_file.zip");
-    let options = crate::options::CompressionOptions::new(ArchiveFormat::Zip);
+    let options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&test_path, options).unwrap();
     archive.add_file_from_data("a.txt", b"leaf file").unwrap();
     archive.finish().unwrap();
@@ -511,7 +512,7 @@ fn test_commit_changes_rejects_directory_then_file_at_same_path() {
     // file the other is a directory) must fail.
     let temp = tempfile::tempdir().unwrap();
     let test_path = temp.path().join("conflict_dir_vs_file.zip");
-    let options = crate::options::CompressionOptions::new(ArchiveFormat::Zip);
+    let options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&test_path, options).unwrap();
     archive.add_file_from_data("seed.txt", b"seed").unwrap();
     archive.finish().unwrap();
@@ -530,7 +531,7 @@ fn test_commit_changes_accepts_file_under_added_directory() {
     // path the directory entry claims.
     let temp = tempfile::tempdir().unwrap();
     let test_path = temp.path().join("ok_dir_with_file.zip");
-    let options = crate::options::CompressionOptions::new(ArchiveFormat::Zip);
+    let options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&test_path, options).unwrap();
     archive.add_file_from_data("seed.txt", b"seed").unwrap();
     archive.finish().unwrap();
@@ -553,7 +554,7 @@ fn test_add_entry_from_path_round_trip_zip() {
     let payload_bytes = b"streamed-from-disk";
     std::fs::write(&payload_path, payload_bytes).unwrap();
 
-    let options = crate::options::CompressionOptions::new(ArchiveFormat::Zip);
+    let options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&archive_path, options).unwrap();
     archive.add_file_from_data("seed.txt", b"seed").unwrap();
     archive.finish().unwrap();
@@ -574,7 +575,7 @@ fn test_add_entry_from_reader_with_size_zip() {
     let temp = tempfile::tempdir().unwrap();
     let archive_path = temp.path().join("from_reader.zip");
 
-    let options = crate::options::CompressionOptions::new(ArchiveFormat::Zip);
+    let options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&archive_path, options).unwrap();
     archive.add_file_from_data("seed.txt", b"seed").unwrap();
     archive.finish().unwrap();
@@ -602,7 +603,7 @@ fn test_add_entry_from_reader_unknown_size_zip() {
     let temp = tempfile::tempdir().unwrap();
     let archive_path = temp.path().join("from_reader_unknown.zip");
 
-    let options = crate::options::CompressionOptions::new(ArchiveFormat::Zip);
+    let options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&archive_path, options).unwrap();
     archive.add_file_from_data("seed.txt", b"seed").unwrap();
     archive.finish().unwrap();
@@ -627,7 +628,7 @@ fn test_replace_entry_from_path_swaps_payload() {
     let payload_path = temp.path().join("new_payload.bin");
     std::fs::write(&payload_path, b"new-content-from-disk").unwrap();
 
-    let options = crate::options::CompressionOptions::new(ArchiveFormat::Zip);
+    let options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&archive_path, options).unwrap();
     archive
         .add_file_from_data("target.bin", b"old-content")
@@ -651,13 +652,15 @@ fn test_replace_entry_from_path_swaps_payload() {
 fn test_validate_pending_commit_rejects_format_override_mismatch() {
     let temp = tempfile::tempdir().unwrap();
     let test_path = temp.path().join("preflight_format_mismatch.zip");
-    let options = crate::options::CompressionOptions::new(ArchiveFormat::Zip);
+    let options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&test_path, options).unwrap();
     archive.add_file_from_data("seed.txt", b"seed").unwrap();
     archive.finish().unwrap();
 
     let mut mod_opts = ModificationOptions::new();
-    mod_opts.compression = Some(crate::options::CompressionOptions::new(ArchiveFormat::Tar));
+    mod_opts.compression = Some(crate::options::CompressionOptions::for_writable(
+        WritableFormat::TAR,
+    ));
     let mut archive = Archive::modify_with_options(&test_path, mod_opts).unwrap();
     archive.add_entry("added.txt", b"added").unwrap();
 
@@ -676,12 +679,12 @@ fn test_validate_pending_commit_rejects_format_override_mismatch() {
 fn test_validate_pending_commit_rejects_password_in_options() {
     let temp = tempfile::tempdir().unwrap();
     let test_path = temp.path().join("preflight_password.zip");
-    let options = crate::options::CompressionOptions::new(ArchiveFormat::Zip);
+    let options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&test_path, options).unwrap();
     archive.add_file_from_data("seed.txt", b"seed").unwrap();
     archive.finish().unwrap();
 
-    let mut compression = crate::options::CompressionOptions::new(ArchiveFormat::Zip);
+    let mut compression = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
     compression.password = Some("secret".to_string().into());
     let mut mod_opts = ModificationOptions::new();
     mod_opts.compression = Some(compression);
@@ -802,7 +805,7 @@ fn test_commit_changes_preserves_archive_file_mode() {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir().unwrap();
     let test_path = temp.path().join("private.zip");
-    let options = crate::options::CompressionOptions::new(ArchiveFormat::Zip);
+    let options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&test_path, options).unwrap();
     archive.add_file_from_data("seed.txt", b"seed").unwrap();
     archive.finish().unwrap();
@@ -911,7 +914,7 @@ fn test_commit_changes_emits_duplicate_directory_once() {
     // (R0081-0038).
     let temp = tempfile::tempdir().unwrap();
     let archive_path = temp.path().join("dup_dir.zip");
-    let options = crate::options::CompressionOptions::new(ArchiveFormat::Zip);
+    let options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(&archive_path, options).unwrap();
     archive.add_file_from_data("seed.txt", b"seed").unwrap();
     archive.finish().unwrap();

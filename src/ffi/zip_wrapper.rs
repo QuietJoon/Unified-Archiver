@@ -805,7 +805,7 @@ impl ZipArchive {
         // restored on disk can never disagree.
         let times = zip_entry_times(zip_file);
 
-        let mut entry = ArchiveEntry::new(path, 0);
+        let mut entry = ArchiveEntry::file(path, 0).build();
         entry.entry_type = entry_type;
         entry.size = size;
         entry.compressed_size = compressed_size;

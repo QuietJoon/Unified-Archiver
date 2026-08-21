@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 /// Create a test ZIP using the crate's own creation API. Hermetic: no
 /// dependency on an external `zip` CLI or `which` probe (R0065-0014/0015).
 fn create_test_zip(path: &Path, content: &str) -> std::io::Result<()> {
-    use unified_archive::{Archive, CompressionOptions};
-    let options = CompressionOptions::new(unified_archive::ArchiveFormat::Zip);
+    use unified_archive::{Archive, CompressionOptions, WritableFormat};
+    let options = CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut archive = Archive::create(path, options)
         .map_err(|e| std::io::Error::other(format!("Archive::create: {e}")))?;
     archive

@@ -38,7 +38,7 @@
 //! to silence a failure: a failure here means the payload walk regressed.
 
 use std::time::Instant;
-use unified_archive::{Archive, ArchiveFormat, CompressionOptions};
+use unified_archive::{Archive, CompressionOptions, WritableFormat};
 
 /// Entry count. Large enough that a quadratic walk is unmissable (the
 /// pre-fix ratio scaled with it), small enough that the linear walk stays
@@ -50,7 +50,7 @@ fn manifest_digest_does_not_reopen_archive_per_entry() {
     let dir = tempfile::tempdir().expect("temp dir");
     let archive_path = dir.path().join("big.tar.gz");
     {
-        let opts = CompressionOptions::new(ArchiveFormat::TarGzip);
+        let opts = CompressionOptions::for_writable(WritableFormat::TAR_GZIP);
         let mut a = Archive::create(&archive_path, opts).unwrap();
         for i in 0..ENTRIES {
             a.add_file_from_data(&format!("file_{i:04}.txt"), b"x")

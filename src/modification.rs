@@ -55,7 +55,7 @@ pub struct ModificationOptions {
     /// keep the source's container format — `commit_changes()` rejects an
     /// override whose `format` field disagrees with the archive's detected
     /// format rather than silently substituting either side, so a stray
-    /// `CompressionOptions::new(ArchiveFormat::Tar)` cannot replace a ZIP
+    /// `CompressionOptions::for_writable(WritableFormat::TAR)` cannot replace a ZIP
     /// container by accident (R0071-0002).
     pub compression: Option<crate::options::CompressionOptions>,
 }
@@ -885,8 +885,13 @@ impl Archive {
             None => {
                 // Mirror the defaults `commit_changes` builds so the
                 // dry-run stays a full preflight even if a format's
-                // default options ever stop validating.
-                crate::options::CompressionOptions::new(self.format).validate_for_format()?;
+                // default options ever stop validating. `validate_for_format`
+                // is kept rather than folded into `try_new`: `try_new` checks
+                // creatability only, while this checks creatability, password
+                // and split_size, which is the "even if the defaults ever stop
+                // validating" part. `try_new` cannot fail here — only Zip and
+                // SevenZip are modifiable and both are creatable.
+                crate::options::CompressionOptions::try_new(self.format)?.validate_for_format()?;
             }
         }
 
@@ -1161,10 +1166,12 @@ impl Archive {
             // `take()` lets us move the single owned `CompressionOptions`
             // (progress callback and all) into the new archive; cloning
             // would have silently dropped the callback.
-            let options = mod_options
-                .compression
-                .take()
-                .unwrap_or_else(|| crate::options::CompressionOptions::new(self.format));
+            let options = match mod_options.compression.take() {
+                Some(supplied) => supplied,
+                // `try_new` cannot fail here: only Zip and SevenZip are
+                // modifiable, and both are creatable.
+                None => crate::options::CompressionOptions::try_new(self.format)?,
+            };
 
             // R0071-0002: a modify-mode rewrite must keep the source's
             // container format — see `check_rewrite_format_override`,
@@ -1983,7 +1990,7 @@ pub(crate) fn record_dir(
 /// the source's container format, so a caller-supplied
 /// `ModificationOptions.compression` whose `format` disagrees is
 /// refused rather than silently swapping the container — otherwise
-/// modifying a ZIP with `CompressionOptions::new(ArchiveFormat::Tar)`
+/// modifying a ZIP with `CompressionOptions::for_writable(WritableFormat::TAR)`
 /// would write a TAR over the original path and call it an in-place
 /// edit. Shared between `commit_changes`'s write path and
 /// `validate_pending_commit`'s dry-run (R0079-0014) so the two stay
@@ -1998,7 +2005,7 @@ fn check_rewrite_format_override(
             format!(
                 "ModificationOptions.compression.format ({:?}) does not match the archive's format ({:?}); \
                  a modify-mode rewrite cannot change the container format. \
-                 Use CompressionOptions::new(archive.format()) and adjust the supported rewrite options (level, progress) only.",
+                 Use CompressionOptions::try_new(archive.format())? and adjust the supported rewrite options (level, progress) only.",
                 override_format, archive_format
             ),
         ));
@@ -2180,6 +2187,7 @@ mod tests;
 mod commit_warning_and_cleanup_tests {
     use super::{Archive, ArchiveError, buffered_ingest_reader};
     use crate::error::{ArchiveWarning, EntrySkipReason, UnsupportedEntryKind};
+    use crate::options::WritableFormat;
     use std::io::Write;
 
     /// A ZIP carrying one regular file and one symlink, plus a
@@ -2346,7 +2354,7 @@ mod commit_warning_and_cleanup_tests {
         let out = temp.path().join("buffered.zip");
         let mut archive = Archive::create(
             &out,
-            crate::options::CompressionOptions::new(super::ArchiveFormat::Zip),
+            crate::options::CompressionOptions::for_writable(WritableFormat::ZIP),
         )
         .unwrap();
 

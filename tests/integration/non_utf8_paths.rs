@@ -9,7 +9,7 @@
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
-use unified_archive::{Archive, ArchiveFormat, CompressionOptions};
+use unified_archive::{Archive, CompressionOptions, WritableFormat};
 
 fn temp_dir() -> PathBuf {
     std::env::temp_dir()
@@ -90,7 +90,7 @@ fn libarchive_path_roundtrips_through_non_utf8_archive_name() {
     let archive_path = temp_dir().join(&archive_name);
     cleanup(&archive_path);
 
-    let opts = CompressionOptions::new(ArchiveFormat::Tar);
+    let opts = CompressionOptions::for_writable(WritableFormat::TAR);
     let mut a = Archive::create(&archive_path, opts).unwrap();
     a.add_file_from_data("hello.txt", b"hello").unwrap();
     a.finish().unwrap();
@@ -176,7 +176,7 @@ fn add_file_from_path_rejects_non_utf8_filename_loudly() {
     std::fs::write(&src_file, b"hello").unwrap();
 
     let archive_path = dir.join("out.zip");
-    let opts = unified_archive::CompressionOptions::new(unified_archive::ArchiveFormat::Zip);
+    let opts = unified_archive::CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut a = Archive::create(&archive_path, opts).unwrap();
     let result = a.add_file_from_path(&src_file);
 
@@ -216,7 +216,7 @@ fn add_file_from_path_as_accepts_non_utf8_source_with_explicit_name() {
     std::fs::write(&src_file, b"hello").unwrap();
 
     let archive_path = dir.join("out.zip");
-    let opts = unified_archive::CompressionOptions::new(unified_archive::ArchiveFormat::Zip);
+    let opts = unified_archive::CompressionOptions::for_writable(WritableFormat::ZIP);
     let mut a = Archive::create(&archive_path, opts).unwrap();
     a.add_file_from_path_as(&src_file, "explicit_name.txt")
         .unwrap();
@@ -245,7 +245,7 @@ fn libarchive_extract_to_memory_works_through_non_utf8_archive_name() {
     let archive_path = temp_dir().join(&archive_name);
     cleanup(&archive_path);
 
-    let opts = CompressionOptions::new(ArchiveFormat::Tar);
+    let opts = CompressionOptions::for_writable(WritableFormat::TAR);
     let mut a = Archive::create(&archive_path, opts).unwrap();
     a.add_file_from_data("payload.bin", b"abc123").unwrap();
     a.finish().unwrap();

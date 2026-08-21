@@ -247,9 +247,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Deprecated
 
-All three carry `since = "0.5.0"`. They were written as `since = "0.4.0"`, which named a release
-that does not contain them — `v0.4.0` is tagged at `2c7f349`, before either change landed, so a
-caller on 0.4.0 would never see the warning the attribute promised.
+Six items now carry `since = "0.5.0"`. Three of them were written as `since = "0.4.0"`, which named
+a release that does not contain them — `v0.4.0` is tagged at `2c7f349`, before either change landed,
+so a caller on 0.4.0 would never see the warning the attribute promised.
+
+- **`CompressionOptions::new`** → `for_writable` for a literal format, `try_new` for a computed one.
+  It accepts a read-only format and defers the rejection to `Archive::create`. Removed in 0.6.0.
+- **`ArchiveEntry::new`** → `ArchiveEntry::file(path, id).build()`. Removed in 0.6.0. *One migration
+  note, because it bites:* `new` took a concrete `String`, so `"x".into()` inferred its target from
+  the parameter; `file` takes `impl Into<String>`, which makes that `.into()` ambiguous. Drop it —
+  `"x"` is what the builder wants.
+- **`ArchiveEntry::directory`** → `ArchiveEntry::dir_at(path, id).build()`. Removed in 0.6.0.
+
+Attaching those three is what the 0.4.x doc blocks deferred, on the stated grounds that the crate
+still called them itself and the gate is warning-free. The 187 in-crate call sites moved first: 132
+literal formats to `CompressionOptions::for_writable`, 7 computed ones to `try_new`, and 48 entry
+constructions to `ArchiveEntry::file(..).build()`. Along the way the checked constructors stopped
+routing through the loose one — `for_writable` called `new`, which is the dependency the wrong way
+round — and `CompressionOptions::default()` now says `for_writable(WritableFormat::ZIP)`, which is
+exact since ZIP is creatable. Seven test files stopped naming `ArchiveFormat` altogether, which is
+the newtype doing its job.
+
+And the three that were mis-dated:
 
 - **`ArchiveEntry::symlink`** → `ArchiveEntry::symlink_at(path, id, target).build()`, which returns
   a builder so the remaining metadata can be set in the same expression instead of by field
@@ -308,17 +327,19 @@ caller on 0.4.0 would never see the warning the attribute promised.
   target, followed it into `src/archive/in_place_payload_tests.rs`. Nothing was widened from
   private to `pub(crate)` to make a move compile.
 
-### Still owed before 0.5.0 can be tagged
+### Nothing owed before 0.5.0 can be tagged
 
-- **`CompressionOptions::new` and `ArchiveEntry::new` were supposed to gain `#[deprecated]` in
-  0.5.0** and have not. Their own doc blocks say so: "0.4.x — kept, un-attributed … 0.5.0 — gains
-  `#[deprecated]`", the stated reason being that the crate still calls them from its own code and
-  the gate is warning-free. They still do — 139 code call sites for `CompressionOptions::new` (84
-  in `src/` less 2 that are doc comments, plus 57 in `tests/`) and 48 for `ArchiveEntry::new`
-  (44 + 4). Attaching the attribute without migrating those turns the gate red, so the migration is
-  the work, and it is deliberately not bundled into this change set: mixing a ~190-site mechanical
-  rewrite into a semver-relevant change makes both unreviewable. Either that migration lands before
-  the tag, or this timeline slips by one minor and says so.
+The one item that was outstanding here — `CompressionOptions::new` and `ArchiveEntry::new` still
+un-attributed, against doc blocks that promised `#[deprecated]` in 0.5.0 — is delivered, so the
+timeline did not have to slip. It is described under **Deprecated** above; the summary is that the
+187 in-crate call sites moved first (132 literal formats to `for_writable`, 7 computed to `try_new`,
+48 entry constructions to `file(..).build()`), and `cargo clippy --all-targets --all-features -D
+warnings` is green with the attributes attached.
+
+Three `#[allow(deprecated)]` sites remain, all deliberate and all commented: two assert that
+`CompressionOptions::new` still accepts a non-creatable format and defers the rejection — which is
+the back-compat guarantee, and neither replacement can express a non-creatable format at all — and
+they are the reason `new` is deprecated rather than removed. `ArchiveEntry::new` needed none.
 
 ## [0.4.0] - 2026-08-17
 
