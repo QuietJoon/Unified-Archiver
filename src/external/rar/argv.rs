@@ -154,6 +154,17 @@ impl std::error::Error for ArgvError {}
 /// A struct rather than five positional parameters so a future switch
 /// cannot be added in the wrong slot at a call site.
 #[derive(Debug, Clone, Copy)]
+/// **Not `#[non_exhaustive]`, deliberately (ticgit a5b31f).** This is a
+/// caller-constructed *input* with no builder and no total constructor, so
+/// closing the struct literal would leave an external caller — the audience
+/// for [`build`] and `session::preview_argv` — unable to build one at all.
+/// Adding a field here is therefore still a breaking change.
+///
+/// Worth fixing together with a duplication: this type and
+/// [`super::session::CreateRequest`] are field-for-field identical, and
+/// `CreateRequest::as_argv` converts between them by copying each field
+/// unchanged. The right repair may be to collapse the two rather than to
+/// give each its own builder — which is a design call, not a mechanical one.
 pub struct AddArgv<'a> {
     /// The `-mN` compression switch, from the crate-internal
     /// compression-level mapping (`rar_compression_flag`).

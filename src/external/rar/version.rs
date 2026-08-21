@@ -33,7 +33,12 @@
 //! `tests/external_rar_cli_contract.rs`.
 
 /// A `major.minor` version parsed from a RAR-family banner.
+///
+/// `#[non_exhaustive]`: [`Self::new`] takes both fields and is `const`, so a
+/// caller can still build one to compare against [`MINIMUM_RAR_VERSION`] —
+/// which is the only reason to build one at all, since `Ord` is derived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub struct RarVersion {
     /// Major version (the `6` in `RAR 6.24`).
     pub major: u32,
@@ -89,12 +94,27 @@ impl core::fmt::Display for RarFlavor {
 }
 
 /// A successfully parsed banner: which program, and which version.
+///
+/// `#[non_exhaustive]`, with [`Self::new`] added alongside it. This is an
+/// output — [`parse_banner`] is the only thing that produces one in
+/// production — but a caller writing a test against a stubbed runner has a
+/// real reason to construct one, so closing the literal without offering a
+/// constructor would have removed something rather than protected it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RarBanner {
     /// Which RAR-family program printed the banner.
     pub flavor: RarFlavor,
     /// The version it reported.
     pub version: RarVersion,
+}
+
+impl RarBanner {
+    /// Construct a banner. Counterpart to [`parse_banner`], for a caller
+    /// assembling one by hand.
+    pub const fn new(flavor: RarFlavor, version: RarVersion) -> Self {
+        Self { flavor, version }
+    }
 }
 
 /// Oldest `rar` release this crate will drive.

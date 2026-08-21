@@ -30,7 +30,13 @@ use std::ffi::OsString;
 use std::path::Path;
 
 /// What a finished child process reported.
+///
+/// `#[non_exhaustive]`: a caller implementing [`CommandRunner`] builds these
+/// through [`Self::new`], which takes every field, so nothing is lost by
+/// closing the struct literal — and a future field (a timing, a signal
+/// number) then costs nobody a compile error.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CommandOutcome {
     /// Raw exit code, or `None` when the process was killed by a signal.
     /// Classified by [`super::exit::RarExit::from_code`].

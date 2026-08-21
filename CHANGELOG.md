@@ -192,7 +192,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   absent and binary too old are distinct, because a caller handling the first installs something
   and the second upgrades it; `RarVersion` / `RarFlavor` / `parse_banner`; and the discovery
   surface (`find_rar_binary`, `vet_program`, `external_rar_supported`,
-  `SHELL_INTERPRETED_EXTENSIONS`). `StubRunner`, `StubResponse` and `StubCall` are **not** part of
+  `SHELL_INTERPRETED_EXTENSIONS`).
+  Three of those types are `#[non_exhaustive]`, so adding a field to one later is not a break:
+  `CommandOutcome` and `RarVersion` already had total constructors, and `RarBanner` gained one
+  (`RarBanner::new`) alongside the attribute rather than being closed without a way in.
+  `AddArgv` and `CreateRequest` are deliberately left open and say so in their own docs — they are
+  caller-constructed inputs with no builder, so closing them would leave an external caller unable
+  to build one at all. They are also field-for-field identical, with `CreateRequest::as_argv`
+  copying each field unchanged, so the candidate repair is to collapse the two rather than give
+  each a builder; that is a design call and is tracked, not guessed at here.
+  `StubRunner`, `StubResponse` and `StubCall` are **not** part of
   that surface — they are `#[cfg(test)]`, "a seam, not public surface" as the module puts it. The
   contract tests reach them only by compiling the source files into their own binary with
   `#[path]`, which turns `cfg(test)` back on locally; a downstream crate cannot do that and should

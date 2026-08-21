@@ -53,6 +53,12 @@ pub const OUTPUT_EXCERPT_LIMIT: usize = 4096;
 /// Mirrors [`AddArgv`] rather than re-deriving it, so the sequence and
 /// the vector cannot drift apart.
 #[derive(Debug, Clone, Copy)]
+/// **Not `#[non_exhaustive]`, deliberately (ticgit a5b31f).** Same reason as
+/// [`super::argv::AddArgv`], to which this is field-for-field identical:
+/// callers construct it directly to reach [`preview_argv`], and there is no
+/// builder to construct it through. Adding a field is a breaking change
+/// until that is resolved, and collapsing the two types is the candidate
+/// repair.
 pub struct CreateRequest<'a> {
     /// `-mN` switch from the compression-level mapping.
     pub compression_flag: &'a str,
