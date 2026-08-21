@@ -620,6 +620,35 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
 
 
 ### UnRAR callback answers volume-change with a non-abort code, risking an unbounded retry
+- **Exposure closed 2026-08-21; the end-to-end lane is what remains, and it is fixture-blocked.**
+  The ticket recorded the retry as *inferred* from the SDK contract plus the return value, "not yet
+  reproduced". It is now **confirmed by reading the vendored SDK**, which is stronger than a
+  reproduction would have been for this purpose: `src/ffi/native/unrar/volume.cpp`'s
+  `DllVolChange` ends `if (DllVolAborted || Cmd->Callback==NULL && Cmd->ChangeVolProc==NULL)`,
+  under its own comment "We quit only on 'abort' condition, but not on 'name not changed' ... It is
+  legitimate for program to return the same name when waiting for currently non-existent volume."
+  We register a callback, returned `1`, and never rewrote the name buffer, so both disjuncts were
+  false and `MergeArchive` re-asked for the same name — holding AD 0019's process-wide lock.
+  The fix discriminates on the `P2` mode, and that is the part a later reader must not simplify:
+  `RAR_VOL_ASK` means the volume is absent, so the trampoline records `UnrarAbort::MissingVolume`
+  and returns `-1`; `RAR_VOL_NOTIFY` means the next volume *was* opened, and `-1` there makes
+  `DllVolNotify` give up on a valid multi-volume read. An unconditional abort would have traded a
+  hang for a regression. `take_abort_error` maps it to `ArchiveError::Corruption` — the same class
+  as a central directory that ends mid-record, since the entry's data is truncated at the set
+  boundary — naming the archive and pointing at `VolumeSet::defects()` for which volume, because
+  the callback cannot answer that portably (the `W` message arrives first, carrying a
+  platform-width `wchar` buffer).
+  Five tests drive the trampoline directly and pin both arms. Non-vacuity was checked in **both**
+  directions: restoring the original `return 1` fails the two `RAR_VOL_ASK` tests while the
+  `RAR_VOL_NOTIFY` test keeps passing, and applying the plausible wrong fix — abort regardless of
+  mode — fails the `RAR_VOL_NOTIFY` test while the others pass. `src/ffi/wrapper.rs` was restored
+  byte-for-byte after each.
+  **Still owed:** the ticket's second Expected bullet, an integration test that opens a real
+  multi-volume RAR set with a middle volume removed and asserts a bounded typed failure. That
+  needs a genuine multi-volume fixture; `tests/fixtures/` has none (`test_multi.rar` is one file
+  with several entries, not a volume set), and this crate cannot create one — RAR creation is the
+  Windows-only external-WinRAR lane. It is therefore blocked behind `8c29f8`, the RAR-fixture
+  ticket. Supplying the next volume path rather than aborting stays with `61660f` (OI-0001-006).
 - **Type:** 2
 - **Verified:** yes — gated manual-review finding, triaged 2026-08-06
 - **Sources:** ticgit:d3cfceed, src/ffi/wrapper.rs

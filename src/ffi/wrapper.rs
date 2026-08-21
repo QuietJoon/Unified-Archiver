@@ -1470,7 +1470,7 @@ fn listing_drift_eof(visited: usize, listing_len: usize) -> ArchiveError {
 }
 
 /// Reason the UnRAR data callback aborted an in-flight `RARProcessFile`.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum UnrarAbort {
     /// The caller's progress callback voted to cancel (R0080-0022).
     Cancelled,
@@ -1482,6 +1482,12 @@ enum UnrarAbort {
     /// and surface corruption instead of silently coercing the length to zero
     /// and continuing to decode on corrupt state (R0081-0069).
     CallbackError,
+    /// UnRAR asked for the next volume of a multi-volume set and it is not
+    /// available (`UCM_CHANGEVOLUME*` with `RAR_VOL_ASK`). Answering
+    /// anything but `-1` there makes the SDK retry the same name
+    /// indefinitely, under the process-wide lock (AD 0019), so the
+    /// trampoline aborts and this records why.
+    MissingVolume,
 }
 
 /// Per-extraction context handed to the UnRAR C library through
@@ -1652,6 +1658,22 @@ impl<'a> UnrarExtractContext<'a> {
                 archive_path.display().to_string(),
                 "UnRAR data callback reported a negative processed-length; aborting to avoid masking ABI/state corruption",
             )),
+            // A volume the set references is absent, so the entry's data is
+            // truncated at the set boundary — the same class as a
+            // central directory that ends mid-record, hence `Corruption`
+            // rather than `Io`. The message points at the typed parser
+            // instead of guessing a name here: the callback receives the
+            // wanted volume in `p1`, but as a platform-width `wchar` buffer
+            // for the `W` message that arrives first, and
+            // `VolumeSet::defects()` already answers "which volume"
+            // precisely and portably.
+            Some(UnrarAbort::MissingVolume) => Some(ArchiveError::corruption(
+                archive_path.display().to_string(),
+                "UnRAR asked for the next volume of this multi-volume set and it is not available; \
+                 aborted rather than retrying the same volume name under the process-wide UnRAR lock. \
+                 Use unified_archive::format::multipart::parse_volume_set and VolumeSet::defects() to \
+                 learn which volume is missing",
+            )),
             None => None,
         }
     }
@@ -1722,10 +1744,39 @@ unsafe extern "C" fn unrar_process_callback(
     p2: isize,
 ) -> c_int {
     let outcome = std::panic::catch_unwind(|| {
+        // Volume change is handled explicitly, because "keep the default
+        // behaviour" is not what a non-abort answer means here. See
+        // [`RAR_VOL_ASK`] and `volume.cpp`'s `DllVolChange`: returning
+        // `>= 0` without rewriting the name buffer makes the SDK retry the
+        // same volume name indefinitely, and that spin holds AD 0019's
+        // process-wide lock the whole time, stalling every RAR operation in
+        // the process rather than just this one.
+        if msg == UCM_CHANGEVOLUME || msg == UCM_CHANGEVOLUMEW {
+            // `RAR_VOL_NOTIFY` says the next volume *was* opened. `-1` here
+            // makes `DllVolNotify` return false and aborts a valid
+            // multi-volume read, so this arm must stay non-negative.
+            if p2 == RAR_VOL_NOTIFY {
+                return 1;
+            }
+            // `RAR_VOL_ASK`: the volume is missing. Abort, and record why so
+            // `take_abort_error` can name it. Supplying the next path
+            // instead is the multi-volume continuation feature, tracked
+            // separately (ticgit 61660f / OI-0001-006); it is not something
+            // this trampoline can invent.
+            if user_data != 0 {
+                // SAFETY: as below — the registered context pointer,
+                // single-threaded under AD 0019.
+                let ctx = unsafe { &mut *(user_data as *mut UnrarExtractContext<'_>) };
+                ctx.abort = Some(UnrarAbort::MissingVolume);
+            }
+            // Abort even with no context to record into: a stalled lock is
+            // worse than an unlabelled error.
+            return -1;
+        }
         if msg != UCM_PROCESSDATA || user_data == 0 {
-            // Only data blocks are handled; every other message (volume
-            // change, password prompt, large-dict notice) keeps UnRAR's
-            // default behaviour by returning a non-abort code.
+            // Only data blocks are handled; the remaining messages
+            // (password prompt, large-dict notice) keep UnRAR's default
+            // behaviour by returning a non-abort code.
             return 1;
         }
         // SAFETY: `user_data` is the context pointer registered just before

@@ -588,3 +588,118 @@ fn rar5_recovery_bad_header_crc_is_corruption() {
         .expect_err("a bad header CRC must be corruption");
     assert!(matches!(err, ArchiveError::Corruption { .. }));
 }
+
+// ── UCM_CHANGEVOLUME handling (ticgit d3cfce) ──
+
+/// Build a bare context for driving the trampoline directly. `progress` is
+/// `None`, which is the only field the volume-change arms read nothing from —
+/// they touch `abort` and nothing else.
+fn volume_test_context() -> UnrarExtractContext<'static> {
+    UnrarExtractContext::new("test", None, 0, None)
+}
+
+/// Call the trampoline the way the SDK does, with a context pointer.
+fn call_trampoline(ctx: &mut UnrarExtractContext<'_>, msg: c_uint, p2: isize) -> c_int {
+    let user_data = ctx as *mut UnrarExtractContext<'_> as isize;
+    // SAFETY: `user_data` points at `ctx`, which outlives the call, and the
+    // trampoline only touches it on this thread — the same single-threaded
+    // discipline AD 0019 gives it in production.
+    unsafe { unrar_process_callback(msg, user_data, 0, p2) }
+}
+
+/// The defect this pins: answering `UCM_CHANGEVOLUME*`/`RAR_VOL_ASK` with a
+/// non-abort code makes the SDK retry the same volume name indefinitely.
+///
+/// `volume.cpp`'s `DllVolChange` quits only on `DllVolAborted`, or when no
+/// callback is registered at all — and its own comment says returning an
+/// unchanged name is a legitimate way to say "waiting for a volume that does
+/// not exist yet". We register a callback and cannot rewrite the buffer, so
+/// `-1` is the only answer that terminates. The spin would hold AD 0019's
+/// process-wide lock, stalling every RAR operation in the process.
+#[test]
+fn unrar_callback_aborts_when_the_next_volume_is_missing() {
+    for msg in [UCM_CHANGEVOLUME, UCM_CHANGEVOLUMEW] {
+        let mut ctx = volume_test_context();
+        let rc = call_trampoline(&mut ctx, msg, RAR_VOL_ASK);
+        assert_eq!(rc, -1, "msg {msg} with RAR_VOL_ASK must abort, not retry");
+        assert!(
+            matches!(ctx.abort, Some(UnrarAbort::MissingVolume)),
+            "msg {msg} must record why it aborted, got {:?}",
+            ctx.abort
+        );
+    }
+}
+
+/// The other half, and the reason the fix cannot simply return `-1` for every
+/// volume-change message: `RAR_VOL_NOTIFY` reports that the next volume *was*
+/// opened. `DllVolNotify` treats `-1` there as a refusal and gives up, so an
+/// unconditional abort would break every valid multi-volume archive.
+#[test]
+fn unrar_callback_lets_an_opened_volume_through() {
+    for msg in [UCM_CHANGEVOLUME, UCM_CHANGEVOLUMEW] {
+        let mut ctx = volume_test_context();
+        let rc = call_trampoline(&mut ctx, msg, RAR_VOL_NOTIFY);
+        assert!(
+            rc >= 0,
+            "msg {msg} with RAR_VOL_NOTIFY must not abort a volume that opened, got {rc}"
+        );
+        assert!(
+            ctx.abort.is_none(),
+            "a successful volume transition must record no abort, got {:?}",
+            ctx.abort
+        );
+    }
+}
+
+/// A missing volume aborts even when there is no context to explain it in.
+/// A stalled process-wide lock is worse than an unlabelled error, so the
+/// `user_data == 0` path must not fall through to the non-abort default.
+#[test]
+fn unrar_callback_aborts_a_missing_volume_without_a_context() {
+    // SAFETY: `user_data` is 0, so the trampoline never dereferences it.
+    let rc = unsafe { unrar_process_callback(UCM_CHANGEVOLUMEW, 0, 0, RAR_VOL_ASK) };
+    assert_eq!(rc, -1);
+}
+
+/// Messages that genuinely do want UnRAR's default behaviour still get it —
+/// the volume arms must not have widened into a blanket abort.
+#[test]
+fn unrar_callback_keeps_the_default_for_other_messages() {
+    for msg in [UCM_NEEDPASSWORD, UCM_NEEDPASSWORDW, UCM_LARGEDICT] {
+        let mut ctx = volume_test_context();
+        let rc = call_trampoline(&mut ctx, msg, 0);
+        assert_eq!(rc, 1, "msg {msg} must keep the non-abort default");
+        assert!(ctx.abort.is_none());
+    }
+}
+
+/// The abort must surface as a typed error a caller can act on, and the
+/// action is named: `VolumeSet::defects()` answers "which volume", which the
+/// callback itself cannot do portably (the `W` message that arrives first
+/// carries a platform-width `wchar` buffer).
+#[test]
+fn missing_volume_maps_to_corruption_pointing_at_the_defect_list() {
+    let mut ctx = volume_test_context();
+    ctx.abort = Some(UnrarAbort::MissingVolume);
+    let err = ctx
+        .take_abort_error(Path::new("/tmp/set.part1.rar"))
+        .expect("a recorded abort must produce an error");
+    match err {
+        ArchiveError::Corruption { path, details } => {
+            assert!(path.contains("set.part1.rar"), "path was {path}");
+            assert!(
+                details.contains("not available"),
+                "details must say the volume is missing: {details}"
+            );
+            assert!(
+                details.contains("defects()"),
+                "details must point the caller at the typed parser: {details}"
+            );
+        }
+        other => panic!("expected Corruption, got {other:?}"),
+    }
+    assert!(
+        ctx.abort.is_none(),
+        "take_abort_error must consume the abort"
+    );
+}

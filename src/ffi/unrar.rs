@@ -60,6 +60,24 @@ pub const UCM_CHANGEVOLUMEW: c_uint = 3;
 pub const UCM_NEEDPASSWORDW: c_uint = 4;
 pub const UCM_LARGEDICT: c_uint = 5;
 
+/// `P2` values for `UCM_CHANGEVOLUME` / `UCM_CHANGEVOLUMEW`, from the
+/// vendored SDK's `dll.hpp`. The same message means two opposite things
+/// depending on which one arrives, and the callback's answer is read
+/// differently in each case (`volume.cpp`, `DllVolChange` vs
+/// `DllVolNotify`):
+///
+/// * [`RAR_VOL_ASK`] — the next volume is **not** available and the SDK is
+///   asking the callback to supply or confirm a name. `-1` aborts;
+///   anything `>= 0` means "try again", and returning `>= 0` *without*
+///   rewriting the name buffer makes the SDK retry the same name
+///   indefinitely — its own comment calls that legitimate, for a caller
+///   that is waiting for a volume to appear.
+/// * [`RAR_VOL_NOTIFY`] — the next volume **was** opened. This is
+///   informational, and `-1` here aborts a valid multi-volume read.
+pub const RAR_VOL_ASK: isize = 0;
+/// See [`RAR_VOL_ASK`].
+pub const RAR_VOL_NOTIFY: isize = 1;
+
 // Header flags (file-level)
 pub const RHDF_SPLITBEFORE: c_uint = 0x01;
 pub const RHDF_SPLITAFTER: c_uint = 0x02;

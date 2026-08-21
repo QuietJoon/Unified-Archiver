@@ -267,6 +267,25 @@ caller on 0.4.0 would never see the warning the attribute promised.
   change's gate counted clippy warnings and never ran `cargo doc`. Two were public docs linking to
   private items (`SourceManifest`, `RawCentralDirectory`), which render as dead links for anyone
   reading the published docs; the third was a redundant explicit link target.
+- **A RAR set with a missing volume errors instead of spinning under the process-wide lock.**
+  The UnRAR data-callback trampoline answered every non-`UCM_PROCESSDATA` message with `1`,
+  described as keeping the library's default behaviour. For `UCM_CHANGEVOLUME` /
+  `UCM_CHANGEVOLUMEW` that is not what a non-abort answer means. The vendored SDK's own
+  `DllVolChange` quits only on an abort return, or when no callback is registered at all, and its
+  comment says returning an unchanged volume name is a legitimate way to say "waiting for a
+  volume that does not exist yet" — so a registered callback returning `1` without rewriting the
+  name buffer asks for the same volume again, indefinitely. Every UnRAR call holds a
+  process-wide lock (AD 0019), so that spin stalls every RAR operation in the process, not just
+  the one that started it.
+  The message is now handled on its mode, which is the part that cannot be simplified: with
+  `RAR_VOL_ASK` the volume is missing and the trampoline aborts, surfacing
+  `ArchiveError::Corruption` that names the archive and points at
+  `format::multipart::parse_volume_set` / `VolumeSet::defects()` for *which* volume; with
+  `RAR_VOL_NOTIFY` the next volume was opened successfully and the answer stays non-negative,
+  because `-1` there makes the SDK give up on a perfectly good multi-volume read. Supplying the
+  next volume path instead of aborting is the multi-volume continuation feature, tracked
+  separately (OI-0001-006). Five tests pin both arms; reverting either direction fails a
+  different one.
 - **One assertion that could never fail is gone.** `assert!(!cfg!(windows))` inside a match arm was
   `assert!(true)` off Windows and unreachable on it, so it documented an expectation rather than
   checking one. The arm is `#[cfg(not(windows))]` instead, which states the same thing where it
