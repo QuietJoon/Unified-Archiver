@@ -13,9 +13,15 @@ use crate::security::{
 };
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use zip::ZipArchive as RawZipArchive;
+
+mod aes;
+mod raw_directory;
+
+use aes::{crc32_check_exempt, drain_entry_crc32_counted};
+use raw_directory::{RawCentralDirectory, RawRecord, read_central_directory_exact};
 
 use super::common::{
     StagedEntryWrite, check_extraction_cancelled, entry_cancel_hook, normalize_path,
@@ -170,115 +176,6 @@ fn check_listing_drift(
     Ok(())
 }
 
-/// WinZip AES extra-field header id (`0x9901`) and the vendor version
-/// that marks an entry as AE-2 — the variant that stores no CRC32 at all.
-/// AE-1 (`0x0001`) stores the real CRC32 and keeps every checksum
-/// comparison in this file.
-const AES_EXTRA_FIELD_ID: u16 = 0x9901;
-const AES_VENDOR_VERSION_AE2: u16 = 0x0002;
-
-/// Read the AES vendor version out of an entry's `0x9901` extra field.
-///
-/// The `zip` crate parses this field into a private `aes_mode` tuple and
-/// exposes no accessor for it, but it leaves the raw field in
-/// `ZipFile::extra_data()` (only the ZIP64 field is stripped), so the two
-/// bytes are readable here. Layout per the WinZip AES specification: a
-/// 7-byte body of `version:u16 | vendor_id:"AE" | strength:u8 |
-/// method:u16`, little-endian.
-///
-/// Returns `None` when the entry carries no AES field — a plaintext entry
-/// or a legacy ZipCrypto one — and `None` for a malformed or truncated
-/// extra-field chain rather than guessing.
-fn aes_vendor_version(zip_file: &zip::read::ZipFile) -> Option<u16> {
-    let extra = zip_file.extra_data()?;
-    let mut cursor = 0usize;
-    // Extra fields are a chain of `id:u16 | len:u16 | body[len]`.
-    while cursor + 4 <= extra.len() {
-        let id = u16::from_le_bytes([extra[cursor], extra[cursor + 1]]);
-        let len = u16::from_le_bytes([extra[cursor + 2], extra[cursor + 3]]) as usize;
-        let body = cursor + 4;
-        let end = body.checked_add(len)?;
-        if end > extra.len() {
-            // Truncated chain: stop rather than read past the field.
-            return None;
-        }
-        if id == AES_EXTRA_FIELD_ID {
-            if len < 2 {
-                return None;
-            }
-            return Some(u16::from_le_bytes([extra[body], extra[body + 1]]));
-        }
-        cursor = end;
-    }
-    None
-}
-
-/// AE-2 AES entries store 0 in the central-directory CRC32 field by
-/// specification, so comparing decrypted bytes against that placeholder
-/// would flag every non-empty entry as corrupt. Mirror the zip crate's
-/// own gate (it disables its internal `Crc32Reader` for AE-2 and relies
-/// on the AES authentication tag for integrity instead) and exempt those
-/// entries from every CRC comparison in this file (R0079-0007) — and,
-/// since DCR-012, from the listing's `crc32` field too.
-///
-/// **The gate is `encrypted() && crc == 0 && AE-2`, and the third
-/// conjunct is load-bearing.** `encrypted() && crc == 0` alone is a
-/// *superset* of AE-2: it also sweeps in any encrypted entry whose
-/// payload is genuinely empty — a legacy ZipCrypto empty file, or an AE-1
-/// empty file from a writer that does not use the `zip` crate's
-/// "under 20 bytes ⇒ AE-2" rule. Those carry a *real* stored CRC32,
-/// `CRC32(b"") == 0`, which AD 0012 says is a valid checksum and not an
-/// absent one. Exempting them would drop a checksum the archive actually
-/// carried, and (post-DCR-012) would list `crc32: None` and force a
-/// needless decrypt-and-stream during the digest walk. Reading the
-/// `0x9901` vendor version distinguishes the placeholder from the real
-/// zero, so the gate now means what its name says.
-///
-/// Residual, stated rather than hidden: an AE-2 entry whose central
-/// record omits the `0x9901` field is not recognised here. Such an entry
-/// is unreadable anyway — the `zip` crate rejects
-/// "AES encryption without AES extra data field" when parsing the central
-/// directory — so it cannot reach a CRC comparison in the first place.
-fn crc32_check_exempt(zip_file: &zip::read::ZipFile) -> bool {
-    zip_file.encrypted()
-        && zip_file.crc32() == 0
-        && aes_vendor_version(zip_file) == Some(AES_VENDOR_VERSION_AE2)
-}
-
-/// Drain an entry's decoded payload, returning both its CRC32 and the
-/// number of bytes produced.
-///
-/// R0001-0032: the shared `common::compute_crc32_reader` returns only a
-/// checksum, so the integrity walk could not tell an entry that decoded
-/// short from an intact one — a truncated payload whose stored CRC
-/// matches the shortened bytes, or an AE-2 entry exempt from the CRC
-/// compare, was reported clean. Counting here lets the caller require the
-/// byte count to equal the authoritative central-directory size. Read
-/// errors route through the same `map_entry_read_error` the shared helper
-/// uses, so decoder-side CRC failures keep the R0079-0046 `Corruption`
-/// mapping the caller classifies on.
-fn drain_entry_crc32_counted<R: Read + ?Sized>(
-    reader: &mut R,
-    error_path: &Path,
-) -> Result<(u32, u64)> {
-    let mut hasher = crc32fast::Hasher::new();
-    let mut buffer = [0u8; 8192];
-    let mut bytes_read: u64 = 0;
-
-    loop {
-        let n = reader
-            .read(&mut buffer)
-            .map_err(|e| super::common::map_entry_read_error(e, error_path))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buffer[..n]);
-        bytes_read += n as u64;
-    }
-
-    Ok((hasher.finalize(), bytes_read))
-}
-
 /// Modification time from the entry's DOS-precision timestamp,
 /// converted via the shared calendar helper (the zip crate's
 /// `to_time()` needs the "time" feature, which is not enabled).
@@ -344,37 +241,6 @@ fn zip_entry_times(zip_file: &zip::read::ZipFile) -> ZipEntryTimes {
     times
 }
 
-/// Read exactly `buf.len()` bytes of the raw central directory, keeping
-/// the three outcomes the duplicate scan must distinguish apart.
-///
-/// R0001-0027: the scan previously ran `read_exact(..).is_err() { break }`
-/// over a whole 46-byte header, which collapsed "reached the EOCD"
-/// (expected), "the record is cut short" (truncation), and "the OS read
-/// failed" (I/O fault) into one silent loop exit — and a scan that ends
-/// early leaves `counts` incomplete, i.e. it *disables* duplicate
-/// detection. The EOCD the `zip` crate already parsed always follows the
-/// last central-directory record, so a short read here is a truncated
-/// directory (`Corruption`); anything else is a real archive-file read
-/// failure (`Io`). Normal termination is decided by the record signature,
-/// never by a read error.
-fn read_central_directory_exact(
-    file: &mut File,
-    buf: &mut [u8],
-    path: &Path,
-    what: &str,
-) -> Result<()> {
-    file.read_exact(buf).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::UnexpectedEof {
-            ArchiveError::corruption(
-                path.display().to_string(),
-                format!("central directory ends mid-record: incomplete {}", what),
-            )
-        } else {
-            ArchiveError::io("read", path.to_path_buf(), e)
-        }
-    })
-}
-
 /// Open a ZIP file and create a RawZipArchive
 fn open_zip(path: &Path) -> Result<RawZipArchive<File>> {
     let file = File::open(path).map_err(|e| ArchiveError::io("open", path.to_path_buf(), e))?;
@@ -419,141 +285,6 @@ pub struct ZipArchive {
     /// it, which since OI-0001-003 is any listing, extraction or integrity
     /// call rather than only a by-name single-entry extraction.
     raw_directory: once_cell::sync::OnceCell<RawCentralDirectory>,
-}
-
-/// One raw central-directory record, as the file physically carries it.
-struct RawRecord {
-    /// The entry name exactly as stored — never decoded here, because the
-    /// `zip` crate collapses on these bytes (R0001-0029).
-    name: Vec<u8>,
-    /// The `zip`-crate listing indices whose stored name is these bytes.
-    /// Empty when the crate never parsed a record with this spelling (e.g.
-    /// the EOCD undercounts the directory), and several indices when one
-    /// raw spelling backs more than one listed entry because two records
-    /// disagree about the general-purpose UTF-8 flag.
-    listed_indices: Vec<usize>,
-}
-
-/// The single raw-central-directory index every ZIP operation consults
-/// (R0079-0026 / DCR-009 / OI-0001-003).
-///
-/// **Why an index rather than more guard calls.** Before OI-0001-003 the
-/// collapse was re-scanned only by the by-name single-entry paths, and the
-/// scan re-opened `self.path` independently of the cached handle — so the
-/// scan and the extractor could read two different files, and every other
-/// surface (listing, counts, by-id and bulk extraction, integrity) consumed
-/// the `zip` crate's already-collapsed view without ever learning the
-/// archive was ambiguous. This index closes both halves at once: it is read
-/// through the descriptor the cached `RawZipArchive` already owns
-/// ([`ZipArchive::with_cached_file`], never a second `File::open`), and it is
-/// memoised once per handle so every operation can afford to consult it.
-struct RawCentralDirectory {
-    /// Every record the raw directory physically carries, in stored order.
-    records: Vec<RawRecord>,
-    /// How many entries the `zip` crate's deduped map exposes — the count
-    /// every `zip.len()` walk in this file iterates.
-    deduped_len: usize,
-    /// Normalized paths that appear more than once across the raw
-    /// central-directory records. The by-name single-entry paths refuse
-    /// these because the `zip` crate's deduped listing would otherwise
-    /// silently hand back the surviving (last) record's payload.
-    duplicate_names: HashSet<String>,
-    /// `true` when at least one record the `zip` crate collapsed could not
-    /// be attributed to a specific listed name (e.g. an exotic
-    /// mixed-encoding collision whose two raw byte strings decode to one
-    /// name, or a record the crate never parsed because the EOCD undercounts
-    /// the directory). In that case even the by-name surface is refused
-    /// wholesale rather than risk silently returning the wrong payload — a
-    /// safe over-rejection for a genuinely ambiguous archive.
-    ///
-    /// R0001-0028: this is decided by counting, not by
-    /// `duplicate_names.is_empty()`. The old heuristic disarmed itself the
-    /// moment a single ordinary duplicate was attributed, so a crafted
-    /// archive could hide an unattributable collision behind an ordinary
-    /// one.
-    any_undetected: bool,
-}
-
-impl RawCentralDirectory {
-    /// How many records the raw directory physically carries.
-    fn raw_len(&self) -> usize {
-        self.records.len()
-    }
-
-    /// Did the `zip` crate collapse anything at all — an ambiguous name, or
-    /// a record it could not account for?
-    fn is_collapsed(&self) -> bool {
-        self.any_undetected || !self.duplicate_names.is_empty()
-    }
-
-    /// The records the `zip` crate never mapped to a listing index — the
-    /// ones no id can address and no name can name. A non-empty result is
-    /// what `any_undetected` is usually reporting.
-    fn unaddressable_records(&self) -> Vec<&RawRecord> {
-        self.records
-            .iter()
-            .filter(|record| record.listed_indices.is_empty())
-            .collect()
-    }
-
-    /// The ambiguous listed paths, sorted so a refusal message is stable.
-    fn ambiguous_names(&self) -> Vec<&str> {
-        let mut names: Vec<&str> = self.duplicate_names.iter().map(String::as_str).collect();
-        names.sort_unstable();
-        names
-    }
-
-    /// Refusal text for an operation that would consume the collapsed view.
-    ///
-    /// The name list is capped: entry names are attacker-controlled, so an
-    /// archive with thousands of colliding names must not be able to turn a
-    /// rejection into an unbounded string.
-    fn collapsed_reason(&self) -> String {
-        const MAX_NAMES: usize = 8;
-        const NAME_PREVIEW_CHARS: usize = 64;
-
-        let mut reason = format!(
-            "ambiguous ZIP central directory: {} raw record(s) resolve to {} addressable entry/entries",
-            self.raw_len(),
-            self.deduped_len
-        );
-        let names = self.ambiguous_names();
-        if !names.is_empty() {
-            reason.push_str("; ambiguous name(s): ");
-            reason.push_str(&names[..names.len().min(MAX_NAMES)].join(", "));
-            if names.len() > MAX_NAMES {
-                reason.push_str(&format!(" (and {} more)", names.len() - MAX_NAMES));
-            }
-        }
-        if self.any_undetected {
-            reason.push_str(
-                "; at least one collapsed record could not be attributed to a listed name",
-            );
-            let orphans = self.unaddressable_records();
-            if let Some(first) = orphans.first() {
-                // A diagnostic preview only — never a key. Attacker-controlled
-                // bytes are decoded lossily and truncated, and the raw
-                // spelling is what the reader failed to parse, so the CP437
-                // vs UTF-8 question the tally cares about (R0001-0029) does
-                // not arise here.
-                let preview: String = String::from_utf8_lossy(&first.name)
-                    .chars()
-                    .take(NAME_PREVIEW_CHARS)
-                    .collect();
-                reason.push_str(&format!(
-                    " ({} record(s) carry a name the reader never parsed, first '{}')",
-                    orphans.len(),
-                    preview
-                ));
-            }
-        }
-        reason.push_str(
-            ". A shadowed record has no listing id, so it can be neither addressed nor \
-             extracted, and this operation would silently omit it \
-             (R0079-0026 / DCR-009 / OI-0001-003)",
-        );
-        reason
-    }
 }
 
 impl ZipArchive {

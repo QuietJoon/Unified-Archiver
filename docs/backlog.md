@@ -182,7 +182,16 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   central-directory value layer (`RawRecord`, `RawCentralDirectory`, the exact central-directory
   read), which does not touch the `ZipArchive` facade at all, and the AES/CRC-exemption cluster
   (the AES extra-field constants, the vendor-version probe, the CRC exemption predicate, the
-  counted CRC drain). Those two are ready to implement and belong in this Type 1 section.
+  counted CRC drain).
+  **Both landed 2026-08-21.** `src/ffi/zip_wrapper/raw_directory.rs` (192 lines) and
+  `src/ffi/zip_wrapper/aes.rs` (121 lines); the parent went 1715 → 1445 lines. The `tests` child is
+  byte-identical to the previous commit, so no test was added, removed, renamed or re-pathed, and
+  `ffi::zip_wrapper` reports the same 34 passed. Nothing became `pub` or `pub(crate)`: fourteen
+  items are `pub(super)`, which on a child reaches exactly the `zip_wrapper` subtree a
+  module-private item already reached, and five items are now *more* encapsulated than before.
+  AD 0057 carries the amendment, including the two things a reference grep got wrong that the
+  compiler caught — `raw_len` is called from the sibling `tests` child, not just the parent, and
+  the parent's `Read` import went unused once the blocks left.
   Genuinely deferred, and waiting on named work rather than on bandwidth: `src/ffi/wrapper.rs`
   (2496 production LOC, the largest remaining offender, first in the queue once D2 clears) and
   everything else, all of which waits for D2's backend-enum reshape and D9's libarchive wrapper
@@ -214,7 +223,15 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
 
 ### Libarchive header-status policy split across six read walks (OI-0080-006)
 - **Type:** 2
-- **Verified:** yes — six `archive_read_next_header` call sites read directly, 2026-08-07
+- **Verified:** yes — re-read 2026-08-21: **eight** `archive_read_next_header` call sites in
+  `src/ffi/libarchive_wrapper/reader.rs`, not the six counted on 2026-08-07. The asymmetry is
+  unchanged and current. Three reject `ARCHIVE_WARN` by testing `result != ARCHIVE_OK`: the
+  metadata listing walk (which routes through `classify_libarchive_error`, so a header-encrypted
+  archive surfaces as `Password`), `extract_all_with_options` and `extract_file_with_options`
+  (both plain `ArchiveError::format`). Five accept it by testing
+  `!= ARCHIVE_OK && != ARCHIVE_WARN`: the AD detection probe, the integrity walk and the stream
+  walks. So the observable consequence the Description names is live — `validate_integrity()` can
+  call an archive clean that `list_files()` refuses.
 - **Sources:** ticgit:12d4310b, docs/project/open-issues.md (OI-0080-006), R0080-0018,
   src/ffi/libarchive_wrapper/reader.rs, docs/investigation/codebase/ffi-libarchive.md
 - **First seen:** 2026-08-07 (recovered by `/indy-review-cleanup`; never routed at gate time)

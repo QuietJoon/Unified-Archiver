@@ -313,3 +313,67 @@ the pass removing inline blocks was in flight. That asymmetry is the defect; a p
 focused test module with a doc comment explaining its scope is not the same thing, and moving the
 remaining two is a judgement call about test locality rather than a correction. It is left to the
 reviewer who takes the D10 pass on this file.
+
+## Amendment (2026-08-21, the two `zip_wrapper` D10 seams land — the only D10 work this record calls unblocked)
+
+The previous amendment named two seams in `src/ffi/zip_wrapper.rs` and gave them a trigger that was
+not a dependency: they "may land as soon as a reviewer has bandwidth, since they depend on neither
+D2 nor D9". They have landed. Everything else in D10 still waits on D2 and D9, and this amendment
+does not move any of it.
+
+| new child | lines | what moved |
+|---|---|---|
+| `src/ffi/zip_wrapper/raw_directory.rs` | 192 (166 moved) | `RawRecord`, `RawCentralDirectory` and its five methods, and `read_central_directory_exact` |
+| `src/ffi/zip_wrapper/aes.rs` | 121 (108 moved) | the WinZip-AES header id and AE-2 vendor constants, `aes_vendor_version`, `crc32_check_exempt`, `drain_entry_crc32_counted` |
+
+`src/ffi/zip_wrapper.rs` went from 1715 to 1445 lines. Its `tests` child is **byte-identical to the
+previous commit** — `git diff` reports no change to it at all — so no test was added, removed,
+renamed or re-pathed, and `ffi::zip_wrapper` reports the same 34 passed as before the split. Only
+production code moved.
+
+### The visibility question, answered exactly
+
+A child sees every private item of its ancestors; a parent does not see the child's privates. So
+items the parent still uses had to gain a visibility keyword. **Nothing became `pub` or
+`pub(crate)`** — a grep for `^\s*pub (fn|struct|enum|const|mod)` across both children returns
+nothing. Fourteen items are `pub(super)`: two in `aes.rs` (`crc32_check_exempt`,
+`drain_entry_crc32_counted`) and twelve in `raw_directory.rs` (one function, two structs, six
+fields, three methods).
+
+`pub(super)` on a child is not a widening. It makes an item visible throughout the `zip_wrapper`
+subtree, which is precisely where a module-private item in `zip_wrapper.rs` was already visible.
+The Decision Drivers warn against enlarging the internal surface to make a move compile; this
+does not, and the check for it is the grep above rather than an assurance.
+
+Five items went the other way and are **more** encapsulated than before, having been module-global
+in a 1715-line file and now private to a small child: `AES_EXTRA_FIELD_ID`,
+`AES_VENDOR_VERSION_AE2`, `aes_vendor_version`, `RawCentralDirectory::unaddressable_records` and
+`RawCentralDirectory::ambiguous_names`.
+
+The struct **fields** are the one part that deserves justification rather than a count. The value
+layer moved but its *builder* did not: `ZipArchive::scan_raw_central_directory` needs the cached
+descriptor, so it stays on the facade and constructs `RawRecord` and `RawCentralDirectory` with
+struct literals from the parent — which requires the fields to be nameable there. The alternative
+was to move the scan too and leave a thin facade method, but that is a refactor of the building
+logic, not a move, and this record classes that as the deferred half. So the seam is drawn where
+the previous amendment said it was: at the value layer.
+
+### Two things a reference grep got wrong, and the compiler caught
+
+Recorded because the same mistake is easy to repeat on the `wrapper.rs` pass:
+
+* `raw_len` was measured as used only inside the moving block and was therefore made private. It is
+  called from `src/ffi/zip_wrapper/tests.rs` — a *sibling* child, which the grep did not read
+  because it only searched `zip_wrapper.rs`. `pub(super)` fixes it and is still the honest reach.
+  **When sizing a move, grep the sibling test child too, not just the parent.**
+* `Read` moved out of the parent with the blocks, leaving the parent's `use std::io::{Read, Seek,
+  SeekFrom}` unused — an error under the gate's `-D warnings`, not a warning.
+
+One doc link did not survive the move and was converted rather than repointed:
+`RawCentralDirectory`'s doc linked `[`ZipArchive::with_cached_file`]`, which cannot resolve from a
+child and names a private method besides. It is a code span now, saying "in the parent module".
+
+### Gate evidence for this amendment
+
+`cargo check --all-features --all-targets` exit 0 with zero Rust warnings. `ffi::zip_wrapper` 34
+passed / 0 failed. Full-gate figures are in the commit that carries this amendment.
