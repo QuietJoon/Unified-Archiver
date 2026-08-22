@@ -674,7 +674,7 @@ fn unrar_callback_keeps_the_default_for_other_messages() {
 }
 
 /// The abort must surface as a typed error a caller can act on, and the
-/// action is named: `VolumeSet::defects()` answers "which volume", which the
+/// action is named: `VolumeSetReport::defects()` answers "which volume", which the
 /// callback itself cannot do portably (the `W` message that arrives first
 /// carries a platform-width `wchar` buffer).
 #[test]
@@ -695,11 +695,45 @@ fn missing_volume_maps_to_corruption_pointing_at_the_defect_list() {
                 details.contains("defects()"),
                 "details must point the caller at the typed parser: {details}"
             );
+            assert!(
+                details.contains("VolumeSetReport"),
+                "details must name the type that owns defects(): {details}"
+            );
         }
         other => panic!("expected Corruption, got {other:?}"),
     }
     assert!(
         ctx.abort.is_none(),
         "take_abort_error must consume the abort"
+    );
+}
+
+/// The advice in that error message has to be a call that compiles, not a
+/// substring that looks right.
+///
+/// The message previously said `VolumeSet::defects()`. `defects()` is on
+/// `VolumeSetReport`; `VolumeSet` owns `paths`, `to_layout` and `expected_name`.
+/// A caller who followed the advice got a compile error, and the assertion above
+/// did not notice because the substring `defects()` was present either way. So
+/// this test *performs* the recommended sequence. If the type or the method
+/// moves again, this stops compiling instead of passing.
+#[test]
+fn the_recommended_recovery_call_actually_compiles() {
+    use crate::format::multipart::parse_volume_set;
+
+    let paths = [
+        PathBuf::from("set.part1.rar"),
+        PathBuf::from("set.part3.rar"),
+    ];
+    let report = parse_volume_set(&paths);
+    // The exact chain the error message tells the caller to use.
+    let defects = report.defects();
+    assert!(
+        !defects.is_empty(),
+        "a set missing volume 2 must report a defect, got {defects:?}"
+    );
+    assert!(
+        !report.is_complete(),
+        "a set missing volume 2 must not be complete"
     );
 }

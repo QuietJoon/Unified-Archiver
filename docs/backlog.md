@@ -356,10 +356,16 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
 - **Narrowed 2026-08-21 (ticgit `513f99fc`, closed):** the typed model landed as **additive
   public API with no in-crate consumer**, so this entry survives as its unfinished half.
   `src/format/multipart.rs` now holds `VolumeScheme` / `VolumeName` / `Volume` / `VolumeSet`,
-  `parse_volume_name`, `parse_volume_set` and `VolumeSet::defects() -> &[VolumeSetDefect]` — a defect
-  *list*, deliberately, so a caller learns which volume is missing and learns about more than one
-  problem per set. (`continuity_defects` is the private function that computes the list; `defects` is
-  the public accessor, so cite that one when writing against this API.) What remains is what the decision was actually about:
+  `parse_volume_name`, `parse_volume_set` and `VolumeSetReport::defects() -> &[VolumeSetDefect]` — a
+  defect *list*, deliberately, so a caller learns which volume is missing and learns about more than
+  one problem per set.
+  **Correction 2026-08-22.** An earlier note here said `VolumeSet::defects()`. Wrong type, and the
+  note was itself written as a correction, which is the embarrassing part. Walking the impl blocks of
+  `src/format/multipart.rs`: `VolumeSet` owns `paths`, `to_layout` and `expected_name`;
+  `VolumeSetReport` owns `set`, `defects` and `is_complete`. Both `parse_volume_set` and
+  `parse_volume_set_for` return a `VolumeSetReport`, so the chain is
+  `parse_volume_set(paths).defects()`. `continuity_defects` remains the private function that
+  computes the list. What remains is what the decision was actually about:
   `Archive::detect_multipart` in `src/inspection.rs` still runs its own sibling scan with the old
   string predicates and never calls the parser, so the crate now holds two implementations of "is
   this a volume name"; and the 7z `.001` routing question (R0080-0093) is untouched. Verified by
@@ -635,7 +641,7 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   `DllVolNotify` give up on a valid multi-volume read. An unconditional abort would have traded a
   hang for a regression. `take_abort_error` maps it to `ArchiveError::Corruption` — the same class
   as a central directory that ends mid-record, since the entry's data is truncated at the set
-  boundary — naming the archive and pointing at `VolumeSet::defects()` for which volume, because
+  boundary — naming the archive and pointing at `VolumeSetReport::defects()` for which volume, because
   the callback cannot answer that portably (the `W` message arrives first, carrying a
   platform-width `wchar` buffer).
   Five tests drive the trampoline directly and pin both arms. Non-vacuity was checked in **both**
@@ -667,7 +673,7 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   under the process-wide UnRAR mutex (AD-0019), so it would block every other archive operation in
   the process.
 - **Dependency update 2026-08-21:** the typed volume-set parser this entry was waiting to lean on
-  landed (`513f99fc`, closed) — `VolumeSet::defects()` can now say which volume is missing
+  landed (`513f99fc`, closed) — `VolumeSetReport::defects()` can now say which volume is missing
   before anything is opened. But it landed as additive public API that no open or extract path calls,
   so the "refuse up front rather than rely on the callback" option is available in API form only and
   would still need wiring. The decision this entry owes is unchanged, and its exposure is unchanged:

@@ -1665,14 +1665,14 @@ impl<'a> UnrarExtractContext<'a> {
             // instead of guessing a name here: the callback receives the
             // wanted volume in `p1`, but as a platform-width `wchar` buffer
             // for the `W` message that arrives first, and
-            // `VolumeSet::defects()` already answers "which volume"
+            // `VolumeSetReport::defects()` already answers "which volume"
             // precisely and portably.
             Some(UnrarAbort::MissingVolume) => Some(ArchiveError::corruption(
                 archive_path.display().to_string(),
                 "UnRAR asked for the next volume of this multi-volume set and it is not available; \
                  aborted rather than retrying the same volume name under the process-wide UnRAR lock. \
-                 Use unified_archive::format::multipart::parse_volume_set and VolumeSet::defects() to \
-                 learn which volume is missing",
+                 Call unified_archive::format::multipart::parse_volume_set on the sibling paths and \
+                 read VolumeSetReport::defects() to learn which volume is missing",
             )),
             None => None,
         }

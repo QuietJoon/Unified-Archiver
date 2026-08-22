@@ -157,9 +157,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `password_ref`, `split_size`, `has_progress`.
 - **`format::multipart`** — a typed parser for split/multi-volume sets: `VolumeSet`, `Volume`,
   `VolumeName`, `VolumeScheme`, `VolumeSetDefect`, `VolumeSetReport`, with `parse_volume_name`,
-  `parse_volume_set`, `parse_volume_set_for` and the set queries `is_complete`, `defects`, `paths`,
-  `expected_name`, `to_layout`. `defects` returns a list rather than a bool on purpose: a caller
-  who cannot open a set needs to know *which* volume is missing.
+  `parse_volume_set` and `parse_volume_set_for`. The queries split across two types, which is worth
+  stating because an earlier draft of this entry ran them together: `VolumeSet` answers `paths`,
+  `to_layout` and `expected_name`; `VolumeSetReport` — what both parse functions actually return —
+  answers `set`, `is_complete` and `defects`. `defects` returns a list rather than a bool on purpose:
+  a caller who cannot open a set needs to know *which* volume is missing, and may need to know about
+  more than one gap.
 - **`entry`**: `build_checked` on the builder — the fallible finish that enforces the entry-kind
   invariants `build` cannot — plus `symlink_at` / `try_symlink_at` / `hardlink_at` /
   `try_hardlink_at`, and the `entry_type`, `id`, `path`, `is_encrypted` accessors — the read path
@@ -308,7 +311,7 @@ And the three that were mis-dated:
   The message is now handled on its mode, which is the part that cannot be simplified: with
   `RAR_VOL_ASK` the volume is missing and the trampoline aborts, surfacing
   `ArchiveError::Corruption` that names the archive and points at
-  `format::multipart::parse_volume_set` / `VolumeSet::defects()` for *which* volume; with
+  `format::multipart::parse_volume_set` / `VolumeSetReport::defects()` for *which* volume; with
   `RAR_VOL_NOTIFY` the next volume was opened successfully and the answer stays non-negative,
   because `-1` there makes the SDK give up on a perfectly good multi-volume read. Supplying the
   next volume path instead of aborting is the multi-volume continuation feature, tracked
