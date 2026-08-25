@@ -2227,7 +2227,9 @@ fn parse_rar5_recovery<R: std::io::Read + std::io::Seek>(
         let header_flags = read_rar5_vint(file)?;
 
         // Optional ExtraSize / DataSize vints in the standard header tail.
-        let _extra_area_size = if header_flags & 0x0001 != 0 {
+        // The extra area is where the recovery percentage lives, so unlike
+        // the previous version of this walk it must not be discarded.
+        let extra_area_size = if header_flags & 0x0001 != 0 {
             read_rar5_vint(file)?
         } else {
             0
@@ -2260,30 +2262,27 @@ fn parse_rar5_recovery<R: std::io::Read + std::io::Seek>(
                 ));
             }
             let remaining = header_size - consumed_in_header;
-            let read_cap = remaining.min(4096) as usize;
-            let mut tail = vec![0u8; read_cap];
+            // `header_size` was CRC-verified above, so `remaining` is the
+            // archive's own declaration rather than an attacker's free
+            // choice. Cap the allocation anyway: a service header this
+            // large is not an RR header, and refusing to allocate for it
+            // is cheaper than reading it to find that out.
+            if remaining > RAR5_SERVICE_HEADER_READ_CAP {
+                return Ok(None);
+            }
+            let mut tail = vec![0u8; remaining as usize];
             file.read_exact(&mut tail)
                 .map_err(|e| ArchiveError::io("read", archive_path, e))?;
 
-            // Find the "RR" name. RAR5 service headers carry a
-            // length-prefixed name; the "RR" bytes appear as a contiguous
-            // pair within the type-specific portion of the header.
-            // Restrict the percentage scan to the bytes *after* that match
-            // so unrelated header fields can't trigger a false positive
-            // (R0075-0062).
-            if let Some(rr_at) = tail.windows(2).position(|window| window == b"RR") {
-                let after_rr = &tail[rr_at + 2..];
-                // The percentage is conventionally a 1-byte field in
-                // 1..=15 within the recovery extra-area record. We scan
-                // the first 32 bytes after "RR" — far tighter than the
-                // previous 64-byte scan over the entire header.
-                for &byte in after_rr.iter().take(32) {
-                    if (1..=15).contains(&byte) {
-                        return Ok(Some(byte));
-                    }
-                }
-                return Ok(None);
+            if let Some(raw) = rar5_service_recovery_percent(&tail, extra_area_size) {
+                // RAR 6.10 raised the maximum recovery record from 99% to
+                // 1000%, which `Option<u8>` cannot carry. Report the
+                // documented "percentage cannot be determined" rather than
+                // a truncated number (ticgit 7ca208: widen the return
+                // type).
+                return Ok(u8::try_from(raw).ok().filter(|pct| *pct > 0));
             }
+            return Ok(None);
         }
 
         // Compute the next block's starting offset:
@@ -2501,6 +2500,126 @@ fn parse_rar4_recovery<R: std::io::Read + std::io::Seek>(
 ///
 /// On EOF mid-vint the function surfaces the underlying I/O error
 /// rather than returning a partial value.
+/// Largest RAR5 service header this walk will read into memory while
+/// looking for a recovery record. The RR header is a few dozen bytes; the
+/// cap only exists so a legitimately huge service header (a large archive
+/// comment, say) is skipped instead of allocated.
+const RAR5_SERVICE_HEADER_READ_CAP: u64 = 64 * 1024;
+
+/// RAR5 extra-area record type carrying a service header's subdata array
+/// (`FHEXTRA_SUBDATA` in the vendored UnRAR `headers5.hpp`).
+const RAR5_FHEXTRA_SUBDATA: u64 = 0x07;
+
+/// Read a RAR5 vint out of a byte slice, returning the value and the number
+/// of bytes consumed. `None` if the slice ends mid-vint or the value does
+/// not fit a `u64`.
+fn slice_rar5_vint(bytes: &[u8]) -> Option<(u64, usize)> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    for (index, &byte) in bytes.iter().take(10).enumerate() {
+        if shift >= 64 {
+            return None;
+        }
+        value |= u64::from(byte & 0x7F).checked_shl(shift)?;
+        if byte & 0x80 == 0 {
+            return Some((value, index + 1));
+        }
+        shift += 7;
+    }
+    None
+}
+
+/// Decode the recovery-record percentage from a RAR5 service header.
+///
+/// `tail` is the header body from just after the optional ExtraSize /
+/// DataSize vints to the end of the header; `extra_area_size` is that
+/// header's declared extra-area length, which occupies `tail`'s last
+/// `extra_area_size` bytes.
+///
+/// The percentage is **not** a byte to be scanned for. The vendored UnRAR
+/// reads it in `arcread.cpp`'s `HEAD_SERVICE` arm, from the `FHEXTRA_SUBDATA`
+/// (0x07) extra-area record of the service header whose name is `"RR"`:
+///
+/// ```text
+/// RawPercent.Read(hd->SubData.data(), hd->SubData.size());
+/// RecoveryPercent = (int)RawPercent.GetV();
+/// ```
+///
+/// with the upstream comment "It is stored as a single byte up to RAR 6.02
+/// and as vint since 6.10, where we extended the maximum RR size from 99% to
+/// 1000%". Returns the raw vint, so the caller decides what to do with a
+/// value that does not fit its return type.
+///
+/// This replaces a scan that returned the first byte in `1..=15` found after
+/// the literal `"RR"`. That byte was the extra record's own *size* field, so
+/// every recovery-bearing archive reported the same percentage regardless of
+/// the `-rr` value it was built with, and any record above 15% could not be
+/// represented at all.
+///
+/// Returns `None` — never an error — when the header is not an `"RR"` service
+/// header or the extra area does not parse. The header bytes are already
+/// CRC-verified by the caller, so a parse that does not fit this shape means
+/// this is some other service header, not a damaged archive; reporting
+/// corruption here would turn unfamiliar-but-valid headers into false damage
+/// reports.
+fn rar5_service_recovery_percent(tail: &[u8], extra_area_size: u64) -> Option<u64> {
+    let mut pos = 0usize;
+
+    // FileFlags, UnpackedSize, Attributes.
+    let (file_flags, used) = slice_rar5_vint(tail.get(pos..)?)?;
+    pos += used;
+    let (_unpacked_size, used) = slice_rar5_vint(tail.get(pos..)?)?;
+    pos += used;
+    let (_attributes, used) = slice_rar5_vint(tail.get(pos..)?)?;
+    pos += used;
+
+    // Optional fixed-width mtime (0x0002) and data CRC32 (0x0004).
+    if file_flags & 0x0002 != 0 {
+        pos = pos.checked_add(4)?;
+    }
+    if file_flags & 0x0004 != 0 {
+        pos = pos.checked_add(4)?;
+    }
+
+    // CompressionInfo, HostOS, then the length-prefixed name.
+    let (_compression_info, used) = slice_rar5_vint(tail.get(pos..)?)?;
+    pos += used;
+    let (_host_os, used) = slice_rar5_vint(tail.get(pos..)?)?;
+    pos += used;
+    let (name_size, used) = slice_rar5_vint(tail.get(pos..)?)?;
+    pos += used;
+
+    let name_end = pos.checked_add(usize::try_from(name_size).ok()?)?;
+    let name = tail.get(pos..name_end)?;
+    if name != b"RR" {
+        return None;
+    }
+
+    // The extra area is the tail's suffix. Deriving its start from the
+    // declared size rather than from `name_end` keeps this correct even
+    // when a header carries fields this parser does not know about.
+    let extra_len = usize::try_from(extra_area_size).ok()?;
+    let extra_start = tail.len().checked_sub(extra_len)?;
+    if extra_start < name_end {
+        return None;
+    }
+    let mut extra = tail.get(extra_start..)?;
+
+    while !extra.is_empty() {
+        let (record_size, size_len) = slice_rar5_vint(extra)?;
+        let record_end = size_len.checked_add(usize::try_from(record_size).ok()?)?;
+        let record = extra.get(size_len..record_end)?;
+        let (record_type, type_len) = slice_rar5_vint(record)?;
+        if record_type == RAR5_FHEXTRA_SUBDATA {
+            let subdata = record.get(type_len..)?;
+            return slice_rar5_vint(subdata).map(|(percent, _)| percent);
+        }
+        extra = extra.get(record_end..)?;
+    }
+
+    None
+}
+
 pub(crate) fn read_rar5_vint<R: std::io::Read>(reader: &mut R) -> Result<u64> {
     let mut value = 0u64;
     let mut shift: u32 = 0;

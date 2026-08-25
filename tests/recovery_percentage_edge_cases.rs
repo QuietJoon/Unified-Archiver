@@ -18,27 +18,77 @@ use unified_archive::Archive;
 // ============================================================================
 
 /// Recovery metadata of the committed RAR fixtures, read off the bytes on
-/// disk (R0001-0088). Every one of them was produced without `rar -rr`, so
-/// the RAR5 main header's archive-flags vint is `0` and `MHFL_RECOVERY`
-/// (0x0008) is clear — UnRAR therefore reports no `ROADF_RECOVERY` and
-/// `recovery_percentage()` must short-circuit to `None`.
+/// disk (R0001-0088). Each entry is that fixture's fact, not the format's:
+/// the RAR5 main header carries an archive-flags vint, and its
+/// `MHFL_RECOVERY` bit (0x0008) is what `has_recovery_record()` reports.
 ///
 /// This is the oracle the consistency tests were missing: they only printed
 /// the value when a recovery record was present, so `None` or an impossible
 /// percentage from a recovery-bearing archive passed silently.
 ///
-/// If a fixture is ever regenerated with a recovery record, update this
-/// constant in the same commit — the assertions below are what force it.
+/// The recovery-bearing fixtures come from `scripts/generate-rar-fixtures.sh`,
+/// which is deliberately *outside* the build: it shells out to the
+/// proprietary RARLAB `rar` CLI, which is not a build dependency and which
+/// this crate cannot substitute for (RAR creation exists only behind
+/// `cfg(all(target_os = "windows", feature = "external-rar-create"))`).
+/// Regenerate a fixture and this table in the same commit — the assertions
+/// below are what force that.
 #[cfg(feature = "rar-support")]
-const FIXTURE_HAS_RECOVERY_RECORD: bool = false;
+const FIXTURE_RECOVERY: &[(&str, bool, Option<u8>)] = &[
+    // Produced without `rar -rr`: archive-flags vint is 0, so
+    // `MHFL_RECOVERY` is clear and the percentage must short-circuit.
+    ("tests/fixtures/test.rar", false, None),
+    ("tests/fixtures/test_rar5.rar", false, None),
+    ("tests/fixtures/test_encrypted_data.rar", false, None),
+    // Produced with `rar a -rr5p`: archive-flags vint is 0x0008, and the
+    // FHEXTRA_SUBDATA record of the "RR" service header carries the 5.
+    ("tests/fixtures/test_recovery.rar", true, Some(5)),
+    // `rar a -ptest123 -rr5p`: data encrypted, headers readable. This is the
+    // combination that exercises `parse_recovery_percentage`'s second,
+    // password-less open against an encrypted archive *and gets an answer*
+    // (R0001-0089 item 2).
+    (
+        "tests/fixtures/test_encrypted_data_recovery.rar",
+        true,
+        Some(5),
+    ),
+];
+
+/// The expected `(has_recovery_record, recovery_percentage)` pair for a
+/// committed fixture.
+///
+/// Panics for an unlisted path rather than defaulting, so a newly added
+/// fixture cannot be asserted against nothing — which is how
+/// `test_recovery.rar` sat in the tree for months named after a recovery
+/// record it did not have.
+#[cfg(feature = "rar-support")]
+fn expected_recovery(path: &str) -> (bool, Option<u8>) {
+    FIXTURE_RECOVERY
+        .iter()
+        .find(|(fixture, _, _)| *fixture == path)
+        .map(|(_, has_record, percentage)| (*has_record, *percentage))
+        .unwrap_or_else(|| {
+            panic!(
+                "{path} has no FIXTURE_RECOVERY entry; add one, and regenerate the \
+                 fixture with scripts/generate-rar-fixtures.sh if it is meant to \
+                 carry a recovery record"
+            )
+        })
+}
 
 /// R0001-0088: the documented `has_recovery_record()` /
 /// `recovery_percentage()` contract, asserted rather than printed.
 ///
 /// * no recovery flag ⇒ the percentage must be `None`;
 /// * recovery flag set ⇒ the percentage is either `None` (the record is
-///   present but its percentage byte could not be parsed) or a value in
-///   the documented 1..=100 range — never 0 and never above 100.
+///   present but its percentage could not be read) or a positive value —
+///   never 0.
+///
+/// The upper bound is the return type, not the format: RAR 6.10 raised the
+/// maximum recovery record from 99% to 1000%, so `1..=100` would now reject
+/// archives `rar -rr200p` produces. `recovery_percentage()` returns
+/// `Option<u8>` and reports `None` for anything it cannot carry, so what is
+/// assertable here is `1..=u8::MAX`.
 #[cfg(feature = "rar-support")]
 fn assert_recovery_contract(label: &str, has_recovery: bool, percentage: Option<u8>) {
     match (has_recovery, percentage) {
@@ -47,8 +97,8 @@ fn assert_recovery_contract(label: &str, has_recovery: bool, percentage: Option<
             "{label}: has_recovery_record() is false but recovery_percentage() reported {pct}%"
         ),
         (true, Some(pct)) => assert!(
-            (1..=100).contains(&pct),
-            "{label}: recovery percentage must be 1-100%, got {pct}"
+            pct > 0,
+            "{label}: a recovery percentage of 0 is not a percentage"
         ),
         (true, None) => {}
     }
@@ -59,6 +109,7 @@ fn assert_recovery_contract(label: &str, has_recovery: bool, percentage: Option<
 /// flag (or invented one) fails instead of printing.
 #[cfg(feature = "rar-support")]
 fn assert_fixture_recovery_metadata(path: &str) {
+    let (expected_has_record, expected_percentage) = expected_recovery(path);
     let archive = Archive::open(path).unwrap_or_else(|e| panic!("Failed to open {path}: {e}"));
 
     let has_recovery = archive
@@ -70,13 +121,13 @@ fn assert_fixture_recovery_metadata(path: &str) {
 
     assert_recovery_contract(path, has_recovery, percentage);
     assert_eq!(
-        has_recovery, FIXTURE_HAS_RECOVERY_RECORD,
-        "{path}: fixture carries archive-flags 0 (no MHFL_RECOVERY); \
-         regenerate FIXTURE_HAS_RECOVERY_RECORD together with the fixture"
+        has_recovery, expected_has_record,
+        "{path}: MHFL_RECOVERY disagrees with FIXTURE_RECOVERY; regenerate the \
+         table together with the fixture (scripts/generate-rar-fixtures.sh)"
     );
     assert_eq!(
-        percentage, None,
-        "{path}: a fixture without a recovery record must report no percentage"
+        percentage, expected_percentage,
+        "{path}: recovery percentage disagrees with FIXTURE_RECOVERY"
     );
 }
 
@@ -98,12 +149,17 @@ fn test_consistency_rar5_recovery_methods() {
     assert_fixture_recovery_metadata("tests/fixtures/test_rar5.rar");
 }
 
-/// R0001-0088: `tests/fixtures/test_recovery.rar` is currently byte-identical
-/// to `tests/fixtures/test.rar` (same SHA-256, archive-flags `0`), so despite
-/// its name it carries no recovery record — and until this test nothing in
-/// the suite referenced it at all. Pin what it actually is; the assertion
-/// fails the moment somebody regenerates it with `rar -rr`, which is exactly
-/// when the constant above must be revisited.
+/// R0001-0088 / ticgit 8c29f8: `tests/fixtures/test_recovery.rar` now earns
+/// its name. It used to be byte-identical to `tests/fixtures/test.rar` (same
+/// SHA-256, archive-flags `0`), so the positive branch of the
+/// recovery-percentage contract had no fixture anywhere in the repository —
+/// every RAR fixture answered `false`, and a backend that simply never
+/// reported a recovery record would have passed the whole suite.
+///
+/// It is now produced by `scripts/generate-rar-fixtures.sh` with
+/// `rar a -rr5p`, so its archive-flags vint is `0x0008` and both halves of
+/// the contract are exercised: the flag must be `true` *and* the percentage
+/// must parse back as the 5 that produced it.
 #[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
@@ -343,16 +399,90 @@ fn test_recovery_percentage_all_supported_formats() {
 /// case had no coverage at all. It now exercises a genuinely encrypted
 /// fixture — with the honest name.
 ///
-/// **Known gap:** no committed fixture is *both* encrypted and
-/// recovery-record-bearing, so the encrypted-header × recovery-percentage
-/// interaction (which would exercise `parse_recovery_percentage`'s second
-/// file open against an encrypted archive) is still untested. Adding
-/// `rar a -hp<pw> -rr5p …` output as a fixture is the follow-up.
+/// This fixture is *data*-encrypted (`rar -p`), so its headers are readable
+/// without the password. The header-encrypted × recovery-record combination
+/// is covered separately by
+/// `test_recovery_percentage_header_encrypted_recovery_archive`, which closes
+/// the gap this doc comment used to record (R0001-0089).
 #[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_recovery_percentage_data_encrypted_archive() {
     assert_fixture_recovery_metadata("tests/fixtures/test_encrypted_data.rar");
+}
+
+/// R0001-0089 item 2 / ticgit 8c29f8: the encrypted × recovery-record case
+/// that *works*.
+///
+/// `tests/fixtures/test_encrypted_data_recovery.rar` is produced by
+/// `scripts/generate-rar-fixtures.sh` with `rar a -ptest123 -rr5p`: the file
+/// data is encrypted but the headers are not, so the second, password-less
+/// open inside `recovery_percentage()` can still walk the block structure and
+/// read the `FHEXTRA_SUBDATA` record. Before this fixture existed that second
+/// open had never met an encrypted archive at all.
+#[cfg(feature = "rar-support")]
+#[test]
+#[serial_test::file_serial(rar)]
+fn test_recovery_percentage_data_encrypted_recovery_archive() {
+    assert_fixture_recovery_metadata("tests/fixtures/test_encrypted_data_recovery.rar");
+}
+
+/// R0001-0089 / ticgit 8c29f8: the header-encrypted × recovery-record case,
+/// which pins a **known limitation** rather than the desired behaviour.
+///
+/// `tests/fixtures/test_encrypted_recovery.rar` is produced with
+/// `rar a -hptest123 -rr5p`, so the RAR5 main header lives inside an
+/// encrypted-header block (HEAD_CRYPT, type 4). The record is genuinely
+/// there — `unrar lt -ptest123` on this fixture prints
+/// "Details: RAR 5, recovery record, encrypted headers" — but this crate
+/// reports `has_recovery_record() == false`.
+///
+/// The cause is ordering, not the format: `UnrarArchive` captures its
+/// `flags` from `OpenArchiveDataEx` at `RAROpenArchiveEx` time and calls
+/// `RARSetPassword` *afterwards*. With `-hp` the main header cannot be
+/// decrypted during the open, so `ROADF_RECOVERY` is absent from the flags
+/// word, and a later `RARSetPassword` does not revisit it. Fixing it means
+/// making the password available to the open itself (a `UCM_NEEDPASSWORD`
+/// callback installed before `RAROpenArchiveEx`, or a re-open), inside the
+/// process-wide UnRAR mutex. Tracked as ticgit 3f8790.
+///
+/// This test therefore asserts what happens today, so that a fix breaks it
+/// and forces this comment and the assertion to be updated together. What it
+/// does *not* tolerate is an `Err`: a valid archive whose header this parser
+/// cannot decrypt is not a damaged archive, and reporting corruption here
+/// would turn every header-encrypted RAR into a false damage report.
+#[cfg(feature = "rar-support")]
+#[test]
+#[serial_test::file_serial(rar)]
+fn test_recovery_percentage_header_encrypted_recovery_archive() {
+    let path = "tests/fixtures/test_encrypted_recovery.rar";
+
+    let archive = Archive::open_encrypted(path, "test123")
+        .unwrap_or_else(|e| panic!("Failed to open header-encrypted {path}: {e}"));
+
+    let has_recovery = archive
+        .has_recovery_record()
+        .expect("has_recovery_record failed on a header-encrypted archive");
+
+    let percentage = archive.recovery_percentage().unwrap_or_else(|e| {
+        panic!(
+            "{path}: recovery_percentage() failed on a valid header-encrypted \
+             archive: {e}. A header this parser cannot decrypt is not damage."
+        )
+    });
+
+    assert_recovery_contract(path, has_recovery, percentage);
+    assert!(
+        !has_recovery,
+        "{path}: has_recovery_record() now reports the record that `unrar -p` \
+         has always seen — the open-before-password ordering must have been \
+         fixed. Update this test and its doc comment to assert the record is \
+         found, and give the fixture a FIXTURE_RECOVERY entry."
+    );
+    assert_eq!(
+        percentage, None,
+        "{path}: with the flag unreadable the percentage must short-circuit"
+    );
 }
 
 #[cfg(feature = "rar-support")]

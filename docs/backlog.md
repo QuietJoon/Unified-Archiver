@@ -219,6 +219,48 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   documents disagree.
   **Landed 2026-08-12:** the `src/sfx.rs` row now names the public submodules, states that `limits` and `signatures` are `pub(crate)`, and lists the four re-exported items; `src/sfx/limits.rs` gained the row it never had. No code change — `pub(crate)` is correct. The entry stays until `0477055a` is closed by its filer.
 
+### Header-encrypted RAR archives report no recovery record (ticgit `3f8790`)
+- **Type:** 1
+- **Verified:** yes — 2026-08-26, first-hand against a fixture built for it. `unrar lt -ptest123 tests/fixtures/test_encrypted_recovery.rar` prints "Details: RAR 5, recovery record, encrypted headers"; `Archive::open_encrypted(path, "test123").has_recovery_record()` returns `false`
+- **Sources:** ticgit:3f8790, src/ffi/wrapper.rs, tests/recovery_percentage_edge_cases.rs,
+  tests/fixtures/test_encrypted_recovery.rar
+- **First seen:** 2026-08-26
+- **Last seen:** 2026-08-26
+- **Description:** `UnrarArchive::open_with_mode` stores `flags: open_data.flags` from
+  `RAROpenArchiveEx`, and `RARSetPassword` is called only afterwards. A `-hp` archive keeps its
+  main header inside a HEAD_CRYPT block, so it cannot be decrypted during the open and the
+  captured flags word never gains `ROADF_RECOVERY`; nothing revisits it later.
+- **Background:** Not recovery-specific — every main-header flag (`ROADF_SOLID`,
+  `ROADF_COMMENT`, `ROADF_VOLUME`, …) is lost the same way for header-encrypted archives. The
+  fix is to make the password available to the open itself: a `UCM_NEEDPASSWORD` /
+  `UCM_NEEDPASSWORDW` callback installed before `RAROpenArchiveEx`, or a re-open once the
+  password is known, inside AD 0019's process-wide lock. Type 1 rather than 2 because there is
+  no scope question — the answer is simply wrong today.
+  `test_recovery_percentage_header_encrypted_recovery_archive` asserts the defective answer on
+  purpose, so a fix breaks the test and forces both to move together.
+
+### `UnrarAbort::MissingVolume` never reaches a caller (ticgit `03ddc6`)
+- **Type:** 1
+- **Verified:** yes — 2026-08-26. Extraction of a set with its middle volume removed reports `ArchiveError::Io` / "UnRAR ERAR_EOPEN"; instrumenting `unrar_process_callback` logged nothing at all for that scenario, so the trampoline is never entered
+- **Sources:** ticgit:03ddc6, ticgit:d3cfce, src/ffi/wrapper.rs,
+  src/ffi/native/unrar/volume.cpp, tests/rar_multivolume_test.rs
+- **First seen:** 2026-08-26
+- **Last seen:** 2026-08-26
+- **Description:** `d3cfce` added the typed `MissingVolume` abort and a message telling the
+  caller to run `parse_volume_set` and read `VolumeSetReport::defects()`. That message cannot
+  reach a caller on the extraction path, because this crate registers its UnRAR callback per
+  operation — immediately before `RARProcessFile`, since `UnrarExtractContext` borrows caller
+  state — and nothing is registered at the moment UnRAR asks for the next volume.
+- **Background:** The vendored SDK explains the observable. `DllVolChange` ends with
+  `if (DllVolAborted || Cmd->Callback==NULL && Cmd->ChangeVolProc==NULL) { Cmd->DllError=ERAR_EOPEN; return false; }`,
+  so an abort and a missing callback are indistinguishable from outside, and the second case
+  never calls back. The practical consequence is that **boundedness on this path comes from the
+  SDK's own no-callback branch, not from the `d3cfce` fix** — that branch exists, in its author's
+  words, "to prevent an infinite loop if no callback is defined". The five callback unit tests in
+  `src/ffi/wrapper/tests.rs` remain valid for the paths where a callback *is* installed. Fixing
+  the diagnostic needs a handle-owned callback context; the ownership shape is an implementation
+  choice, not an owner decision, which is why this is Type 1.
+
 ## Type 2 — needs decision
 
 ### Libarchive header-status policy split across six read walks (OI-0080-006)
@@ -783,6 +825,47 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   collapse them rather than answer twice.
 
 ---
+
+### Multi-volume RAR sets cannot be extracted by any public path (ticgit `3b4d15`)
+- **Type:** 2
+- **Verified:** yes — 2026-08-26, measured against a complete `unrar t`-verified three-volume fixture set
+- **Sources:** ticgit:3b4d15, src/format.rs, src/ffi/wrapper.rs, src/extraction.rs,
+  tests/rar_multivolume_test.rs, tests/fixtures/test_multivol.part1.rar
+- **First seen:** 2026-08-26
+- **Last seen:** 2026-08-26
+- **Description:** UnRAR reports the per-volume file header, so a file split across three
+  volumes is listed as three entries sharing one path. Every extraction guard then correctly
+  rejects it: `extract_all` trips the duplicate-output-path guard, `extract_file` and
+  `extract_to_memory` refuse to disambiguate and recommend `extract_by_ids`, and
+  `extract_by_ids` — the recommended call — fails with "listing drift: archive ended after 1
+  entries but the validated listing holds 3". `validate_integrity()` meanwhile reports
+  `total_entries: 3, validated: 3, failed: []`, i.e. fully healthy.
+- **Background:** `ArchiveFormat::Rar`/`Rar5` claimed `multipart_read: Support::Full`. That was
+  corrected to `Support::Partial` on 2026-08-26, matching the ZIP arm in the same match and its
+  stated reason ("extraction across parts is not implemented end-to-end"), but `Partial` still
+  flatters it: listing works, extraction does not, at all. **The decision owed** is whether
+  multi-volume RAR extraction is in scope. If it is, a split entry has to be coalesced into one
+  logical entry that reassembles across volumes. If it is not, the refusal should be one typed
+  error naming the limitation, and `extract_by_ids` should stop being recommended for a case
+  where it also fails. Distinct from `61660f` (OI-0001-006), which is about `detect_multipart`
+  discovering a set from a continuation member — a detection asymmetry, not extraction.
+
+### `recovery_percentage()` cannot carry RAR 6.10's extended range (ticgit `7ca208`)
+- **Type:** 2
+- **Verified:** yes — 2026-08-26, from the vendored SDK's own comment in `arcread.cpp`
+- **Sources:** ticgit:7ca208, src/ffi/native/unrar/arcread.cpp, src/ffi/wrapper.rs, src/archive.rs
+- **First seen:** 2026-08-26
+- **Last seen:** 2026-08-26
+- **Description:** The vendored UnRAR reads the recovery percentage as a vint and notes "It is
+  stored as a single byte up to RAR 6.02 and as vint since 6.10, where we extended the maximum
+  RR size from 99% to 1000%." The public return type is `Option<u8>`, so any record above 255%
+  is unrepresentable and reports `None` — which the docs define as "percentage cannot be
+  determined", indistinguishable from a record whose percentage genuinely could not be read.
+- **Background:** Reachable in practice: `rar a -rr300p` produces such an archive. **The
+  decision owed** is whether to widen to `Option<u16>` (a breaking signature change, and the
+  0.5.0 window is already open) or to keep `Option<u8>` and add a distinguishable outcome. The
+  percentage parse itself is correct as of 2026-08-26 — this is only about the type that carries
+  the answer.
 
 ## Type 3 — blocked
 

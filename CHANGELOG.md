@@ -131,6 +131,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`scripts/generate-rar-fixtures.sh`** — the RAR fixtures this crate cannot produce itself.
+  RAR creation exists only behind `cfg(all(target_os = "windows", feature =
+  "external-rar-create"))`, so a recovery-record fixture, an encrypted-plus-recovery fixture and
+  a multi-volume set all have to come from the proprietary RARLAB `rar` CLI. The script is
+  deliberately outside the build and must stay there: `rar` is not a build dependency, and on
+  macOS every invocation is stalled by `syspolicyd`. Run it by hand, commit the bytes, and let
+  the suite consume the committed bytes. It skips fixtures that already exist unless given
+  `--force`, and verifies each result with `unrar t`.
+
+  New fixtures: `test_recovery.rar` (regenerated with a genuine 5% record),
+  `test_encrypted_data_recovery.rar`, `test_encrypted_recovery.rar`, and
+  `test_multivol.part{1,2,3}.rar`. `tests/fixtures/README.md` documents each one, its generation
+  command, and what it is for.
+
+- **`tests/rar_multivolume_test.rs`** — the end-to-end half of ticgit d3cfce's acceptance
+  criteria, which could not be written until a genuine volume set existed. It pins that a set
+  missing its middle volume fails *bounded* rather than retrying the absent name forever under
+  the process-wide UnRAR lock, and records why the typed `MissingVolume` diagnostic does not
+  reach the caller on that path: the vendored SDK's `DllVolChange` maps both "our callback
+  aborted" and "no callback installed" to `ERAR_EOPEN`, and this crate registers its callback per
+  operation, so nothing is registered when UnRAR asks. Boundedness there comes from the SDK's own
+  no-callback branch (ticgit 03ddc6).
+
 - **`Archive::validate()`** — asks whether the handle refers to a usable archive, for the cost of
   the first parse and no more. `Archive::open` parses nothing on most backends, so `Ok` from
   `open()` never meant the input was a valid archive; a corrupt ZIP opened fine and failed later,
@@ -211,6 +234,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write its own `CommandRunner` double.
 
 ### Changed
+
+- **`ArchiveFormat::Rar` and `Rar5` report `multipart_read: Support::Partial`, not `Full`.** The
+  `Full` claim was false, and a real three-volume set now in the fixtures proves it. RAR does get
+  further than ZIP — UnRAR opens the set and lists it, rather than ZIP's name-level enumeration —
+  but extraction across volumes is not implemented end-to-end either, so the same `Partial` that
+  ZIP carries applies for the same reason.
+
+  What a caller actually gets for a complete, `unrar`-verified volume set: the split file is
+  listed as one entry *per volume*, all sharing one path, so `extract_all` trips the
+  duplicate-output-path guard, `extract_file` and `extract_to_memory` refuse to disambiguate and
+  recommend `extract_by_ids`, and `extract_by_ids` — the recommended call — fails with a
+  listing-drift error. `validate_integrity()` meanwhile reports the set as fully healthy. Every
+  outcome is pinned in `tests/rar_multivolume_test.rs`; the gap is ticgit 3b4d15.
 
 - **`ExtractionLimits::reject_unsafe_paths` enforces something.** It recorded intent and gated
   nothing. Set `true`, the pre-extraction gate now blocks an archive carrying an unsafe entry name
@@ -293,6 +329,28 @@ And the three that were mis-dated:
   OI-0081-006 ships.
 
 ### Fixed
+
+- **`recovery_percentage()` returned the same number for every archive.** It reported `Some(2)`
+  for a RAR built with `-rr1p`, `-rr3p`, `-rr5p`, `-rr10p` and `-rr30p` alike, and could never
+  report more than 15. The cause: it searched the 32 bytes after the literal `"RR"` for the first
+  byte in `1..=15` and returned it — and that byte is the extra-area record's own *size* field,
+  which is `0x02` for every recovery record. It now decodes the field the format actually defines:
+  the `FHEXTRA_SUBDATA` (`0x07`) record of the `"RR"` service header, read as a vint, exactly as
+  the vendored UnRAR does in `arcread.cpp`. Measured against fixtures built at five different
+  percentages, each now reports its own value.
+
+  This was invisible because no fixture in the repository had a recovery record at all —
+  `tests/fixtures/test_recovery.rar` was byte-identical to `test.rar` despite the name, so every
+  assertion in the suite could only ever check the `false` / `None` branch. A parser that always
+  answered `Some(2)` passed. The fixture is real now, and `FIXTURE_RECOVERY` in
+  `tests/recovery_percentage_edge_cases.rs` holds a per-fixture expected value that a
+  regeneration has to update.
+
+  Two limits are recorded rather than fixed, each with a test that pins today's answer so a fix
+  breaks it: a record above 255% cannot be carried by the `Option<u8>` return type and reports
+  `None` (ticgit 7ca208), and a header-encrypted (`-hp`) archive reports no recovery record at all
+  because `UnrarArchive` captures its flags at `RAROpenArchiveEx` and calls `RARSetPassword`
+  afterwards (ticgit 3f8790).
 
 - **`cargo doc` is warning-free again.** Three rustdoc warnings shipped in `4f521e0` because that
   change's gate counted clippy warnings and never ran `cargo doc`. Two were public docs linking to

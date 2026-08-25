@@ -420,7 +420,23 @@ impl ArchiveFormat {
             ArchiveFormat::Rar | ArchiveFormat::Rar5 => FormatCapabilities {
                 encryption_read: Support::Full,
                 encryption_write: Support::None,
-                multipart_read: Support::Full,
+                // Corrected 2026-08-26 from `Full`. RAR gets further than
+                // ZIP does — UnRAR opens the set and lists it, rather than
+                // ZIP's name-level enumeration — but extraction across
+                // volumes is not implemented end-to-end either, so the same
+                // `Partial` applies for the same reason.
+                //
+                // Measured against a real three-volume set
+                // (`tests/fixtures/test_multivol.part*.rar`, produced by
+                // `scripts/generate-rar-fixtures.sh`): a split file is
+                // listed as one entry *per volume*, all sharing one path, so
+                // `extract_all` trips the duplicate-output-path guard,
+                // `extract_file` and `extract_to_memory` refuse to
+                // disambiguate, and `extract_by_ids` — the call those two
+                // errors recommend — fails with a listing-drift error. Every
+                // extraction path is closed (ticgit 3b4d15).
+                // `tests/rar_multivolume_test.rs` pins each one.
+                multipart_read: Support::Partial,
                 multipart_write: Support::None,
                 modification: Support::None,
                 // RAR is read-only through the main facade. The optional
@@ -1953,7 +1969,10 @@ mod tests {
             let caps = fmt.capabilities();
             assert_eq!(caps.encryption_read, Support::Full);
             assert_eq!(caps.encryption_write, Support::None);
-            assert_eq!(caps.multipart_read, Support::Full);
+            // Not `Full`: UnRAR lists a volume set but no extraction
+            // path can reassemble one. See the capability comment and
+            // `tests/rar_multivolume_test.rs`.
+            assert_eq!(caps.multipart_read, Support::Partial);
             assert_eq!(caps.modification, Support::None);
             // R0070-0065: RAR is decode-only through the main facade.
             assert_eq!(caps.compression_read, Support::Full);
