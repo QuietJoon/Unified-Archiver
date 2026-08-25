@@ -2001,7 +2001,8 @@ semantics unchanged. See AD 0009 / DCR-007 amendments of the same date.
 
 The compression-option builders advertise that "invalid combinations cannot be constructed at all,"
 but two escape hatches exist: `SevenZCompressionOptions::password` (fixed in this review — setter
-removed / claim softened per MADR-0027's permanent no-encrypted-creation stance) and
+removed / claim softened per MADR-0027's no-encrypted-creation stance, which its 2026-07-20
+amendment downgraded from permanent to deferred behind an explicit opt-in — see OI-0081-006) and
 `LibarchiveCompressionOptions::new(format)`, which accepts any `ArchiveFormat` and defers
 write-capability rejection to `Archive::create_libarchive` (R0081-0006, claim softened in this
 review). A true compile-time guarantee for the libarchive builder needs a restricted
@@ -2016,7 +2017,9 @@ promise is imperfect.
 ### Required Actions
 
 1. Introduce a `WritableFormat` (or equivalent restricted enum) for `LibarchiveCompressionOptions::new`, or a fallible constructor, so non-writable formats cannot be selected.
-2. Revisit the 7z password setter if encrypted creation is ever added (currently permanently rejected — MADR-0027).
+2. Revisit the 7z password setter when encrypted creation lands (rejected at the creation boundary
+   today, but no longer permanently: MADR-0027's 2026-07-20 amendment defers it behind an explicit
+   opt-in, tracked as OI-0081-006 / ticgit 2c54e5).
 
 ### Verification
 
