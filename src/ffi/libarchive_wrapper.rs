@@ -68,6 +68,25 @@ pub struct LibarchiveArchive {
     /// read backend now agrees that the listing is frozen at first
     /// observation. Write-mode handles never populate this cell.
     cached_listing: OnceCell<std::sync::Arc<Vec<ArchiveEntry>>>,
+    /// Free-form `ARCHIVE_WARN` text libarchive produced while reading
+    /// headers, in production order (OI-0080-006 / ticgit 12d431).
+    ///
+    /// Every read walk accepts `ARCHIVE_WARN`, because libarchive returns
+    /// it when it recovered. What used to happen next was that the text
+    /// went in the bin, so a caller could not learn what had been
+    /// objected to. Most of those walks return through a signature with
+    /// no warning channel — several are `ArchiveBackend` trait methods
+    /// shared with the ZIP, 7z and UnRAR backends, which never produce
+    /// this condition — so the text lands here instead of forcing a
+    /// channel onto three unrelated backends.
+    ///
+    /// `extract_all` drains this into the `Vec<ArchiveWarning>` it already
+    /// returns; everything else is reached with
+    /// [`LibarchiveArchive::take_backend_warnings`].
+    ///
+    /// `RefCell`, not `Mutex`: this type is deliberately `!Sync`
+    /// (R0079-0015), so `&self` is single-threaded by construction.
+    backend_warnings: std::cell::RefCell<Vec<crate::error::ArchiveWarning>>,
 }
 
 // SAFETY: `write_handle` is a raw libarchive writer handle owned
@@ -76,10 +95,12 @@ pub struct LibarchiveArchive {
 // `close_write` (`archive_write_close` + `archive_write_free`).
 // libarchive handles carry no thread-affine state, so moving the owner
 // to another thread is sound. All other fields are `Send`
-// (`ProgressCallback` has a `Send` supertrait), so this impl only
-// restores what the raw pointer suppressed; the auto-derived `!Sync`
-// is kept, so `&LibarchiveArchive` still cannot be shared across
-// threads (R0079-0015).
+// (`ProgressCallback` has a `Send` supertrait, and
+// `RefCell<Vec<ArchiveWarning>>` is `Send` because `ArchiveWarning` is),
+// so this impl only restores what the raw pointer suppressed; the
+// auto-derived `!Sync` is kept, so `&LibarchiveArchive` still cannot be
+// shared across threads (R0079-0015) — which is also what makes the
+// `RefCell` warning sink sound.
 unsafe impl Send for LibarchiveArchive {}
 
 /// RAII owner for a libarchive *read* handle: frees via
@@ -136,6 +157,55 @@ const CHECKSUM_FAILURE_MARKERS: &[&str] = &["checksum", "Checksum", "CRC"];
 /// through this helper instead of substring-matching locally.
 fn is_libarchive_checksum_failure(message: &str) -> bool {
     CHECKSUM_FAILURE_MARKERS.iter().any(|m| message.contains(m))
+}
+
+/// Substrings that mark a libarchive message as an *operational* failure —
+/// the storage or the OS refused, and the archive itself may be perfectly
+/// intact (ticgit cf1474 / R0001-0056).
+///
+/// Every entry names an I/O verb, because that is the only thing that
+/// separates the two classes in libarchive's message text. libarchive
+/// raises these through `archive_set_error(a, errno, "Error reading ...")`
+/// when a `read`/`open`/`seek`/`write` syscall failed; archive damage gets
+/// format-specific wording instead — "Truncated input file", "Damaged tar
+/// archive", "Invalid central directory signature".
+///
+/// The set is deliberately narrow, and both directions of widening it are
+/// harmful:
+///
+/// * a damage message misclassified as operational turns a listed failed
+///   file into a hard error, which is exactly the corruption-detection
+///   regression cf1474 was filed to avoid;
+/// * an operational message misclassified as damage tells the caller their
+///   archive is corrupt when their disk is failing.
+///
+/// Case-sensitive, matching [`CHECKSUM_FAILURE_MARKERS`]. libarchive is a
+/// linked system library here, not vendored, so this is version-dependent
+/// by nature — it is a best-effort classifier over text the library does
+/// not promise to keep stable, and it fails toward "not operational",
+/// which preserves today's behaviour.
+const OPERATIONAL_FAILURE_MARKERS: &[&str] = &[
+    "Error reading",
+    "Error opening",
+    "Error seeking",
+    "Error writing",
+    "Can't open",
+    "Couldn't open",
+    "Failed to open",
+];
+
+/// True when a libarchive message describes a storage/OS failure rather
+/// than archive damage (ticgit cf1474).
+///
+/// Callers that need the corruption side use
+/// [`is_libarchive_checksum_failure`]; the two are the crate's only
+/// message-level discriminators and every path that must tell an
+/// operational fault from damage goes through one of them rather than
+/// substring-matching locally.
+pub(crate) fn is_libarchive_operational_failure(message: &str) -> bool {
+    OPERATIONAL_FAILURE_MARKERS
+        .iter()
+        .any(|marker| message.contains(marker))
 }
 
 /// Get error message from archive
@@ -198,6 +268,73 @@ mod tests {
             assert!(
                 !is_libarchive_checksum_failure(msg),
                 "must not classify as checksum failure: {msg}"
+            );
+        }
+    }
+
+    /// ticgit cf1474: the operational discriminator must separate a
+    /// storage/OS failure from archive damage.
+    ///
+    /// Both directions matter and neither is the safe one. A damage
+    /// message read as operational turns a listed failed file into a hard
+    /// error, losing the rest of the integrity walk — the regression
+    /// cf1474 was filed to avoid. An operational message read as damage
+    /// tells the caller their archive is corrupt when their disk is
+    /// failing.
+    #[test]
+    fn operational_failure_classifier_separates_storage_faults_from_damage() {
+        // libarchive raises these through `archive_set_error(a, errno, ...)`
+        // after a failed syscall: the archive may be perfectly intact.
+        for msg in [
+            "Error reading 'backup.tar.gz'",
+            "Error opening archive",
+            "Error seeking in archive",
+            "Error writing to disk",
+            "Can't open file",
+            "Couldn't open archive",
+            "Failed to open '/mnt/dead/archive.zip'",
+        ] {
+            assert!(
+                is_libarchive_operational_failure(msg),
+                "expected operational classification for: {msg}"
+            );
+        }
+
+        // Archive damage. Every one of these must stay out, because each
+        // is a `failed_files` entry rather than a walk-ending error.
+        for msg in [
+            "Truncated input file (needed 512 bytes, only 0 available)",
+            "Damaged tar archive",
+            "Unrecognized archive format",
+            "Invalid central directory signature",
+            "ZIP bad CRC: 0x12345678 should be 0x9abcdef0",
+            "Checksum failure",
+            // Case matters, matching CHECKSUM_FAILURE_MARKERS: widening to
+            // case-insensitive would start matching prose.
+            "error reading",
+        ] {
+            assert!(
+                !is_libarchive_operational_failure(msg),
+                "must not classify as operational: {msg}"
+            );
+        }
+    }
+
+    /// The two message-level discriminators must not both claim the same
+    /// message: a message is either a checksum failure or a storage fault,
+    /// never both, or the classification order would decide the answer.
+    #[test]
+    fn the_two_message_discriminators_do_not_overlap() {
+        for msg in CHECKSUM_FAILURE_MARKERS {
+            assert!(
+                !is_libarchive_operational_failure(msg),
+                "checksum marker {msg:?} also reads as operational"
+            );
+        }
+        for msg in OPERATIONAL_FAILURE_MARKERS {
+            assert!(
+                !is_libarchive_checksum_failure(msg),
+                "operational marker {msg:?} also reads as a checksum failure"
             );
         }
     }

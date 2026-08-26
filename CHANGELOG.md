@@ -131,6 +131,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`ArchiveWarning::BackendAdvisory { backend, operation, message }`** and
+  **`Archive::take_backend_warnings()`** — the channel for text a backend recovered from but
+  wanted to report. Adding the variant is not a break: `ArchiveWarning` is already
+  `#[non_exhaustive]`, so external matches carry a `_` arm.
+
+  Unlike every other variant this one carries unstructured third-party text, deliberately.
+  libarchive's `ARCHIVE_WARN` is a recoverable status whose only detail is a free-form English
+  string from the linked library — not a vendored one, so its wording is version- and
+  format-dependent and cannot be parsed into fields without inventing a taxonomy libarchive does
+  not have. Do not match on `message`; show it.
+
+  `extract_all` appends these to the `Vec<ArchiveWarning>` it already returns, so the common path
+  needs no new call. The other reads — `list_files`, `extract_file`, `extract_to_memory`,
+  `validate_integrity` — return through signatures with no warning channel, several of them shared
+  `ArchiveBackend` trait methods that the ZIP, 7z and UnRAR backends also implement and that never
+  produce this condition; `take_backend_warnings()` reaches those without forcing a channel onto
+  three backends that would never use it. It returns an empty vector for those backends, and
+  `ReadArchive` forwards it under `v2-api`.
+
 - **`scripts/generate-rar-fixtures.sh`** — the RAR fixtures this crate cannot produce itself.
   RAR creation exists only behind `cfg(all(target_os = "windows", feature =
   "external-rar-create"))`, so a recovery-record fixture, an encrypted-plus-recovery fixture and
@@ -234,6 +253,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write its own `CommandRunner` double.
 
 ### Changed
+
+- **The eight libarchive read walks agree on `ARCHIVE_WARN`, and no longer throw its message
+  away.** Three of them refused the status and five accepted it, so the same archive could pass
+  `validate_integrity()` and be rejected by `list_files()` — same bytes, opposite answers,
+  decided by nothing more than which method the caller reached for. All eight accept it now:
+  libarchive returns `ARCHIVE_WARN` when it *recovered* and the header is usable, and refusing a
+  read the library completed makes this crate stricter than the library it wraps.
+
+  Calls that returned `Err` for a recovered header now return `Ok`. The text libarchive attached
+  used to be discarded at every accepting site, so a caller was told the archive was fine with no
+  way to learn what had been objected to; it now arrives as an `ArchiveWarning::BackendAdvisory`.
+
+  The policy lives in one helper, `next_header_status`, and
+  `tests/libarchive_header_policy_test.rs` reads the source to keep it that way — a ninth call
+  site with its own inline status check would reintroduce exactly the divergence while every
+  behavioural test still passed. Two of the newly-unified sites also stopped bypassing the error
+  classifier, so an encrypted-header failure there now surfaces as `ArchiveError::Password`
+  instead of a generic `Format`.
+
+- **`test_integrity` tells a failing disk from a damaged archive.** libarchive raises
+  "Error reading '…'" through the same `archive_read_data_block` return as "Truncated input
+  file", and the storage case was being recorded as a damaged entry — sending the caller to fix
+  the wrong thing. A new message discriminator, `is_libarchive_operational_failure`, splits them,
+  and an operational fault now propagates as `ArchiveError::Io` instead of landing in
+  `failed_files`.
+
+  Everything else stays a damaged entry on purpose. Promoting every non-checksum `Format` to a
+  typed abort would turn a truncated tar from a listed failed file into a hard error and lose the
+  rest of the walk — the regression this was filed to avoid. The discriminator is deliberately
+  narrow, case-sensitive, and fails toward "not operational", which preserves prior behaviour; a
+  test asserts the two message discriminators cannot both claim one message.
+
+- **`add_directory_recursive` on a filesystem root no longer drops the root entry.** `/` has no
+  parent, so the parent-relative rule produced an empty archive path for the root itself, the
+  walker's guard dropped it, and its children were archived unprefixed as `etc/`, `usr/`, … The
+  root's own mtime and mode were lost without a word.
+
+  A root now gets a synthesised name that behaves like any other source directory's: it is the
+  top-level prefix for the whole tree, so `/` yields `rootfs/`, `rootfs/etc/`, … Nesting is what
+  makes it coherent — naming the root entry without nesting its children would emit an empty
+  `rootfs/` beside `etc/`, worse than the drop — and it makes a collision impossible, since a
+  real `/rootfs` becomes `rootfs/rootfs`. The name derives from the root's own spelling, so it is
+  stable and distinguishes volumes: `C:\` gives `C`, `\\srv\share\` gives `srv_share`. Unix `/`
+  has no alphanumerics to draw on and falls back to `rootfs`.
 
 - **`ArchiveFormat::Rar` and `Rar5` report `multipart_read: Support::Partial`, not `Full`.** The
   `Full` claim was false, and a real three-volume set now in the fixtures proves it. RAR does get

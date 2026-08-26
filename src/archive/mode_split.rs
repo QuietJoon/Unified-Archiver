@@ -112,6 +112,12 @@ impl ReadArchive {
         self.inner.extract_all(options)
     }
 
+    /// Take the advisories the backend produced while reading this archive.
+    /// See [`Archive::take_backend_warnings`].
+    pub fn take_backend_warnings(&self) -> Vec<crate::error::ArchiveWarning> {
+        self.inner.take_backend_warnings()
+    }
+
     /// Extract `file_path` into memory.
     pub fn extract_to_memory(&self, file_path: &str) -> Result<Vec<u8>> {
         self.inner.extract_to_memory(file_path)

@@ -940,7 +940,7 @@ pub(crate) fn walk_directory_tree(
         ));
     }
 
-    let base_path = dir_path.parent().unwrap_or(dir_path);
+    let (base_path, synthetic_root) = archive_base_for_root(dir_path);
 
     // Peekable pre-order stream: a directory's children immediately
     // follow it at greater depth, so leaf detection needs no extra
@@ -958,14 +958,12 @@ pub(crate) fn walk_directory_tree(
     while let Some(entry_result) = entries.next() {
         let entry = entry_result.map_err(|e| walkdir_io_error(&e, dir_path, op))?;
         let fs_path = entry.path();
-        let archive_path = fs_path
-            .strip_prefix(base_path)
-            .unwrap_or(fs_path)
-            .to_string_lossy()
-            .into_owned();
-        // Defensive: under a parent-rooted base every entry has a
-        // non-empty relative form; keep the guard so a degenerate
-        // walker setup can't slip an empty path through.
+        let relative = fs_path.strip_prefix(base_path).unwrap_or(fs_path);
+        let archive_path = compose_archive_path(relative, synthetic_root.as_deref());
+        // Defensive: with a parent-rooted base every entry has a
+        // non-empty relative form, and a synthesised root supplies one
+        // where the parent-rooted rule cannot. Keep the guard so a
+        // degenerate walker setup can't slip an empty path through.
         if archive_path.is_empty() {
             continue;
         }
@@ -994,6 +992,85 @@ pub(crate) fn walk_directory_tree(
         })?;
     }
     Ok(())
+}
+
+/// Choose the base every archive path is made relative to, plus a
+/// synthesised name for the source root when it needs one (OI-0080-005
+/// residual / ticgit 330f38).
+///
+/// The ordinary rule is "relative to the source's parent", which is what
+/// makes `add_directory_recursive("/home/u/project")` archive
+/// `project/`, `project/src/…` — the source directory's own name becomes
+/// the top-level prefix.
+///
+/// A filesystem root has no parent, and that used to break the rule
+/// silently. `Path::parent()` returns `None` for `/`, so the base fell
+/// back to the root itself: `"/".strip_prefix("/")` is `""`, the empty
+/// archive path hit the guard above, and **the root entry was dropped
+/// without a word** — while its children were archived unprefixed, as
+/// `etc/`, `usr/`, … So the source root's own mtime and mode were lost,
+/// and the one case where the top-level prefix disappears was the case
+/// nobody could see.
+///
+/// A root therefore gets a synthesised name, and that name behaves
+/// exactly like any other source directory's: it is the prefix for the
+/// whole tree. Archiving `/` yields `rootfs/`, `rootfs/etc/`, … This is
+/// what makes the result *coherent* — naming the root entry without
+/// prefixing its children would emit an empty `rootfs/` sitting beside
+/// `etc/`, which is worse than dropping it. Nesting also makes a
+/// collision impossible by construction: every entry is under the
+/// synthesised name, so it cannot clash with a real child such as
+/// `/rootfs`.
+///
+/// The name is derived from the root's own spelling, so it is stable
+/// across runs and distinguishes volumes: `C:\` gives `C`, `\\srv\share\`
+/// gives `srv_share`. Unix `/` has no alphanumerics to draw on and falls
+/// back to `rootfs`.
+fn archive_base_for_root(dir_path: &Path) -> (&Path, Option<String>) {
+    match dir_path.parent() {
+        Some(parent) => (parent, None),
+        None => (dir_path, Some(synthesise_root_name(dir_path))),
+    }
+}
+
+/// Fallback name for a filesystem root whose spelling carries no
+/// alphanumeric character to name it by — Unix `/`.
+const DEFAULT_ROOT_ARCHIVE_NAME: &str = "rootfs";
+
+/// Derive a stable, filesystem-safe archive name from a root path's own
+/// textual form.
+///
+/// Alphanumeric runs are kept and joined with `_`; everything else
+/// (separators, colons, spaces) is dropped. Deterministic, so the same
+/// root always produces the same name — an archive of `C:\` made today
+/// and one made next year agree on their top-level entry.
+fn synthesise_root_name(root: &Path) -> String {
+    let spelling = root.to_string_lossy();
+    let name = spelling
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    if name.is_empty() {
+        DEFAULT_ROOT_ARCHIVE_NAME.to_string()
+    } else {
+        name
+    }
+}
+
+/// Join a walked entry's parent-relative path to the source root's
+/// synthesised name, if it has one.
+///
+/// With no synthesised name this is the historical behaviour: the
+/// relative path *is* the archive path. With one — a filesystem root —
+/// the root itself becomes that name (its relative form is empty) and
+/// every descendant is nested beneath it.
+fn compose_archive_path(relative: &Path, synthetic_root: Option<&str>) -> String {
+    match synthetic_root {
+        None => relative.to_string_lossy().into_owned(),
+        Some(name) if relative.as_os_str().is_empty() => name.to_string(),
+        Some(name) => format!("{name}/{}", relative.to_string_lossy()),
+    }
 }
 
 /// Ensure a directory path has a trailing slash
@@ -1251,6 +1328,125 @@ pub(crate) fn copy_with_optional_crc_bounded<R: Read + ?Sized, W: Write>(
         verify_crc32_value(h.finalize(), expected_crc, entry_path)?;
     }
     Ok(total)
+}
+
+#[cfg(test)]
+mod root_naming_tests {
+    use super::*;
+
+    /// ticgit 330f38: a filesystem root has no parent, so the
+    /// parent-relative rule produced an empty archive path for the root
+    /// itself, which the walker's guard then dropped — silently. Its
+    /// children were still archived, unprefixed, so the loss was invisible
+    /// unless you went looking for the root's own mtime and mode.
+    #[test]
+    fn a_filesystem_root_gets_a_synthesised_name_and_an_ordinary_directory_does_not() {
+        let (base, synthetic) = archive_base_for_root(Path::new("/"));
+        assert_eq!(base, Path::new("/"), "a root is its own base");
+        assert_eq!(
+            synthetic.as_deref(),
+            Some("rootfs"),
+            "the root must be named, or its entry is dropped"
+        );
+
+        let ordinary = Path::new("/home/u/project");
+        let (base, synthetic) = archive_base_for_root(ordinary);
+        assert_eq!(
+            base,
+            Path::new("/home/u"),
+            "an ordinary source stays relative to its parent"
+        );
+        assert_eq!(
+            synthetic, None,
+            "an ordinary source already has a name of its own"
+        );
+    }
+
+    /// The synthesised name behaves exactly like an ordinary source
+    /// directory's name: it is the top-level prefix for the whole tree.
+    ///
+    /// This is what makes the result coherent. Naming the root entry
+    /// without nesting its children would emit an empty `rootfs/` sitting
+    /// beside `etc/` — worse than the drop it replaces. Nesting also makes
+    /// a collision impossible: a real `/rootfs` becomes `rootfs/rootfs`,
+    /// not a second `rootfs`.
+    #[test]
+    fn the_synthesised_root_prefixes_the_whole_tree() {
+        assert_eq!(
+            compose_archive_path(Path::new(""), Some("rootfs")),
+            "rootfs"
+        );
+        assert_eq!(
+            compose_archive_path(Path::new("etc"), Some("rootfs")),
+            "rootfs/etc"
+        );
+        assert_eq!(
+            compose_archive_path(Path::new("etc/hosts"), Some("rootfs")),
+            "rootfs/etc/hosts"
+        );
+        // The real child that would otherwise have collided.
+        assert_eq!(
+            compose_archive_path(Path::new("rootfs"), Some("rootfs")),
+            "rootfs/rootfs"
+        );
+    }
+
+    /// Without a synthesised root nothing changes — the parent-relative
+    /// path is the archive path, exactly as before.
+    #[test]
+    fn an_ordinary_source_composes_exactly_as_it_always_did() {
+        assert_eq!(compose_archive_path(Path::new("project"), None), "project");
+        assert_eq!(
+            compose_archive_path(Path::new("project/src/main.rs"), None),
+            "project/src/main.rs"
+        );
+        assert_eq!(compose_archive_path(Path::new(""), None), "");
+    }
+
+    /// The name is derived from the root's own spelling, so it is stable
+    /// across runs and distinguishes volumes rather than calling every
+    /// root the same thing.
+    #[test]
+    fn synthesised_root_names_are_stable_and_volume_specific() {
+        for (root, expected) in [
+            ("/", "rootfs"),
+            ("C:\\", "C"),
+            ("D:\\", "D"),
+            ("\\\\srv\\share\\", "srv_share"),
+        ] {
+            let name = synthesise_root_name(Path::new(root));
+            assert_eq!(name, expected, "root {root:?} named {name:?}");
+            assert_eq!(
+                name,
+                synthesise_root_name(Path::new(root)),
+                "the same root must always produce the same name"
+            );
+        }
+
+        assert_ne!(
+            synthesise_root_name(Path::new("C:\\")),
+            synthesise_root_name(Path::new("D:\\")),
+            "different volumes must not collapse to one archive name"
+        );
+    }
+
+    /// Whatever the spelling, the result has to be usable as an archive
+    /// path component.
+    #[test]
+    fn a_synthesised_name_is_always_a_usable_path_component() {
+        for root in ["/", "C:\\", "\\\\srv\\share\\", "//", ":::"] {
+            let name = synthesise_root_name(Path::new(root));
+            assert!(!name.is_empty(), "{root:?} produced an empty name");
+            assert!(
+                !name.contains('/') && !name.contains('\\'),
+                "{root:?} produced {name:?}, which is a path, not a component"
+            );
+            assert!(
+                name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                "{root:?} produced {name:?}, which is not portable"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

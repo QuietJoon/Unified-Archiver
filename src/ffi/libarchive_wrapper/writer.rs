@@ -402,6 +402,9 @@ impl LibarchiveArchive {
                 write_poisoned: false,
                 finish_failure: None,
                 cached_listing: OnceCell::new(),
+                // Write-mode handles read no headers, so nothing can
+                // ever land here.
+                backend_warnings: std::cell::RefCell::new(Vec::new()),
             })
         }
     }
@@ -1163,6 +1166,7 @@ mod close_write_state_tests {
             write_poisoned: false,
             finish_failure: finish_failure.map(str::to_string),
             cached_listing: OnceCell::new(),
+            backend_warnings: std::cell::RefCell::new(Vec::new()),
         }
     }
 

@@ -283,6 +283,28 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
 - **Background:** Needs a ruling, not just a sweep — `checked_data_skip` standardised OK/WARN for
   *skips* (OI-0076-007), but accepting WARN on a listing walk is a separate call. The investigation
   doc already asserts the uniform contract that only three sites implement.
+- **Ruled and landed 2026-08-26.** Owner ruling: accept everywhere *and* keep the text everywhere.
+  All eight call sites now go through one helper, `next_header_status`, which is the only place
+  the policy is decided, and each site surfaces libarchive's own message as the new
+  `ArchiveWarning::BackendAdvisory`. Adding the variant is not a break — `ArchiveWarning` was
+  already `#[non_exhaustive]`.
+
+  The predicted cost did not materialise. Giving seven methods a warning channel would have meant
+  changing three `ArchiveBackend` **trait** methods (`test_integrity`,
+  `visit_payloads_by_listing_id`, `extract_file`), forcing the ZIP, 7z and UnRAR backends to carry
+  a channel for a condition only libarchive produces. A per-handle sink gives the same observable
+  outcome with no signature change: `extract_all` drains it into the warning list it already
+  returns, and `Archive::take_backend_warnings()` — on the facade, not just the backend — reaches
+  the rest. The one property a sink is weaker on is that a caller can ignore it; the extraction
+  path, which is where it matters, carries them automatically.
+
+  Verified against an archive that really makes libarchive return `ARCHIVE_WARN` (a tar whose pax
+  extended header holds a malformed record; confirmed independently with the system `bsdtar`).
+  Both halves proven non-vacuous by injection: rejecting WARN fails the listing/integrity
+  agreement test, dropping the text fails the preservation test with `warnings: []`. A
+  source-shape guard in `tests/libarchive_header_policy_test.rs` fails if a ninth call site
+  appears outside the helper — the divergence class a behavioural test cannot catch — and it was
+  proven non-vacuous by injecting one. Landed with cf1474, which it required.
 
 ### 7z error classification and integrity drain (OI-0080-007)
 - **Type:** 2
@@ -435,7 +457,8 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   revalidation immediately before each source reaches the backend, with the module stating plainly
   that the *set* is pinned and the verify-to-open window is narrowed rather than closed. Each drift
   class gets its own error so a caller restoring a backup can tell them apart. **What is left is the
-  root-preservation semantics (R0081-0046):** when the added directory is a filesystem root the
+  root-preservation semantics (R0081-0046) — **resolved 2026-08-26, see below:** when the added
+  directory is a filesystem root the
   relative path strips to empty and the root entry is skipped, and nothing in `src/creation.rs` or
   `src/creation/manifest.rs` mentions R0081-0046 or a root case — the manifest model inherited the
   behaviour without ruling on it. Synthesize a stable archive name, or document the drop. That is
@@ -616,6 +639,25 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   archive must be recomputed, and one thing found while writing it — each writer still carries its
   own `add_directory_recursive` branching on `is_leaf_dir`, the superseded leaf-only emit, with no
   caller left in the crate.
+- **Root-preservation resolved 2026-08-26** (owner ruling: synthesise a stable name). The drop was
+  in `walk_directory_tree`, not the manifest: every archive path is made relative to the source's
+  *parent*, which is what gives `/home/u/project` its `project/` prefix. A root has no parent, so
+  the base fell back to the root itself, `"/".strip_prefix("/")` produced `""`, and the walker's
+  `is_empty()` guard skipped it — losing the root's own mtime and mode silently while its children
+  were archived unprefixed as `etc/`, `usr/`, …
+
+  A root now gets a synthesised name that behaves like any other source directory's: it is the
+  prefix for the whole tree, so `/` yields `rootfs/`, `rootfs/etc/`, … Prefixing rather than merely
+  naming the root entry is what makes it coherent — a named-but-unnested root would emit an empty
+  `rootfs/` beside `etc/`, worse than the drop — and it makes collision impossible, since a real
+  `/rootfs` becomes `rootfs/rootfs`. The name derives from the root's own spelling so it is stable
+  and volume-specific: `C:\` gives `C`, `\\srv\share\` gives `srv_share`; Unix `/` has no
+  alphanumerics and falls back to `rootfs`. Non-root sources are untouched.
+
+  The decision is two pure functions (`archive_base_for_root`, `compose_archive_path`), so five
+  unit tests pin it without walking a real filesystem root. Behaviour change worth noting:
+  `add_directory_recursive("/")` now produces `rootfs/etc/…` where it produced `etc/…`; that case
+  previously lost data, so there was no correct prior behaviour to preserve.
 
 
 ### Libarchive integrity cannot separate an operational I/O failure from archive corruption
@@ -638,6 +680,24 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   (nonzero errno is OS-level, zero with a format message is archive damage), or add an explicit
   operational-message discriminator. It should agree with OI-0080-006's header-status policy
   rather than growing a second classifier.
+- **Ruled and landed 2026-08-26.** Owner chose the explicit operational-message discriminator over
+  declaring `archive_errno`. `is_libarchive_operational_failure` sits beside
+  `is_libarchive_checksum_failure` over a narrow, case-sensitive marker set, every entry an I/O
+  verb — which is the only thing separating the classes in libarchive's text, since it raises
+  those through `archive_set_error(a, errno, ...)` after a failed syscall while damage gets
+  format-specific wording. `test_integrity` now propagates an operational fault as
+  `ArchiveError::Io` instead of recording it in `failed_files`.
+
+  The regression this entry warned about is explicitly avoided: everything that is neither
+  operational nor a password failure stays a `failed_files` entry, so a truncated tar is still a
+  listed failed file rather than a hard error that ends the walk.
+
+  One classifier, not two, as required: `classify_libarchive_error_at` is a path-aware wrapper
+  over the existing `classify_libarchive_error`, and OI-0080-006's header helper calls the same
+  wrapper — so the two agree by construction. Two unit tests pin both directions of the split and
+  assert the two discriminators cannot both claim one message. Known limit, stated rather than
+  hidden: libarchive is linked, not vendored, so this classifies text the library does not promise
+  to keep stable; it fails toward "not operational", preserving prior behaviour.
 
 
 ### Repository hygiene: machine-specific tracked config and convention violations

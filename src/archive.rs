@@ -1657,6 +1657,54 @@ impl Archive {
         }
     }
 
+    /// Take the advisories the backend produced while reading this
+    /// archive, emptying the buffer.
+    ///
+    /// A backend can hit a condition it *recovers* from — libarchive
+    /// returns `ARCHIVE_WARN` for a header field it had to repair or a
+    /// format quirk it worked around, and hands back a usable entry. This
+    /// crate accepts those, because refusing a read the library completed
+    /// would make it stricter than the library it wraps. Accepting them
+    /// must not mean hiding them, so the message is kept and reaches you
+    /// here as [`ArchiveWarning::BackendAdvisory`](crate::error::ArchiveWarning::BackendAdvisory).
+    ///
+    /// [`extract_all`](Self::extract_all) already returns a warning list
+    /// and appends these to it, so that path needs no extra call. Every
+    /// other read — [`list_files`](Self::list_files),
+    /// [`extract_file`](Self::extract_file),
+    /// [`extract_to_memory`](Self::extract_to_memory),
+    /// [`validate_integrity`](Self::validate_integrity) — returns through a
+    /// signature with no warning channel. Call this after one of those to
+    /// see whether the backend had anything to say.
+    ///
+    /// Returns an empty vector when there was nothing to report, which is
+    /// the overwhelmingly common case, and always for backends other than
+    /// libarchive: the ZIP, 7z and UnRAR readers have no equivalent
+    /// recoverable-status channel.
+    ///
+    /// ```no_run
+    /// # use unified_archive::Archive;
+    /// # fn main() -> unified_archive::Result<()> {
+    /// let archive = Archive::open("backup.tar.gz")?;
+    /// let entries = archive.list_files()?;
+    /// for advisory in archive.take_backend_warnings() {
+    ///     eprintln!("{advisory}");
+    /// }
+    /// # let _ = entries;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn take_backend_warnings(&self) -> Vec<crate::error::ArchiveWarning> {
+        match &self.backend {
+            ArchiveBackend::Libarchive(backend) => backend.take_backend_warnings(),
+            #[cfg(feature = "rar-support")]
+            ArchiveBackend::Unrar(_) => Vec::new(),
+            ArchiveBackend::ZipWriter(_)
+            | ArchiveBackend::ZipReader(_)
+            | ArchiveBackend::SevenZ(_) => Vec::new(),
+        }
+    }
+
     /// Get recovery record percentage
     ///
     /// Returns the percentage of archive data allocated for recovery records.

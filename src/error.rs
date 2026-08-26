@@ -816,6 +816,33 @@ pub enum ArchiveWarning {
         /// modify-mode rewrite
         reason: EntrySkipReason,
     },
+
+    /// A backend recovered from a condition but had something to say
+    ///
+    /// Unlike every variant above, this one carries **unstructured
+    /// third-party text**. It exists because libarchive's `ARCHIVE_WARN`
+    /// is a recoverable status whose only detail is a free-form English
+    /// string from the linked library — not a vendored one, so its exact
+    /// wording is version- and format-dependent and cannot be parsed into
+    /// fields here without inventing a taxonomy the library does not have.
+    ///
+    /// Before OI-0080-006 that text was discarded at every site that
+    /// accepted the status, so a caller was told an archive was readable
+    /// with no way to learn what the library had objected to. Keeping it
+    /// verbatim is the point: do not match on `message`, show it.
+    ///
+    /// `ARCHIVE_WARN` means libarchive continued. A condition it could not
+    /// recover from is an [`ArchiveError`], never this.
+    BackendAdvisory {
+        /// Backend that produced the message, e.g. `"libarchive"`
+        backend: &'static str,
+        /// Operation during which it was produced, spelled the same way
+        /// `ArchiveError` spells its `operation` fields, so an advisory
+        /// correlates with the errors from the same call
+        operation: String,
+        /// The backend's own text, verbatim and unparsed
+        message: String,
+    },
 }
 
 impl std::fmt::Display for ArchiveWarning {
@@ -841,6 +868,17 @@ impl std::fmt::Display for ArchiveWarning {
                     f,
                     "Skipped hard link '{}' (FR-022: limited cross-platform support)",
                     path
+                )
+            }
+            ArchiveWarning::BackendAdvisory {
+                backend,
+                operation,
+                message,
+            } => {
+                write!(
+                    f,
+                    "{} reported a recoverable condition during {}: {}",
+                    backend, operation, message
                 )
             }
             ArchiveWarning::OutputPathCaseCollision { first, second } => {

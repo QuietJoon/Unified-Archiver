@@ -131,6 +131,100 @@ fn classify_libarchive_error(message: impl Into<String>) -> ArchiveError {
     ArchiveError::format(None, message)
 }
 
+/// [`classify_libarchive_error`] plus the operational split (ticgit cf1474).
+///
+/// A storage or OS failure — the disk refused the read, the file vanished —
+/// is not archive damage, and a caller has to be able to tell them apart:
+/// one means "retry or check the medium", the other means "this archive is
+/// broken". libarchive gives no status code for the difference, only its
+/// message text, so [`is_libarchive_operational_failure`] does the split
+/// and the result becomes an [`ArchiveError::Io`] instead of a `Format`.
+///
+/// This is a *wrapper* over `classify_libarchive_error`, not a second
+/// classifier: the encryption and format cases still resolve there, so the
+/// header-status policy (OI-0080-006) and the integrity walk agree on one
+/// taxonomy, as ticgit cf1474 requires. Callers with no archive path to
+/// name — `checked_data_skip`, for one — use the inner function and keep
+/// the `Password` / `Format` split only.
+///
+/// The `Io` this produces wraps the libarchive text in
+/// [`std::io::Error::other`] because the real `errno` is not exposed at
+/// this boundary; the message is the evidence, and it is preserved
+/// verbatim.
+fn classify_libarchive_error_at(path: &Path, message: impl Into<String>) -> ArchiveError {
+    let message = message.into();
+    if is_libarchive_operational_failure(&message) {
+        return ArchiveError::io(
+            "libarchive-read",
+            path.to_path_buf(),
+            std::io::Error::other(message),
+        );
+    }
+    classify_libarchive_error(message)
+}
+
+/// Outcome of one `archive_read_next_header` under the uniform
+/// header-status policy (OI-0080-006 / ticgit 12d431).
+enum HeaderStatus {
+    /// A header was read cleanly.
+    Ok,
+    /// The archive ended.
+    Eof,
+    /// A header was read and libarchive recovered from something it wanted
+    /// to report. The payload is libarchive's own text.
+    Warned(String),
+}
+
+/// Read the next header and apply the crate-wide `ARCHIVE_WARN` policy.
+///
+/// The eight `archive_read_next_header` call sites in this file used to
+/// disagree: three refused `ARCHIVE_WARN` and five accepted it, so an
+/// archive `validate_integrity()` called clean could be rejected by
+/// `list_files()` — same bytes, opposite answers, depending only on which
+/// method the caller happened to use. All eight now accept it. libarchive
+/// returns `ARCHIVE_WARN` when it *recovered* and the header is usable;
+/// refusing a recovered read makes this crate stricter than the library it
+/// wraps, and stricter in a way no caller asked for.
+///
+/// Accepting the status is only half the fix. The text libarchive attaches
+/// was discarded at every accepting site, so a caller was told the archive
+/// was fine with no way to learn what the library had objected to. It now
+/// comes back in [`HeaderStatus::Warned`] and reaches callers as an
+/// [`ArchiveWarning::BackendAdvisory`].
+///
+/// # Safety
+/// `archive` must be a live libarchive read handle, and `entry_ptr` a
+/// valid out-parameter for it.
+unsafe fn next_header_status(
+    archive: *mut Archive,
+    archive_path: &Path,
+    entry_ptr: &mut *mut LibarchiveEntry,
+) -> Result<HeaderStatus> {
+    let result = unsafe { archive_read_next_header(archive, entry_ptr) };
+    if result == ARCHIVE_EOF {
+        Ok(HeaderStatus::Eof)
+    } else if result == ARCHIVE_OK {
+        Ok(HeaderStatus::Ok)
+    } else if result == ARCHIVE_WARN {
+        Ok(HeaderStatus::Warned(unsafe { get_archive_error(archive) }))
+    } else {
+        Err(classify_libarchive_error_at(archive_path, unsafe {
+            get_archive_error(archive)
+        }))
+    }
+}
+
+/// Wrap libarchive's own recovered-condition text as a caller-visible
+/// warning. The text is never parsed — see
+/// [`ArchiveWarning::BackendAdvisory`].
+fn libarchive_advisory(operation: &str, message: String) -> ArchiveWarning {
+    ArchiveWarning::BackendAdvisory {
+        backend: "libarchive",
+        operation: operation.to_string(),
+        message,
+    }
+}
+
 /// Advance past the current entry's data, classifying a failed skip as
 /// a structured error instead of silently leaving the libarchive read
 /// cursor in an undefined position (R0076-0029..0034 / AD 0059).
@@ -839,6 +933,39 @@ unsafe fn parse_entry(
 }
 
 impl LibarchiveArchive {
+    /// Record one of libarchive's own recovered-condition messages
+    /// (OI-0080-006 / ticgit 12d431).
+    ///
+    /// Takes `&self` because every read walk does; the sink is a `RefCell`
+    /// and this type is `!Sync`, so the borrow cannot overlap.
+    fn record_backend_warning(&self, warning: ArchiveWarning) {
+        self.backend_warnings.borrow_mut().push(warning);
+    }
+
+    /// Take the advisories libarchive produced while reading this
+    /// archive's headers, emptying the buffer.
+    ///
+    /// `ARCHIVE_WARN` means libarchive hit something it *recovered* from —
+    /// a header field it had to repair, a format quirk it worked around.
+    /// Every read walk in this backend accepts that status rather than
+    /// failing, because refusing a read the library completed makes this
+    /// crate stricter than libarchive itself; but "accepted" must not mean
+    /// "silent", so the text is kept here.
+    ///
+    /// `extract_all_with_options` appends these to the warnings it already
+    /// returns, so callers of that method never need this. Every other read
+    /// path — listing, single-entry extraction, integrity, the payload
+    /// visitor — returns through a signature with no warning channel,
+    /// several of them shared `ArchiveBackend` trait methods that the ZIP,
+    /// 7z and UnRAR backends also implement and that never produce this
+    /// condition. Call this after such an operation to see what libarchive
+    /// said.
+    ///
+    /// Returns an empty vector when there was nothing to report, which is
+    /// the overwhelmingly common case.
+    pub fn take_backend_warnings(&self) -> Vec<ArchiveWarning> {
+        std::mem::take(&mut *self.backend_warnings.borrow_mut())
+    }
     /// Open a libarchive read handle with all formats/filters enabled
     ///
     /// Encapsulates: archive_read_new, null check, support_format_all,
@@ -949,6 +1076,14 @@ impl LibarchiveArchive {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
         let path_display = path_buf.display().to_string();
+        // Seeds `backend_warnings`: the eager probe below is a header read
+        // like any other, so anything libarchive reports there reaches the
+        // caller instead of being dropped on the floor.
+        let mut open_advisories: Vec<ArchiveWarning> = Vec::new();
+        // Whether the eager probe reached the end of the archive without a
+        // header. The A.6 compressed-tar assertion below needs it: an empty
+        // container cannot have bid a format, so it is judged differently.
+        let probe_hit_eof;
 
         // Verify file exists by attempting to open
         let c_path = path_to_cstring_checked(&path_buf)?;
@@ -967,19 +1102,23 @@ impl LibarchiveArchive {
             // 0052 eager-validation contract documented above held for
             // compressed-tar filenames alone.
             let mut entry_ptr: *mut LibarchiveEntry = std::ptr::null_mut();
-            let next = archive_read_next_header(archive, &mut entry_ptr);
-            if next != ARCHIVE_OK && next != ARCHIVE_WARN && next != ARCHIVE_EOF {
-                // R0075-0021: a non-EOF, non-OK/WARN return from the
-                // eager probe is a real read error — fail the open here
-                // so the eager-validate contract documented above isn't
-                // violated. The previous code silently fell through to
-                // the "everything is fine" path and let downstream
-                // operations stumble over the broken stream.
-                return Err(classify_libarchive_error(get_archive_error(archive)));
+            // R0075-0021: a read error from the eager probe fails the open
+            // here, so the eager-validate contract documented above is not
+            // violated. The code this replaced fell through to the
+            // "everything is fine" path and let downstream operations
+            // stumble over the broken stream.
+            //
+            // ARCHIVE_EOF: an archive with zero entries is a legal shape,
+            // so it stays a success (subject to the A.6 format assertion
+            // below).
+            let probe_status = next_header_status(archive, &path_buf, &mut entry_ptr)?;
+            if let HeaderStatus::Warned(message) = probe_status {
+                open_advisories.push(libarchive_advisory("open", message));
+                // A warned probe still read a header, so it is not EOF.
+                probe_hit_eof = false;
+            } else {
+                probe_hit_eof = matches!(probe_status, HeaderStatus::Eof);
             }
-            // ARCHIVE_EOF: an archive with zero entries is a legal
-            // shape, so it stays a success (subject to the A.6 format
-            // assertion below).
 
             // AD 0062 A.6: when the filename extension claims a
             // compressed-tar (`.tar.gz` / `.tar.bz2` / `.tar.xz` and
@@ -1001,7 +1140,7 @@ impl LibarchiveArchive {
                 // all and is indistinguishable from a genuinely empty
                 // container. A real empty `.tar.gz` (a gzip of 1024 NUL
                 // bytes) does bid TAR, so it still opens.
-                let format_mismatch = if next == ARCHIVE_EOF {
+                let format_mismatch = if probe_hit_eof {
                     actual != 0 && actual != ARCHIVE_FORMAT_TAR_BASE
                 } else {
                     actual != ARCHIVE_FORMAT_TAR_BASE
@@ -1034,6 +1173,7 @@ impl LibarchiveArchive {
             write_poisoned: false,
             finish_failure: None,
             cached_listing: OnceCell::new(),
+            backend_warnings: std::cell::RefCell::new(open_advisories),
         })
     }
 
@@ -1090,16 +1230,23 @@ impl LibarchiveArchive {
             let mut index = 0;
 
             loop {
-                let result = archive_read_next_header(archive, &mut entry_ptr);
-
-                if result == ARCHIVE_EOF {
-                    break;
-                } else if result != ARCHIVE_OK {
-                    // R0069-0057: route through the FFI-side classifier so
-                    // header-encrypted libarchive errors surface as
-                    // `ArchiveError::Password { .. }` instead of a generic
-                    // `Format` carrying an English-encrypted-file string.
-                    return Err(classify_libarchive_error(get_archive_error(archive)));
+                // R0069-0057: route through the FFI-side classifier so
+                // header-encrypted libarchive errors surface as
+                // `ArchiveError::Password { .. }` instead of a generic
+                // `Format` carrying an English-encrypted-file string.
+                //
+                // OI-0080-006: this walk used to *reject* `ARCHIVE_WARN`
+                // while the integrity walk accepted it, so the same archive
+                // could pass `validate_integrity()` and fail `list_files()`.
+                match next_header_status(archive, &self.path, &mut entry_ptr)? {
+                    HeaderStatus::Eof => break,
+                    HeaderStatus::Ok => {}
+                    HeaderStatus::Warned(message) => {
+                        self.record_backend_warning(libarchive_advisory(
+                            crate::error::ops::LIST_FILES,
+                            message,
+                        ));
+                    }
                 }
 
                 // R0001-0052: the format is only bid once a header has
@@ -1290,12 +1437,14 @@ impl LibarchiveArchive {
                     )?;
                 }
 
-                let result = archive_read_next_header(archive, &mut entry_ptr);
-
-                if result == ARCHIVE_EOF {
-                    break;
-                } else if result != ARCHIVE_OK {
-                    return Err(ArchiveError::format(None, get_archive_error(archive)));
+                // OI-0080-006: accepts `ARCHIVE_WARN` like every other read
+                // walk, and keeps the text rather than discarding it.
+                match next_header_status(archive, &self.path, &mut entry_ptr)? {
+                    HeaderStatus::Eof => break,
+                    HeaderStatus::Ok => {}
+                    HeaderStatus::Warned(message) => {
+                        warnings.push(libarchive_advisory(crate::error::ops::EXTRACT_ALL, message));
+                    }
                 }
 
                 // R0079-0022: skip — without consuming a positional
@@ -1675,6 +1824,11 @@ impl LibarchiveArchive {
                 crate::error::ops::EXTRACT_ALL,
             )?;
 
+            // Anything the earlier walks recorded on this handle — the
+            // eager probe at `open`, a prior `list_files` — rides out on
+            // the channel this method already has, so the common path
+            // needs no new API to see it.
+            warnings.append(&mut self.take_backend_warnings());
             Ok(warnings)
         }
     }
@@ -1722,12 +1876,17 @@ impl LibarchiveArchive {
             let mut entry_idx: usize = 0;
 
             loop {
-                let result = archive_read_next_header(archive, &mut entry_ptr);
-
-                if result == ARCHIVE_EOF {
-                    return Err(listing_drift_eof(target_id));
-                } else if result != ARCHIVE_OK {
-                    return Err(ArchiveError::format(None, get_archive_error(archive)));
+                // OI-0080-006: accepts `ARCHIVE_WARN` like every other read
+                // walk, and keeps the text rather than discarding it.
+                match next_header_status(archive, &self.path, &mut entry_ptr)? {
+                    HeaderStatus::Eof => return Err(listing_drift_eof(target_id)),
+                    HeaderStatus::Ok => {}
+                    HeaderStatus::Warned(message) => {
+                        self.record_backend_warning(libarchive_advisory(
+                            crate::error::ops::EXTRACT_FILE,
+                            message,
+                        ));
+                    }
                 }
 
                 // R0079-0022: skip — without consuming a positional
@@ -1948,15 +2107,16 @@ impl LibarchiveArchive {
             let mut entry: *mut LibarchiveEntry = std::ptr::null_mut();
             let mut entry_idx: usize = 0;
 
-            // Seek to the validated listing index (R0076-0059: by
-            // stable position, never by name).
             loop {
-                let r = archive_read_next_header(archive, &mut entry);
-                if r == ARCHIVE_EOF {
-                    return Err(listing_drift_eof(target_id));
-                }
-                if r != ARCHIVE_OK && r != ARCHIVE_WARN {
-                    return Err(ArchiveError::format(None, get_archive_error(archive)));
+                match next_header_status(archive, &self.path, &mut entry)? {
+                    HeaderStatus::Eof => return Err(listing_drift_eof(target_id)),
+                    HeaderStatus::Ok => {}
+                    HeaderStatus::Warned(message) => {
+                        self.record_backend_warning(libarchive_advisory(
+                            crate::error::ops::EXTRACT_TO_MEMORY,
+                            message,
+                        ));
+                    }
                 }
 
                 // R0079-0022: skip — without consuming a positional
@@ -2230,7 +2390,13 @@ impl LibarchiveArchive {
             file_path,
             crate::error::ops::EXTRACT_TO_STREAM,
         )?;
-        let reader = LibarchiveStreamReader::open(&self.path, target.id(), target.path())?;
+        let mut reader = LibarchiveStreamReader::open(&self.path, target.id(), target.path())?;
+        // The header seek that positioned this reader is a header read like
+        // any other, so anything libarchive reported there joins this
+        // handle's sink instead of dying with the local.
+        for warning in reader.take_backend_warnings() {
+            self.record_backend_warning(warning);
+        }
         let size = reader.entry_size;
         Ok(crate::streaming::StreamingExtractor::new(
             Box::new(reader),
@@ -2256,7 +2422,10 @@ impl LibarchiveArchive {
         id: usize,
         validated_path: &str,
     ) -> Result<crate::streaming::StreamingExtractor> {
-        let reader = LibarchiveStreamReader::open(&self.path, id, validated_path)?;
+        let mut reader = LibarchiveStreamReader::open(&self.path, id, validated_path)?;
+        for warning in reader.take_backend_warnings() {
+            self.record_backend_warning(warning);
+        }
         let size = reader.entry_size;
         Ok(crate::streaming::StreamingExtractor::new(
             Box::new(reader),
@@ -2321,14 +2490,17 @@ impl LibarchiveArchive {
             let mut next = 0usize;
 
             while next < pending.len() {
-                let r = archive_read_next_header(archive, &mut entry);
-                if r == ARCHIVE_EOF {
+                match next_header_status(archive, &self.path, &mut entry)? {
                     // A target the listing promised never arrived: the
                     // archive changed under the cached listing.
-                    return Err(listing_drift_eof(pending[next].id));
-                }
-                if r != ARCHIVE_OK && r != ARCHIVE_WARN {
-                    return Err(ArchiveError::format(None, get_archive_error(archive)));
+                    HeaderStatus::Eof => return Err(listing_drift_eof(pending[next].id)),
+                    HeaderStatus::Ok => {}
+                    HeaderStatus::Warned(message) => {
+                        self.record_backend_warning(libarchive_advisory(
+                            crate::error::ops::EXTRACT_BY_IDS,
+                            message,
+                        ));
+                    }
                 }
 
                 // R0079-0022: skip without consuming a positional index,
@@ -2396,11 +2568,15 @@ impl LibarchiveArchive {
             let mut entry_ptr: *mut LibarchiveEntry = std::ptr::null_mut();
 
             loop {
-                let result = archive_read_next_header(archive, &mut entry_ptr);
-                if result == ARCHIVE_EOF {
-                    break;
-                } else if result != ARCHIVE_OK && result != ARCHIVE_WARN {
-                    return Err(ArchiveError::format(None, get_archive_error(archive)));
+                match next_header_status(archive, &self.path, &mut entry_ptr)? {
+                    HeaderStatus::Eof => break,
+                    HeaderStatus::Ok => {}
+                    HeaderStatus::Warned(message) => {
+                        self.record_backend_warning(libarchive_advisory(
+                            crate::error::ops::VALIDATE_INTEGRITY,
+                            message,
+                        ));
+                    }
                 }
 
                 // R0001-0052: the format is only bid once a header has
@@ -2438,15 +2614,35 @@ impl LibarchiveArchive {
                         break;
                     }
                     if r != ARCHIVE_OK {
-                        // R0001-0056: classify before recording. A
-                        // password / encryption failure is an operational
-                        // fault, not a payload integrity fault, so it
-                        // propagates as the typed error the drain path
-                        // below already produces instead of being reported
-                        // as a damaged entry — `failed_files` stays
-                        // reserved for payload faults.
-                        let classified = classify_libarchive_error(get_archive_error(archive));
-                        if matches!(classified, ArchiveError::Password { .. }) {
+                        // R0001-0056 / ticgit cf1474: classify before
+                        // recording. `failed_files` means "this entry's
+                        // payload is damaged", and two things that are not
+                        // that used to land in it.
+                        //
+                        // A password / encryption failure is an operational
+                        // fault, not a payload integrity fault — that half
+                        // landed with R0001-0056.
+                        //
+                        // The other half is cf1474's: a storage or OS
+                        // failure. libarchive raises "Error reading ..."
+                        // through the same `archive_read_data_block` return
+                        // as "Truncated input file", and reporting a failing
+                        // disk as a corrupt entry sends the caller to fix the
+                        // wrong thing. `classify_libarchive_error_at` splits
+                        // them on the message and yields `ArchiveError::Io`
+                        // for the operational case, so it propagates here.
+                        //
+                        // Everything else stays a damaged entry, deliberately.
+                        // Promoting every non-checksum `Format` to a typed
+                        // abort is what cf1474 rejected up front: it would
+                        // turn a truncated tar from a listed failed file into
+                        // a hard error and lose the rest of the walk.
+                        let classified =
+                            classify_libarchive_error_at(&self.path, get_archive_error(archive));
+                        if matches!(
+                            classified,
+                            ArchiveError::Password { .. } | ArchiveError::Io { .. }
+                        ) {
                             return Err(classified);
                         }
                         failed = true;
@@ -2467,7 +2663,10 @@ impl LibarchiveArchive {
                             }
                         };
                         if drain_status != ARCHIVE_EOF {
-                            return Err(classify_libarchive_error(get_archive_error(archive)));
+                            return Err(classify_libarchive_error_at(
+                                &self.path,
+                                get_archive_error(archive),
+                            ));
                         }
                         break;
                     }
@@ -2571,6 +2770,11 @@ pub(crate) struct LibarchiveStreamReader {
     /// Entry size if known (from archive_entry_size)
     pub(crate) entry_size: Option<u64>,
     eof: bool,
+    /// libarchive's own `ARCHIVE_WARN` text from the header seek that
+    /// positioned this reader (OI-0080-006). Same policy as
+    /// [`LibarchiveArchive::take_backend_warnings`]: the status is
+    /// accepted, so the message must not be lost.
+    advisories: Vec<ArchiveWarning>,
 }
 
 // SAFETY: The archive handle is exclusively owned by this struct.
@@ -2578,6 +2782,13 @@ pub(crate) struct LibarchiveStreamReader {
 unsafe impl Send for LibarchiveStreamReader {}
 
 impl LibarchiveStreamReader {
+    /// Take the advisories libarchive produced while seeking to this
+    /// entry, emptying the buffer. Both construction sites drain this into
+    /// the owning [`LibarchiveArchive`]'s sink immediately, so callers read
+    /// them through [`LibarchiveArchive::take_backend_warnings`].
+    fn take_backend_warnings(&mut self) -> Vec<ArchiveWarning> {
+        std::mem::take(&mut self.advisories)
+    }
     /// Open the archive and position at the gate-validated target entry
     /// for streaming reads.
     ///
@@ -2597,13 +2808,17 @@ impl LibarchiveStreamReader {
 
             let mut entry: *mut LibarchiveEntry = std::ptr::null_mut();
             let mut entry_idx: usize = 0;
+            let mut advisories: Vec<ArchiveWarning> = Vec::new();
             loop {
-                let r = archive_read_next_header(archive, &mut entry);
-                if r == ARCHIVE_EOF {
-                    return Err(listing_drift_eof(target_id));
-                }
-                if r != ARCHIVE_OK && r != ARCHIVE_WARN {
-                    return Err(ArchiveError::format(None, get_archive_error(archive)));
+                match next_header_status(archive, archive_path, &mut entry)? {
+                    HeaderStatus::Eof => return Err(listing_drift_eof(target_id)),
+                    HeaderStatus::Ok => {}
+                    HeaderStatus::Warned(message) => {
+                        advisories.push(libarchive_advisory(
+                            crate::error::ops::EXTRACT_TO_STREAM,
+                            message,
+                        ));
+                    }
                 }
 
                 // R0079-0022: skip — without consuming a positional
@@ -2644,6 +2859,7 @@ impl LibarchiveStreamReader {
                     archive,
                     entry_size,
                     eof: false,
+                    advisories,
                 });
             }
         }
