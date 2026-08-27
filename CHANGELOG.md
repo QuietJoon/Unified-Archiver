@@ -393,6 +393,42 @@ And the three that were mis-dated:
 
 ### Fixed
 
+- **A header-encrypted RAR reported none of its main-header flags.** `UnrarArchive` took its flags
+  word from `RAROpenArchiveEx` and called `RARSetPassword` afterwards, so for a `-hp` archive — whose
+  main header lives inside a HEAD_CRYPT block — the SDK could not decrypt that header in time and
+  the word came back empty. `has_recovery_record()` therefore answered `false` for an archive
+  `unrar lt -p<pw>` describes as "RAR 5, recovery record, encrypted headers", and `ROADF_SOLID`,
+  `ROADF_COMMENT`, `ROADF_VOLUME` and the rest were lost the same way. The password now reaches
+  `RAROpenArchiveEx` itself, through the SDK's `UCM_NEEDPASSWORD` request.
+
+  Registering that callback is conditional on actually having a password, and that is not a
+  detail: a header-encrypted archive must still **open** without one, because reporting that a
+  file is encrypted is how a caller learns which password to ask for. A callback that declines the
+  request makes the SDK proceed as though an empty password had been supplied, which fails the
+  open — so when there is no password the open is left exactly as it was, and the callback is
+  installed immediately after instead.
+
+  Fixing the flag exposed a second fault behind it. `recovery_percentage()` re-opens the path and
+  walks the block structure with no password, and that walk had never been reachable for a `-hp`
+  archive before — it promptly read HEAD_CRYPT ciphertext as a header and reported
+  `Corruption: "RAR5 header extends past end of archive"` for an archive `unrar t` calls sound. It
+  now short-circuits on `ROADF_ENCHEADERS` and returns the documented "percentage cannot be
+  determined". A header this parser is not permitted to read is not damage.
+
+- **A missing RAR volume now says so.** The typed `MissingVolume` diagnostic added for the
+  unbounded-retry fix could not reach a caller. The extract path installed its callback for the
+  duration of one `RARProcessFile` and cleared it after, so a volume request during the *listing*
+  walk — skipping past an entry that continues into the next volume — found no callback at all.
+  The vendored SDK's `DllVolChange` maps both "the callback aborted" and "no callback was
+  installed" to `ERAR_EOPEN`, and never calls back in the second case, so what a caller saw was
+  `Io` / "cannot open archive" naming the *first* volume. Boundedness came from the SDK's own
+  no-callback branch rather than from the fix.
+
+  The callback now lives for the handle's lifetime and is restored after any operation that
+  installs its own, so every walk can answer. Extracting a set with its middle volume removed
+  reports the record it was given: which set, that the next volume is unavailable, and that
+  `parse_volume_set` / `VolumeSetReport::defects()` names the gap.
+
 - **`recovery_percentage()` returned the same number for every archive.** It reported `Some(2)`
   for a RAR built with `-rr1p`, `-rr3p`, `-rr5p`, `-rr10p` and `-rr30p` alike, and could never
   report more than 15. The cause: it searched the 32 bytes after the literal `"RR"` for the first

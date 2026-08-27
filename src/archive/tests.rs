@@ -198,6 +198,22 @@ fn test_is_encrypted_unencrypted_zip() {
     assert!(!archive.is_encrypted().unwrap());
 }
 
+/// A header-encrypted archive must **open** without a password.
+///
+/// `is_encrypted()` may then succeed or fail — the header cannot be read
+/// without the password, so both `Ok(true)` and `Err(Password)` are correct.
+/// But the `unwrap()` on `open` below is load-bearing, not incidental:
+/// reporting that a file is encrypted is a legitimate thing to do without
+/// knowing its password, and it is the only way a caller learns which
+/// password to ask their user for.
+///
+/// ticgit 3f8790 broke exactly this and was caught here. Supplying the
+/// password to `RAROpenArchiveEx` needs a callback registered in the open
+/// data, and registering one *unconditionally* makes the SDK proceed as
+/// though an empty password had been given when there is none to offer —
+/// turning this open into `ERAR_MISSING_PASSWORD`. The fix registers at
+/// open only when a password exists and installs the callback immediately
+/// after otherwise; see `UnrarArchive::open_with_mode_and_password`.
 #[cfg(feature = "rar-support")]
 #[test]
 fn test_is_encrypted_encrypted_rar() {

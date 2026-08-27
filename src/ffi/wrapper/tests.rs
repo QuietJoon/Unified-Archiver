@@ -737,3 +737,47 @@ fn the_recommended_recovery_call_actually_compiles() {
         "a set missing volume 2 must not be complete"
     );
 }
+
+/// ticgit 03ddc6: the extract path must *restore* the handle-lifetime
+/// callback, never clear it to `None`.
+///
+/// Clearing was correct when nothing but a single `RARProcessFile` needed a
+/// callback. It is not correct now: the walks *between* extractions have to
+/// keep answering volume requests, and one
+/// `RARSetCallback(handle, None, 0)` anywhere would silently reopen the gap
+/// this ticket closed — a later `RAR_SKIP` past a split entry would meet the
+/// SDK's own no-callback branch again and fail as a bare `ERAR_EOPEN`.
+///
+/// This reads the source because no behavioural test can reach the case
+/// today: a complete multi-volume set cannot be extracted at all
+/// (ticgit 3b4d15), so there is no way to reach a volume request *after* a
+/// successful extraction. When 3b4d15 is decided, replace this with that
+/// test.
+#[test]
+fn the_handle_callback_is_restored_and_never_cleared_to_none() {
+    const SOURCE: &str = include_str!("../wrapper.rs");
+
+    let clears: Vec<_> = SOURCE
+        .lines()
+        .enumerate()
+        .map(|(index, line)| (index + 1, line.trim()))
+        .filter(|(_, line)| !line.starts_with("//"))
+        .filter(|(_, line)| line.contains("RARSetCallback") && line.contains("None"))
+        .collect();
+
+    assert!(
+        clears.is_empty(),
+        "RARSetCallback must never be given `None`: the handle-lifetime \
+         callback has to stay registered for every walk on the handle. Found \
+         {clears:?}. Restore `unrar_handle_callback` with the handle's own \
+         context pointer instead."
+    );
+
+    // And the restoring call has to actually be there, or the assertion
+    // above passes vacuously on a file that stopped installing anything.
+    assert!(
+        SOURCE.contains("RARSetCallback(handle, Some(unrar_handle_callback), handle_context)"),
+        "the extract path must restore the handle-lifetime callback after \
+         installing its own"
+    );
+}

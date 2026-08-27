@@ -238,6 +238,25 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   no scope question — the answer is simply wrong today.
   `test_recovery_percentage_header_encrypted_recovery_archive` asserts the defective answer on
   purpose, so a fix breaks the test and forces both to move together.
+- **Landed 2026-08-26.** The password now reaches `RAROpenArchiveEx` through the SDK's
+  `UCM_NEEDPASSWORD` request, so the main header decrypts while the flags word is being derived.
+  Registration is conditional on having a password, which the fix had to learn the hard way: a
+  callback that *declines* the request makes the SDK proceed as though an empty password had been
+  given, which turned the no-password open of a header-encrypted archive from success into
+  `ERAR_MISSING_PASSWORD`. That open must keep working — reporting that a file is encrypted is how
+  a caller learns which password to ask for — so with no password the open is left byte-for-byte as
+  it was and the callback is installed immediately after. `test_is_encrypted_encrypted_rar` caught
+  the regression and now documents the invariant.
+
+  The fix exposed a second fault behind it: with the flag correct,
+  `recovery_percentage()`'s password-less byte walk became reachable for `-hp` archives for the
+  first time and reported `Corruption: "RAR5 header extends past end of archive"` — a false damage
+  report on a sound archive. It now short-circuits on `ROADF_ENCHEADERS`, so the answer is
+  "the record is there, its size is not knowable here": `true` and `None`, which the documented
+  contract already allows.
+
+  Proven non-vacuous: removing the open-time registration puts `has_recovery_record()` back to
+  `false` and fails the test with the message written for exactly that.
 
 ### `UnrarAbort::MissingVolume` never reaches a caller (ticgit `03ddc6`)
 - **Type:** 1
@@ -260,6 +279,27 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   `src/ffi/wrapper/tests.rs` remain valid for the paths where a callback *is* installed. Fixing
   the diagnostic needs a handle-owned callback context; the ownership shape is an implementation
   choice, not an owner decision, which is why this is Type 1.
+- **Landed 2026-08-26.** The callback context is now boxed on `UnrarArchive` and registered for the
+  handle's whole life — through `RAROpenArchiveDataEx` when a password makes that possible, and by
+  `RARSetCallback` immediately after the open otherwise. The extract path still installs its own
+  context for one `RARProcessFile`, but now **restores** the handle callback instead of clearing it
+  to `None`, so the walks between extractions keep answering. Extracting a set with its middle
+  volume removed reports the typed `MissingVolume` corruption error with the
+  `VolumeSetReport::defects()` advice, and `tests/rar_multivolume_test.rs` asserts both that and
+  the absence of `ERAR_EOPEN`.
+
+  Two smaller pieces that the fix required. `shared_abort_error` now holds the wording for the
+  abort reasons that need nothing but the archive path, so the extract and handle trampolines
+  cannot drift on the recovery advice — which named a non-existent method once already. And
+  `UnrarArchive::unrar_error` consults the context before falling back to `map_unrar_error`, at the
+  four sites where a walk can meet a volume request: header read, skip, directory extract, and the
+  integrity walk.
+
+  Proven non-vacuous: removing the registration fails the multi-volume test. The restore-not-clear
+  half has no behavioural test available — a complete volume set cannot be extracted at all
+  (ticgit 3b4d15), so a volume request *after* a successful extraction is unreachable — so it is
+  pinned by a source guard that rejects any `RARSetCallback(..., None, ...)`, itself proven by
+  injecting one.
 
 ## Type 2 — needs decision
 

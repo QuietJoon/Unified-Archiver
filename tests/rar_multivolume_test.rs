@@ -179,12 +179,11 @@ fn rar_multipart_read_is_partial_not_full() {
 }
 
 /// The regression ticgit d3cfce exists for: a set with its middle volume absent
-/// must fail *bounded*. Reaching the end of this test at all is the assertion
-/// that matters — the pre-fix behaviour was to retry the absent volume name
-/// forever while holding the process-wide UnRAR lock.
+/// must fail *bounded*, and say something useful. Reaching the end of this test
+/// at all is the first assertion — the pre-fix behaviour was to retry the
+/// absent volume name forever while holding the process-wide UnRAR lock.
 ///
-/// What the error says is a second question, and the answer is not the one
-/// `UnrarAbort::MissingVolume` was written for. The vendored SDK's
+/// Getting the diagnostic out took a second fix. The vendored SDK's
 /// `DllVolChange` (`volume.cpp`) ends with:
 ///
 /// ```text
@@ -195,19 +194,21 @@ fn rar_multipart_read_is_partial_not_full() {
 /// }
 /// ```
 ///
-/// so **both** "our callback returned -1" and "no callback was installed"
-/// produce `ERAR_EOPEN`, and in the second case the callback is never invoked
-/// at all — verified by instrumenting the trampoline, which logged nothing for
-/// this scenario. This crate installs its callback per operation, immediately
-/// before `RARProcessFile`, because the context it registers borrows caller
-/// state; at the point UnRAR asks for the next volume here, no callback is
-/// registered, so the SDK takes its own no-callback branch, which exists in
-/// its author's words "to prevent an infinite loop if no callback is defined".
+/// so "our callback returned -1" and "no callback was installed" are
+/// indistinguishable from outside, and in the second case the callback is never
+/// invoked at all — verified by instrumenting the trampoline, which logged
+/// nothing for this scenario. The extract path installs its callback
+/// immediately before `RARProcessFile` and cleared it after, so the *listing*
+/// walk that runs first, and its `RAR_SKIP` past a split entry, met the SDK's
+/// own no-callback branch. Boundedness came from that branch — which exists in
+/// its author's words "to prevent an infinite loop if no callback is defined" —
+/// and not from d3cfce's abort at all.
 ///
-/// Consequence: boundedness on this path is guaranteed by the SDK rather than
-/// by our abort, and `MissingVolume`'s `VolumeSetReport::defects()` advice does
-/// not reach the caller. Making it reach requires a handle-owned callback
-/// context (ticgit 03ddc6). Until then this pins what a caller actually sees.
+/// ticgit 03ddc6 moved the callback to the handle's lifetime: it is registered
+/// through `RAROpenArchiveDataEx` before the main header is read and restored
+/// after any operation that installs its own, so every SDK call on the handle
+/// can answer a volume request. The typed `MissingVolume` diagnostic now
+/// reaches the caller, which is what this asserts.
 #[test]
 #[serial_test::file_serial(rar)]
 fn volume_set_missing_its_middle_volume_fails_bounded() {
@@ -224,16 +225,22 @@ fn volume_set_missing_its_middle_volume_fails_bounded() {
         text.contains(PARTS[0]),
         "the error must name the archive the caller asked about; got: {text}"
     );
-    // The discriminator against the complete-set failure above: a hole in the
-    // set fails inside UnRAR, not at our duplicate-path guard. Without this
-    // the test would pass for the same reason a complete set fails.
+    // The discriminator against the complete-set failure above. A complete set
+    // fails at our duplicate-output-path guard; a hole in the set must fail as
+    // a missing volume, and must say which call answers "which volume".
+    // Without this the test would pass for the same reason a complete set
+    // fails.
     assert!(
-        text.contains("ERAR_EOPEN"),
-        "a missing volume must fail inside UnRAR, distinctly from the \
-         duplicate-path refusal a complete set produces. If this now reports \
-         the missing volume through VolumeSetReport instead, the handle-owned \
-         callback context landed — update this test and its doc comment \
-         together; got: {text}"
+        text.contains("next volume") && text.contains("VolumeSetReport"),
+        "a missing volume must report itself as one and point at the call that \
+         names the gap, distinctly from the duplicate-path refusal a complete \
+         set produces; got: {text}"
+    );
+    assert!(
+        !text.contains("ERAR_EOPEN"),
+        "ERAR_EOPEN is what the SDK reports when no callback was installed. \
+         Seeing it again means the handle-lifetime callback stopped being \
+         registered for this walk; got: {text}"
     );
 
     common::cleanup(&dir);

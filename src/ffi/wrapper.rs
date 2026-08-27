@@ -10,8 +10,9 @@ use crate::options::{ProgressCallback, RateLimiter};
 use crate::password::Password;
 use crate::security::sanitize_entry_path;
 use once_cell::sync::OnceCell;
+use std::cell::Cell;
 use std::ffi::CString;
-use std::os::raw::{c_int, c_uint};
+use std::os::raw::{c_int, c_uint, c_void};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -169,6 +170,14 @@ pub struct UnrarArchive {
     /// fresh open of `self.path` (R0080-0061). `None` when identity could
     /// not be captured, or on non-Unix where the drift check is skipped.
     identity: Option<UnrarFileIdentity>,
+    /// Callback state registered with this handle for its whole life.
+    ///
+    /// Boxed so its address is stable: the SDK holds a raw pointer to it
+    /// from `RAROpenArchiveEx` until `RARCloseArchive`, and moving this
+    /// `UnrarArchive` moves the `Box`, not the allocation it points at.
+    /// See [`UnrarHandleContext`] for why it has to outlive individual
+    /// operations.
+    callback_context: Box<UnrarHandleContext>,
 }
 
 // SAFETY: `handle` is a raw UnRAR SDK handle owned exclusively by this
@@ -185,16 +194,69 @@ unsafe impl Send for UnrarArchive {}
 impl UnrarArchive {
     /// Open RAR/RAR5 archive with specific mode
     fn open_with_mode(path: impl AsRef<Path>, mode: c_uint) -> Result<Self> {
+        Self::open_with_mode_and_password(path, mode, None)
+    }
+
+    /// [`Self::open_with_mode`], with the password available *during* the
+    /// open rather than set afterwards.
+    ///
+    /// That ordering is the whole point (ticgit 3f8790). A `-hp` archive
+    /// keeps its main header inside a HEAD_CRYPT block, and the SDK reads
+    /// that header inside `RAROpenArchiveEx` — before any `RARSetPassword`
+    /// could run. Without a password there it cannot decrypt, so
+    /// `open_data.flags` comes back missing `ROADF_RECOVERY` and every
+    /// other main-header flag, and nothing revisits that word later. The
+    /// callback registered here answers the SDK's `UCM_NEEDPASSWORD`
+    /// request while the header is being read.
+    fn open_with_mode_and_password(
+        path: impl AsRef<Path>,
+        mode: c_uint,
+        password: Option<&str>,
+    ) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
+        let callback_context = UnrarHandleContext::new(password)?;
 
         // CString preserves raw bytes on Unix (AD 0064). Windows wide-char
         // path support deferred to OI-0065-001.
         let c_path = crate::ffi::common::path_to_cstring_checked(&path_buf)?;
 
         unsafe {
+            // Register at open ONLY when there is a password to answer
+            // with. `dll.cpp` copies these into its `Cmd` before
+            // `Archive::IsArchive` reads the main header, which is what
+            // lets a `-hp` archive decrypt in time for the flags word
+            // (ticgit 3f8790).
+            //
+            // Registering unconditionally is wrong, and measurably so: a
+            // header-encrypted archive opened *without* a password used to
+            // succeed — `Archive::open` on such a file reports
+            // `is_encrypted()` without ever seeing the contents — and a
+            // callback that declines the password request makes the SDK
+            // proceed as though an empty password had been supplied, which
+            // fails the open with `ERAR_MISSING_PASSWORD`. Declining with
+            // `-1` does not help: `RequestArcPassword` reaches the same
+            // `Cmd->Password.Set()` either way. The only faithful "no
+            // password" behaviour is the one the SDK takes when
+            // `Cmd->Callback` is NULL, so that is preserved verbatim.
+            //
+            // The callback is installed immediately after a successful
+            // open instead, which is all ticgit 03ddc6 needs — volume
+            // requests happen during walks, not during the main-header
+            // read.
+            let (open_callback, open_user_data) = if callback_context.password.is_some() {
+                (
+                    unrar_handle_callback as *const () as *mut c_void,
+                    &*callback_context as *const UnrarHandleContext as isize,
+                )
+            } else {
+                (std::ptr::null_mut(), 0)
+            };
+
             let mut open_data = RAROpenArchiveDataEx {
                 arc_name: c_path.as_ptr(),
                 open_mode: mode,
+                callback: open_callback,
+                user_data: open_user_data,
                 ..Default::default()
             };
 
@@ -211,6 +273,14 @@ impl UnrarArchive {
             let handle = RAROpenArchiveEx(&mut open_data);
 
             if handle.is_null() || open_data.open_result != ERAR_SUCCESS as u32 {
+                // A volume request during the open — the SDK follows the
+                // volume chain while reading the main header of a
+                // continuation volume — aborts through the callback and
+                // lands here as `ERAR_EOPEN`. Prefer the specific
+                // diagnostic when the callback left one.
+                if let Some(err) = callback_context.take_abort_error(&path_buf) {
+                    return Err(err);
+                }
                 return Err(map_unrar_error(open_data.open_result as c_int, &path_buf));
             }
 
@@ -233,15 +303,46 @@ impl UnrarArchive {
                 }
             }
 
+            // Every walk on this handle from here on can answer a volume
+            // request (ticgit 03ddc6), whether or not the open itself had a
+            // callback. `RARSetCallback` is idempotent, so re-registering
+            // the same pointer the open already carried is harmless.
+            RARSetCallback(
+                handle,
+                Some(unrar_handle_callback),
+                &*callback_context as *const UnrarHandleContext as isize,
+            );
+
             Ok(Self {
                 handle,
                 path: path_buf,
-                password: None,
+                password: password.map(Password::new),
                 flags: open_data.flags,
                 listing: OnceCell::new(),
                 identity,
+                callback_context,
             })
         }
+    }
+
+    /// Prefer the callback's own reason over the SDK's return code.
+    ///
+    /// A missing volume met *outside* an extraction — a listing walk's
+    /// `RAR_SKIP`, a header read — aborts through the handle callback, and
+    /// `DllVolChange` reports that abort as a bare `ERAR_EOPEN`
+    /// indistinguishable from "could not open the archive at all". Asking
+    /// the context first turns it back into the diagnostic that says what
+    /// to do about it (ticgit 03ddc6).
+    fn unrar_error(&self, result: c_int) -> ArchiveError {
+        self.callback_context
+            .take_abort_error(&self.path)
+            .unwrap_or_else(|| map_unrar_error(result, &self.path))
+    }
+
+    /// The raw pointer the SDK holds for this handle's callback, for
+    /// restoring it after an operation installs its own.
+    fn callback_context_ptr(&self) -> isize {
+        &*self.callback_context as *const UnrarHandleContext as isize
     }
 
     /// Open RAR/RAR5 archive for reading and extraction
@@ -262,8 +363,16 @@ impl UnrarArchive {
     }
 
     /// Open encrypted RAR/RAR5 archive with password
+    ///
+    /// The password reaches `RAROpenArchiveEx` itself, so a
+    /// header-encrypted (`-hp`) archive's main header is decrypted while
+    /// the SDK is deriving the archive flags rather than after
+    /// (ticgit 3f8790). `RARSetPassword` still runs afterwards: for a
+    /// data-only-encrypted (`-p`) archive the header never prompts, so the
+    /// callback is never asked and the payload path needs the password set
+    /// the ordinary way.
     pub fn open_with_password(path: impl AsRef<Path>, password: &str) -> Result<Self> {
-        let mut archive = Self::open(path)?;
+        let archive = Self::open_with_mode_and_password(path, RAR_OM_EXTRACT, Some(password))?;
 
         let c_password = CString::new(password)
             .map_err(|_| ArchiveError::password("Password contains null byte"))?;
@@ -272,9 +381,6 @@ impl UnrarArchive {
             let _guard = unrar_lock()?;
             RARSetPassword(archive.handle, c_password.as_ptr());
         }
-
-        // Store password for fresh handle creation
-        archive.password = Some(Password::new(password));
 
         Ok(archive)
     }
@@ -304,7 +410,7 @@ impl UnrarArchive {
                 ERAR_END_ARCHIVE => Ok(None),
                 ERAR_BAD_PASSWORD => Err(ArchiveError::password("Wrong password")),
                 ERAR_MISSING_PASSWORD => Err(ArchiveError::password("Password required")),
-                _ => Err(map_unrar_error(result, &self.path)),
+                _ => Err(self.unrar_error(result)),
             }
         }
     }
@@ -318,7 +424,7 @@ impl UnrarArchive {
             if result == ERAR_SUCCESS {
                 Ok(())
             } else {
-                Err(map_unrar_error(result, &self.path))
+                Err(self.unrar_error(result))
             }
         }
     }
@@ -472,6 +578,27 @@ impl UnrarArchive {
     fn parse_recovery_percentage(&self) -> Result<Option<u8>> {
         use std::fs::File;
         use std::io::Read;
+
+        // ticgit 3f8790 follow-on: this walk reads raw bytes with no
+        // password, so it cannot read an encrypted header. Until 3f8790
+        // the question never arose — `ROADF_RECOVERY` was lost for `-hp`
+        // archives, so `recovery_percentage` short-circuited before ever
+        // reaching here. With the flag now correct the walk *is* reached,
+        // and it read the HEAD_CRYPT block's ciphertext as though it were
+        // a header: bogus vints, and a `Corruption` error reporting
+        // "RAR5 header extends past end of archive" for an archive
+        // `unrar t` calls perfectly sound.
+        //
+        // A header this parser is not permitted to read is not damage.
+        // Report the documented "percentage cannot be determined" instead.
+        // The flag still says a record exists — `has_recovery_record()`
+        // answers that from the decrypted main header — so the caller
+        // learns the record is there and its size is not knowable without
+        // implementing RAR5 header decryption here, which is not this
+        // function's job.
+        if (self.flags & ROADF_ENCHEADERS) != 0 {
+            return Ok(None);
+        }
 
         // R0080-0061: the percentage is parsed from a fresh open of
         // `self.path`, which a non-cooperating writer could have swapped
@@ -672,6 +799,7 @@ impl UnrarArchive {
                     preserve_permissions,
                     preserve_times,
                     Some(&mut ctx),
+                    fresh.callback_context_ptr(),
                 )?;
                 ctx.finish_file(entry.size.unwrap_or(0));
             } else {
@@ -690,7 +818,7 @@ impl UnrarArchive {
                         dest_name_cstr.as_ptr(),
                     );
                     if result != ERAR_SUCCESS {
-                        return Err(map_unrar_error(result, &self.path));
+                        return Err(self.unrar_error(result));
                     }
                 }
                 ctx.advance_declared(entry.size.unwrap_or(0));
@@ -889,6 +1017,7 @@ impl UnrarArchive {
                         preserve_permissions,
                         preserve_times,
                         ctx,
+                        fresh.callback_context_ptr(),
                     )?;
                     // R1: hand the header's declaration back so the caller
                     // can hold the staged payload to it.
@@ -1143,7 +1272,7 @@ impl UnrarArchive {
                         ERAR_BAD_DATA | ERAR_BAD_ARCHIVE => {
                             failed_files.push(entry.path.clone());
                         }
-                        _ => return Err(map_unrar_error(result, &self.path)),
+                        _ => return Err(self.unrar_error(result)),
                     }
 
                     // R0075-0060: force an explicit RAR_SKIP so the next
@@ -1490,6 +1619,147 @@ enum UnrarAbort {
     MissingVolume,
 }
 
+/// Callback state that lives as long as an UnRAR handle.
+///
+/// Boxed and owned by [`UnrarArchive`], and registered before
+/// `RAROpenArchiveEx` reads the main header — the SDK copies
+/// `RAROpenArchiveDataEx::callback` / `user_data` into its `Cmd` there
+/// (`dll.cpp`), so this is installed for the whole life of the handle and
+/// every SDK call on it has a callback. Two defects needed exactly that:
+///
+/// * ticgit 3f8790 — a header-encrypted (`-hp`) archive keeps its main
+///   header inside a HEAD_CRYPT block. Without a password *during the
+///   open*, `Archive::IsArchive` cannot decrypt it, so `Arc.Protected`
+///   stays false and `open_data.flags` comes back without
+///   `ROADF_RECOVERY` — and without every other main-header flag.
+///   `RARSetPassword` afterwards does not revisit that flags word. The
+///   password now arrives through `UCM_NEEDPASSWORD` while the header is
+///   being read.
+/// * ticgit 03ddc6 — the extract path installs its own callback for the
+///   duration of one `RARProcessFile` and clears it after, so a missing
+///   volume met during a *listing* walk's `RAR_SKIP` found no callback at
+///   all. `DllVolChange` then took its own no-callback branch, which sets
+///   `ERAR_EOPEN` without asking, and the typed `MissingVolume`
+///   diagnostic could not reach the caller.
+struct UnrarHandleContext {
+    /// Password to answer `UCM_NEEDPASSWORD` with, already NUL-terminated
+    /// for the SDK's `char[]` buffer. `None` for an archive opened
+    /// without one, in which case the SDK's own missing-password error
+    /// stands.
+    password: Option<CString>,
+    /// Why the callback aborted, if it did.
+    ///
+    /// `Cell` because the trampoline reaches this through a raw pointer
+    /// while the owner is only borrowed immutably. Sound for the same
+    /// reason the extract context is: AD 0019 serialises every UnRAR call
+    /// — including the library's synchronous call back into us — onto the
+    /// one thread holding `UNRAR_LOCK`, and `UnrarArchive` is `!Sync`.
+    abort: Cell<Option<UnrarAbort>>,
+}
+
+impl UnrarHandleContext {
+    fn new(password: Option<&str>) -> Result<Box<Self>> {
+        let password = match password {
+            None => None,
+            Some(pw) => Some(
+                CString::new(pw)
+                    .map_err(|_| ArchiveError::password("Password contains null byte"))?,
+            ),
+        };
+        Ok(Box::new(Self {
+            password,
+            abort: Cell::new(None),
+        }))
+    }
+
+    /// Take the recorded abort reason, if any, as a typed error.
+    ///
+    /// Mirrors [`UnrarExtractContext::take_abort_error`] so a caller sees
+    /// the same diagnostic whether the volume ran out during an extract
+    /// (extract context installed) or during a listing walk (this one).
+    fn take_abort_error(&self, archive_path: &Path) -> Option<ArchiveError> {
+        self.abort
+            .take()
+            .and_then(|abort| shared_abort_error(abort, archive_path))
+    }
+}
+
+/// Registered through `RAROpenArchiveDataEx` for a handle's whole life.
+///
+/// Deliberately narrow: it answers the password request and applies the
+/// volume-change policy, and returns the non-abort default for everything
+/// else. Payload accounting stays in [`unrar_process_callback`], which the
+/// extract path installs over this one for the duration of a single
+/// `RARProcessFile` and then restores this one after.
+///
+/// # Safety
+/// `user_data` must be the `*const UnrarHandleContext` registered with the
+/// handle, valid for as long as the handle is open.
+unsafe extern "C" fn unrar_handle_callback(
+    msg: c_uint,
+    user_data: isize,
+    p1: isize,
+    p2: isize,
+) -> c_int {
+    let outcome = std::panic::catch_unwind(|| {
+        if user_data == 0 {
+            // No context to consult. Abort a volume request anyway — the
+            // SDK's own no-callback branch would do the same thing with a
+            // less specific error, and a retry loop under the
+            // process-wide lock is worse than an unlabelled failure.
+            if msg == UCM_CHANGEVOLUME || msg == UCM_CHANGEVOLUMEW {
+                return if p2 == RAR_VOL_NOTIFY { 1 } else { -1 };
+            }
+            return 1;
+        }
+        // SAFETY: the pointer registered at open, per the contract above.
+        // Shared reference only — the context's one mutable field is a
+        // `Cell`.
+        let ctx = unsafe { &*(user_data as *const UnrarHandleContext) };
+
+        if msg == UCM_CHANGEVOLUME || msg == UCM_CHANGEVOLUMEW {
+            if p2 == RAR_VOL_NOTIFY {
+                return 1;
+            }
+            ctx.abort.set(Some(UnrarAbort::MissingVolume));
+            return -1;
+        }
+
+        if msg == UCM_NEEDPASSWORD {
+            let Some(password) = ctx.password.as_ref() else {
+                // Let the SDK raise its own `ERAR_MISSING_PASSWORD`
+                // rather than inventing an answer.
+                return 1;
+            };
+            let bytes = password.as_bytes_with_nul();
+            // `p2` is the buffer's capacity in `char`s, including room for
+            // the terminator. Refuse rather than truncate: a silently
+            // shortened password is a wrong password, and the SDK would
+            // report it as one.
+            if p1 == 0 || p2 <= 0 || bytes.len() > p2 as usize {
+                return 1;
+            }
+            // SAFETY: `p1` is the SDK's `char PasswordA[MAXPASSWORD]`
+            // stack buffer and `p2` its element count; the length check
+            // above keeps the copy inside it.
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), p1 as *mut u8, bytes.len());
+            }
+            return 1;
+        }
+
+        // `UCM_NEEDPASSWORDW` is deliberately not answered. The SDK asks
+        // wide-first and falls through to the ANSI request when the wide
+        // buffer comes back empty (`Archive::RequestArcPassword`), and it
+        // zero-initialises that buffer before asking — so declining here
+        // routes the request to the arm above and keeps this trampoline
+        // free of `wchar_t`-width handling, which differs between
+        // platforms.
+        1
+    });
+    outcome.unwrap_or(-1)
+}
+
 /// Per-extraction context handed to the UnRAR C library through
 /// `RARSetCallback`'s `LPARAM` user-data slot. The trampoline
 /// ([`unrar_process_callback`]) casts the pointer back to `&mut Self` on
@@ -1651,31 +1921,50 @@ impl<'a> UnrarExtractContext<'a> {
                     self.entry_cap.unwrap_or(0)
                 ),
             )),
-            // R0081-0069: a negative processed-length surfaced by the
-            // trampoline is neither a byte-cap breach nor a cancellation — it
-            // is ABI/state corruption, so map it to a corruption error.
-            Some(UnrarAbort::CallbackError) => Some(ArchiveError::corruption(
-                archive_path.display().to_string(),
-                "UnRAR data callback reported a negative processed-length; aborting to avoid masking ABI/state corruption",
-            )),
-            // A volume the set references is absent, so the entry's data is
-            // truncated at the set boundary — the same class as a
-            // central directory that ends mid-record, hence `Corruption`
-            // rather than `Io`. The message points at the typed parser
-            // instead of guessing a name here: the callback receives the
-            // wanted volume in `p1`, but as a platform-width `wchar` buffer
-            // for the `W` message that arrives first, and
-            // `VolumeSetReport::defects()` already answers "which volume"
-            // precisely and portably.
-            Some(UnrarAbort::MissingVolume) => Some(ArchiveError::corruption(
-                archive_path.display().to_string(),
-                "UnRAR asked for the next volume of this multi-volume set and it is not available; \
-                 aborted rather than retrying the same volume name under the process-wide UnRAR lock. \
-                 Call unified_archive::format::multipart::parse_volume_set on the sibling paths and \
-                 read VolumeSetReport::defects() to learn which volume is missing",
-            )),
+            Some(other) => shared_abort_error(other, archive_path),
             None => None,
         }
+    }
+}
+
+/// The abort reasons whose diagnostic needs nothing but the archive path,
+/// so both callback contexts report them identically.
+///
+/// A missing volume can be met by either trampoline — the extract one when
+/// a payload spans volumes, the handle one when a listing walk skips past a
+/// split entry (ticgit 03ddc6) — and the caller must not be able to tell
+/// which was installed. Keeping the wording in one place is also why the
+/// recovery advice below can be trusted: it named a method that did not
+/// exist once already.
+///
+/// Returns `None` for the reasons that need the extract context's own
+/// counters; those are reported by
+/// [`UnrarExtractContext::take_abort_error`].
+fn shared_abort_error(abort: UnrarAbort, archive_path: &Path) -> Option<ArchiveError> {
+    match abort {
+        // R0081-0069: a negative processed-length surfaced by the
+        // trampoline is neither a byte-cap breach nor a cancellation — it
+        // is ABI/state corruption, so map it to a corruption error.
+        UnrarAbort::CallbackError => Some(ArchiveError::corruption(
+            archive_path.display().to_string(),
+            "UnRAR data callback reported a negative processed-length; aborting to avoid masking ABI/state corruption",
+        )),
+        // A volume the set references is absent, so the entry's data is
+        // truncated at the set boundary — the same class as a central
+        // directory that ends mid-record, hence `Corruption` rather than
+        // `Io`. The message points at the typed parser instead of guessing
+        // a name here: the callback receives the wanted volume in `p1`, but
+        // as a platform-width `wchar` buffer for the `W` message that
+        // arrives first, and `VolumeSetReport::defects()` already answers
+        // "which volume" precisely and portably.
+        UnrarAbort::MissingVolume => Some(ArchiveError::corruption(
+            archive_path.display().to_string(),
+            "UnRAR asked for the next volume of this multi-volume set and it is not available; \
+             aborted rather than retrying the same volume name under the process-wide UnRAR lock. \
+             Call unified_archive::format::multipart::parse_volume_set on the sibling paths and \
+             read VolumeSetReport::defects() to learn which volume is missing",
+        )),
+        UnrarAbort::Cancelled | UnrarAbort::CapExceeded => None,
     }
 }
 
@@ -1905,6 +2194,7 @@ fn unrar_extract_atomic(
     preserve_permissions: bool,
     preserve_times: bool,
     mut ctx: Option<&mut UnrarExtractContext<'_>>,
+    handle_context: isize,
 ) -> Result<()> {
     if !overwrite && safe_path.exists() {
         return Err(ArchiveError::OperationBlocked {
@@ -1948,8 +2238,15 @@ fn unrar_extract_atomic(
             std::ptr::null(),
             dest_name_cstr.as_ptr(),
         );
-        // Clear the callback before the handle is used elsewhere / closed.
-        RARSetCallback(handle, None, 0);
+        // Restore the handle-lifetime callback rather than clearing to
+        // `None`. Clearing used to be right when nothing else needed one;
+        // it is not now, because the walks *between* extractions have to
+        // keep answering volume requests (ticgit 03ddc6) — a later
+        // `RAR_SKIP` past a split entry would otherwise meet the SDK's
+        // no-callback branch again. The extract context's pointer is a
+        // local of this function, so it must not stay registered past this
+        // point either way.
+        RARSetCallback(handle, Some(unrar_handle_callback), handle_context);
         r
     };
 

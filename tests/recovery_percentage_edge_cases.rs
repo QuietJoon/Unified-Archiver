@@ -427,30 +427,40 @@ fn test_recovery_percentage_data_encrypted_recovery_archive() {
     assert_fixture_recovery_metadata("tests/fixtures/test_encrypted_data_recovery.rar");
 }
 
-/// R0001-0089 / ticgit 8c29f8: the header-encrypted × recovery-record case,
-/// which pins a **known limitation** rather than the desired behaviour.
+/// R0001-0089 / ticgit 8c29f8 / ticgit 3f8790: the header-encrypted ×
+/// recovery-record case, which took two fixes to get right.
 ///
 /// `tests/fixtures/test_encrypted_recovery.rar` is produced with
 /// `rar a -hptest123 -rr5p`, so the RAR5 main header lives inside an
-/// encrypted-header block (HEAD_CRYPT, type 4). The record is genuinely
-/// there — `unrar lt -ptest123` on this fixture prints
-/// "Details: RAR 5, recovery record, encrypted headers" — but this crate
-/// reports `has_recovery_record() == false`.
+/// encrypted-header block (HEAD_CRYPT, type 4): the archive cannot be listed
+/// without the password, and a raw byte walk from offset 8 lands on
+/// ciphertext.
 ///
-/// The cause is ordering, not the format: `UnrarArchive` captures its
-/// `flags` from `OpenArchiveDataEx` at `RAROpenArchiveEx` time and calls
-/// `RARSetPassword` *afterwards*. With `-hp` the main header cannot be
-/// decrypted during the open, so `ROADF_RECOVERY` is absent from the flags
-/// word, and a later `RARSetPassword` does not revisit it. Fixing it means
-/// making the password available to the open itself (a `UCM_NEEDPASSWORD`
-/// callback installed before `RAROpenArchiveEx`, or a re-open), inside the
-/// process-wide UnRAR mutex. Tracked as ticgit 3f8790.
+/// The two halves of the recovery API reach the file by different routes, and
+/// each was wrong in its own way.
 ///
-/// This test therefore asserts what happens today, so that a fix breaks it
-/// and forces this comment and the assertion to be updated together. What it
-/// does *not* tolerate is an `Err`: a valid archive whose header this parser
-/// cannot decrypt is not a damaged archive, and reporting corruption here
-/// would turn every header-encrypted RAR into a false damage report.
+/// * `has_recovery_record()` reads `ROADF_RECOVERY` from the flags word
+///   `RAROpenArchiveEx` produced. That word is derived from the *decrypted*
+///   main header, so it needs the password during the open — and
+///   `RARSetPassword` used to run afterwards, leaving the flag clear. This
+///   crate therefore reported "no recovery record" for an archive
+///   `unrar lt -ptest123` describes as "RAR 5, recovery record, encrypted
+///   headers". Fixed by supplying the password through `UCM_NEEDPASSWORD`
+///   while the header is being read (ticgit 3f8790).
+///
+/// * `recovery_percentage()` re-opens the path and walks the block structure
+///   itself, with no password and no decryption. Fixing the flag above made
+///   that walk reachable for the first time, and it promptly read the
+///   HEAD_CRYPT ciphertext as a header and reported
+///   `Corruption: "RAR5 header extends past end of archive"` — a false damage
+///   report on a sound archive. It now short-circuits on `ROADF_ENCHEADERS`.
+///
+/// So the correct answer for this fixture is "the record is there, its size
+/// is not knowable here": `true` and `None`, which
+/// `recovery_percentage()`'s documented contract already allows. What must
+/// never happen is an `Err` — a header this parser is not permitted to read
+/// is not a damaged archive, and reporting corruption would turn every
+/// header-encrypted RAR into a false damage report.
 #[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
@@ -473,15 +483,17 @@ fn test_recovery_percentage_header_encrypted_recovery_archive() {
 
     assert_recovery_contract(path, has_recovery, percentage);
     assert!(
-        !has_recovery,
-        "{path}: has_recovery_record() now reports the record that `unrar -p` \
-         has always seen — the open-before-password ordering must have been \
-         fixed. Update this test and its doc comment to assert the record is \
-         found, and give the fixture a FIXTURE_RECOVERY entry."
+        has_recovery,
+        "{path} was built with `-rr5p`, and `unrar lt -ptest123` reports the \
+         record. The password reaches RAROpenArchiveEx now, so the decrypted \
+         main header's MHFL_PROTECT bit must be visible here"
     );
     assert_eq!(
         percentage, None,
-        "{path}: with the flag unreadable the percentage must short-circuit"
+        "{path}: the percentage lives in the encrypted header, which the \
+         raw-byte walk is not permitted to read. `None` is the documented \
+         \"cannot be determined\"; anything else means the walk decoded \
+         ciphertext"
     );
 }
 
