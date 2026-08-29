@@ -255,6 +255,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`Archive::detect_multipart` no longer keeps its own idea of what a volume name is, and
+  opening a continuation volume now finds the set.** The method carried ~270 lines of hand-rolled
+  matching — four boundary closures, four hoisted source predicates and a bespoke numeric sort —
+  a few hundred lines away from `format::multipart`, which has done the same job as a typed
+  parser since it landed as additive API with no in-crate consumer. Two implementations of "is
+  this a volume name" is one too many, and they were already drifting. The matcher is gone: the
+  method collects the sibling names exactly as before and hands them to `parse_volume_set_for`,
+  anchored on the archive that was opened.
+
+  **One behavioural consequence, and it is the point of the change.** Old-style RAR sibling
+  matching was gated on the *source* name ending in `.rar`, so opening `archive.r00` reported
+  `(false, [archive.r00])` while opening `archive.rar` beside it discovered the whole series —
+  the same set on disk, a different answer, decided by nothing but which member the caller
+  happened to hold. A `.rNN`/`.sNN` source now derives its base like any other member, so
+  `archive.rar`, `archive.r00` and `archive.r01` all report
+  `[archive.rar, archive.r00, archive.r01]` in that order. A caller that read "opened a `.r00`,
+  got `is_multipart == false`" as "this is a standalone archive" is now told it is volume 2 of a
+  set, which is what it is. This also holds for a series whose `.rar` main is absent: two
+  `.rNN` files are still one set.
+
+  Anchoring is load-bearing, not incidental. `parse_volume_set_for` falls back to an *unanchored*
+  largest-group rule when the source parses as no volume name at all, and in a directory holding
+  two sets that fallback would bind the handle to whichever set is bigger. The migrated body
+  refuses to reach it: a source name that parses as no volume returns the documented
+  `(false, [self.path])` shape without consulting the parser. That check sits *after* the
+  directory scan, so an unreadable parent still surfaces as `ArchiveError::Io` whatever the
+  archive is named. The rest is unchanged by construction — write mode still errors, the
+  capability gate still short-circuits non-multipart formats before any scan (7z `.001` included;
+  that routing decision stays open), the deliberate single-element `(false, [self.path])` return
+  shape is preserved, matching stays ASCII-case-insensitive over original-case paths, and volume
+  order is still main-first then ascending with `.sNN` after `.rNN`.
+
+  Three degenerate name classes move with the parser's rules, none of them a name WinRAR or
+  WinZip writes. Volume *zero* siblings (`x.z00`, `x.000`, `x.0`, `x.part0.rar`) used to be swept
+  into a set and are now rejected, because 1-based continuity arithmetic cannot say what volume 0
+  is. A source carrying an all-digit extension wider than nine digits used to group `.NNN`
+  siblings even though the sort key could not represent it — the source predicate had no width
+  bound although the sibling predicate did — and is now rejected on both sides. And two files
+  claiming the same volume number (`x.part1.rar` with `x.part01.rar`) are still both returned,
+  but now in a deterministic `(number, path)` order instead of whatever `read_dir` yielded.
+
 - **`external::rar::session::CreateRequest` is gone; the invocation sequence takes
   `argv::AddArgv` directly.** The two structs were field-for-field identical — the same five
   fields, the same types, the same doc text — and `CreateRequest::as_argv` bridged them by copying

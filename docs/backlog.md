@@ -506,6 +506,26 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   module and its tests child the only hit is an unrelated `VolumeSetSize` local in the vendored
   UnRAR C++ sources. Still type 2 for the same reason as before — migrating `detect_multipart` is a
   `MultipartLayout` API change, and the `.001` routing is a capability-gate decision.
+- **Landed 2026-08-29 (the second implementation is gone).** `Archive::detect_multipart` now
+  collects the sibling names and hands them to `parse_volume_set_for`, anchored on the archive
+  that was opened; the ~270-line matcher — four boundary closures, four hoisted source predicates,
+  the bespoke numeric sort — went with it, along with the now-unused `parse_rar_part_suffix` and
+  `MAX_VOL_DIGITS` in `src/inspection.rs`. Grepping that file for `.part`, `.z0`, `strip_prefix`,
+  `strip_suffix` and `is_ascii_digit` now returns only doc prose and two test paths — no matching
+  logic at all, so the crate holds exactly one answer to "is this a volume name", which is what
+  this entry was about. `src/archive/mode_split.rs` needed no change — its
+  `detect_multipart`/`multipart_layout` are pure delegations and inherit the behaviour.
+
+  Two halves stay open, and this entry stays with them. The **`MultipartLayout` API evolution**
+  is untouched: `VolumeSetReport` knows which volume is missing, which files claim the same
+  number and which siblings are foreign, and the `(bool, Vec<PathBuf>)` tuple has nowhere to put
+  any of it, so the migrated body discards the defects at the boundary. The **7z `.001` routing**
+  (R0080-0093) is likewise untouched and was left untouched on purpose: `supports_multipart()` is
+  a boolean OR that `detect_multipart` gates on before any scan, `SevenZip` reports
+  `multipart_read: None`, and `src/format.rs`'s `test_supports_multipart` pins that value — so
+  flipping it inside a migration billed as behaviour-preserving would have changed 7z silently.
+  The parser already understands `VolumeScheme::Numeric`, so when the decision is taken it is a
+  capability flip plus its own fixtures, not another change to `detect_multipart`.
 
 ### Manifest-based recursive creation (OI-0080-005)
 - **Type:** 2
@@ -1136,6 +1156,18 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   discovers the whole set. The reported set must be identical whichever member is opened.
 - **Background:** Medium severity, low impact, real asymmetry — the caller gets a materially
   different answer for the same archive set depending on entry point.
+- **Landed 2026-08-29, with the blocker.** The typed-parser migration of `detect_multipart`
+  (OI-0080-004 above) removed the `.rar`-only source gate as a side effect of removing the source
+  predicates entirely: a `.rNN`/`.sNN` name derives its base through `parse_volume_name` like any
+  other member, and the set is anchored on whichever member was opened. `archive.rar`,
+  `archive.r00` and `archive.r01` now all report
+  `[archive.rar, archive.r00, archive.r01]`, which is this entry's acceptance criterion stated
+  literally. `src/inspection/tests.rs::test_detect_multipart_old_style_set_is_the_same_from_every_member`
+  stages the three volumes as byte-copies of `tests/fixtures/test_rar5.rar` — each has to be
+  openable, and detection is content-first so the `.r00` name does not block `Archive::open` —
+  and asserts one identical `MultipartLayout::Multi` per member. Proven non-vacuous by
+  re-injecting the old rejection: the `.rar` member kept passing and `.r00` came back
+  `Single { path: ".../archive.r00" }`, which is the asymmetry this entry described.
 
 ### Exact content total silently treats unknown entry sizes as zero (OI-0001-007)
 - **Type:** 3

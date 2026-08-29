@@ -587,6 +587,42 @@ fn test_detect_multipart_rar_old_style_volumes() {
     );
 }
 
+/// OI-0001-006 / R0001-0048: the reported set must be identical
+/// whichever member of it was opened. Old-style `.rNN` sibling matching
+/// used to be gated on the *source* name ending in `.rar`, so opening
+/// `archive.r00` reported `(false, [archive.r00])` while opening
+/// `archive.rar` next to it discovered the whole series — a materially
+/// different answer for the same set depending on the entry point.
+///
+/// Every volume here is a byte-copy of a real single-volume RAR because
+/// each one has to be openable; detection is content-first, so the
+/// `.r00`/`.r01` names do not block `Archive::open`. Sibling discovery
+/// itself still never reads the siblings.
+#[cfg(feature = "rar-support")]
+#[test]
+fn test_detect_multipart_old_style_set_is_the_same_from_every_member() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("archive.rar");
+    let r00 = dir.path().join("archive.r00");
+    let r01 = dir.path().join("archive.r01");
+    for volume in [&main, &r00, &r01] {
+        std::fs::copy(fixture("test_rar5.rar"), volume).unwrap();
+    }
+
+    let expected = MultipartLayout::Multi {
+        parts: vec![main.clone(), r00.clone(), r01.clone()],
+    };
+    for member in [&main, &r00, &r01] {
+        let archive = Archive::open(member).unwrap();
+        assert_eq!(
+            archive.multipart_layout().unwrap(),
+            expected,
+            "opening {} must report the whole old-style set, in volume order",
+            member.display()
+        );
+    }
+}
+
 /// multipart_layout must surface old-style RAR volume sets as
 /// `Multi` and a lone `.rar` as `Single` (R0079-0029).
 #[cfg(feature = "rar-support")]

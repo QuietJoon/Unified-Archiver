@@ -7,6 +7,7 @@ use crate::archive::{Archive, ArchiveBackend};
 use crate::entry::{ArchiveEntry, EntryType};
 use crate::error::ops;
 use crate::error::{ArchiveError, ArchiveWarning, Result};
+use crate::format::multipart::{parse_volume_name, parse_volume_set_for};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -772,6 +773,13 @@ impl Archive {
     /// Sibling volumes are matched by file name only — their contents
     /// are never opened.
     ///
+    /// Name classification, grouping and volume order are delegated to
+    /// [`crate::format::multipart`], and the set is *anchored* on the
+    /// member that was opened. Every member of one set therefore reports
+    /// the same list: opening `x.rar`, `x.r00` or `x.r01` of an old-style
+    /// set all return the whole series (OI-0001-006), and a directory
+    /// holding a second, larger set cannot capture this handle.
+    ///
     /// Returns `(is_multipart, part_files)` where:
     /// - `is_multipart`: true if this archive is part of a multi-part set
     /// - `part_files`: list of all detected part files in the set (sorted)
@@ -800,14 +808,15 @@ impl Archive {
             return Err(ArchiveError::write_mode_only("detect_multipart"));
         }
 
-        // Non-UTF-8 path note (AD 0064 / R0075-0082): file_name() and
-        // file_stem() flow through to_string_lossy() before the
-        // boundary predicates. Because the source path and its
-        // siblings undergo the *same* substitution (U+FFFD for invalid
-        // sequences), prefix matching still works correctly for the
-        // common multi-volume case where stems share the same byte
-        // sequence except for volume-number suffixes. The edge case
-        // where two byte-different non-UTF-8 stems coalesce into the
+        // Non-UTF-8 path note (AD 0064 / R0075-0082): the source name and
+        // every candidate name flow through to_string_lossy() before the
+        // parser sees them — the anchor in `parse_volume_set_for`, the
+        // candidates in its `build_report`. Because the source path and
+        // its siblings undergo the *same* substitution (U+FFFD for
+        // invalid sequences), base-name matching still works correctly
+        // for the common multi-volume case where names share the same
+        // byte sequence except for volume-number suffixes. The edge case
+        // where two byte-different non-UTF-8 base names coalesce into the
         // same lossy form is documented as a v0.4 follow-up
         // (OI-0075-004 R0075-0083 typed multipart return shape).
 
@@ -820,6 +829,14 @@ impl Archive {
         // A future version may switch to an empty list once
         // downstream consumers are audited; for now the existing
         // shape is preserved to keep the test suite stable.
+        //
+        // This gate is also what keeps 7z numeric splits away from the
+        // parser: `SevenZip::supports_multipart()` is false, so a 7z
+        // `.001` set exits here and is never grouped. Routing it is a
+        // capability decision tracked separately (R0080-0093); the
+        // parser already understands `VolumeScheme::Numeric`, so when
+        // that decision is taken it is a capability flip plus its own
+        // fixtures, not a change to this body.
         if !self.format.supports_multipart() {
             return Ok((false, vec![self.path.clone()]));
         }
@@ -833,21 +850,14 @@ impl Archive {
             .to_string_lossy();
 
         let parent_dir = sibling_scan_dir(&self.path);
-        let file_stem = self
-            .path
-            .file_stem()
-            .ok_or_else(|| {
-                ArchiveError::invalid_path(self.path.display().to_string(), "No file stem")
-            })?
-            .to_string_lossy();
-
-        let mut part_files = Vec::new();
-        part_files.push(self.path.clone()); // Always include current file
 
         // Collect directory entries once. Propagate I/O failures so a
         // permission error or missing directory is distinguishable from
         // "this archive is not multipart"; previously `.ok().unwrap_or_default()`
-        // hid every failure behind a silent empty-list.
+        // hid every failure behind a silent empty-list. The scan stays
+        // ahead of the anchor check below so an unreadable parent surfaces
+        // as `ArchiveError::Io` whatever the source archive is named
+        // (R0068-0082).
         let dir_entries: Vec<PathBuf> = fs::read_dir(parent_dir)
             .map_err(|e| ArchiveError::io("read_dir", parent_dir.to_path_buf(), e))?
             .map(|entry| {
@@ -864,202 +874,43 @@ impl Archive {
             .flatten()
             .collect();
 
-        // Sibling matching is ASCII-case-insensitive (R0080-0087): compare
-        // lowercased names so mixed-case sets (`.ZIP`/`.Z01`/`.PART1.RAR`/
-        // `.R00`) on case-preserving filesystems still group, while the
-        // original-case PathBufs are preserved in the returned volume list.
-        let file_name_lc = file_name.to_ascii_lowercase();
-        let stem_lc = file_stem.to_ascii_lowercase();
-        let stem = stem_lc.as_str();
-
-        // RAR part base name, parsed from the terminal `.part<digits>.rar`
-        // suffix so a base that itself contains `.part` resolves correctly
-        // (R0080-0088). `None` when the source is not a `.partN.rar` volume.
-        let rar_base = parse_rar_part_suffix(&file_name_lc).map(|(base, _)| base.to_string());
-
-        // Format-specific boundary predicates (MADR-0013). Hoisted above the
-        // directory walk so each entry pays a single match cost and the loop
-        // body stays focused on the per-path dispatch logic.
-
-        // `.zNN` suffix (ZIP split archives).
-        let is_zip_split_ext = |s: &str| -> bool {
-            if let Some(dot_pos) = s.rfind('.') {
-                let ext = &s[dot_pos..];
-                ext.starts_with(".z")
-                    && ext.len() >= 3
-                    && ext.len() - 2 <= MAX_VOL_DIGITS
-                    && ext[2..].chars().all(|c| c.is_ascii_digit())
-            } else {
-                false
-            }
-        };
-        // ZIP multipart: the suffix immediately after the stem must be a
-        // recognized ZIP multipart extension — `.zip` or `.zNN`. Raw
-        // `starts_with(file_stem)` would otherwise accept unrelated siblings
-        // like `archive.backup.zip`.
-        let zip_part_boundary = |name: &str| -> bool {
-            if let Some(rest) = name.strip_prefix(stem) {
-                rest == ".zip" || (rest.starts_with(".z") && is_zip_split_ext(name))
-            } else {
-                false
-            }
-        };
-        // RAR multipart: accept only `<base>.part<digits>.rar` whose base
-        // matches the source's, using the same anchored parser as the sort
-        // key so matching and ordering never diverge (R0080-0088/-0095).
-        let rar_part_boundary = |name: &str| -> bool {
-            match (rar_base.as_deref(), parse_rar_part_suffix(name)) {
-                (Some(src_base), Some((base, _))) => base == src_base,
-                _ => false,
-            }
-        };
-        // Old-style RAR volume names (R0079-0029): the first volume is
-        // `<stem>.rar` and continuation volumes are `<stem>.r00`,
-        // `.r01`, ..., rolling into `.s00` after `.r99` (WinRAR
-        // "old style volume names" / `rar -vn`). Accept `<stem>.rNN`
-        // / `<stem>.sNN` with EXACTLY two ASCII digits: WinRAR rolls
-        // `.r99` into `.s00` and never emits a three-digit `.r100`, so a
-        // wider tail (`.r1`, `.r123456`) is not this convention (R0080-0090).
-        let rar_old_style_boundary = |name: &str| -> bool {
-            if let Some(rest) = name.strip_prefix(stem) {
-                let mut chars = rest.chars();
-                if chars.next() != Some('.') {
-                    return false;
-                }
-                if !matches!(chars.next(), Some('r') | Some('s')) {
-                    return false;
-                }
-                let digits = chars.as_str();
-                digits.len() == 2 && digits.chars().all(|c| c.is_ascii_digit())
-            } else {
-                false
-            }
-        };
-        // Numeric multipart: require `<stem>.<digits>` so unrelated siblings
-        // like `archive.backup.001` or `archive_longer.001` are not swept in.
-        // Previously the numeric branch accepted any
-        // `name_str.starts_with(file_stem)`, which over-matched on
-        // shared-prefix names.
-        let numeric_part_boundary = |name: &str| -> bool {
-            if let Some(rest) = name.strip_prefix(stem) {
-                let mut chars = rest.chars();
-                if chars.next() != Some('.') {
-                    return false;
-                }
-                let tail = chars.as_str();
-                !tail.is_empty()
-                    && tail.len() <= MAX_VOL_DIGITS
-                    && tail.chars().all(|c| c.is_ascii_digit())
-            } else {
-                false
-            }
-        };
-
-        // Properties of the *source* archive name — loop-invariant, so
-        // hoisted out of the per-sibling scan.
-        let src_is_zip_set = file_name_lc.ends_with(".zip") || is_zip_split_ext(&file_name_lc);
-        let src_is_rar_part = rar_base.is_some();
-        let src_is_rar = file_name_lc.ends_with(".rar");
-        // Pattern 3 applies only when the source itself carries an
-        // all-digit extension (e.g. the caller opened `.001`).
-        // `numeric_part_boundary` already guarantees the sibling's tail
-        // after `<stem>.` is all digits, so no per-sibling extension
-        // probe is needed.
-        let src_has_numeric_ext = self
-            .path
-            .extension()
-            .is_some_and(|e| e.to_string_lossy().chars().all(|c| c.is_ascii_digit()));
-
-        // Apply format-specific predicates to find related parts
-        for path in dir_entries {
-            if let Some(name) = path.file_name() {
-                let name_str = name.to_string_lossy().to_ascii_lowercase();
-
-                // Pattern 1: ZIP multi-part (.zip, .z01, .z02, ...)
-                let is_zip_part = src_is_zip_set && zip_part_boundary(&name_str);
-
-                // Pattern 2: RAR multi-part (.part1.rar, .part2.rar, ...)
-                let is_rar_part = src_is_rar_part && rar_part_boundary(&name_str);
-
-                // Pattern 2b: old-style RAR volumes (`x.rar` + `x.r00`,
-                // `x.r01`, ..., `x.sNN`) (R0079-0029).
-                let is_rar_old_style = src_is_rar && rar_old_style_boundary(&name_str);
-
-                // Pattern 3: numeric `.001`/`.002` splits. Reachable only
-                // for zip/rar-magic content: `SevenZip::supports_multipart`
-                // is false, so 7z `.001` sets exit at the capability gate
-                // above and never reach this branch. 7z numeric-volume
-                // routing is tracked separately (R0080-0093).
-                let is_numeric_part = src_has_numeric_ext && numeric_part_boundary(&name_str);
-
-                if is_zip_part || is_rar_part || is_rar_old_style || is_numeric_part {
-                    part_files.push(path);
-                }
-            }
+        // A source whose own name parses as no volume name belongs to no
+        // set, and must say so before the parser is consulted:
+        // `parse_volume_set_for` falls back to the unanchored
+        // largest-group rule when the anchor does not parse, which would
+        // bind this handle to whichever *unrelated* set happens to be the
+        // biggest in the same directory.
+        if parse_volume_name(&file_name).is_none() {
+            return Ok((false, vec![self.path.clone()]));
         }
 
-        // Sort part files numerically (not lexicographically) for correct ordering
-        // e.g., .z2 before .z10, .part2.rar before .part10.rar
-        part_files.sort_by(|a, b| {
-            // Extract numeric part from extension or filename
-            let extract_num = |p: &PathBuf| -> Option<u32> {
-                // Lowercased to match the case-insensitive sibling matching
-                // above (R0080-0087).
-                let name = p.file_name()?.to_string_lossy().to_ascii_lowercase();
-                // Try extension first (e.g., .001, .z01)
-                if let Some(ext) = p.extension() {
-                    let ext_str = ext.to_string_lossy().to_ascii_lowercase();
-                    // Pure numeric extension (.001, .002)
-                    if let Ok(n) = ext_str.parse::<u32>() {
-                        return Some(n);
-                    }
-                    // ZIP split (.z01, .z02) - extract digits after 'z'
-                    if let Some(suffix) = ext_str.strip_prefix('z') {
-                        if let Ok(n) = suffix.parse::<u32>() {
-                            return Some(n);
-                        }
-                    }
-                    // Old-style RAR volumes (R0079-0029): `.rNN` is
-                    // volume NN; the series rolls into `.sNN` after
-                    // `.r99`, so offset the s-series by 100 to keep
-                    // ascending volume order. `.rar` itself fails the
-                    // numeric parse and sorts first as the main volume.
-                    if let Some(suffix) = ext_str.strip_prefix('r') {
-                        if let Ok(n) = suffix.parse::<u32>() {
-                            return Some(n);
-                        }
-                    }
-                    if let Some(suffix) = ext_str.strip_prefix('s') {
-                        if let Ok(n) = suffix.parse::<u32>() {
-                            return Some(n.saturating_add(100));
-                        }
-                    }
-                }
-                // Terminal `.part<digits>.rar` volume suffix, parsed with
-                // the same anchored helper as the boundary predicate so
-                // matching and ordering agree (R0080-0095).
-                if let Some((_, digits)) = parse_rar_part_suffix(&name) {
-                    if let Ok(n) = digits.parse::<u32>() {
-                        return Some(n);
-                    }
-                }
-                None
-            };
+        // Everything below — which names are volumes, which of them belong
+        // to this archive's set, and in what order — is the typed parser's
+        // (OI-0080-004). It matches ASCII-case-insensitively while
+        // returning the original-case paths (R0080-0087), anchors
+        // `.part<digits>.rar` at the terminal suffix (R0080-0088 /
+        // R0080-0095), and numbers volumes so the MADR-0013 order falls
+        // out of one sort: unnumbered main first, then ascending, `.sNN`
+        // after `.rNN` (R0079-0029). Anchoring on the member that was
+        // opened is what makes `x.rar`, `x.r00` and `x.r01` of one
+        // old-style set report the same list (OI-0001-006).
+        let mut candidates = Vec::with_capacity(dir_entries.len() + 1);
+        candidates.push(self.path.clone());
+        candidates.extend(dir_entries);
+        let report = parse_volume_set_for(&self.path, &candidates);
 
-            // MADR-0013 sort: the non-numbered main archive (`.zip`, `.rar`)
-            // comes first; numbered parts (`.z01`, `.partN.rar`, `.001`)
-            // follow in ascending order. Keep the AD-accepted ordering so
-            // ZIP split sets surface as `[archive.zip, archive.z01, ...]`.
-            match (extract_num(a), extract_num(b)) {
-                (Some(na), Some(nb)) => na.cmp(&nb),
-                (Some(_), None) => std::cmp::Ordering::Greater,
-                (None, Some(_)) => std::cmp::Ordering::Less,
-                (None, None) => a.cmp(b), // Fallback to lexicographic
-            }
-        });
-
-        let is_multipart = part_files.len() > 1;
-        Ok((is_multipart, part_files))
+        // Adapt the report to the legacy tuple. An `Unvolumed` report is
+        // not a set, so it returns the same single-element shape as the
+        // gate above rather than the report's `paths`, which are every
+        // candidate in the directory. Defects — holes, duplicates,
+        // foreign siblings — are deliberately dropped here: this tuple
+        // has nowhere to put them, and surfacing them is the
+        // `MultipartLayout` evolution deferred to v0.4 (OI-0080-004).
+        let parts = match report.set() {
+            Some(set) => set.paths(),
+            None => vec![self.path.clone()],
+        };
+        Ok((parts.len() > 1, parts))
     }
 
     /// Detect this archive's multipart layout, returning a typed
@@ -1263,39 +1114,6 @@ fn sibling_scan_dir(path: &Path) -> &Path {
     path.parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
-}
-
-/// Maximum digit-run width accepted for numbered multipart volumes.
-///
-/// Every digit-matching predicate is bounded to what the `u32` sort key
-/// can represent, so the matcher and the sorter never disagree: a wider
-/// run would pass matching but overflow `parse::<u32>()` and mis-sort as
-/// the unnumbered main volume (R0080-0094). Nine digits stays below
-/// `u32::MAX` (4_294_967_295).
-const MAX_VOL_DIGITS: usize = 9;
-
-/// Parse a terminal `.part<digits>.rar` volume suffix from the end of an
-/// already-ASCII-lowercased file name, returning `(base, digits)` where
-/// `base` is everything preceding `.part<digits>.rar`.
-///
-/// Anchored at the end via `rfind(".part")` so a base that itself
-/// contains `.part` (e.g. `my.part9.data.part1.rar`) resolves to the
-/// terminal volume suffix rather than the first occurrence
-/// (R0080-0088 / R0080-0095). The digit run must be non-empty
-/// (R0080-0089), all ASCII digits, and at most [`MAX_VOL_DIGITS`] wide so
-/// matching agrees with the `u32` sort key (R0080-0094). Callers must
-/// lowercase the input first so `.rar`/`.part` match case-insensitively.
-fn parse_rar_part_suffix(name: &str) -> Option<(&str, &str)> {
-    let without_rar = name.strip_suffix(".rar")?;
-    let part_pos = without_rar.rfind(".part")?;
-    let digits = &without_rar[part_pos + ".part".len()..];
-    if digits.is_empty()
-        || digits.len() > MAX_VOL_DIGITS
-        || !digits.chars().all(|c| c.is_ascii_digit())
-    {
-        return None;
-    }
-    Some((&without_rar[..part_pos], digits))
 }
 
 /// Digest/size aggregation shared by
