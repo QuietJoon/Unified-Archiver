@@ -178,15 +178,43 @@ mod scripted {
             output: Path::new("out dir/archive.rar"),
             entries: &entries,
         };
-        // Absent for the pre-check, present for the post-check.
-        let probed = std::cell::Cell::new(0u32);
+        // Absent for the pre-checks, present for the post-check. Keyed
+        // off the runner's call count rather than a counter of its own,
+        // so adding or removing an existence check does not silently
+        // change what this closure means: two runs (probe, add) is
+        // exactly "the archive has been written".
+        let exists_calls = std::cell::Cell::new(0usize);
+        let runs_at_last_precheck = std::cell::Cell::new(usize::MAX);
         let exists = |_: &Path| {
-            let nth = probed.get();
-            probed.set(nth + 1);
-            nth > 0
+            exists_calls.set(exists_calls.get() + 1);
+            let runs = stub.calls().len();
+            if runs < 2 {
+                runs_at_last_precheck.set(runs);
+            }
+            runs >= 2
         };
 
         session::create_archive(&stub, &rar_path(), &request, exists).expect("archive created");
+
+        // ticgit 642488: the existence check must still be the last thing
+        // that happens before the spawn. It is checked twice — once before
+        // the probe so an occupied destination costs no child process at
+        // all, and once after, because `probe_binary` spawns `rar` and
+        // waits for its banner. With only the early check, the comment
+        // promising a re-check "immediately before the run" had a whole
+        // process living in the gap.
+        assert_eq!(
+            exists_calls.get(),
+            3,
+            "expected: refuse-early check, post-probe check, post-run check"
+        );
+        assert_eq!(
+            runs_at_last_precheck.get(),
+            1,
+            "the last check before the run must happen after the probe has \
+             already spawned (1 run) and before the add — nothing may spawn \
+             between that check and the run"
+        );
 
         let sent: Vec<String> = stub
             .args(1)
@@ -224,11 +252,8 @@ mod scripted {
             };
             // The artifact exists after the run, so only the exit code
             // can fail this: a lenient implementation returns Ok.
-            let probed = std::cell::Cell::new(0u32);
             let result = session::create_archive(&stub, &rar_path(), &request, |_: &Path| {
-                let nth = probed.get();
-                probed.set(nth + 1);
-                nth > 0
+                stub.calls().len() >= 2
             });
             match result {
                 Err(RarCliError::CommandFailed { exit, .. }) => {

@@ -393,6 +393,22 @@ And the three that were mis-dated:
 
 ### Fixed
 
+- **The external RAR lane's destination check now really is the last step before the spawn.** Its
+  comment claimed it ran "immediately before the run"; `probe_binary`, which spawns `rar` and waits
+  for its banner, sat between the check and the run — the widest possible version of the window the
+  check exists to narrow.
+
+  The check now runs twice. The first, before the probe, keeps the common "the file is already
+  there" case free of any child process at all, which a test pins deliberately. The second runs
+  after the probe, so nothing spawns between it and the create. A second `stat` buys the narrowing
+  that moving the probe would have bought, without spawning on every occupied destination.
+
+  This narrows the window; it does not close it. Closing it means creating under an exclusive
+  temporary name and installing the result with `rename_noclobber` — which already exists in
+  `ffi::common` with unix, Windows and fallback arms — and remains the open half of
+  OI-0076-006 / ticgit 642488, along with the missing `-ep1` switch that would stop absolute source
+  paths being stored verbatim.
+
 - **A header-encrypted RAR reported none of its main-header flags.** `UnrarArchive` took its flags
   word from `RAROpenArchiveEx` and called `RARSetPassword` afterwards, so for a `-hp` archive — whose
   main header lives inside a HEAD_CRYPT block — the SDK could not decrypt that header in time and

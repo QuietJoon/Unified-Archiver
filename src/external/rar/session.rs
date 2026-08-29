@@ -183,20 +183,42 @@ where
     // Step 1: refuse bad input before spending a spawn on it.
     let args = argv::build(&request.as_argv())?;
 
-    // Re-check immediately before the run. The construction-time check
-    // is far earlier, and a racing process can occupy the path in
-    // between; this narrows the window rather than closing it (staging
-    // to an exclusive tempfile is tracked separately in OI-0076-006).
+    // Step 2: refuse an occupied destination before spending a spawn on
+    // it. Cheap, and it keeps the common "the file is already there"
+    // case free of any child process at all.
     if output_exists(request.output) {
         return Err(RarCliError::OutputExists {
             output: request.output.to_path_buf(),
         });
     }
 
-    // Step 2: identify the binary before handing it a vector.
+    // Step 3: identify the binary before handing it a vector.
     probe_binary(runner, rar_exe)?;
 
-    // Step 3: run it.
+    // Step 4: check *again*, now that nothing else will happen before
+    // the run.
+    //
+    // ticgit 642488: step 2's check used to be the only one, and its
+    // comment claimed it ran "immediately before the run" — but
+    // `probe_binary` spawns `rar` and waits for its banner, so a whole
+    // child process lived in the gap. That is the widest possible
+    // version of the window the check exists to narrow. Moving the probe
+    // earlier would have closed the gap too, but at the cost of spawning
+    // on every occupied destination, which step 2 deliberately avoids;
+    // a second `stat` buys the same narrowing for no process at all.
+    //
+    // It narrows the window; it does not close it. Closing it means
+    // creating under an exclusive temporary name and installing the
+    // result with `rename_noclobber` — which already exists in
+    // `ffi::common`, with unix, Windows and fallback arms — and is
+    // tracked as the remaining half of OI-0076-006 / ticgit 642488.
+    if output_exists(request.output) {
+        return Err(RarCliError::OutputExists {
+            output: request.output.to_path_buf(),
+        });
+    }
+
+    // Step 5: run it.
     let outcome = runner
         .run(rar_exe, &args)
         .map_err(|source| RarCliError::SpawnFailed {
@@ -204,7 +226,7 @@ where
             source,
         })?;
 
-    // Step 4: an unchecked exit code is how a failed archive passes for
+    // Step 6: an unchecked exit code is how a failed archive passes for
     // a good one.
     let exit = RarExit::from_code(outcome.code);
     if !exit.is_success() {
@@ -215,7 +237,7 @@ where
         });
     }
 
-    // Step 5: a success code is not an artifact.
+    // Step 7: a success code is not an artifact.
     if !output_exists(request.output) {
         return Err(RarCliError::OutputMissing {
             output: request.output.to_path_buf(),
@@ -281,15 +303,12 @@ mod tests {
             &stub,
             &rar_path(),
             &request(Path::new("out.rar"), &entries),
-            // Absent before the run, present after: flip on first call.
-            {
-                let seen = std::cell::Cell::new(false);
-                move |_: &Path| {
-                    let before = seen.get();
-                    seen.set(true);
-                    before
-                }
-            },
+            // Absent before the run, present after. Keyed off the
+            // runner's call count rather than a call counter of its own,
+            // so adding or removing an existence check does not silently
+            // change what this closure means: two runs (probe, add) is
+            // exactly "the archive has been written".
+            |_: &Path| stub.calls().len() >= 2,
         );
         assert!(created.is_ok(), "{created:?}");
 

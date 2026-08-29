@@ -258,6 +258,35 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   Proven non-vacuous: removing the open-time registration puts `has_recovery_record()` back to
   `false` and fails the test with the message written for exactly that.
 
+### External RAR creator design hardening — partial (ticgit `642488`)
+- **Type:** 2
+- **Verified:** yes — 2026-08-27, read first-hand in `src/external/rar/session.rs`
+- **Sources:** ticgit:642488, docs/project/open-issues.md (OI-0076-006),
+  src/external/rar/session.rs, src/external/rar/argv.rs, src/ffi/common.rs
+- **First seen:** 2026-08-12
+- **Last seen:** 2026-08-27
+- **Description:** Two residual items on the external RAR creation lane: the destination-occupied
+  race, and archive-internal path layout.
+- **Landed 2026-08-27 (the ordering half).** `create_archive` checked the destination once, before
+  `probe_binary` — which spawns `rar` and waits for its banner — while its comment claimed the check
+  ran "immediately before the run". The check now runs twice: once before the probe (so an occupied
+  destination still costs no child process, which
+  `an_occupied_output_is_refused_without_running_anything` pins on purpose) and once after, adjacent
+  to the create. Moving the probe earlier would have closed the same gap but spawned on every
+  occupied destination, trading away the property that test protects. Pinned by ordering assertions
+  in `tests/external_rar_cli_contract.rs`, proven non-vacuous by deleting the second check.
+- **Still open, and both need an owner call:**
+  1. *Closing* the race rather than narrowing it — create under an exclusive temporary name and
+     install with `ffi::common::rename_noclobber`, which already exists in three cfg arms with unit
+     tests. Constraint to record before building it: `rar` writes companion files for `-v` (volumes),
+     `-rv` and `-rr`, and a single-file rename is wrong the moment any of those is used. `argv.rs`
+     emits none of them today, so this is a forward constraint rather than a present bug. The
+     alternative OI-0076-006 floated — a "fail if it already exists" switch — **does not exist** in
+     the vendored WinRAR switch table.
+  2. *Layout.* `argv.rs` emits no `-ep` switch at all, so `/Users/me/project/src` is stored as
+     `Users/me/project/src/main.rs`. `-ep1` stores `src/main.rs`, matching what the native creator
+     already promises. Two argv elements, no type change.
+
 ### `UnrarAbort::MissingVolume` never reaches a caller (ticgit `03ddc6`)
 - **Type:** 1
 - **Verified:** yes — 2026-08-26. Extraction of a set with its middle volume removed reports `ArchiveError::Io` / "UnRAR ERAR_EOPEN"; instrumenting `unrar_process_callback` logged nothing at all for that scenario, so the trampoline is never entered
