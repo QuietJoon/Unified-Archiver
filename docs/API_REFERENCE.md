@@ -793,6 +793,7 @@ finish silently.
 #### `CompressionOptions`
 
 ```rust
+#[non_exhaustive]
 pub struct CompressionOptions {
     pub format: ArchiveFormat,
     pub level: CompressionLevel,
@@ -916,6 +917,7 @@ Apply all tracked modifications (additions, removals, replacements). Creates a n
 #### `ModificationOptions`
 
 ```rust
+#[non_exhaustive]
 pub struct ModificationOptions {
     pub preserve_metadata: bool,
     pub create_backup: bool,
@@ -1547,6 +1549,7 @@ impl ProgressCallback for MyProgress {
 Results of archive integrity validation.
 
 ```rust
+#[non_exhaustive]
 pub struct ValidationReport {
     /// Total number of entries checked
     pub total_entries: usize,
@@ -1684,6 +1687,7 @@ Create a `ReadOnlyBackend` error for read-only backends that do not support crea
 Result type that carries both a value and non-fatal warnings emitted during an operation.
 
 ```rust
+#[non_exhaustive]
 pub struct ResultWithWarnings<T> {
     /// Operation result
     pub value: T,
@@ -1810,6 +1814,7 @@ inside `Archive::extract_*`.
 ### `StreamChecksum`
 
 ```rust
+#[non_exhaustive]
 pub struct StreamChecksum {
     /// CRC32 value from the stream (if available)
     pub crc32: Option<u32>,

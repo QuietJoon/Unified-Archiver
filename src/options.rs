@@ -200,27 +200,32 @@ pub enum CompressionLevel {
 ///   [`has_progress`](Self::has_progress)). Write new code against the
 ///   accessors and the checked constructors: that code needs no edit
 ///   when the fields are demoted.
-/// - **0.5.0** — every field becomes non-`pub` and the struct becomes
-///   `#[non_exhaustive]`. Three of them are demoted because *mutation is
-///   what breaks an invariant*: `password` and `split_size` are the two
-///   whose validity depends on the format and which no backend can honour
-///   today, so assigning them is the only way to turn a valid value into
-///   one [`Self::validate_for_format`] refuses; and `format` itself,
-///   because reassigning it after construction is exactly what defeats
-///   the [`WritableFormat`] invariant [`Self::for_writable`] and
+/// - **0.5.0, landed** — the struct is `#[non_exhaustive]`. External
+///   crates can no longer build it with a struct literal; that includes
+///   the `..Default::default()` form, which does **not** escape the
+///   attribute. The fields are still `pub`, so reading them and assigning
+///   to them (`opts.level = …`) both still compile, in this crate and
+///   outside it. This half buys one thing only — a sixth field can be
+///   added without a major bump — and enforces nothing:
+///   [`Self::validate_for_format`] is still what rejects a bad
+///   combination, and [`crate::Archive::create`] still calls it.
+/// - **0.5.0, still owed** — every field becomes non-`pub`. Three of them
+///   are demoted because *mutation is what breaks an invariant*:
+///   `password` and `split_size` are the two whose validity depends on the
+///   format and which no backend can honour today, so assigning them is
+///   the only way to turn a valid value into one
+///   [`Self::validate_for_format`] refuses; and `format` itself, because
+///   reassigning it after construction is exactly what defeats the
+///   [`WritableFormat`] invariant [`Self::for_writable`] and
 ///   [`Self::try_new`] establish. `level` and `progress` carry no
-///   cross-field invariant and are demoted only for uniformity.
+///   cross-field invariant and are demoted only for uniformity. This half
+///   is split out because it cannot land as-is: no constructor or setter
+///   on this type takes a `level` or a `progress`, so demoting the fields
+///   today would leave both unreachable from outside the crate. It needs
+///   that setter pair (or a full builder) designed first — OI-0076-005.
 /// - **0.6.0** — [`Self::new`] is removed; construct through
 ///   [`Self::for_writable`], [`Self::try_new`], or a typed builder.
-///
-/// The demotion is not in 0.4.x because in-tree struct literals still
-/// name `password` and `split_size` field-by-field
-/// (`examples/create_archive.rs`, `examples/modify_archive.rs`) and
-/// others build the value with `..Default::default()`, which Rust also
-/// refuses once any field is private (`src/lib.rs` crate docs,
-/// `tests/integration/backend_caching_baseline.rs`). Those call sites
-/// migrate to the accessors and the typed builders in the same change
-/// that demotes the fields.
+#[non_exhaustive]
 pub struct CompressionOptions {
     /// Output archive format
     pub format: ArchiveFormat,
@@ -236,12 +241,13 @@ pub struct CompressionOptions {
     /// field to `Some(_)` therefore makes the value unusable; there is
     /// no format for which it is accepted.
     ///
-    /// The field is kept (rather than removed) only because struct-literal
-    /// source-compat is preserved for the 0.3 shape — see the type-level
-    /// docs. The typed builders expose no password setter at all, so an
-    /// encrypted-creation request is unrepresentable there (R0081-0005).
-    /// The field returns to being meaningful when the opt-in lands
-    /// (OI-0081-006).
+    /// The field is kept (rather than removed) so that assigning it stays a
+    /// compiling, in-place edit for the callers that already do — the
+    /// struct-literal source-compat that used to be the reason is gone with
+    /// `#[non_exhaustive]`, but `opts.password = …` still works. The typed
+    /// builders expose no password setter at all, so an encrypted-creation
+    /// request is unrepresentable there (R0081-0005). The field returns to
+    /// being meaningful when the opt-in lands (OI-0081-006).
     ///
     /// **Becomes non-`pub` in 0.5.0** (OI-0076-005). Read it through
     /// [`Self::password_ref`]. Mutating it is what turns a valid value

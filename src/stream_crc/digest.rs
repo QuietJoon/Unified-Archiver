@@ -27,7 +27,14 @@
 /// | `None`       | neither `crc32` nor `crc64`; `uncompressed_size` may still be set if the format records it elsewhere |
 /// | `Sha256`     | (reserved — no current backend emits this)       |
 /// | `Unknown`    | nothing reliable; do not act on the option fields |
+///
+/// **Construction (OI-0076-005).** The struct is `#[non_exhaustive]`: it is
+/// an *output* type, decoded from a stream trailer by the codecs in
+/// `stream_crc`, so no constructor is offered and none is owed. The fields
+/// stay `pub` and readable — prefer [`crc32_value`](Self::crc32_value) /
+/// [`crc64_value`](Self::crc64_value), which respect `check_type`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct StreamChecksum {
     /// CRC32 value from the stream (if available)
     pub crc32: Option<u32>,

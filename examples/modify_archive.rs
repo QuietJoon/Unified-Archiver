@@ -7,9 +7,7 @@
 //! - Committing changes back to the archive
 
 use std::path::Path;
-use unified_archive::{
-    Archive, ArchiveError, ArchiveFormat, CompressionLevel, CompressionOptions, Result,
-};
+use unified_archive::{Archive, ArchiveError, CompressionOptions, Result, WritableFormat};
 
 fn main() -> Result<()> {
     println!("unified-archive modification examples");
@@ -40,13 +38,9 @@ fn main() -> Result<()> {
 fn create_sample_archive(path: &Path) -> Result<()> {
     println!("Creating sample archive for modification...");
 
-    let options = CompressionOptions {
-        format: ArchiveFormat::Zip,
-        level: CompressionLevel::Normal,
-        password: None,
-        split_size: None,
-        progress: None,
-    };
+    // `CompressionOptions` is `#[non_exhaustive]`; `for_writable` gives the
+    // same defaults a literal used to spell out.
+    let options = CompressionOptions::for_writable(WritableFormat::ZIP);
 
     let mut archive = Archive::create(path, options)?;
 

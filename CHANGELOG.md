@@ -22,8 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-> **This will be 0.5.0, and the bump is forced.** Two independent reasons: `ArchiveEntry` became
-> `#[non_exhaustive]`, and several operations changed which `ArchiveError` variant they return.
+> **This will be 0.5.0, and the bump is forced.** Two independent reasons: six public structs
+> became `#[non_exhaustive]`, and several operations changed which `ArchiveError` variant they
+> return.
 > 0.5.0 is not a number chosen here — every deprecation-timeline block already in the tree names
 > 0.5.0 as the next stop, and the three `#[deprecated(since = …)]` attributes below are set to it.
 >
@@ -32,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > owed before 0.5.0 can honestly be cut — see **Still owed**.
 >
 > **How to read the Breaking list.** Nothing here changes a signature: code that compiled against
-> 0.4.0 still compiles, except for the `#[non_exhaustive]` item. The rest are *behavioural* —
+> 0.4.0 still compiles, except for the two `#[non_exhaustive]` items. The rest are *behavioural* —
 > calls that returned `Ok` now return `Err`, or return a different `ArchiveError` variant, so a
 > caller matching on variants is the one who has to act.
 
@@ -47,6 +48,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pattern that matched every field. The struct is a *listing* type whose field set tracks what archive formats
   carry, so every metadata addition so far has been a silent break for anyone holding a literal;
   the attribute converts that into a compile error at the one place it can be fixed.
+
+- **Five more public structs are `#[non_exhaustive]`: `CompressionOptions`,
+  `ModificationOptions`, `ValidationReport`, `ResultWithWarnings<T>` and `StreamChecksum`.**
+  External code can no longer build any of them with a struct literal, and can no longer match one
+  with an exhaustive pattern. The compile errors are `E0639` ("cannot create non-exhaustive struct
+  using struct expression") for the literal and `E0638` ("`..` required with struct marked as
+  non-exhaustive") for the pattern. **`..Default::default()` is not a workaround** — verified by
+  a two-crate `rustc` experiment, the functional-update form raises the same `E0639`, so
+  `CompressionOptions { level: Fast, ..Default::default() }` stops compiling exactly like the
+  spelled-out literal. A bare `Default::default()` call, with no literal around it, is unaffected;
+  `CompressionOptions` and `ModificationOptions` have a `Default` impl, the other three do not.
+  Field *reads* and field *assignment* (`opts.level = …`) still compile: the fields stay `pub`.
+
+  *Migration, per type:*
+  - `CompressionOptions` — `CompressionOptions::for_writable(WritableFormat::ZIP)` when the format
+    is a literal, `::try_new(format)` when it is computed, then assign the rest
+    (`opts.level = CompressionLevel::Fast`). Or move to a typed builder —
+    `ZipCompressionOptions` / `SevenZCompressionOptions` / `LibarchiveCompressionOptions` with
+    `Archive::create_zip` / `create_seven_zip` / `create_libarchive`.
+  - `ModificationOptions` — `ModificationOptions::new()` (or `Default::default()`), then
+    `.with_backup(suffix)` / `.without_metadata_preservation()`, or assign the field.
+  - `ResultWithWarnings<T>` — `ResultWithWarnings::ok(value)` or `::with_warnings(value, warnings)`;
+    between them they set both fields, so nothing is unreachable.
+  - `ValidationReport` and `StreamChecksum` — no constructor, and none is owed: they are output
+    types, returned by `Archive::validate_integrity` and by `extract_stream_checksum` and its
+    per-codec siblings. If you were fabricating one in a test, hold a real one instead.
+
+  *What this does and does not buy.* It buys exactly one thing: a field can be added to any of the
+  five without a major bump. It enforces **no invariant** — the fields are still `pub` and still
+  assignable, so a value can still be mutated into a state the crate rejects.
+  `CompressionOptions::validate_for_format()` remains the check that catches that, and
+  `Archive::create` and the `commit_changes` path still call it. What is given up is *type-state*
+  (failing at construction instead of at the call), not safety. `ExtractionLimits` — the type whose
+  numeric invariants were the dangerous ones — has had private fields and a builder since
+  Innovation I1 and is unaffected.
+
+  *Not in this change:* `ExtractionOptions` is deliberately untouched (OI-0076-005), and
+  `CompressionOptions` keeps its `pub` fields — demoting them needs a `level`/`progress` setter
+  pair that does not exist yet, and demoting without it would leave both unreachable from outside
+  the crate.
 
 - **Creating or modifying an archive now refuses entry names it used to accept.** This is the
   break most likely to bite, and it has a case with no escape hatch, so it is worth reading in

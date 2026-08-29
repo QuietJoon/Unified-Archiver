@@ -22,7 +22,18 @@ use std::path::{Path, PathBuf};
 /// embeds a non-cloneable progress callback (`Box<dyn ProgressCallback>`).
 /// Callers that need to hand these options to multiple operations should
 /// build a fresh value or call `CompressionOptions::strip_progress` explicitly.
+///
+/// **Construction (OI-0076-005).** The struct is `#[non_exhaustive]`, so a
+/// struct literal — including one ending in `..Default::default()` — no
+/// longer compiles outside this crate. That buys the freedom to add a
+/// modification knob without a major bump; it enforces no invariant, since
+/// the fields stay `pub` and remain readable and assignable. Build with
+/// [`ModificationOptions::new`] (or [`Default::default`], which is the same
+/// value) and then [`with_backup`](Self::with_backup) /
+/// [`without_metadata_preservation`](Self::without_metadata_preservation),
+/// or assign the field you need on the result.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ModificationOptions {
     /// Whether to preserve original file metadata on retained entries.
     /// When `true`, `commit_changes()` re-emits `modified`, `accessed`,

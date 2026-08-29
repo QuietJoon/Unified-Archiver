@@ -10,14 +10,13 @@ use std::fs;
 use std::io::Write as _;
 use std::path::PathBuf;
 
-use unified_archive::{Archive, ArchiveFormat, CompressionLevel, CompressionOptions};
+use unified_archive::{Archive, CompressionOptions, WritableFormat};
 
 fn build_tar_gz(path: &std::path::Path, entries: &[(&str, &[u8])]) {
-    let opts = CompressionOptions {
-        format: ArchiveFormat::TarGzip,
-        level: CompressionLevel::Normal,
-        ..Default::default()
-    };
+    // `CompressionOptions` is `#[non_exhaustive]`; `..Default::default()` does
+    // not escape that, so the checked constructor is the way in from a test
+    // crate. It already defaults `level` to `Normal`.
+    let opts = CompressionOptions::for_writable(WritableFormat::TAR_GZIP);
     let mut creator = Archive::create(path, opts).expect("create tar.gz");
     for (name, data) in entries {
         creator

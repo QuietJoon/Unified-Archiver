@@ -11,7 +11,7 @@
 //! contract+integration suite is tracked as test-suite reorganization
 //! work (R0074-0079).
 
-use unified_archive::{Archive, ArchiveFormat, EntryType, ValidationReport};
+use unified_archive::{Archive, ArchiveFormat, EntryType};
 
 #[cfg(feature = "rar-support")]
 #[test]
@@ -124,22 +124,13 @@ fn test_nonexistent_file_error() {
     // The error should be an I/O error
 }
 
-/// Test that ValidationReport has the correct structure
-#[test]
-fn test_validation_report_structure() {
-    let report = ValidationReport {
-        total_entries: 10,
-        total_files: 10,
-        validated: 8,
-        failed: vec!["file1.txt".to_string(), "file2.txt".to_string()],
-    };
-
-    assert_eq!(report.total_entries, 10);
-    assert_eq!(report.total_files, 10);
-    assert_eq!(report.validated, 8);
-    assert_eq!(report.failed.len(), 2);
-    assert_eq!(report.failed[0], "file1.txt");
-}
+// `test_validation_report_structure` lived here: it built a `ValidationReport`
+// with a struct literal and then asserted the four values it had just written.
+// `ValidationReport` is `#[non_exhaustive]` as of OI-0076-005, so an external
+// test crate cannot fabricate one — which is the point, it is an output type.
+// Nothing was lost: `src/inspection/tests.rs` covers `Debug`, `Clone` and
+// equality in-crate, and `tests/integration/format_compatibility.rs` checks a
+// report produced by a real `validate_integrity()` call against `entry_count()`.
 
 /// Test that the same API works for both RAR and RAR5
 #[cfg(feature = "rar-support")]

@@ -30,7 +30,14 @@ pub enum MultipartLayout {
 }
 
 /// Report from archive integrity validation
+///
+/// **Construction (OI-0076-005).** The struct is `#[non_exhaustive]`: it is
+/// an *output* type, produced only by `Archive::validate_integrity`, so no
+/// constructor is offered and none is owed. External code reads the fields —
+/// they stay `pub` — but cannot fabricate a report, which also means a new
+/// counter can be added here without a major bump.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ValidationReport {
     /// Total number of entries inspected (including directories and skipped
     /// entries).

@@ -10,7 +10,7 @@
 
 use std::path::Path;
 use unified_archive::{
-    Archive, ArchiveError, ArchiveFormat, CompressionLevel, CompressionOptions, Result,
+    Archive, ArchiveError, CompressionLevel, CompressionOptions, Result, WritableFormat,
 };
 
 fn main() -> Result<()> {
@@ -42,13 +42,11 @@ fn main() -> Result<()> {
 fn example_create_zip(base: &Path) -> Result<()> {
     println!("1. Creating simple ZIP archive...");
 
-    let options = CompressionOptions {
-        format: ArchiveFormat::Zip,
-        level: CompressionLevel::Normal,
-        password: None,
-        split_size: None,
-        progress: None,
-    };
+    // `CompressionOptions` is `#[non_exhaustive]`, so a struct literal is not
+    // available outside the crate. `for_writable` gives the same defaults
+    // (Normal level, no password, no split, no progress) and rules out a
+    // read-only format at construction.
+    let options = CompressionOptions::for_writable(WritableFormat::ZIP);
 
     let path = base.join("example.zip");
     let mut archive = Archive::create(&path, options)?;
@@ -72,13 +70,9 @@ fn example_create_zip(base: &Path) -> Result<()> {
 fn example_create_tar_gz(base: &Path) -> Result<()> {
     println!("2. Creating TAR.GZ archive...");
 
-    let options = CompressionOptions {
-        format: ArchiveFormat::TarGzip,
-        level: CompressionLevel::Fast,
-        password: None,
-        split_size: None,
-        progress: None,
-    };
+    let mut options = CompressionOptions::for_writable(WritableFormat::TAR_GZIP);
+    // The fields stay `pub` under `#[non_exhaustive]`; only the literal is gone.
+    options.level = CompressionLevel::Fast;
 
     let path = base.join("example.tar.gz");
     let mut archive = Archive::create(&path, options)?;
@@ -103,13 +97,8 @@ fn example_create_tar_gz(base: &Path) -> Result<()> {
 fn example_encrypted_creation_rejected(base: &Path) -> Result<()> {
     println!("3. Encrypted-archive creation is rejected (MADR-0027)...");
 
-    let options = CompressionOptions {
-        format: ArchiveFormat::Zip,
-        level: CompressionLevel::Normal,
-        password: Some("secret123".into()),
-        split_size: None,
-        progress: None,
-    };
+    let mut options = CompressionOptions::for_writable(WritableFormat::ZIP);
+    options.password = Some("secret123".into());
 
     let path = base.join("encrypted.zip");
     match Archive::create(&path, options) {
@@ -134,13 +123,8 @@ fn example_encrypted_creation_rejected(base: &Path) -> Result<()> {
 fn example_create_maximum_compression(base: &Path) -> Result<()> {
     println!("4. Creating archive with maximum compression...");
 
-    let options = CompressionOptions {
-        format: ArchiveFormat::SevenZip,
-        level: CompressionLevel::Ultra,
-        password: None,
-        split_size: None,
-        progress: None,
-    };
+    let mut options = CompressionOptions::for_writable(WritableFormat::SEVEN_ZIP);
+    options.level = CompressionLevel::Ultra;
 
     let path = base.join("compressed.7z");
     let mut archive = Archive::create(&path, options)?;

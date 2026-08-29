@@ -927,7 +927,15 @@ impl ArchiveWarning {
 }
 
 /// Result type that includes warnings
+///
+/// **Construction (OI-0076-005).** The struct is `#[non_exhaustive]`, so a
+/// struct literal no longer compiles outside this crate. Nothing is lost:
+/// [`ResultWithWarnings::ok`] and [`ResultWithWarnings::with_warnings`]
+/// between them set both fields, and in practice this is an *output* type —
+/// the crate builds it and the caller reads it. The fields stay `pub`, so
+/// reading and `.warnings.push(..)` are unaffected.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ResultWithWarnings<T> {
     /// Operation result
     pub value: T,

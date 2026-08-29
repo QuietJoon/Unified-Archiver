@@ -122,13 +122,13 @@
 //! ### Create Archives
 //!
 //! ```no_run
-//! use unified_archive::{Archive, ArchiveFormat, CompressionOptions, CompressionLevel};
+//! use unified_archive::{Archive, CompressionOptions, WritableFormat};
 //!
-//! let options = CompressionOptions {
-//!     format: ArchiveFormat::Zip,
-//!     level: CompressionLevel::Normal,
-//!     ..Default::default()
-//! };
+//! // `CompressionOptions` is `#[non_exhaustive]`, so a struct literal — with
+//! // or without `..Default::default()` — does not compile outside the crate.
+//! // `for_writable` carries the "this format can be written" invariant; the
+//! // fields stay `pub`, so `options.level = …` remains available.
+//! let options = CompressionOptions::for_writable(WritableFormat::ZIP);
 //!
 //! let mut creator = Archive::create("backup.zip", options)?;
 //! creator.add_file_from_data("readme.txt", b"Hello, world!")?;

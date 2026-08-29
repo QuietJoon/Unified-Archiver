@@ -444,6 +444,52 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   (pre-1.0) behind `ExtractionLimitsBuilder`, with typed `Cap` and exact rational
   `CompressionRatio`. The two remaining items are v0.4 breaking changes and need a timing +
   accessor-shape decision, coordinated with the format-specific option builders.
+- **Landed 2026-08-29 (the `#[non_exhaustive]` half, five structs of six).**
+  `CompressionOptions`, `ModificationOptions`, `ValidationReport`, `ResultWithWarnings<T>` and
+  `StreamChecksum` now carry the attribute, joining `ArchiveEntry`. Nine external construction
+  sites moved: four in `examples/create_archive.rs` and one in `examples/modify_archive.rs` to
+  `CompressionOptions::for_writable(WritableFormat::…)` plus field assignment for a non-default
+  `level`/`password`; the `src/lib.rs` crate-doc example and
+  `tests/integration/backend_caching_baseline.rs` off `..Default::default()` to the same
+  constructor; `tests/review_0068_test.rs` to `ModificationOptions::new().with_backup(".bak")`;
+  and `tests/format_compatibility_test.rs`'s `test_validation_report_structure` deleted — it
+  fabricated an *output* type and then asserted the four values it had just written, which
+  `src/inspection/tests.rs` already covers in-crate and
+  `tests/integration/format_compatibility.rs` already covers against a real report. Nothing under
+  `src/` needed an edit: `#[non_exhaustive]` never restricts the defining crate.
+  **No new constructor was added, for any of the five**, because none was missing: the two
+  input-ish types are reachable through `CompressionOptions::for_writable`/`::try_new` and
+  `ModificationOptions::new`/`.with_backup`, plus field assignment for the rest (the fields stay
+  `pub`); `ResultWithWarnings::ok`/`::with_warnings` between them set both of its fields; and
+  `ValidationReport`/`StreamChecksum` are outputs nobody outside builds.
+  What the attribute buys is field-addition freedom and nothing else — it enforces no invariant,
+  since the fields remain `pub` and assignable. The ticket's premise that "while the fields stay
+  public every invariant is advisory" is wrong and was not repeated:
+  `CompressionOptions::validate_for_format()` is called by `Archive::create` and twice on the
+  modify path, so a loosely-built value is still rejected at the call. What is lost is *type-state*,
+  not safety.
+
+  **Three things are left, and this entry stays for them.**
+  (1) **`ExtractionOptions`** — split out deliberately, not overlooked: 9 public fields and, counted
+  on this tree, 44 external construction sites (39 struct literals across `tests/`, `examples/` and
+  `benches/`, plus 5 more in `src/` doc examples, which are external crates too). It is also the one
+  type where `..Default::default()` is the idiomatic in-tree form, so the attribute there is a much
+  larger migration than the other five combined and wants its own decision.
+  (2) **`CompressionOptions` field demotion** (the 0.5.0 bullet in its type docs) — it cannot land
+  as-is. No constructor or setter on the type takes a `level` or a `progress`, so demoting the
+  fields today would make both unreachable from outside the crate. It needs that setter pair, or a
+  full builder, designed first.
+  (3) **The manual bundle is now stale and its `--ignored` snippet lane is red.**
+  `manual/how-to/user/en/create-an-archive.md`'s "One complete example" is a compiled `rust` fence
+  (it is *not* named in `tests/fixtures/manual/unmarked_fragments.txt`) and builds
+  `CompressionOptions` with a struct literal, so `cargo test --test manual_snippets -- --ignored`
+  will now report `E0639` against it. Prose on at least four pages went stale with it:
+  `create-an-archive.md` ("the type is not `#[non_exhaustive]` in 0.3"),
+  `options-and-defaults.md` (two claims), and `public-api-surface.md` (the "nine public types"
+  count, and `ResultWithWarnings<T>` listed as **not** `#[non_exhaustive]`). None of it was
+  hand-fixed on purpose: editing a page body invalidates its `synced_hash`, and both
+  `manual/log.md` and the allowlist header require that to ride a `write-diataxis-manual` sync run
+  with a log entry rather than a hand-edit — that is what commit `005a9ad` got wrong.
 
 ### External RAR creator design hardening (OI-0076-006)
 - **Type:** 2

@@ -507,10 +507,7 @@ fn r0068_0087_commit_changes_refuses_to_clobber_existing_backup() {
     let backup = temp.join("backup_clobber.zip.bak");
     fs::write(&backup, b"old backup content").unwrap();
 
-    let mod_opts = ModificationOptions {
-        create_backup: true,
-        ..Default::default()
-    };
+    let mod_opts = ModificationOptions::new().with_backup(".bak");
     let mut modifier = Archive::modify_with_options(&archive_path, mod_opts).unwrap();
     modifier.add_entry("new.txt", b"new").unwrap();
     let result = modifier.commit_changes();
