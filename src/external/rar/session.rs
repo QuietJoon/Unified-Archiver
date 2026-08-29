@@ -48,41 +48,12 @@ use super::version::{MINIMUM_RAR_VERSION, RarVersion, parse_banner};
 /// Maximum number of child-output bytes copied into an error value.
 pub const OUTPUT_EXCERPT_LIMIT: usize = 4096;
 
-/// Everything needed to invoke `rar a`, in already-validated form.
-///
-/// Mirrors [`AddArgv`] rather than re-deriving it, so the sequence and
-/// the vector cannot drift apart.
-#[derive(Debug, Clone, Copy)]
-/// **Not `#[non_exhaustive]`, deliberately (ticgit a5b31f).** Same reason as
-/// [`super::argv::AddArgv`], to which this is field-for-field identical:
-/// callers construct it directly to reach [`preview_argv`], and there is no
-/// builder to construct it through. Adding a field is a breaking change
-/// until that is resolved, and collapsing the two types is the candidate
-/// repair.
-pub struct CreateRequest<'a> {
-    /// `-mN` switch from the compression-level mapping.
-    pub compression_flag: &'a str,
-    /// Password payload for `-hp`, if any.
-    pub password: Option<&'a str>,
-    /// Whether to pass `-r`.
-    pub recurse: bool,
-    /// Archive to write.
-    pub output: &'a Path,
-    /// Files and directories to add.
-    pub entries: &'a [PathBuf],
-}
-
-impl<'a> CreateRequest<'a> {
-    fn as_argv(&self) -> AddArgv<'a> {
-        AddArgv {
-            compression_flag: self.compression_flag,
-            password: self.password,
-            recurse: self.recurse,
-            output: self.output,
-            entries: self.entries,
-        }
-    }
-}
+// The request type is `argv::AddArgv` itself. Until ticgit a5b31f this module
+// had its own `CreateRequest`, field-for-field identical, converted by a
+// private `as_argv` that copied each field by hand — which protected only
+// one direction: a field added to `AddArgv` broke the conversion loudly,
+// while a field added to `CreateRequest` compiled clean and never reached
+// the argument vector. One type removes the silent direction entirely.
 
 /// Locate a `rar` binary, then identify it.
 ///
@@ -174,14 +145,14 @@ pub fn probe_binary(runner: &dyn CommandRunner, rar_exe: &Path) -> Result<RarVer
 pub fn create_archive<F>(
     runner: &dyn CommandRunner,
     rar_exe: &Path,
-    request: &CreateRequest<'_>,
+    request: &AddArgv<'_>,
     output_exists: F,
 ) -> Result<(), RarCliError>
 where
     F: Fn(&Path) -> bool,
 {
     // Step 1: refuse bad input before spending a spawn on it.
-    let args = argv::build(&request.as_argv())?;
+    let args = argv::build(request)?;
 
     // Step 2: refuse an occupied destination before spending a spawn on
     // it. Cheap, and it keeps the common "the file is already there"
@@ -250,9 +221,12 @@ where
 /// The argument vector a given request would produce, redacted.
 ///
 /// Exposed so a caller can log or display the exact invocation without
-/// running it — and without ever seeing the password.
-pub fn preview_argv(request: &CreateRequest<'_>) -> Result<Vec<String>, RarCliError> {
-    let args: Vec<OsString> = argv::build(&request.as_argv())?;
+/// running it — and without ever seeing the password. It takes the same
+/// [`AddArgv`] [`create_archive`] takes and routes through the same
+/// [`argv::build`], so the preview is the vector, not a re-derivation of
+/// it.
+pub fn preview_argv(request: &AddArgv<'_>) -> Result<Vec<String>, RarCliError> {
+    let args: Vec<OsString> = argv::build(request)?;
     Ok(argv::redact_argv(&args))
 }
 
@@ -278,8 +252,8 @@ mod tests {
         vec![PathBuf::from("doc.txt")]
     }
 
-    fn request<'a>(output: &'a Path, entries: &'a [PathBuf]) -> CreateRequest<'a> {
-        CreateRequest {
+    fn request<'a>(output: &'a Path, entries: &'a [PathBuf]) -> AddArgv<'a> {
+        AddArgv {
             compression_flag: "-m3",
             password: None,
             recurse: true,

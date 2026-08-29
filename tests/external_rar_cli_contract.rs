@@ -171,7 +171,7 @@ mod scripted {
     fn a_clean_run_produces_the_documented_argument_vector() {
         let stub = scripted_runner(Some(0));
         let entries = vec![PathBuf::from("a file & more.txt")];
-        let request = session::CreateRequest {
+        let request = argv::AddArgv {
             compression_flag: "-m5",
             password: Some("hunter2"),
             recurse: true,
@@ -243,7 +243,7 @@ mod scripted {
         for code in [1i32, 2, 3, 5, 7, 10, 11, 42, 255] {
             let stub = scripted_runner(Some(code));
             let entries = vec![PathBuf::from("doc.txt")];
-            let request = session::CreateRequest {
+            let request = argv::AddArgv {
                 compression_flag: "-m3",
                 password: None,
                 recurse: true,
@@ -308,6 +308,58 @@ mod scripted {
         assert!(old.is_binary_unusable());
         assert_ne!(absent.remediation(), old.remediation());
     }
+
+    /// The preview *is* the invocation, not a second derivation of it.
+    ///
+    /// One `argv::AddArgv` value goes to both `preview_argv` and
+    /// `create_archive`, and what the runner was handed — redacted — must
+    /// equal what the preview returned, element for element. A caller who
+    /// logs the preview and then runs is therefore looking at the command
+    /// that ran, including every switch.
+    ///
+    /// ticgit a5b31f: this test can pass one value to both entry points
+    /// only because there is one request type. `session` used to define
+    /// its own `CreateRequest`, field-for-field identical to
+    /// `argv::AddArgv`, and bridge them with a private `as_argv` that
+    /// copied each field by hand — so a field added to `CreateRequest`
+    /// compiled clean and never reached the vector, while a field added to
+    /// `AddArgv` broke the bridge with E0063. Collapsing the two removed
+    /// the silent direction, and re-introducing a parallel request struct
+    /// in `session` stops this test from compiling.
+    ///
+    /// Note what is *not* here: no assertion replaces the removed drift.
+    /// With one type there is nothing for a test to compare — the
+    /// guarantee is a compile error at every construction site, which is
+    /// the compiler's to enforce and not something an assertion could
+    /// restate honestly.
+    #[test]
+    fn the_preview_is_the_vector_that_is_run() {
+        let stub = scripted_runner(Some(0));
+        let entries = vec![PathBuf::from("-dash entry.txt"), PathBuf::from("plain.txt")];
+        let request = argv::AddArgv {
+            compression_flag: "-m5",
+            password: Some("hunter2"),
+            recurse: true,
+            output: Path::new("out.rar"),
+            entries: &entries,
+        };
+
+        let previewed = session::preview_argv(&request).expect("the preview builds");
+        session::create_archive(&stub, &rar_path(), &request, |_: &Path| {
+            stub.calls().len() >= 2
+        })
+        .expect("archive created");
+
+        assert_eq!(
+            previewed,
+            argv::redact_argv(&stub.args(1)),
+            "the preview must be the argv that was spawned, redacted"
+        );
+        assert!(
+            !previewed.join(" ").contains("hunter2"),
+            "the preview leaked the password: {previewed:?}"
+        );
+    }
 }
 
 /// The stub-script lane: the same sequence across a real process
@@ -335,7 +387,7 @@ mod stub_script {
             PathBuf::from("a b & c | d > e \"quoted\".txt"),
             PathBuf::from("-sw.txt"),
         ];
-        let request = session::CreateRequest {
+        let request = argv::AddArgv {
             compression_flag: "-m0",
             password: Some("p a s s\"word"),
             recurse: true,
@@ -372,7 +424,7 @@ mod stub_script {
         let output = dir.path().join("out.rar");
         let stub = StubBinary::new(dir.path(), 0, Some(&output)).expect("stub written");
         let entries = vec![PathBuf::from("doc.txt")];
-        let request = session::CreateRequest {
+        let request = argv::AddArgv {
             compression_flag: "-m3",
             password: None,
             recurse: true,
@@ -393,7 +445,7 @@ mod stub_script {
         // can fail the run.
         let stub = StubBinary::new(dir.path(), 3, Some(&output)).expect("stub written");
         let entries = vec![PathBuf::from("doc.txt")];
-        let request = session::CreateRequest {
+        let request = argv::AddArgv {
             compression_flag: "-m3",
             password: None,
             recurse: true,
@@ -416,7 +468,7 @@ mod stub_script {
         let output = dir.path().join("out.rar");
         let stub = StubBinary::new(dir.path(), 0, None).expect("stub written");
         let entries = vec![PathBuf::from("doc.txt")];
-        let request = session::CreateRequest {
+        let request = argv::AddArgv {
             compression_flag: "-m3",
             password: None,
             recurse: true,
@@ -496,7 +548,7 @@ fn a_real_rar_binary_identifies_itself_and_creates_an_archive() {
     std::fs::write(&input, b"payload").expect("input written");
     let output = dir.path().join("out.rar");
     let entries = vec![input];
-    let request = session::CreateRequest {
+    let request = argv::AddArgv {
         compression_flag: "-m3",
         password: None,
         recurse: true,

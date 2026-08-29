@@ -241,11 +241,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Three of those types are `#[non_exhaustive]`, so adding a field to one later is not a break:
   `CommandOutcome` and `RarVersion` already had total constructors, and `RarBanner` gained one
   (`RarBanner::new`) alongside the attribute rather than being closed without a way in.
-  `AddArgv` and `CreateRequest` are deliberately left open and say so in their own docs — they are
-  caller-constructed inputs with no builder, so closing them would leave an external caller unable
-  to build one at all. They are also field-for-field identical, with `CreateRequest::as_argv`
-  copying each field unchanged, so the candidate repair is to collapse the two rather than give
-  each a builder; that is a design call and is tracked, not guessed at here.
+  `AddArgv` — the request type of `argv::build`, `session::create_archive` and
+  `session::preview_argv` alike — is deliberately left open and says so in its own doc: it is a
+  caller-constructed input with no builder, so closing it would leave an external caller unable to
+  build one at all. (Earlier in this same cycle `session` also carried a field-for-field identical
+  `CreateRequest`; it was collapsed into `AddArgv` before release — see **Changed** — so it is not
+  part of this surface and never shipped.)
   `StubRunner`, `StubResponse` and `StubCall` are **not** part of
   that surface — they are `#[cfg(test)]`, "a seam, not public surface" as the module puts it. The
   contract tests reach them only by compiling the source files into their own binary with
@@ -253,6 +254,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write its own `CommandRunner` double.
 
 ### Changed
+
+- **`external::rar::session::CreateRequest` is gone; the invocation sequence takes
+  `argv::AddArgv` directly.** The two structs were field-for-field identical — the same five
+  fields, the same types, the same doc text — and `CreateRequest::as_argv` bridged them by copying
+  each field by hand. That protected exactly one direction. A field added to `AddArgv` broke the
+  conversion with E0063, loud and correct; a field added to `CreateRequest` compiled clean and the
+  new field simply never reached the argument vector, so a switch a caller set would have been
+  dropped with nothing said about it.
+
+  `create_archive` and `preview_argv` now take `&AddArgv<'_>`, the type that lives beside
+  `argv::build`, where the argv contract is enforced. There is one place to add a field and one
+  place — `build` — that decides what it emits. **No deprecated alias was left behind.**
+  `pub use argv::AddArgv as CreateRequest;` would restore the second name for the one type, which
+  is the thing being removed, and there is no source compatibility to keep: `pub mod external` is
+  gated on `all(target_os = "windows", feature = "external-rar-create")`, a non-default feature,
+  and no version of this crate has ever been published to a registry, so no build outside this
+  tree can name `CreateRequest` today.
+
+  `AddArgv` stays open rather than joining its `#[non_exhaustive]` siblings `CommandOutcome`,
+  `RarVersion` and `RarBanner`. The attribute obliges a total constructor, and the only one
+  available is a five-argument `new` — exactly the positional call site the struct exists to
+  prevent. Adding a field remains a breaking change; what the collapse buys is that the break is
+  now *loud in every direction*, since every construction site is a struct literal that fails to
+  compile until the field is supplied. No runtime assertion replaces the removed drift, because
+  with one type there is nothing left to compare — the guarantee is the compiler's. What
+  `tests/external_rar_cli_contract.rs` gains instead is `the_preview_is_the_vector_that_is_run`,
+  which hands *one* `AddArgv` to both `preview_argv` and `create_archive` and asserts the redacted
+  argv the runner received equals the preview element for element. That is only expressible
+  because there is one type, so re-introducing a parallel request struct in `session` stops it
+  compiling.
 
 - **The eight libarchive read walks agree on `ARCHIVE_WARN`, and no longer throw its message
   away.** Three of them refused the status and five accepted it, so the same archive could pass

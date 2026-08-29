@@ -469,9 +469,9 @@ impl RarCreator {
         )
     }
 
-    /// Borrow the creator's state as a [`session::CreateRequest`].
-    fn request(&self) -> session::CreateRequest<'_> {
-        session::CreateRequest {
+    /// Borrow the creator's state as an [`argv::AddArgv`].
+    fn request(&self) -> argv::AddArgv<'_> {
+        argv::AddArgv {
             compression_flag: rar_compression_flag(self.compression_level),
             password: self.password.as_ref().map(Password::as_str),
             recurse: true,
