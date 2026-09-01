@@ -38,18 +38,15 @@ fn main() {
         destination.display()
     );
 
-    let options = ExtractionOptions {
-        destination,
-        progress: Some(Box::new(|current: u64, total: Option<u64>| {
+    let options =
+        ExtractionOptions::new(destination).progress(|current: u64, total: Option<u64>| {
             if let Some(t) = total {
                 if t > 0 {
                     print!("\rProgress: {:.0}%", (current as f64 / t as f64) * 100.0);
                 }
             }
             ControlFlow::Continue(())
-        })),
-        ..Default::default()
-    };
+        });
 
     let result = archive.extract_all(options).unwrap_or_else(|e| {
         eprintln!("\nExtraction failed: {}", e);

@@ -2,9 +2,8 @@
 //!
 //! Provides shared infrastructure for integration and unit tests. The
 //! `default_compression_options` and `default_extraction_options` helpers
-//! exist so individual tests do not have to hand-roll the full
-//! `CompressionOptions`/`ExtractionOptions` literal every time — override
-//! only the fields that differ from the library's own defaults.
+//! exist so individual tests do not have to restate the library's own
+//! defaults — chain the setters for the fields that differ.
 
 pub mod config;
 
@@ -64,14 +63,22 @@ pub fn default_compression_options(format: ArchiveFormat) -> CompressionOptions 
 }
 
 /// Default `ExtractionOptions` for tests — library defaults with the given
-/// destination. Override additional fields with the struct-update syntax:
-/// `ExtractionOptions { overwrite: true, ..default_extraction_options(dest) }`.
+/// destination.
+///
+/// Now a thin delegate to [`ExtractionOptions::new`], which does exactly
+/// this. It is kept because 54 call sites across 17 test files name it, and
+/// churning all of them belongs to a cleanup commit rather than to the
+/// breaking change that made the constructor necessary.
+///
+/// Override further fields by chaining the setters —
+/// `default_extraction_options(dest).overwrite(true)`. The struct-update
+/// form this helper used to recommend
+/// (`ExtractionOptions { overwrite: true, ..default_extraction_options(dest) }`)
+/// no longer compiles: `ExtractionOptions` is `#[non_exhaustive]`, and the
+/// `..base` syntax is refused outside the defining crate whatever `base` is.
 #[allow(dead_code)] // Not every test binary that includes common/mod.rs uses this.
 pub fn default_extraction_options(dest: impl Into<PathBuf>) -> ExtractionOptions {
-    ExtractionOptions {
-        destination: dest.into(),
-        ..Default::default()
-    }
+    ExtractionOptions::new(dest)
 }
 
 /// Get fixture path for test files

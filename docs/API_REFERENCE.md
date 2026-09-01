@@ -428,14 +428,9 @@ Extract all files from the archive.
 
 **Example:**
 ```rust
-use std::path::PathBuf;
-
-let options = ExtractionOptions {
-    destination: PathBuf::from("./output"),
-    preserve_permissions: true,
-    preserve_times: true,
-    ..Default::default()
-};
+let options = ExtractionOptions::new("./output")
+    .preserve_permissions(true)
+    .preserve_times(true);
 
 // extract_all returns ResultWithWarnings<()>. A successful return still
 // carries warnings — e.g., SkippedSymlink / SkippedHardLink entries.
@@ -464,14 +459,10 @@ Extract a single file from the archive.
 **Example:**
 ```rust
 use unified_archive::ExtractionOptions;
-use std::path::PathBuf;
 
 archive.extract_file(
     "document.pdf",
-    ExtractionOptions {
-        destination: PathBuf::from("./output"),
-        ..Default::default()
-    }
+    ExtractionOptions::new("./output"),
 )?;
 ```
 
@@ -1354,8 +1345,10 @@ pub struct FormatCapabilities {
 
 Per-operation capability matrix returned by `ArchiveFormat::capabilities()`.
 Read/write are split so read-only compressed streams are not confused with
-creatable compressed archives. `#[non_exhaustive]` — construct via field
-updates against `..Default::default()`. See rustdoc on
+creatable compressed archives. `#[non_exhaustive]` — take a
+`FormatCapabilities::default()` and assign the fields you need; the
+`..Default::default()` struct-update form does **not** escape the attribute
+and is refused outside this crate. See rustdoc on
 `FormatCapabilities::compression()` for the worst-of helper.
 
 ---
@@ -1365,6 +1358,7 @@ updates against `..Default::default()`. See rustdoc on
 Configuration for extraction operations.
 
 ```rust
+#[non_exhaustive]
 pub struct ExtractionOptions {
     /// Destination directory for extracted files
     pub destination: PathBuf,
@@ -1395,21 +1389,52 @@ pub struct ExtractionOptions {
 }
 ```
 
-### Default Values
+### Construction
+
+The struct is `#[non_exhaustive]`, so crates outside `unified-archive`
+cannot build one with a struct literal. The `..Default::default()`
+functional-update form is **not** an escape hatch — the attribute refuses
+it with the same `E0639` as the spelled-out literal. `ExtractionOptions::new`
+is the entry point, and every field has a consuming setter to chain off it:
 
 ```rust
-ExtractionOptions {
-    destination: PathBuf::from("."),
-    password: None,
-    overwrite: false,
-    preserve_permissions: true,
-    preserve_times: true,
-    verify_crc32: false,
-    limits: ExtractionLimits::default(),
-    filter: None,
-    progress: None,
-}
+let options = ExtractionOptions::new("./output")   // destination, plus the defaults below
+    .password("hunter2")
+    .overwrite(true)
+    .preserve_permissions(true)
+    .preserve_times(true)
+    .verify_crc32(true)
+    .limits(ExtractionLimits::builder().max_file_size(64 * 1024 * 1024).build())
+    .filter(|entry| entry.path.ends_with(".txt"))
+    .progress(|_done: u64, _total: Option<u64>| ControlFlow::Continue(()));
 ```
+
+`.filter` and `.progress` box their argument, so the call site writes
+neither `Some` nor `Box::new`. Two cases stay field assignment: installing
+an already-boxed `Box<dyn ProgressCallback>` (`opts.progress = Some(b)`),
+and clearing one back to `None` (`opts.filter = None`). The fields remain
+`pub`, so reads and assignments both still compile.
+
+`ExtractionOptions::default()` also still compiles outside the crate; its
+`destination` is the process working directory, which is why `new` is
+preferred.
+
+### Default Values
+
+`ExtractionOptions::default()` — and `new`, for every field but
+`destination` — produces:
+
+| Field | Default |
+|-------|---------|
+| `destination` | `PathBuf::from(".")` (`new` takes it as an argument) |
+| `password` | `None` |
+| `overwrite` | `false` |
+| `preserve_permissions` | `true` |
+| `preserve_times` | `true` |
+| `verify_crc32` | `false` |
+| `limits` | `ExtractionLimits::default()` |
+| `filter` | `None` |
+| `progress` | `None` |
 
 `verify_crc32` defaults to `false` (AD 0062 A.3): libarchive-backed
 formats without per-entry CRC32 (TAR, ISO, raw streams) return
@@ -2034,19 +2059,16 @@ record.
 
 ```rust
 use unified_archive::ExtractionOptions;
-use std::path::PathBuf;
 use std::ops::ControlFlow;
 
-let options = ExtractionOptions {
-    destination: PathBuf::from("./output"),
-    progress: Some(Box::new(|current: u64, total: Option<u64>| {
+let options = ExtractionOptions::new("./output").progress(
+    |current: u64, total: Option<u64>| {
         if let Some(t) = total {
             print!("\rProgress: {:.1}%", (current as f64 / t as f64) * 100.0);
         }
         ControlFlow::Continue(())
-    })),
-    ..Default::default()
-};
+    },
+);
 
 let result = archive.extract_all(options)?;
 for warning in &result.warnings {
@@ -2057,10 +2079,7 @@ for warning in &result.warnings {
 ### Selective Extraction by Extension
 
 ```rust
-let options = ExtractionOptions {
-    destination: PathBuf::from("./images"),
-    ..Default::default()
-};
+let options = ExtractionOptions::new("./images");
 
 archive.extract_filtered(
     |entry| {

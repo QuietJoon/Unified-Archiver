@@ -321,6 +321,7 @@ reference.
 
 **ExtractionOptions**:
 ```rust
+#[non_exhaustive]
 pub struct ExtractionOptions {
     pub destination: PathBuf,
     pub verify_crc32: bool,
@@ -329,31 +330,35 @@ pub struct ExtractionOptions {
 }
 ```
 
-**Usage** (v0.4.0 shape — `ExtractionLimits` fields are private and are set
-through the builder, per Innovation I1):
+Because the struct is `#[non_exhaustive]`, crates outside `unified-archive` can no
+longer build one with a struct literal — including the `..Default::default()`
+form, which the attribute also refuses. `ExtractionOptions::new(destination)` is
+the entry point, and each field has a consuming setter to chain off it. Reading
+and assigning the public fields (`opts.limits = ...`) still works.
+
+**Usage** (`ExtractionLimits` fields are private and are set through the
+builder, per Innovation I1):
 ```rust
 // Default limits (recommended)
-let options = ExtractionOptions::default();
+let options = ExtractionOptions::new("./output");
 archive.extract_all(options)?;
 
 // Custom limits for trusted sources
-let options = ExtractionOptions {
-    limits: ExtractionLimits::builder()
+let options = ExtractionOptions::new("./output").limits(
+    ExtractionLimits::builder()
         .max_total_size(100u64 * 1024 * 1024 * 1024)  // 100 GiB
         .build(),
-    ..Default::default()
-};
+);
 
 // Lifting a specific ceiling (use with EXTREME caution!)
-let options = ExtractionOptions {
-    limits: ExtractionLimits::builder()
+let options = ExtractionOptions::new("./output").limits(
+    ExtractionLimits::builder()
         .max_total_size(Cap::Unlimited)
         .max_file_size(Cap::Unlimited)
         .max_entry_count(Cap::Unlimited)
         .unlimited_compression_ratio()
         .build(),
-    ..Default::default()
-};
+);
 ```
 
 There is no public "everything unlimited" preset: each axis is opted out
@@ -404,7 +409,7 @@ individually with `Cap::Unlimited` (or `unlimited_compression_ratio()`).
 1. **Always use default `ExtractionOptions`** unless you have a specific reason
 2. **Validate archive sources** - Only extract from trusted origins
 3. **Monitor disk space** before extraction
-4. **Enable CRC verification where supported** — `verify_crc32: true` only on backends that expose per-entry CRC32 (ZIP, 7z, RAR/RAR5). Libarchive-backed formats (TAR, ISO, raw streams) return `Unsupported` when this flag is enabled (AD 0062 A.3); use `Archive::validate_integrity()` instead, which falls back to read-based error detection where CRC32 is unavailable
+4. **Enable CRC verification where supported** — `.verify_crc32(true)` only on backends that expose per-entry CRC32 (ZIP, 7z, RAR/RAR5). Libarchive-backed formats (TAR, ISO, raw streams) return `Unsupported` when this flag is enabled (AD 0062 A.3); use `Archive::validate_integrity()` instead, which falls back to read-based error detection where CRC32 is unavailable
 5. **Review extraction limits** for your use case
 
 ### For Library Maintainers

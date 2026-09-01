@@ -17,7 +17,7 @@ fn test_extract_all_rar5() {
     let archive = Archive::open(&archive_path).expect("Failed to open RAR5 archive");
     assert_eq!(archive.format(), ArchiveFormat::Rar5);
 
-    let options = common::default_extraction_options(temp.clone());
+    let options = ExtractionOptions::new(temp.clone());
 
     archive
         .extract_all(options)
@@ -41,7 +41,7 @@ fn test_extract_all_zip() {
     let archive = Archive::open(&archive_path).expect("Failed to open ZIP archive");
     assert_eq!(archive.format(), ArchiveFormat::Zip);
 
-    let options = common::default_extraction_options(temp.clone());
+    let options = ExtractionOptions::new(temp.clone());
 
     archive
         .extract_all(options)
@@ -65,7 +65,7 @@ fn test_extract_all_7z() {
     let archive = Archive::open(&archive_path).expect("Failed to open 7z archive");
     assert_eq!(archive.format(), ArchiveFormat::SevenZip);
 
-    let options = common::default_extraction_options(temp.clone());
+    let options = ExtractionOptions::new(temp.clone());
 
     archive
         .extract_all(options)
@@ -115,7 +115,7 @@ fn test_extract_single_file_multiple_formats() {
         let archive_extract = Archive::open(&archive_path)
             .unwrap_or_else(|_| panic!("Failed to reopen {}", filename));
 
-        let options = common::default_extraction_options(temp.clone());
+        let options = ExtractionOptions::new(temp.clone());
 
         archive_extract
             .extract_file(&first_file, options)
@@ -192,7 +192,7 @@ fn test_extract_filtered_multiple_formats() {
         let archive = Archive::open(&archive_path)
             .unwrap_or_else(|_| panic!("Failed to open {}", archive_name));
 
-        let options = common::default_extraction_options(temp.clone());
+        let options = ExtractionOptions::new(temp.clone());
 
         // Extract only .txt files
         archive
@@ -240,7 +240,7 @@ fn test_extract_to_nested_directory() {
         let archive = Archive::open(&archive_path)
             .unwrap_or_else(|_| panic!("Failed to open {}", archive_name));
 
-        let options = common::default_extraction_options(nested.clone());
+        let options = ExtractionOptions::new(nested.clone());
 
         // Should create nested directories automatically
         archive
@@ -271,10 +271,7 @@ fn test_extract_overwrite_handling() {
     let archive = Archive::open(&archive_path).expect("Failed to open archive");
 
     // First extraction
-    let options = ExtractionOptions {
-        overwrite: false,
-        ..common::default_extraction_options(temp.clone())
-    };
+    let options = ExtractionOptions::new(temp.clone()).overwrite(false);
 
     archive
         .extract_all(options)
@@ -285,10 +282,7 @@ fn test_extract_overwrite_handling() {
 
     // Second extraction without overwrite should fail
     let archive2 = Archive::open(&archive_path).expect("Failed to reopen archive");
-    let options_no_overwrite = ExtractionOptions {
-        overwrite: false,
-        ..common::default_extraction_options(temp.clone())
-    };
+    let options_no_overwrite = ExtractionOptions::new(temp.clone()).overwrite(false);
 
     let result_no_overwrite = archive2.extract_all(options_no_overwrite);
     // Contract: with overwrite=false and an existing destination file,
@@ -302,10 +296,7 @@ fn test_extract_overwrite_handling() {
 
     // Third extraction with overwrite should succeed
     let archive3 = Archive::open(&archive_path).expect("Failed to reopen archive");
-    let options_overwrite = ExtractionOptions {
-        overwrite: true,
-        ..common::default_extraction_options(temp.clone())
-    };
+    let options_overwrite = ExtractionOptions::new(temp.clone()).overwrite(true);
 
     archive3
         .extract_all(options_overwrite)
@@ -333,7 +324,7 @@ fn test_extract_preserves_file_content() {
         let archive = Archive::open(&archive_path)
             .unwrap_or_else(|_| panic!("Failed to open {}", archive_name));
 
-        let options = common::default_extraction_options(temp.clone());
+        let options = ExtractionOptions::new(temp.clone());
 
         archive
             .extract_all(options)
@@ -395,13 +386,11 @@ fn test_unified_extraction_api_consistency() {
             .unwrap_or_else(|_| panic!("Failed to reopen {}", archive_name));
 
         // 5. Extract all
-        let options = ExtractionOptions {
-            preserve_times: true,
-            preserve_permissions: true,
-            overwrite: true,
-            verify_crc32: true,
-            ..common::default_extraction_options(temp.clone())
-        };
+        let options = ExtractionOptions::new(temp.clone())
+            .preserve_times(true)
+            .preserve_permissions(true)
+            .overwrite(true)
+            .verify_crc32(true);
 
         archive_extract
             .extract_all(options)
@@ -437,7 +426,7 @@ fn test_extract_all_honors_options_filter() {
     let temp = common::temp_test_dir();
     let archive = Archive::open(common::fixture("batch_test.zip")).expect("open batch_test.zip");
 
-    let mut options = common::default_extraction_options(temp.clone());
+    let mut options = ExtractionOptions::new(temp.clone());
     options.filter = Some(Box::new(|entry| entry.path == "file2.txt"));
 
     archive

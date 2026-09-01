@@ -286,6 +286,16 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   2. *Layout.* `argv.rs` emits no `-ep` switch at all, so `/Users/me/project/src` is stored as
      `Users/me/project/src/main.rs`. `-ep1` stores `src/main.rs`, matching what the native creator
      already promises. Two argv elements, no type change.
+- **Owner ruling, 2026-09-01 — both remaining items stay deferred, priority unchanged.** Asked
+  whether item 2 in particular should be raised, the answer is no, and the earlier suggestion to
+  raise it is withdrawn: present exposure is zero. `pub mod external` is gated on
+  `all(target_os = "windows", feature = "external-rar-create")`, that feature is not in `default`,
+  nothing inside the crate calls it, and no version of this crate has ever been published to a
+  registry. Neither the destination race nor the `-ep1` layout can reach a consumer before the
+  Windows lane is picked up deliberately, and both are cheap to do at that point. One caveat to
+  carry forward rather than rediscover: `-ep1`'s own documented behaviour is "Exclude base dir from
+  names… Ignored if path includes wildcards", so the layout fix is not unconditional and needs a
+  wildcard-path test when it does land.
 
 ### `UnrarAbort::MissingVolume` never reaches a caller (ticgit `03ddc6`)
 - **Type:** 1
@@ -469,12 +479,33 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   modify path, so a loosely-built value is still rejected at the call. What is lost is *type-state*,
   not safety.
 
-  **Three things are left, and this entry stays for them.**
-  (1) **`ExtractionOptions`** — split out deliberately, not overlooked: 9 public fields and, counted
-  on this tree, 44 external construction sites (39 struct literals across `tests/`, `examples/` and
-  `benches/`, plus 5 more in `src/` doc examples, which are external crates too). It is also the one
-  type where `..Default::default()` is the idiomatic in-tree form, so the attribute there is a much
-  larger migration than the other five combined and wants its own decision.
+  **Three things were left. Item (1) is discharged as of 2026-09-01; this entry stays for the
+  other two.**
+  (1) **`ExtractionOptions` — DISCHARGED 2026-09-01.** It was split out deliberately, not
+  overlooked: 9 public fields, and it is the one type where `..Default::default()` was the
+  idiomatic in-tree form, so the attribute there was a larger migration than the other five
+  combined and wanted its own decision. It now carries `#[non_exhaustive]`, joining the other six,
+  and it gained the constructor the other five did not need: `ExtractionOptions::new(destination)`
+  (defaults plus the destination) with consuming setters `.overwrite`, `.preserve_permissions`,
+  `.preserve_times`, `.verify_crc32`, `.limits`, `.filter` and `.progress`, chaining off the
+  pre-existing `.password`. `.filter` and `.progress` box internally, so callers pass the closure
+  or the callback itself. Two shapes stay field assignment and no setter is owed for either: an
+  already-boxed `Box<dyn ProgressCallback>`, which does not satisfy `impl ProgressCallback` because
+  the trait has no impl for the box (`opts.progress = Some(the_box)`), and clearing an `Option`
+  back to `None` (`opts.progress = None`, `opts.filter = None`). `Default` still exists and a bare
+  `ExtractionOptions::default()` still compiles outside the crate; only the literal form is gone,
+  including `..Default::default()`, which the `E0639` rule refuses by syntax whatever the base
+  expression is.
+
+  **The site count this item used to carry was wrong, and is corrected rather than carried
+  forward.** It said "44 external construction sites (39 struct literals across `tests/`,
+  `examples/` and `benches/`, plus 5 more in `src/` doc examples)". The real figure is **36 + 5 =
+  41**. The 39 was a raw grep for `ExtractionOptions {`, and three of its hits are not
+  constructions at all: two in `tests/common/mod.rs` — a doc comment that quotes the literal form,
+  and the `-> ExtractionOptions {` brace of `default_extraction_options`'s own signature — and one
+  in `tests/manual_conformance.rs` (~line 506), which is a **string literal** inside a parser unit
+  test, not code that is compiled as a construction. `benches/` contributes **zero** sites despite
+  being named in that sentence: the directory came from the grep's argument list, not from a hit.
   (2) **`CompressionOptions` field demotion** (the 0.5.0 bullet in its type docs) — it cannot land
   as-is. No constructor or setter on the type takes a `level` or a `progress`, so demoting the
   fields today would make both unreachable from outside the crate. It needs that setter pair, or a
@@ -490,6 +521,46 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   hand-fixed on purpose: editing a page body invalidates its `synced_hash`, and both
   `manual/log.md` and the allowlist header require that to ride a `write-diataxis-manual` sync run
   with a log entry rather than a hand-edit — that is what commit `005a9ad` got wrong.
+
+  **Enlarged 2026-09-01 by the `ExtractionOptions` attribute. This sub-block is the handover to
+  the next `write-diataxis-manual` sync run — read it before starting one.**
+  * **Seven currently-COMPILED fences begin failing `E0639`** in the `--ignored` lane of
+    `tests/manual_snippets.rs`: `manual/how-to/user/en/choose-an-extraction-api.md` (**two**
+    blocks), `manual/how-to/user/en/stream-a-large-entry.md`,
+    `manual/how-to/user/en/extract-multi-part-rar-sets.md`,
+    `manual/how-to/user/en/report-progress-and-cancel.md`,
+    `manual/how-to/user/en/verify-archive-integrity.md` and
+    `manual/tutorials/user/en/getting-started.md`. That is **on top of** the
+    `create-an-archive.md` `CompressionOptions` block named above, which the five-struct change
+    already turned red.
+  * **Allowlisting them is blocked three ways** by `tests/manual_snippets.rs`'s own floors, so the
+    usual escape — park the block in `tests/fixtures/manual/unmarked_fragments.txt` — is genuinely
+    unavailable, not merely discouraged. It would push allowlist entries to **38** against
+    `MAX_UNMARKED_FRAGMENTS` 34, allowlisted blocks to **41** against `MAX_ALLOWLISTED_BLOCKS` 36,
+    and drop checked snippets to **24** against `MIN_CHECKED_SNIPPETS` 28. That last floor is
+    asserted by `collection_is_not_vacuous`, which runs in the **default** lane, so the workaround
+    would turn a plain `cargo test` red rather than keeping the breakage confined to `--ignored`.
+    A real sync is the only fix.
+  * **Two reference pages now state things that are FALSE, not merely stale.**
+    `manual/reference/user/en/options-and-defaults.md` says outright that `ExtractionOptions`'s
+    fields are public and that "the struct is not `#[non_exhaustive]`", and goes on to describe
+    struct-literal construction as supported. `manual/reference/user/en/public-api-surface.md`
+    says **nine** public types are `#[non_exhaustive]` and presents that as the complete set for
+    0.4.0 — a claim the five-struct change already made wrong by five, and this one makes wrong by
+    six.
+  * **Do not launder the pre-existing drift signal.** Two of the affected pages —
+    `stream-a-large-entry.md` and `getting-started.md` — are already in `manual/log.md`'s
+    pre-existing-drift set, and `getting-started.md` was **deliberately edited without re-hashing**
+    on 2026-08-17 in order to preserve that signal. A sync run that re-hashes them while fixing the
+    fences would silently erase the record of an older, unrelated problem. Fix the fences and keep
+    the drift recorded.
+  * **One break the snippet lane cannot see, recorded separately because it is the worse case.**
+    The two `ExtractionOptions` literals on
+    `manual/how-to/user/en/extract-untrusted-archives-safely.md` sit inside fences that are already
+    named in `tests/fixtures/manual/unmarked_fragments.txt`, so they will **not** surface as a
+    snippet failure. That page will go on publishing non-compiling code to readers while the lane
+    stays green on it. A lane that cannot see a break is worse than one that reports it: nothing
+    will remind the next sync run that this page needs the same edit as the seven above.
 
 ### External RAR creator design hardening (OI-0076-006)
 - **Type:** 2
@@ -1063,6 +1134,26 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   the answer.
 
 ## Type 3 — blocked
+
+### `src/external/rar.rs` is compiled by nothing on this host (ticgit `a5b31f`, residual)
+- **Type:** 3
+- **Verified:** yes — recorded first-hand in `a5b31f`'s closure comment 2026-08-29, re-read 2026-09-01
+- **Sources:** ticgit:a5b31f, ticgit:642488, src/external/rar.rs, tests/external_rar_cli_contract.rs
+- **First seen:** 2026-08-29
+- **Last seen:** 2026-09-01
+- **Description:** `src/external/rar.rs` is `cfg(target_os = "windows")`-gated *and* is not among the
+  modules `tests/external_rar_cli_contract.rs` pulls in by `#[path]`. The edits that `6f12f44` and
+  `d73f3ef` made to `RarCreator::request()` were therefore compiled by nothing on the macOS dev
+  host — not `cargo check`, not clippy, not either test stage. Both edits are mechanical
+  substitutions against a sibling `pub mod` in the same file, so the risk is low, but "low risk" is
+  not "verified" and the distinction is the whole point of this entry.
+- **The one command that would settle it:** `cargo check --target x86_64-pc-windows-msvc
+  --no-default-features --features external-rar-create` — it skips the vendored UnRAR C++ build, so
+  it needs no Windows toolchain beyond the target's std.
+- **Blocked by:** owner decision, 2026-09-01 — the Windows lane stays deferred, and the owner will
+  invoke this check explicitly rather than let it ride an unrelated change. This is not a capability
+  gap: the command is known, available and cheap. The hold is deliberate, and an agent must not
+  "just run it once to be sure".
 
 ### ValidatedSource construction order (OI-0069-002 residual, R0069-0063)
 - **Type:** 3

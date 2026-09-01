@@ -13,10 +13,7 @@ fn test_extract_file_overwrite_false_blocks_existing_zip() {
     let target = temp.join("test_file.txt");
     fs::write(&target, b"existing").expect("Failed to seed target file");
 
-    let options = ExtractionOptions {
-        overwrite: false,
-        ..common::default_extraction_options(temp.clone())
-    };
+    let options = ExtractionOptions::new(temp.clone()).overwrite(false);
 
     let result = archive.extract_file("test_file.txt", options);
     assert!(result.is_err(), "Expected overwrite=false to fail");
@@ -33,10 +30,7 @@ fn test_extract_file_respects_limits_zip() {
         .max_file_size(Cap::Limited(1))
         .build();
 
-    let options = ExtractionOptions {
-        limits,
-        ..common::default_extraction_options(temp.clone())
-    };
+    let options = ExtractionOptions::new(temp.clone()).limits(limits);
 
     let result = archive.extract_file("test_file.txt", options);
     assert!(result.is_err(), "Expected file size limit to fail");
@@ -57,10 +51,7 @@ fn test_extract_files_respects_limits_zip() {
         .max_file_size(Cap::Limited(1))
         .build();
 
-    let options = ExtractionOptions {
-        limits,
-        ..common::default_extraction_options(temp.clone())
-    };
+    let options = ExtractionOptions::new(temp.clone()).limits(limits);
 
     let result = archive.extract_files(&["test_file.txt"], options);
     assert!(result.is_err(), "Expected file size limit to fail");
@@ -76,12 +67,10 @@ fn test_extract_files_respects_limits_zip() {
 fn test_extract_to_memory_with_options_rejects_tight_limit() {
     let archive = Archive::open(common::fixture("test.zip")).expect("Failed to open ZIP");
 
-    let options = ExtractionOptions {
-        limits: ExtractionLimits::builder()
-            .max_file_size(Cap::Limited(1))
-            .build(),
-        ..Default::default()
-    };
+    let limits = ExtractionLimits::builder()
+        .max_file_size(Cap::Limited(1))
+        .build();
+    let options = ExtractionOptions::default().limits(limits);
 
     let result = archive.extract_to_memory_with_options("test_file.txt", &options);
     assert!(
@@ -94,12 +83,10 @@ fn test_extract_to_memory_with_options_rejects_tight_limit() {
 fn test_extract_to_memory_with_options_accepts_loose_limit() {
     let archive = Archive::open(common::fixture("test.zip")).expect("Failed to open ZIP");
 
-    let options = ExtractionOptions {
-        limits: ExtractionLimits::builder()
-            .max_file_size(Cap::Limited(1024))
-            .build(),
-        ..Default::default()
-    };
+    let limits = ExtractionLimits::builder()
+        .max_file_size(Cap::Limited(1024))
+        .build();
+    let options = ExtractionOptions::default().limits(limits);
 
     let data = archive
         .extract_to_memory_with_options("test_file.txt", &options)
@@ -111,12 +98,10 @@ fn test_extract_to_memory_with_options_accepts_loose_limit() {
 fn test_extract_to_stream_with_options_rejects_tight_limit() {
     let archive = Archive::open(common::fixture("test.zip")).expect("Failed to open ZIP");
 
-    let options = ExtractionOptions {
-        limits: ExtractionLimits::builder()
-            .max_file_size(Cap::Limited(1))
-            .build(),
-        ..Default::default()
-    };
+    let limits = ExtractionLimits::builder()
+        .max_file_size(Cap::Limited(1))
+        .build();
+    let options = ExtractionOptions::default().limits(limits);
 
     let result = archive.extract_to_stream_with_options(
         "test_file.txt",
@@ -135,12 +120,10 @@ fn test_extract_to_stream_with_options_accepts_loose_limit() {
 
     let archive = Archive::open(common::fixture("test.zip")).expect("Failed to open ZIP");
 
-    let options = ExtractionOptions {
-        limits: ExtractionLimits::builder()
-            .max_file_size(Cap::Limited(1024))
-            .build(),
-        ..Default::default()
-    };
+    let limits = ExtractionLimits::builder()
+        .max_file_size(Cap::Limited(1024))
+        .build();
+    let options = ExtractionOptions::default().limits(limits);
 
     let mut stream = archive
         .extract_to_stream_with_options("test_file.txt", &options, StreamBound::DeclaredSize)

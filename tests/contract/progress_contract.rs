@@ -31,13 +31,11 @@ fn contract_progress_callback_is_invoked_for_rar() {
     let call_count = Arc::new(AtomicUsize::new(0));
     let count_clone = call_count.clone();
 
-    let options = ExtractionOptions {
-        progress: Some(Box::new(move |_current: u64, _total: Option<u64>| {
+    let options =
+        ExtractionOptions::new(temp.path()).progress(move |_current: u64, _total: Option<u64>| {
             count_clone.fetch_add(1, Ordering::SeqCst);
             std::ops::ControlFlow::Continue(())
-        })),
-        ..common::default_extraction_options(temp.path().to_path_buf())
-    };
+        });
 
     archive.extract_all(options).unwrap();
 
@@ -59,13 +57,11 @@ fn contract_progress_callback_accepted_for_zip() {
     let call_count = Arc::new(AtomicUsize::new(0));
     let cc = call_count.clone();
 
-    let options = ExtractionOptions {
-        progress: Some(Box::new(move |_current: u64, _total: Option<u64>| {
+    let options =
+        ExtractionOptions::new(temp.path()).progress(move |_current: u64, _total: Option<u64>| {
             cc.fetch_add(1, Ordering::SeqCst);
             std::ops::ControlFlow::Continue(())
-        })),
-        ..common::default_extraction_options(temp.path().to_path_buf())
-    };
+        });
 
     let result = archive.extract_all(options);
     assert!(
@@ -93,8 +89,8 @@ fn contract_progress_monotonic_for_rar() {
     let monotonic_violation = Arc::new(AtomicUsize::new(0));
     let mv = monotonic_violation.clone();
 
-    let options = ExtractionOptions {
-        progress: Some(Box::new(move |current: u64, total: Option<u64>| {
+    let options =
+        ExtractionOptions::new(temp.path()).progress(move |current: u64, total: Option<u64>| {
             let prev = lc.swap(current, Ordering::SeqCst);
             if current < prev {
                 mv.fetch_add(1, Ordering::SeqCst);
@@ -106,9 +102,7 @@ fn contract_progress_monotonic_for_rar() {
                 }
             }
             std::ops::ControlFlow::Continue(())
-        })),
-        ..common::default_extraction_options(temp.path().to_path_buf())
-    };
+        });
 
     archive.extract_all(options).unwrap();
 
@@ -138,17 +132,15 @@ fn contract_progress_cancellation() {
     let call_count = Arc::new(AtomicUsize::new(0));
     let cc = call_count.clone();
 
-    let options = ExtractionOptions {
-        progress: Some(Box::new(move |_current: u64, _total: Option<u64>| {
+    let options =
+        ExtractionOptions::new(temp.path()).progress(move |_current: u64, _total: Option<u64>| {
             let count = cc.fetch_add(1, Ordering::SeqCst);
             if count >= 1 {
                 std::ops::ControlFlow::Break(())
             } else {
                 std::ops::ControlFlow::Continue(())
             }
-        })),
-        ..common::default_extraction_options(temp.path().to_path_buf())
-    };
+        });
 
     let result = archive.extract_all(options);
     let calls = call_count.load(Ordering::SeqCst) as u64;
@@ -175,13 +167,10 @@ fn contract_progress_callback_with_no_op() {
     let archive = Archive::open(fixture("test.zip")).unwrap();
     let temp = tempfile::tempdir().unwrap();
 
-    let options = ExtractionOptions {
-        progress: Some(Box::new(|_: u64, _: Option<u64>| {
-            // No-op callback
-            std::ops::ControlFlow::Continue(())
-        })),
-        ..common::default_extraction_options(temp.path().to_path_buf())
-    };
+    let options = ExtractionOptions::new(temp.path()).progress(|_: u64, _: Option<u64>| {
+        // No-op callback
+        std::ops::ControlFlow::Continue(())
+    });
 
     let result = archive.extract_all(options);
     assert!(
@@ -204,14 +193,12 @@ fn contract_progress_encrypted_rar() {
     let call_count = Arc::new(AtomicUsize::new(0));
     let cc = call_count.clone();
 
-    let options = ExtractionOptions {
-        password: Some("test123".to_string().into()),
-        progress: Some(Box::new(move |_: u64, _: Option<u64>| {
+    let options = ExtractionOptions::new(temp.path())
+        .password("test123")
+        .progress(move |_: u64, _: Option<u64>| {
             cc.fetch_add(1, Ordering::SeqCst);
             std::ops::ControlFlow::Continue(())
-        })),
-        ..common::default_extraction_options(temp.path().to_path_buf())
-    };
+        });
 
     let result = archive.extract_all(options);
     assert!(

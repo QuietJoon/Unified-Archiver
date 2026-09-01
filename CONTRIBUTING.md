@@ -193,10 +193,7 @@ Example:
 /// use unified_archive::{Archive, ExtractionOptions};
 ///
 /// let archive = Archive::open("test.zip")?;
-/// let options = ExtractionOptions {
-///     destination: "output/".into(),
-///     ..Default::default()
-/// };
+/// let options = ExtractionOptions::new("output/");
 /// let result = archive.extract_all(options)?;
 /// for warning in &result.warnings { eprintln!("{warning}"); }
 /// # Ok::<(), unified_archive::ArchiveError>(())

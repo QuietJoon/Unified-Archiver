@@ -207,21 +207,21 @@ Total files: 1
 
 ## Common Use Cases
 
+Every extraction below starts from `ExtractionOptions::new(destination)` and
+chains one setter per option. Struct-literal construction — including the
+`..Default::default()` form — is no longer available outside the library.
+
 ### Use Case 1: Extract All Files
 
 ```rust
 use unified_archive::{Archive, ExtractionOptions};
-use std::path::PathBuf;
 
 fn extract_archive(archive_path: &str, output_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
     let archive = Archive::open(archive_path)?;
 
-    let options = ExtractionOptions {
-        destination: PathBuf::from(output_dir),
-        preserve_permissions: true,
-        preserve_times: true,
-        ..Default::default()
-    };
+    let options = ExtractionOptions::new(output_dir)
+        .preserve_permissions(true)
+        .preserve_times(true);
 
     println!("Extracting to {}...", output_dir);
     let result = archive.extract_all(options)?;
@@ -241,16 +241,12 @@ fn extract_archive(archive_path: &str, output_dir: &str) -> Result<(), Box<dyn s
 
 ```rust
 use unified_archive::{Archive, ExtractionOptions};
-use std::path::PathBuf;
 
 fn extract_readme(archive_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let archive = Archive::open(archive_path)?;
 
     // Extract a single file
-    let options = ExtractionOptions {
-        destination: PathBuf::from("./"),
-        ..Default::default()
-    };
+    let options = ExtractionOptions::new("./");
     archive.extract_file("README.md", options)?;
 
     println!("README.md extracted!");
@@ -262,15 +258,11 @@ fn extract_readme(archive_path: &str) -> Result<(), Box<dyn std::error::Error>> 
 
 ```rust
 use unified_archive::{Archive, ExtractionOptions};
-use std::path::PathBuf;
 
 fn extract_images(archive_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let archive = Archive::open(archive_path)?;
 
-    let options = ExtractionOptions {
-        destination: PathBuf::from("./images"),
-        ..Default::default()
-    };
+    let options = ExtractionOptions::new("./images");
 
     // Extract only image files
     archive.extract_filtered(
@@ -392,7 +384,6 @@ fn verify_archive(archive_path: &str) -> Result<(), Box<dyn std::error::Error>> 
 
 ```rust
 use unified_archive::{Archive, ArchiveError, ExtractionOptions};
-use std::path::PathBuf;
 
 fn extract_encrypted(archive_path: &str, password: &str)
     -> Result<(), Box<dyn std::error::Error>>
@@ -407,10 +398,7 @@ fn extract_encrypted(archive_path: &str, password: &str)
             println!("Files: {}", entries.len());
 
             // Extract to an explicit destination
-            let options = ExtractionOptions {
-                destination: PathBuf::from("./output"),
-                ..Default::default()
-            };
+            let options = ExtractionOptions::new("./output");
             let result = archive.extract_all(options)?;
             for warning in &result.warnings {
                 eprintln!("warning: {warning}");
@@ -432,7 +420,6 @@ fn extract_encrypted(archive_path: &str, password: &str)
 
 ```rust
 use unified_archive::{Archive, ExtractionOptions, ProgressCallback};
-use std::path::PathBuf;
 use std::ops::ControlFlow;
 
 struct MyProgress {
@@ -462,11 +449,10 @@ fn extract_with_progress(archive_path: &str)
 {
     let archive = Archive::open(archive_path)?;
 
-    let options = ExtractionOptions {
-        destination: PathBuf::from("./output"),
-        progress: Some(Box::new(MyProgress { last_percent: 0 }) as Box<dyn ProgressCallback>),
-        ..Default::default()
-    };
+    // `.progress` takes any `impl ProgressCallback` and boxes it for you,
+    // so `MyProgress` goes in without `Some` or `Box::new`.
+    let options = ExtractionOptions::new("./output")
+        .progress(MyProgress { last_percent: 0 });
 
     let result = archive.extract_all(options)?;
     for warning in &result.warnings {

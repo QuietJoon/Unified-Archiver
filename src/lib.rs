@@ -46,16 +46,12 @@
 //!
 //! ```no_run
 //! use unified_archive::{Archive, ExtractionOptions};
-//! use std::path::PathBuf;
 //!
 //! let archive = Archive::open("backup.7z")?;
 //!
-//! let options = ExtractionOptions {
-//!     destination: PathBuf::from("./output"),
-//!     preserve_permissions: true,
-//!     verify_crc32: true,
-//!     ..Default::default()
-//! };
+//! let options = ExtractionOptions::new("./output")
+//!     .preserve_permissions(true)
+//!     .verify_crc32(true);
 //!
 //! let result = archive.extract_all(options)?;
 //! for warning in &result.warnings {

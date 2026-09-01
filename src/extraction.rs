@@ -523,7 +523,6 @@ impl Archive {
     ///
     /// ```no_run
     /// use unified_archive::{Archive, ExtractionOptions};
-    /// use std::path::PathBuf;
     ///
     /// // Check for symlinks before extraction
     /// let archive = Archive::open("data.tar.gz")?;
@@ -533,10 +532,7 @@ impl Archive {
     /// }
     ///
     /// // Extract (symlinks automatically skipped)
-    /// let options = ExtractionOptions {
-    ///     destination: PathBuf::from("output"),
-    ///     ..Default::default()
-    /// };
+    /// let options = ExtractionOptions::new("output");
     /// let result = archive.extract_all(options)?;
     /// for warning in &result.warnings {
     ///     eprintln!("warning: {warning}");
@@ -548,10 +544,7 @@ impl Archive {
     /// if is_multipart {
     ///     println!("Extracting {} parts...", parts.len());
     /// }
-    /// let options = ExtractionOptions {
-    ///     destination: PathBuf::from("output"),
-    ///     ..Default::default()
-    /// };
+    /// let options = ExtractionOptions::new("output");
     /// let _ = archive.extract_all(options)?;
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
@@ -1315,15 +1308,11 @@ impl Archive {
     ///
     /// ```no_run
     /// use unified_archive::{Archive, ExtractionOptions};
-    /// use std::path::PathBuf;
     ///
     /// let archive = Archive::open("backup.zip")?;
     /// archive.extract_files(
     ///     &["readme.txt", "src/main.rs", "config.json"],
-    ///     ExtractionOptions {
-    ///         destination: PathBuf::from("./output"),
-    ///         ..Default::default()
-    ///     }
+    ///     ExtractionOptions::new("./output"),
     /// )?;
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
@@ -1434,7 +1423,6 @@ impl Archive {
     ///
     /// ```no_run
     /// use unified_archive::{Archive, ExtractionOptions};
-    /// use std::path::PathBuf;
     ///
     /// let archive = Archive::open("backup.rar")?;
     /// let entries = archive.list_files()?;
@@ -1447,10 +1435,7 @@ impl Archive {
     /// // Extract files with IDs 0 and 2
     /// archive.extract_by_ids(
     ///     &[0, 2],
-    ///     ExtractionOptions {
-    ///         destination: PathBuf::from("./output"),
-    ///         ..Default::default()
-    ///     }
+    ///     ExtractionOptions::new("./output"),
     /// )?;
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```

@@ -17,9 +17,6 @@
 //! The `verify_crc32` flag in ExtractionOptions documents this behavior but cannot
 //! disable it, as both backend libraries provide no option to skip CRC32 verification.
 
-#[path = "common/mod.rs"]
-mod common;
-
 use std::fs;
 use std::path::PathBuf;
 use unified_archive::{Archive, ArchiveError, ExtractionOptions};
@@ -41,11 +38,9 @@ fn test_crc32_error_mapping_corrupted_zip() {
         .expect("corrupted-CRC fixture should open (central directory is intact)");
 
     let temp_dir = tempfile::tempdir().expect("create tempdir");
-    let options = ExtractionOptions {
-        verify_crc32: true,
-        overwrite: true,
-        ..common::default_extraction_options(temp_dir.path().to_path_buf())
-    };
+    let options = ExtractionOptions::new(temp_dir.path())
+        .verify_crc32(true)
+        .overwrite(true);
 
     let err = archive
         .extract_all(options)
@@ -81,10 +76,8 @@ fn test_crc32_verification_disabled() {
     let temp_dest = std::env::temp_dir().join("crc32_disabled_test");
     fs::create_dir_all(&temp_dest).ok();
 
-    let options = ExtractionOptions {
-        verify_crc32: false, // Disabled, but backends will still verify
-        ..common::default_extraction_options(temp_dest.clone())
-    };
+    // Disabled, but backends will still verify.
+    let options = ExtractionOptions::new(&temp_dest).verify_crc32(false);
 
     let result = archive.extract_all(options);
     fs::remove_dir_all(&temp_dest).ok();

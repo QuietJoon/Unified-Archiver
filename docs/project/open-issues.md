@@ -1263,7 +1263,11 @@ finalization with subtly different semantics.
 - **Source:** R0076-0003, 0082 (Review 0076), R0076-0095 partial
 - **Date:** 2026-05-01
 - **Decision:** ACCEPT (Phase 2 routing — auto mode default, deferred to v0.4 deprecation cycle)
-- **Status:** OPEN (partially advanced — `ExtractionLimits` done, R0081 I1, 2026-07-22)
+- **Status:** OPEN (substantially advanced — `ExtractionLimits` done, R0081 I1, 2026-07-22; the
+  `#[non_exhaustive]` half is now complete for every struct in scope — the five landed 2026-08-29
+  and `ExtractionOptions` 2026-09-01, joining `ArchiveEntry`; see Progress below. What remains is
+  Required Action 3: the `CompressionOptions` field-demotion timeline, which is blocked on a
+  `level`/`progress` setter pair that does not exist)
 
 ### Problem
 
@@ -1299,8 +1303,8 @@ struct-literal initialiser in the wild.
 ### Verification
 
 - [x] `ExtractionLimits::builder` is the documented primary API (R0081 I1) — public fields removed outright (pre-1.0), not `#[deprecated]`
-- [ ] `ArchiveEntry::new` / `directory` carry `#[deprecated]`
-  <!-- Still unticked 2026-08-21: unchanged by this pass. Item 2 of the Required Actions is untouched; `ArchiveEntry` remains the open half of this entry together with OI-0001-005 (ticgit deff990a), which is blocked on the same v0.4 window. -->
+- [x] `ArchiveEntry::new` / `directory` carry `#[deprecated]`
+  <!-- Ticked 2026-09-01, verified by reading `src/entry.rs` rather than inferred from a closing report: `ArchiveEntry::new`, `ArchiveEntry::directory` and `ArchiveEntry::symlink` all carry `#[deprecated(since = "0.5.0", …)]`, each note naming its builder replacement (`file(..).build()`, `dir_at(..).build()`, `symlink_at(..).build()`) and the 0.6.0 removal. The 2026-08-21 note above ("still unticked, item 2 untouched") was true when written and is superseded. The rest of item 2 — demoting `ArchiveEntry`'s public fields to `pub(crate)` — is NOT done; what landed instead is `#[non_exhaustive]` on the struct, which closes external construction and exhaustive matching while leaving the fields `pub` and assignable. That is a different guarantee (field-addition freedom, not invariant enforcement) and is recorded as such in the 2026-09-01 Progress section below. OI-0001-005 (ticgit deff990a) still owns the entry-kind invariant half. -->
 - [ ] `CompressionOptions` deprecation pathway documented
   <!-- Deliberately unticked 2026-08-21: partly satisfied, and the tick would overstate it. What landed (ticgit 165103b8) is a documented pathway for the *loose libarchive constructor* and for the *7z-style password setter*: `LibarchiveCompressionOptions::new` and `CompressionOptions::password` are both `#[deprecated(since = "0.4.0")]` with notes naming the replacement (`for_writable` / `try_new`) or the condition that lifts the deprecation (OI-0081-006). The flat-bag `CompressionOptions` itself is NOT deprecated and no timeline for it is recorded — `CompressionOptions::new` is the ordinary construction path for ZIP and 7z creation and carries no attribute. Item 3's decision, "the deprecation timeline alongside the format-specific builders", is therefore still unmade. -->
 - [ ] Internal call sites migrated to builders
@@ -1348,6 +1352,48 @@ worst reading of this entry — a security setter that accepts a value and ignor
   is created or a byte is decoded, and reporting the offending name rather than a laundered one.
   Default `false` returns `Ok(())` immediately, so the AD 0066 lossy-repair baseline pays nothing
   and behaves exactly as before.
+
+### Progress (2026-08-29 and 2026-09-01) — the `#[non_exhaustive]` half is complete
+
+Recorded here because this ledger was silent on both landings and a reader would otherwise take the
+entry to be where it was in August.
+
+**2026-08-29 — five structs.** `CompressionOptions`, `ModificationOptions`, `ValidationReport`,
+`ResultWithWarnings<T>` and `StreamChecksum` gained `#[non_exhaustive]`, joining `ArchiveEntry`. No
+new constructor was added for any of them, because none was missing. Nothing under `src/` needed an
+edit — the attribute never restricts the defining crate.
+
+**2026-09-01 — `ExtractionOptions`, the sixth, and the one deliberately split out of that group.**
+It was the largest migration of the six on its own: 9 public fields, and the one type where
+`..Default::default()` was the idiomatic in-tree spelling. It now carries the attribute and, unlike
+the other five, gained a constructor because it needed one:
+
+* `ExtractionOptions::new(destination)` — the documented defaults with `destination` filled in.
+* Consuming setters chaining off it, in the style of the pre-existing `.password(…)`:
+  `.overwrite(bool)`, `.preserve_permissions(bool)`, `.preserve_times(bool)`, `.verify_crc32(bool)`,
+  `.limits(ExtractionLimits)`, `.filter(…)` and `.progress(…)`. The last two box internally, so a
+  caller passes the closure or the callback itself.
+* `Default` is untouched: a bare `ExtractionOptions::default()` still compiles outside the crate,
+  with `destination` at `PathBuf::from(".")`. Only the literal form is gone — including
+  `..Default::default()`, which `E0639` refuses by syntax whatever the base expression is, so the
+  functional-update form is not an escape hatch.
+* Two shapes stay field assignment and no setter is owed for either: an already-boxed
+  `Box<dyn ProgressCallback>`, which does not satisfy `impl ProgressCallback` because the trait has
+  no impl for the box, and clearing an `Option` back to `None`.
+
+**What this does and does not settle.** It buys field-addition freedom on all seven structs and
+nothing else: the fields stay `pub` and assignable, so no invariant is enforced by the attribute.
+The Problem statement's concern about bypassable invariants is answered for `ExtractionLimits`
+(private fields since R0081 I1) and for the entry-kind invariants only insofar as `build_checked`
+exists; it is not answered by `#[non_exhaustive]`. Required Action 3 — the `CompressionOptions`
+deprecation/demotion timeline — is still unmade, and still blocked on the same missing
+`level`/`progress` setter pair, so this entry stays OPEN for it.
+
+**Downstream debt this created, tracked in `docs/backlog.md` under the same id:** the `manual/`
+bundle's `--ignored` snippet lane now has eight red fences, its allowlist escape hatch is closed by
+three separate floors in `tests/manual_snippets.rs`, and two reference pages state the opposite of
+what the code now does. That is a `write-diataxis-manual` sync job, not a hand-edit — editing a page
+body invalidates its `synced_hash`.
 
 ### Related
 
@@ -2708,6 +2754,12 @@ does not reach this.
   but a per-operation options field would need signature changes on the write path
   (`add_file_from_data` and friends take no options today), which belongs with the OI-0076-005
   encapsulation work that touches those types anyway.
+  *Update 2026-09-01 — that hand-off did not happen, so this residual is still live.* OI-0076-005's
+  `#[non_exhaustive]` half has now landed on all of its structs, including `ExtractionOptions`, and
+  it added **no** per-operation options parameter to the write path: the attribute closes external
+  struct-literal construction and nothing else. `add_file_from_data` and friends still take no
+  options, and the host opt-in is still the process-wide switch described above. Re-target this
+  residual rather than assuming the encapsulation pass absorbed it.
 
 ---
 
@@ -2739,6 +2791,13 @@ contradiction by a caller who did nothing unusual.
 2. Land it with its two siblings rather than alone — this is the same "make the type system carry
    the invariant" work as OI-0076-005 and OI-0081-002, and three separate passes over the same
    public surface is three separate breaking changes.
+   <!-- Overtaken in part, 2026-09-01: OI-0076-005's `#[non_exhaustive]` half has now landed on its
+   own, in two passes (five structs 2026-08-29, `ExtractionOptions` 2026-09-01), so the "land it
+   together" advice can no longer be followed for that axis. The cost this action was trying to
+   avoid is not fully incurred, though: `#[non_exhaustive]` closes external construction without
+   touching field visibility or adding any invariant, so the *field-demotion* break this item cares
+   about is still unspent and can still ride one pass with OI-0081-002. Re-read this action as
+   "land the demotion together", not "land the attribute together". -->
 3. Public API change: v0.4.
 
 ### Verification
@@ -2749,7 +2808,9 @@ contradiction by a caller who did nothing unusual.
 
 ### Related
 
-- OI-0076-005 (OPEN) — encapsulate public-field structs, v0.4
+- OI-0076-005 (OPEN) — encapsulate public-field structs, v0.4. Its `#[non_exhaustive]` half is
+  complete as of 2026-09-01 (`ExtractionOptions` was the last), so what it still shares with this
+  entry is the *field-demotion* half, not the attribute.
 - OI-0081-002 (OPEN) — typed compression-option builder invariants; ticgit `165103b8`
 - R0075-0078 — the builder's introduction
 

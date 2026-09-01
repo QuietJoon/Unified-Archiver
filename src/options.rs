@@ -38,6 +38,52 @@ where
 }
 
 /// Configuration for archive extraction operations
+///
+/// Build one with [`ExtractionOptions::new`] and chain the setters:
+///
+/// ```
+/// use unified_archive::ExtractionOptions;
+///
+/// let options = ExtractionOptions::new("./output")
+///     .overwrite(true)
+///     .verify_crc32(true);
+/// ```
+///
+/// [`Default`] is still implemented and still compiles outside this
+/// crate, but its `destination` is the process working directory. Prefer
+/// `new`: an options value whose destination nobody chose is almost
+/// always a mistake, even though the `overwrite: false` default keeps it
+/// a loud one.
+///
+/// # Encapsulation timeline (OI-0076-005)
+///
+/// - **0.4.x** — fields `pub`, no `#[non_exhaustive]`, one setter
+///   ([`password`](method@Self::password)). A struct literal, usually
+///   with `..Default::default()`, was the normal way to build one.
+/// - **0.5.0, landed** — the struct is `#[non_exhaustive]` and carries a
+///   constructor plus one setter per field. External crates can no longer
+///   build it with a struct literal; that includes the
+///   `..Default::default()` form, which does **not** escape the
+///   attribute. The fields stay `pub`, so reading them and assigning to
+///   them (`opts.overwrite = true`) both still compile, in this crate and
+///   outside it. This half buys exactly one thing — a tenth field can be
+///   added without a major bump — and enforces nothing. There is no
+///   cross-field invariant here for a checked constructor to enforce:
+///   `destination` is made mandatory by [`new`](method@Self::new)'s
+///   signature, [`Password`] is UTF-8 by construction, and
+///   [`ExtractionLimits`] validates its own numbers in its own builder.
+/// - **0.5.0, still owed** — read accessors. This type has none, so
+///   demoting the fields today would leave every one of them *unreadable*
+///   from outside the crate — a strictly worse break than the one that
+///   just landed. [`CompressionOptions`] spent the 0.4 line growing its
+///   accessors before its own demotion became schedulable; this type has
+///   not started.
+/// - **0.6.0** — the fields become non-`pub`, once those accessors exist.
+///   Unlike [`CompressionOptions`], no field here carries an invariant
+///   that assignment can break, so that demotion buys freedom to change
+///   the representation, not safety. Worth stating plainly: neither half
+///   of this timeline makes the type safer than it was.
+#[non_exhaustive]
 pub struct ExtractionOptions {
     /// Destination directory
     pub destination: PathBuf,
@@ -117,15 +163,108 @@ pub struct ExtractionOptions {
 }
 
 impl ExtractionOptions {
+    /// The documented defaults, with `destination` set.
+    ///
+    /// Prefer this over [`Default::default`], which leaves `destination`
+    /// at the process working directory. Every other field keeps its
+    /// default; chain the setters below to change them.
+    ///
+    /// ```
+    /// use unified_archive::ExtractionOptions;
+    ///
+    /// let options = ExtractionOptions::new("./output").overwrite(true);
+    /// assert!(options.overwrite);
+    /// ```
+    pub fn new(destination: impl Into<PathBuf>) -> Self {
+        Self {
+            destination: destination.into(),
+            ..Self::default()
+        }
+    }
+
     /// Set the password used to open an encrypted archive during
     /// extraction, consuming and returning `self` for chaining off
-    /// [`ExtractionOptions::default`].
+    /// [`new`](method@Self::new) or [`ExtractionOptions::default`].
     ///
     /// The password is stored as a [`Password`], which is UTF-8 by
     /// construction and redacts itself in `Debug`/`Display`. Prefer this
     /// over assigning the public `password` field directly.
     pub fn password(mut self, password: impl Into<String>) -> Self {
         self.password = Some(Password::new(password));
+        self
+    }
+
+    /// Overwrite files that already exist at the destination.
+    ///
+    /// Takes a `bool` rather than coming as a `with_`/`without_` pair
+    /// because an explicit `false` is a case callers exercise on purpose.
+    pub fn overwrite(mut self, overwrite: bool) -> Self {
+        self.overwrite = overwrite;
+        self
+    }
+
+    /// Preserve Unix mode bits on extracted files.
+    ///
+    /// See the `preserve_permissions` field for the per-backend
+    /// behaviour, which differs — for RAR this flag is an opt-*out*.
+    pub fn preserve_permissions(mut self, preserve: bool) -> Self {
+        self.preserve_permissions = preserve;
+        self
+    }
+
+    /// Preserve modification times on extracted files.
+    ///
+    /// See the `preserve_times` field for the per-backend behaviour.
+    pub fn preserve_times(mut self, preserve: bool) -> Self {
+        self.preserve_times = preserve;
+        self
+    }
+
+    /// Verify CRC32 checksums during extraction.
+    ///
+    /// See the `verify_crc32` field: for 7z and RAR the check is
+    /// unconditional and this flag only records the caller's intent, and
+    /// for the libarchive-backed formats `true` is an error rather than a
+    /// no-op.
+    pub fn verify_crc32(mut self, verify: bool) -> Self {
+        self.verify_crc32 = verify;
+        self
+    }
+
+    /// Install a configured [`ExtractionLimits`] (zip-bomb protection).
+    pub fn limits(mut self, limits: ExtractionLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Extract only the entries the closure accepts.
+    ///
+    /// The closure is boxed into an [`EntryFilter`] here, so the call
+    /// site writes neither `Some` nor `Box::new`. A plain `Fn` closure
+    /// satisfies the `FnMut` bound, and an already-built [`EntryFilter`]
+    /// can be passed too (it is itself `FnMut + Send + 'static`);
+    /// [`entry_filter_from_fn`] remains for callers who need the boxed
+    /// alias as a *value* rather than as an argument.
+    ///
+    /// Clearing a filter is assignment-only, by design:
+    /// `options.filter = None`.
+    pub fn filter(mut self, filter: impl FnMut(&ArchiveEntry) -> bool + Send + 'static) -> Self {
+        self.filter = Some(Box::new(filter));
+        self
+    }
+
+    /// Report progress through `callback`.
+    ///
+    /// The callback is boxed here. Any `FnMut(u64, Option<u64>) ->
+    /// ControlFlow<()> + Send` closure satisfies [`ProgressCallback`]
+    /// through its blanket impl, so the common case needs no `Box::new`.
+    ///
+    /// An *already boxed* `Box<dyn ProgressCallback>` does not satisfy
+    /// this bound — there is no impl of the trait for the box — so moving
+    /// a boxed callback between values stays field assignment, as does
+    /// clearing one with `options.progress = None`.
+    pub fn progress(mut self, callback: impl ProgressCallback + 'static) -> Self {
+        self.progress = Some(Box::new(callback));
         self
     }
 }

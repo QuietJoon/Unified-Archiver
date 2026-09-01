@@ -31,7 +31,7 @@ End-to-end architectural walkthroughs for mandatory scenarios.
 
 ### 2. Archive Extraction (SCN-EXT-01)
 
-**Trigger:** `archive.extract_all(options)` with `ExtractionOptions { destination, .. }`
+**Trigger:** `archive.extract_all(options)` with `ExtractionOptions::new(destination)`
 
 1. `extraction::extract_all` invoked on `Archive`
 2. **Destination prep:** `ensure_destination` creates destination dir if needed

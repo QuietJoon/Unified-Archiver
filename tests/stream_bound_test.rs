@@ -301,10 +301,7 @@ fn assert_stream_and_memory_labels(archive: &Archive, entry: &str, fixture: &str
     // and every staging format declares its entry size), so the *backend*
     // label is the one pinned by the stream arm above — which is exactly the
     // call site R5 was mislabelling.
-    let options = ExtractionOptions {
-        limits: limits(Cap::Limited(4), Cap::Unlimited),
-        ..Default::default()
-    };
+    let options = ExtractionOptions::default().limits(limits(Cap::Limited(4), Cap::Unlimited));
     match archive.extract_to_memory_with_options(entry, &options) {
         Ok(_) => panic!("{fixture}: the memory path must refuse the over-budget entry too"),
         Err(ArchiveError::OperationBlocked { operation, .. }) => assert_eq!(
@@ -432,10 +429,7 @@ fn max_total_size_participates_in_the_backend_budget() {
     let archive = Archive::open(common::fixture("test.gz")).expect("open gz");
     let (entry, _) = only_entry(&archive);
 
-    let options = ExtractionOptions {
-        limits: limits(Cap::Unlimited, Cap::Limited(4)),
-        ..Default::default()
-    };
+    let options = ExtractionOptions::default().limits(limits(Cap::Unlimited, Cap::Limited(4)));
     let mut stream = archive
         .extract_to_stream_with_options(&entry, &options, StreamBound::Unbounded)
         .expect("unknown-size entry passes the metadata gate");

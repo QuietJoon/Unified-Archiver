@@ -566,11 +566,7 @@ fn test_extract_all_verify_crc32_rejected_on_tar_gz() {
     use unified_archive::{ArchiveError, ExtractionOptions};
     let temp = tempfile::tempdir().unwrap();
     let archive = Archive::open("tests/fixtures/test.tar.gz").expect("open tar.gz");
-    let opts = ExtractionOptions {
-        destination: temp.path().to_path_buf(),
-        verify_crc32: true,
-        ..Default::default()
-    };
+    let opts = ExtractionOptions::new(temp.path()).verify_crc32(true);
     let err = match archive.extract_all(opts) {
         Ok(_) => panic!(
             "extract_all with verify_crc32=true must fail on TAR.GZ (libarchive cannot honour it)"
@@ -594,11 +590,7 @@ fn test_extract_all_verify_crc32_false_on_tar_gz_succeeds() {
     use unified_archive::ExtractionOptions;
     let temp = tempfile::tempdir().unwrap();
     let archive = Archive::open("tests/fixtures/test.tar.gz").expect("open tar.gz");
-    let opts = ExtractionOptions {
-        destination: temp.path().to_path_buf(),
-        verify_crc32: false,
-        ..Default::default()
-    };
+    let opts = ExtractionOptions::new(temp.path()).verify_crc32(false);
     archive
         .extract_all(opts)
         .expect("verify_crc32=false on TAR.GZ must succeed");

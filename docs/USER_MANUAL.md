@@ -222,17 +222,13 @@ Useful inspection methods:
 ### 5.2 Extract everything
 
 ```rust
-use std::path::PathBuf;
 use unified_archive::{Archive, ExtractionOptions};
 
 let archive = Archive::open("backup.tar.gz")?;
 
-let options = ExtractionOptions {
-    destination: PathBuf::from("./output"),
-    preserve_permissions: true,
-    preserve_times: true,
-    ..Default::default()
-};
+let options = ExtractionOptions::new("./output")
+    .preserve_permissions(true)
+    .preserve_times(true);
 
 // extract_all returns ResultWithWarnings<()> — the call succeeded even if
 // warnings (e.g., skipped symlinks or hard-links) are present.
@@ -245,17 +241,13 @@ for warning in &result.warnings {
 ### 5.3 Extract one file
 
 ```rust
-use std::path::PathBuf;
 use unified_archive::{Archive, ExtractionOptions};
 
 let archive = Archive::open("assets.zip")?;
 
 archive.extract_file(
     "images/logo.png",
-    ExtractionOptions {
-        destination: PathBuf::from("./output"),
-        ..Default::default()
-    },
+    ExtractionOptions::new("./output"),
 )?;
 ```
 
@@ -447,7 +439,8 @@ Extraction paths are guarded by:
 - symlink / hard-link warnings
 - extraction limits (`ExtractionLimits`) for zip-bomb resistance
 
-If you need to tune resource limits, use `ExtractionOptions.limits`.
+If you need to tune resource limits, pass a built `ExtractionLimits` to the
+`.limits(...)` setter on `ExtractionOptions`.
 
 ## 9. Troubleshooting
 

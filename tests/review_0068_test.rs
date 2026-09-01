@@ -148,10 +148,7 @@ fn r0068_0080_extract_to_memory_with_options_uses_password() {
     );
 
     // With password: same call should succeed.
-    let with_pw = ExtractionOptions {
-        password: Some("test123".into()),
-        ..Default::default()
-    };
+    let with_pw = ExtractionOptions::default().password("test123");
     let bytes = archive
         .extract_to_memory_with_options("test_file.txt", &with_pw)
         .expect("memory extract with password");
@@ -175,10 +172,7 @@ fn r0068_0080_extract_to_stream_with_options_uses_password() {
     );
 
     // With password: should succeed and yield non-empty content.
-    let with_pw = ExtractionOptions {
-        password: Some("test123".into()),
-        ..Default::default()
-    };
+    let with_pw = ExtractionOptions::default().password("test123");
     let mut stream = archive
         .extract_to_stream_with_options("test_file.txt", &with_pw, StreamBound::DeclaredSize)
         .expect("stream extract with password");

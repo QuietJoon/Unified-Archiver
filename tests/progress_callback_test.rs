@@ -20,13 +20,11 @@ fn test_progress_callback_called() {
 
     let dest = common::temp_test_dir();
 
-    let options = ExtractionOptions {
-        progress: Some(Box::new(move |current, total| {
+    let options =
+        ExtractionOptions::new(dest.clone()).progress(move |current: u64, total: Option<u64>| {
             progress_calls_clone.lock().unwrap().push((current, total));
             ControlFlow::Continue(())
-        })),
-        ..common::default_extraction_options(dest.clone())
-    };
+        });
 
     // Clean up before test
     let _ = std::fs::remove_dir_all(&dest);
@@ -72,8 +70,8 @@ fn test_progress_callback_cancellation() {
 
     let dest = common::temp_test_dir();
 
-    let options = ExtractionOptions {
-        progress: Some(Box::new(move |_current, _total| {
+    let options =
+        ExtractionOptions::new(dest.clone()).progress(move |_current: u64, _total: Option<u64>| {
             let mut n = calls_clone.lock().unwrap();
             *n += 1;
             if *n >= 2 {
@@ -81,9 +79,7 @@ fn test_progress_callback_cancellation() {
             } else {
                 ControlFlow::Continue(())
             }
-        })),
-        ..common::default_extraction_options(dest.clone())
-    };
+        });
 
     let _ = std::fs::remove_dir_all(&dest);
 
@@ -114,13 +110,11 @@ fn test_progress_callback_zip() {
 
     let dest = common::temp_test_dir();
 
-    let options = ExtractionOptions {
-        progress: Some(Box::new(move |current, total| {
+    let options =
+        ExtractionOptions::new(dest.clone()).progress(move |current: u64, total: Option<u64>| {
             progress_calls_clone.lock().unwrap().push((current, total));
             ControlFlow::Continue(())
-        })),
-        ..common::default_extraction_options(dest.clone())
-    };
+        });
 
     // Clean up before test
     let _ = std::fs::remove_dir_all(&dest);
@@ -154,13 +148,11 @@ fn test_progress_callback_7z() {
 
     let dest = common::temp_test_dir();
 
-    let options = ExtractionOptions {
-        progress: Some(Box::new(move |current, total| {
+    let options =
+        ExtractionOptions::new(dest.clone()).progress(move |current: u64, total: Option<u64>| {
             progress_calls_clone.lock().unwrap().push((current, total));
             ControlFlow::Continue(())
-        })),
-        ..common::default_extraction_options(dest.clone())
-    };
+        });
 
     // Clean up before test
     let _ = std::fs::remove_dir_all(&dest);
@@ -193,10 +185,8 @@ fn test_progress_without_callback() {
 
     let dest = common::temp_test_dir();
 
-    let options = ExtractionOptions {
-        progress: None, // No callback
-        ..common::default_extraction_options(dest.clone())
-    };
+    // No callback: `progress` defaults to `None`.
+    let options = ExtractionOptions::new(dest.clone());
 
     // Clean up before test
     let _ = std::fs::remove_dir_all(&dest);

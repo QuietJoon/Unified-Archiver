@@ -25,10 +25,7 @@ fn entry_filter_supports_mutable_state() {
 
     let dest = std::env::temp_dir().join("entry_filter_fnmut_dest");
     let _ = std::fs::remove_dir_all(&dest);
-    let mut opts = ExtractionOptions {
-        destination: dest.clone(),
-        ..Default::default()
-    };
+    let mut opts = ExtractionOptions::new(&dest);
     opts.filter = Some(filter);
 
     // The extract path takes `mut options` and consumes the filter.

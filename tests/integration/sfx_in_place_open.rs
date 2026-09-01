@@ -110,10 +110,7 @@ fn open_sfx_reads_a_zip_payload_in_place() {
     // Extraction reads entry payloads through the same offset-aware
     // handle — the in-place open is not listing-only.
     let out = dir.path().join("out");
-    let options = unified_archive::ExtractionOptions {
-        destination: out.clone(),
-        ..Default::default()
-    };
+    let options = unified_archive::ExtractionOptions::new(&out);
     archive.extract_all(options).expect("extract_all");
     assert!(
         out.join("test_file.txt").is_file(),

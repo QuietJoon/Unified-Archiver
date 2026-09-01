@@ -96,15 +96,10 @@ fn main() -> Result<(), ArchiveError> {
 
 ```rust
 use unified_archive::{Archive, ExtractionOptions};
-use std::path::PathBuf;
 
 let archive = Archive::open("backup.7z")?;
 
-let options = ExtractionOptions {
-    destination: PathBuf::from("output/"),
-    preserve_times: true,
-    ..Default::default()
-};
+let options = ExtractionOptions::new("output/").preserve_times(true);
 
 // extract_all returns ResultWithWarnings<()>: skipped symlinks / hard-links
 // surface here as ArchiveWarning entries — the extraction itself still succeeded.
@@ -151,7 +146,6 @@ println!("Embedded entries: {}", sfx_archive.entry_count()?);
 ### Multi-part Archives
 
 ```rust
-use std::path::PathBuf;
 use unified_archive::{Archive, ExtractionOptions};
 
 // RAR/RAR5 split archives are supported end-to-end in v0.4.0
@@ -161,10 +155,7 @@ if is_multipart {
     println!("Multi-part archive with {} parts", parts.len());
 }
 
-let options = ExtractionOptions {
-    destination: PathBuf::from("./output"),
-    ..Default::default()
-};
+let options = ExtractionOptions::new("./output");
 let result = archive.extract_all(options)?; // Uses all RAR parts automatically
 for warning in &result.warnings {
     eprintln!("warning: {warning}");

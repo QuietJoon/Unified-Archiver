@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-> **This will be 0.5.0, and the bump is forced.** Two independent reasons: six public structs
+> **This will be 0.5.0, and the bump is forced.** Two independent reasons: seven public structs
 > became `#[non_exhaustive]`, and several operations changed which `ArchiveError` variant they
 > return.
 > 0.5.0 is not a number chosen here — every deprecation-timeline block already in the tree names
@@ -33,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > owed before 0.5.0 can honestly be cut — see **Still owed**.
 >
 > **How to read the Breaking list.** Nothing here changes a signature: code that compiled against
-> 0.4.0 still compiles, except for the two `#[non_exhaustive]` items. The rest are *behavioural* —
+> 0.4.0 still compiles, except for the three `#[non_exhaustive]` items. The rest are *behavioural* —
 > calls that returned `Ok` now return `Err`, or return a different `ArchiveError` variant, so a
 > caller matching on variants is the one who has to act.
 
@@ -84,10 +84,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   numeric invariants were the dangerous ones — has had private fields and a builder since
   Innovation I1 and is unaffected.
 
-  *Not in this change:* `ExtractionOptions` is deliberately untouched (OI-0076-005), and
-  `CompressionOptions` keeps its `pub` fields — demoting them needs a `level`/`progress` setter
-  pair that does not exist yet, and demoting without it would leave both unreachable from outside
-  the crate.
+  *Not in this change:* `ExtractionOptions` was deliberately left out of these five
+  (OI-0076-005), and `CompressionOptions` keeps its `pub` fields — demoting them needs a
+  `level`/`progress` setter pair that does not exist yet, and demoting without it would leave both
+  unreachable from outside the crate. **Superseded on the `ExtractionOptions` half:** the entry
+  immediately below closes that deferral, so read the two together — "not in this change" is a
+  statement about the commit that landed the five, not a promise about 0.5.0. The
+  `CompressionOptions` half stands: the setter pair still does not exist.
+
+- **`ExtractionOptions` is `#[non_exhaustive]` too — the seventh struct in this release, and the
+  one the entry above deferred.** External code can no longer build one with a struct literal; the
+  error is the same `E0639` ("cannot create non-exhaustive struct using struct expression").
+  **`..Default::default()` is not an escape hatch here either, and this is the type where that
+  hurts.** The functional-update
+  form is refused by the *syntax*, whatever the base expression is, so both
+  `ExtractionOptions { destination: dest, overwrite: true, ..Default::default() }` and
+  `ExtractionOptions { overwrite: true, ..some_base() }` stop compiling. `..Default::default()` was
+  the idiomatic in-tree spelling for this type, which is exactly why it was split out of the group
+  of five and given a migration of its own rather than a line in a shared list. Field *reads*
+  (`opts.overwrite`) and field *assignment* (`opts.overwrite = true`) still compile: the fields stay
+  `pub`. `Default` is untouched — a bare `ExtractionOptions::default()`, with no literal around it,
+  still compiles outside the crate, and its `destination` is still `PathBuf::from(".")`.
+
+  *Migration.* Unlike the other five, this one did get a constructor, because it needed one.
+  `ExtractionOptions::new(destination)` yields the defaults with the destination filled in, and
+  every remaining field has a consuming setter that chains off it, in the style of the pre-existing
+  `.password(…)`: `.overwrite(bool)`, `.preserve_permissions(bool)`, `.preserve_times(bool)`,
+  `.verify_crc32(bool)`, `.limits(ExtractionLimits)`, `.filter(…)` and `.progress(…)`. The last two
+  box internally — pass the closure or the callback itself, with no `Some` and no `Box::new` around
+  it. *The common shape, before and after:*
+  `ExtractionOptions { destination: dest, overwrite: true, ..Default::default() }` becomes
+  `ExtractionOptions::new(&dest).overwrite(true)`.
+
+  *Two cases stay field assignment, and no setter is owed for either.* An **already-boxed**
+  `Box<dyn ProgressCallback>` does not satisfy `.progress(impl ProgressCallback + 'static)` —
+  there is no impl of the trait for the box — so hold a `let mut` binding and write
+  `opts.progress = Some(the_box);`. And **clearing an `Option` back to `None`** has no setter
+  spelling at all: `opts.progress = None;`, `opts.filter = None;`. A *plain closure* needs neither
+  workaround and should go through `.progress(…)`: `ProgressCallback` has a blanket impl for
+  `FnMut(u64, Option<u64>) -> ControlFlow<()> + Send`.
+
+  *What it buys is the same thing the other five bought* — a field can be added to
+  `ExtractionOptions` without a major bump — and it enforces no invariant, since the nine fields
+  remain `pub` and assignable. `ExtractionLimits`, reachable through `.limits(…)`, is still the
+  place the numeric invariants are enforced, and it has had private fields and a builder since
+  Innovation I1.
 
 - **Creating or modifying an archive now refuses entry names it used to accept.** This is the
   break most likely to bite, and it has a case with no escape hatch, so it is worth reading in
