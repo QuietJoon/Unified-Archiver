@@ -87,6 +87,26 @@ Two rules from the previous run were applied deliberately here. First, the 2026-
 Second, an entry is discharged only when the property it describes is false against the tree — not
 when a ticket comment, a commit message or a changelog entry says it is.
 
+**2026-09-01 Type 1 reconciliation.** The owner asked for every remaining Type 1 item to be
+resolved. Checking the six against the tree first — this file's own rule — the answer is that
+**five were already resolved and the section was stale**, and one had a small genuine remainder.
+Evidence per entry is in "Closed since the previous run"; the summary is that `AD 0027` never
+appeared in `docs/API_REFERENCE.md` at all (`git log -S` finds no commit that ever added it) and no
+dangling citation of it survives in any live document; `module-map.md` and `src/sfx.rs` agree;
+`3f8790`'s `ROADF_ENCHEADERS` short-circuit, `03ddc6`'s typed `MissingVolume` and `642488`'s
+two-checks-around-the-probe ordering are all present and tested. The genuine remainder was in
+`095eee`: `src/archive.rs`, a named AD 0057 D10 large-file target, still carried the last two
+inline `#[cfg(test)]` blocks in the crate while every other target had been cleared. They are now
+`archive/sfx_fallback_error_tests.rs` and `archive/sfx_payload_cap_tests.rs` — 16 tests, module
+paths and test names unchanged, parent 2560 → 2369 lines.
+
+Two things this pass corrected rather than carried forward. `642488`'s entry was filed as **Type 2**
+but sat in the Type 1 section, so it was invisible to anyone reading either heading; and AD 0053's
+2026-08-04 amendment claimed D8's `validate()` hook "never shipped", which was true when written and
+was overtaken by `4f521e0` on 2026-08-21 — AD 0052's own amendment had recorded the landing, so the
+two records disagreed and only AD 0053 was wrong. AD 0053 now carries a 2026-09-01 amendment saying
+so. **Type 1 is empty as of this pass.**
+
 Classification:
 1. **Not blocked, no prior decision needed** — ready to implement.
 2. **Needs decision/discussion next** — a design/product/API choice must be made first.
@@ -96,249 +116,11 @@ Classification:
 
 ## Type 1 — ready to implement
 
-Every Type 1 item from the 2026-08-04 scan landed on 2026-08-04/05 — see "Closed since the
-previous run" below. Three items here were filed on 2026-08-07 by the `manual/` sync
-review, which fixed everything it found inside `manual/` and could not touch `docs/` under
-that skill's one-way rule; the third of those (the manual staleness check) landed on 2026-08-16
-and moved to "Closed since the previous run" on 2026-08-17, leaving two.
-
-**2026-08-21:** a third entry joins them — AD 0057's D10 half (`095eee`). It is type 1 rather than
-type 2 because the owner already ruled on it ("queue and do it", 2026-08-20); it is the one of the
-three "Residual AD deferral targets" halves that was queued rather than retired or reduced to
-bookkeeping. The two `manual/` items are unchanged and both were re-confirmed refuted by the
-2026-08-17 pass; they stay only until `write-diataxis-manual` closes its own tickets.
-
-### `docs/API_REFERENCE.md` cites the retired record id "AD 0027"
-- **Type:** 1
-- **Verified:** no — refuted by reopen 2026-08-16: `docs/API_REFERENCE.md` contains no `AD 0027` citation, and `git log -S'AD 0027' -- docs/API_REFERENCE.md` returns no commit, so it never did; its only `0027` reference is the frontmatter tag `ADR-0027`, which resolves — `MADR-0027` tags itself the same way, and `ADR-NNNN` is the bundle-wide tag namespace (120 documents, 67 uses in `index.yaml`). The 2026-08-12 verification above was wrong. Kept per the outside-scan-set rule until `write-diataxis-manual` closes ticgit:d8262f20 itself
-- **Sources:** ticgit:d8262f20, manual/reference/user/en/errors-and-warnings.md,
-  docs/API_REFERENCE.md, docs/records/MADR-0027-reject-encrypted-archive-creation.md
-- **First seen:** 2026-08-07
-- **Last seen:** 2026-08-17
-- **Description:** `AD 0027` resolves to no record. The ruling is `MADR-0027`, renumbered in
-  the 2026-07-23 consolidation. `src/` was corrected on 2026-08-06 (`58b58363`) and `manual/`
-  on 2026-08-07, leaving `docs/API_REFERENCE.md` as the last hand-maintained document sending
-  readers to a record that does not exist.
-- **Background:** Low severity — the id dangles rather than resolving to the wrong ruling, so
-  a reader notices. Related but distinct from `dd119253`, which owns the dangerous
-  real-but-wrong case, where five reused `AD-` numbers are all real records so an existence
-  check passes on every wrong citation. Files under `docs/investigation/` carry the same id
-  and need no action: that tree is regenerated. **Scope correction (reopen 2026-08-12):** the
-  ticket's premise that `docs/API_REFERENCE.md` is the last hand-maintained document with
-  this defect is false — ten further English documents still cite the retired id, so closing
-  the ticket as filed would leave them. An owner call is owed only on which of those are
-  live: `design-baseline.md`, `intake.md`, `open-issues.md` and the architecture
-  matrix/surface files read as live reference and clearly need the fix, while
-  `decision-review-2026-07-19.md` and the 2026-04-29 deferred-OI plan read as dated
-  historical documents that may be intentionally immutable the way records are.
-  **Landed 2026-08-12:** 21 citations retargeted to `MADR-0027` across the ten live reference documents, and `config-surface.md`'s stale `Option<SecStr>` corrected in the same pass. Records, the dated historical documents and the regenerable `docs/investigation/` tree were deliberately left. The entry stays until `d8262f20` is closed by its filer, which is `write-diataxis-manual`'s call, not this command's.
-
-### AD 0057's D10 half: large-file refactors and the `#[cfg(test)]` move-out (ticgit `095eee`)
-- **Type:** 1
-- **Verified:** yes — ticket read first-hand 2026-08-21 (`open` / `new`, priority 3); the owner's
-  ruling is recorded on it as "queue and do it" (2026-08-20)
-- **Sources:** ticgit:095eee, docs/records/AD-0057-r0068-d10-large-file-refactor-deferred.md,
-  docs/architecture/decision-review-2026-07-19.md
-- **First seen:** 2026-08-21
-- **Last seen:** 2026-08-21
-- **Description:** Move the `#[cfg(test)]` modules out of the large production files into sibling
-  `tests.rs` children following the `src/inspection.rs` + `src/inspection/tests.rs` precedent, and
-  either perform AD 0057's D10 large-file refactors or restate them with a concrete trigger. AD 0057
-  is then amended with what was done and what stays deferred.
-- **Background:** Type 1 rather than Type 2 because the decision has been made — this is the third
-  of the three orphaned deferral targets the retired "Residual AD deferral targets" entry carried,
-  and it is the one the owner queued rather than retired. The AD 0052 half was ruled and closed
-  (`0a1e54f8`); the AD 0055 half was ruled bookkeeping and discharged by an amendment on that
-  record. The ticket's own scale note is the thing to plan around: `src/ffi/wrapper.rs` and
-  `src/ffi/zip_wrapper.rs` both carry substantial inline test modules, so the move-out is the bulk
-  of the work, and its acceptance criterion is that no test is lost or silently disabled — compare
-  test counts before and after, which is the same trap OI-0056-010 was filed for. The current
-  baseline to compare against is 38 suites / 1865 passed / 0 failed / 13 ignored (1833 was the pre-change baseline; the
-  figure first recorded here was that baseline rather than the observed run).
-  **Filed with its work already in flight (2026-08-21):** at the time this entry was written the
-  working tree already held untracked `src/ffi/wrapper/{tests.rs,staged_length_tests.rs}` and
-  `src/ffi/sevenz_wrapper/tests.rs` with roughly 2,700 lines removed from
-  `wrapper.rs` / `sevenz_wrapper.rs` / `zip_wrapper.rs` — i.e. the move-out is being done
-  concurrently and is uncommitted. The entry is filed anyway rather than skipped, because the
-  ticket is open and an unfiled item is invisible; but it is stated here so this file does not
-  repeat the 2026-08-16 mistake of describing as pending something the tree already carries. Whoever
-  commits the move-out should discharge this entry in the same pass and record the before/after test
-  counts, which is the only part of the acceptance criteria a later reader cannot reconstruct.
-  **Landed 2026-08-21, and here are those counts.** The move-out is complete and lossless. Per-module
-  totals after, each matching the count in the file it moved to: `ffi::wrapper` 37 (33 in
-  `wrapper/tests.rs` plus 4 in `wrapper/staged_length_tests.rs`), `ffi::zip_wrapper` 34
-  (`zip_wrapper/tests.rs`), `ffi::sevenz_wrapper` 23 (`sevenz_wrapper/tests.rs`) — 94 tests in four
-  new children, no test lost and none silently disabled. Nothing was widened from private to
-  `pub(crate)` to make a move compile, which the ticket forbade because it enlarges the internal
-  surface by stealth.
-  One follow-on the same review caught: the wave that emptied those three FFI files *added* a
-  126-line inline `#[cfg(test)]` block to `src/archive.rs` — a named D10 large-file target — on the
-  opposite principle. It is now `src/archive/in_place_payload_tests.rs`; `archive::` reports 69
-  passed before and after with the same 4 in-place tests, and the excision was 3 lines added and 136
-  removed, so nothing else moved with it.
-  **What is left of D10 is not uniformly deferred, and the record is precise about which part is
-  not.** AD 0057's amendment states the trigger: the two `src/ffi/zip_wrapper.rs` seams "may land
-  as soon as a reviewer has bandwidth, since they depend on neither D2 nor D9" — the raw
-  central-directory value layer (`RawRecord`, `RawCentralDirectory`, the exact central-directory
-  read), which does not touch the `ZipArchive` facade at all, and the AES/CRC-exemption cluster
-  (the AES extra-field constants, the vendor-version probe, the CRC exemption predicate, the
-  counted CRC drain).
-  **Both landed 2026-08-21.** `src/ffi/zip_wrapper/raw_directory.rs` (192 lines) and
-  `src/ffi/zip_wrapper/aes.rs` (121 lines); the parent went 1715 → 1445 lines. The `tests` child is
-  byte-identical to the previous commit, so no test was added, removed, renamed or re-pathed, and
-  `ffi::zip_wrapper` reports the same 34 passed. Nothing became `pub` or `pub(crate)`: fourteen
-  items are `pub(super)`, which on a child reaches exactly the `zip_wrapper` subtree a
-  module-private item already reached, and five items are now *more* encapsulated than before.
-  AD 0057 carries the amendment, including the two things a reference grep got wrong that the
-  compiler caught — `raw_len` is called from the sibling `tests` child, not just the parent, and
-  the parent's `Read` import went unused once the blocks left.
-  Genuinely deferred, and waiting on named work rather than on bandwidth: `src/ffi/wrapper.rs`
-  (2496 production LOC, the largest remaining offender, first in the queue once D2 clears) and
-  everything else, all of which waits for D2's backend-enum reshape and D9's libarchive wrapper
-  split. `src/ffi/sevenz_wrapper.rs` is explicitly **not** to be split mechanically — nearly its
-  whole production half is one `impl` block, so the concern boundaries have to be named inside
-  that impl first, which is D2/D4 work; splitting on the trailing free functions would produce a
-  file that is smaller without being clearer. `src/archive.rs` stays oversized and stays deferred;
-  only its test block left.
-  The reason the refactors were not mixed into the move-out: a judgement-heavy refactor inside a
-  mechanical move makes both unreviewable.
-
-### `module-map.md` lists a `pub(crate)` module as an sfx re-export
-- **Type:** 1
-- **Verified:** no — refuted by reopen 2026-08-16: the document now says what the claim says it fails to say. `docs/implementation/module-map.md` names `limits` and `signatures` as `pub(crate)` and lists the four re-exported items (`detect_sfx`, `SfxConfidence`, `SfxDetectionResult`, `StubType`), and its `src/sfx/signatures.rs` row adds "none reachable from outside the crate"; `src/sfx.rs` reads `pub(crate) mod signatures;`. Document and code agree. Kept per the outside-scan-set rule until `write-diataxis-manual` closes ticgit:0477055a itself
-- **Sources:** ticgit:0477055a, manual/reference/user/en/public-api-surface.md,
-  docs/implementation/module-map.md, src/sfx.rs
-- **First seen:** 2026-08-07
-- **Last seen:** 2026-08-17
-- **Description:** The `src/sfx.rs` row reads "Re-exports submodules (`detection`, `result`,
-  `signatures`, `stub_types`)". `signatures` is `pub(crate)` and is not re-exported, and what
-  the module re-exports is four items (`detect_sfx`, `SfxConfidence`, `SfxDetectionResult`,
-  `StubType`), not submodules.
-- **Background:** Low severity, but the row is the map a reader uses to decide what is public
-  surface, and the manual's public-API reference states the correct split — so the two
-  documents disagree.
-  **Landed 2026-08-12:** the `src/sfx.rs` row now names the public submodules, states that `limits` and `signatures` are `pub(crate)`, and lists the four re-exported items; `src/sfx/limits.rs` gained the row it never had. No code change — `pub(crate)` is correct. The entry stays until `0477055a` is closed by its filer.
-
-### Header-encrypted RAR archives report no recovery record (ticgit `3f8790`)
-- **Type:** 1
-- **Verified:** yes — 2026-08-26, first-hand against a fixture built for it. `unrar lt -ptest123 tests/fixtures/test_encrypted_recovery.rar` prints "Details: RAR 5, recovery record, encrypted headers"; `Archive::open_encrypted(path, "test123").has_recovery_record()` returns `false`
-- **Sources:** ticgit:3f8790, src/ffi/wrapper.rs, tests/recovery_percentage_edge_cases.rs,
-  tests/fixtures/test_encrypted_recovery.rar
-- **First seen:** 2026-08-26
-- **Last seen:** 2026-08-26
-- **Description:** `UnrarArchive::open_with_mode` stores `flags: open_data.flags` from
-  `RAROpenArchiveEx`, and `RARSetPassword` is called only afterwards. A `-hp` archive keeps its
-  main header inside a HEAD_CRYPT block, so it cannot be decrypted during the open and the
-  captured flags word never gains `ROADF_RECOVERY`; nothing revisits it later.
-- **Background:** Not recovery-specific — every main-header flag (`ROADF_SOLID`,
-  `ROADF_COMMENT`, `ROADF_VOLUME`, …) is lost the same way for header-encrypted archives. The
-  fix is to make the password available to the open itself: a `UCM_NEEDPASSWORD` /
-  `UCM_NEEDPASSWORDW` callback installed before `RAROpenArchiveEx`, or a re-open once the
-  password is known, inside AD 0019's process-wide lock. Type 1 rather than 2 because there is
-  no scope question — the answer is simply wrong today.
-  `test_recovery_percentage_header_encrypted_recovery_archive` asserts the defective answer on
-  purpose, so a fix breaks the test and forces both to move together.
-- **Landed 2026-08-26.** The password now reaches `RAROpenArchiveEx` through the SDK's
-  `UCM_NEEDPASSWORD` request, so the main header decrypts while the flags word is being derived.
-  Registration is conditional on having a password, which the fix had to learn the hard way: a
-  callback that *declines* the request makes the SDK proceed as though an empty password had been
-  given, which turned the no-password open of a header-encrypted archive from success into
-  `ERAR_MISSING_PASSWORD`. That open must keep working — reporting that a file is encrypted is how
-  a caller learns which password to ask for — so with no password the open is left byte-for-byte as
-  it was and the callback is installed immediately after. `test_is_encrypted_encrypted_rar` caught
-  the regression and now documents the invariant.
-
-  The fix exposed a second fault behind it: with the flag correct,
-  `recovery_percentage()`'s password-less byte walk became reachable for `-hp` archives for the
-  first time and reported `Corruption: "RAR5 header extends past end of archive"` — a false damage
-  report on a sound archive. It now short-circuits on `ROADF_ENCHEADERS`, so the answer is
-  "the record is there, its size is not knowable here": `true` and `None`, which the documented
-  contract already allows.
-
-  Proven non-vacuous: removing the open-time registration puts `has_recovery_record()` back to
-  `false` and fails the test with the message written for exactly that.
-
-### External RAR creator design hardening — partial (ticgit `642488`)
-- **Type:** 2
-- **Verified:** yes — 2026-08-27, read first-hand in `src/external/rar/session.rs`
-- **Sources:** ticgit:642488, docs/project/open-issues.md (OI-0076-006),
-  src/external/rar/session.rs, src/external/rar/argv.rs, src/ffi/common.rs
-- **First seen:** 2026-08-12
-- **Last seen:** 2026-08-27
-- **Description:** Two residual items on the external RAR creation lane: the destination-occupied
-  race, and archive-internal path layout.
-- **Landed 2026-08-27 (the ordering half).** `create_archive` checked the destination once, before
-  `probe_binary` — which spawns `rar` and waits for its banner — while its comment claimed the check
-  ran "immediately before the run". The check now runs twice: once before the probe (so an occupied
-  destination still costs no child process, which
-  `an_occupied_output_is_refused_without_running_anything` pins on purpose) and once after, adjacent
-  to the create. Moving the probe earlier would have closed the same gap but spawned on every
-  occupied destination, trading away the property that test protects. Pinned by ordering assertions
-  in `tests/external_rar_cli_contract.rs`, proven non-vacuous by deleting the second check.
-- **Still open, and both need an owner call:**
-  1. *Closing* the race rather than narrowing it — create under an exclusive temporary name and
-     install with `ffi::common::rename_noclobber`, which already exists in three cfg arms with unit
-     tests. Constraint to record before building it: `rar` writes companion files for `-v` (volumes),
-     `-rv` and `-rr`, and a single-file rename is wrong the moment any of those is used. `argv.rs`
-     emits none of them today, so this is a forward constraint rather than a present bug. The
-     alternative OI-0076-006 floated — a "fail if it already exists" switch — **does not exist** in
-     the vendored WinRAR switch table.
-  2. *Layout.* `argv.rs` emits no `-ep` switch at all, so `/Users/me/project/src` is stored as
-     `Users/me/project/src/main.rs`. `-ep1` stores `src/main.rs`, matching what the native creator
-     already promises. Two argv elements, no type change.
-- **Owner ruling, 2026-09-01 — both remaining items stay deferred, priority unchanged.** Asked
-  whether item 2 in particular should be raised, the answer is no, and the earlier suggestion to
-  raise it is withdrawn: present exposure is zero. `pub mod external` is gated on
-  `all(target_os = "windows", feature = "external-rar-create")`, that feature is not in `default`,
-  nothing inside the crate calls it, and no version of this crate has ever been published to a
-  registry. Neither the destination race nor the `-ep1` layout can reach a consumer before the
-  Windows lane is picked up deliberately, and both are cheap to do at that point. One caveat to
-  carry forward rather than rediscover: `-ep1`'s own documented behaviour is "Exclude base dir from
-  names… Ignored if path includes wildcards", so the layout fix is not unconditional and needs a
-  wildcard-path test when it does land.
-
-### `UnrarAbort::MissingVolume` never reaches a caller (ticgit `03ddc6`)
-- **Type:** 1
-- **Verified:** yes — 2026-08-26. Extraction of a set with its middle volume removed reports `ArchiveError::Io` / "UnRAR ERAR_EOPEN"; instrumenting `unrar_process_callback` logged nothing at all for that scenario, so the trampoline is never entered
-- **Sources:** ticgit:03ddc6, ticgit:d3cfce, src/ffi/wrapper.rs,
-  src/ffi/native/unrar/volume.cpp, tests/rar_multivolume_test.rs
-- **First seen:** 2026-08-26
-- **Last seen:** 2026-08-26
-- **Description:** `d3cfce` added the typed `MissingVolume` abort and a message telling the
-  caller to run `parse_volume_set` and read `VolumeSetReport::defects()`. That message cannot
-  reach a caller on the extraction path, because this crate registers its UnRAR callback per
-  operation — immediately before `RARProcessFile`, since `UnrarExtractContext` borrows caller
-  state — and nothing is registered at the moment UnRAR asks for the next volume.
-- **Background:** The vendored SDK explains the observable. `DllVolChange` ends with
-  `if (DllVolAborted || Cmd->Callback==NULL && Cmd->ChangeVolProc==NULL) { Cmd->DllError=ERAR_EOPEN; return false; }`,
-  so an abort and a missing callback are indistinguishable from outside, and the second case
-  never calls back. The practical consequence is that **boundedness on this path comes from the
-  SDK's own no-callback branch, not from the `d3cfce` fix** — that branch exists, in its author's
-  words, "to prevent an infinite loop if no callback is defined". The five callback unit tests in
-  `src/ffi/wrapper/tests.rs` remain valid for the paths where a callback *is* installed. Fixing
-  the diagnostic needs a handle-owned callback context; the ownership shape is an implementation
-  choice, not an owner decision, which is why this is Type 1.
-- **Landed 2026-08-26.** The callback context is now boxed on `UnrarArchive` and registered for the
-  handle's whole life — through `RAROpenArchiveDataEx` when a password makes that possible, and by
-  `RARSetCallback` immediately after the open otherwise. The extract path still installs its own
-  context for one `RARProcessFile`, but now **restores** the handle callback instead of clearing it
-  to `None`, so the walks between extractions keep answering. Extracting a set with its middle
-  volume removed reports the typed `MissingVolume` corruption error with the
-  `VolumeSetReport::defects()` advice, and `tests/rar_multivolume_test.rs` asserts both that and
-  the absence of `ERAR_EOPEN`.
-
-  Two smaller pieces that the fix required. `shared_abort_error` now holds the wording for the
-  abort reasons that need nothing but the archive path, so the extract and handle trampolines
-  cannot drift on the recovery advice — which named a non-existent method once already. And
-  `UnrarArchive::unrar_error` consults the context before falling back to `map_unrar_error`, at the
-  four sites where a walk can meet a volume request: header read, skip, directory extract, and the
-  integrity walk.
-
-  Proven non-vacuous: removing the registration fails the multi-volume test. The restore-not-clear
-  half has no behavioural test available — a complete volume set cannot be extracted at all
-  (ticgit 3b4d15), so a volume request *after* a successful extraction is unreachable — so it is
-  pinned by a source guard that rejects any `RARSetCallback(..., None, ...)`, itself proven by
-  injecting one.
+Empty as of the 2026-09-01 reconciliation described in the header. Five entries were discharged
+as already-resolved and one after its genuine remainder landed; all six moved to "Closed since
+the previous run" with their evidence. Two of the six keep an OPEN ticket that is not this
+command's to close — `d8262f20` and `0477055a` belong to `write-diataxis-manual` — so the
+entries are discharged on the merits while those tickets stay with their filer.
 
 ## Type 2 — needs decision
 
@@ -1487,6 +1269,301 @@ All nine are described in `CHANGELOG.md`'s `[Unreleased]` section, which is the 
 account of what changed and in which direction.
 
 ## Closed since the previous run
+
+### Discharged 2026-09-01 — the whole of Type 1
+
+Six entries, each checked against the tree before being discharged. Verdicts and the evidence they
+rest on:
+
+- **`docs/API_REFERENCE.md` cites the retired record id "AD 0027"** — the premise was never true.
+  The file contains no such citation now, and `git log -S'AD 0027' -- docs/API_REFERENCE.md` returns
+  no commit, so it never did; its only `0027` reference is the frontmatter tag `ADR-0027`, which is
+  the bundle-wide tag namespace rather than a citation, and `MADR-0027` tags itself the same way.
+  The real work — 21 citations retargeted to `MADR-0027` across ten live reference documents on
+  2026-08-12 — did land: no dangling `AD 0027` survives in any live document. What survives is four
+  kinds of non-citation, checked one by one: two content-immutable record bodies (`MADR-0012` and
+  `MADR-0027`, the latter being the record the id resolves *to*), two dated historical documents
+  (`decision-review-2026-07-19.md` and the 2026-04-29 deferred-OI plan), this file's own five
+  self-references inside the entry describing the defect, and two `manual/` pages whose text is
+  *about* the retired id rather than citing it. Ticket `d8262f20` stays open and stays with
+  `write-diataxis-manual`.
+- **`module-map.md` lists a `pub(crate)` module as an sfx re-export** — document and code agree.
+  `src/sfx.rs` reads `pub(crate) mod limits;` and `pub(crate) mod signatures;` and re-exports
+  exactly four items; `module-map.md`'s `src/sfx.rs` row says precisely that, names the four items,
+  and both `signatures.rs` and `limits.rs` have their own rows, the latter added in the same pass.
+  No code change was ever owed — `pub(crate)` was correct. Ticket `0477055a` stays open and stays
+  with `write-diataxis-manual`.
+- **Header-encrypted RAR archives report no recovery record (`3f8790`)** — landed and reachable.
+  `parse_recovery_percentage` short-circuits on `ROADF_ENCHEADERS` before the raw header walk, so
+  the walk no longer reads `HEAD_CRYPT` ciphertext as a header and no longer reports `Corruption`
+  for an archive `unrar t` calls sound; `tests/recovery_percentage_edge_cases.rs` pins the
+  header-encrypted × recovery-record combination.
+- **`UnrarAbort::MissingVolume` never reaches a caller (`03ddc6`)** — landed and reachable. The
+  variant exists, is *set* inside the volume-change callback rather than merely being
+  constructible, and `tests/rar_multivolume_test.rs` pins that a set with its middle volume removed
+  now reports the typed diagnostic instead of a generic `Io` / "UnRAR ERAR_EOPEN". This was the
+  ticket's whole difficulty: `DllVolChange` maps both an abort and a no-callback case to
+  `ERAR_EOPEN`, so a fix can look right while never entering the trampoline.
+- **External RAR creator design hardening — partial (`642488`)** — the ordering half is present:
+  `create_archive` refuses an occupied destination at step 2, *before* `probe_binary` spawns `rar`
+  and waits for its banner at step 3, and checks again at step 4 adjacent to the create. Filed as
+  **Type 2** while sitting in the Type 1 section, which is corrected by this move. The two
+  remaining items are deferred by owner ruling of 2026-09-01, recorded on the entry itself; a
+  caveat worth not rediscovering is that `-ep1`'s documented behaviour is "Ignored if path includes
+  wildcards", so the layout fix needs a wildcard-path test when it lands. One honest limit on this
+  verification: parts of `src/external/rar.rs` are behind
+  `cfg(all(target_os = "windows", feature = "external-rar-create"))` and compile on no host in this
+  repo, which is tracked as its own Type 3 entry.
+- **AD 0057's D10 half (`095eee`)** — the remainder landed 2026-09-01 and the ticket is closed.
+  `src/archive.rs` was the last file in the crate carrying inline `#[cfg(test)]` blocks; its
+  `sfx_fallback_error_tests` (11 tests) and `sfx_payload_cap_tests` (5 tests) are now sibling
+  children, module paths and test names unchanged, parent 2560 → 2369 lines. Verified that the four
+  earlier children exist and hold their tests, and that the three large FFI files now carry only
+  `mod tests;`-style declarations. The two AD 0057 seams that were bandwidth-gated rather than
+  dependency-gated are present at their claimed sizes (`zip_wrapper/raw_directory.rs` 192 lines,
+  `zip_wrapper/aes.rs` 121 lines). What is left of D10 waits on D2's backend-enum reshape, which has
+  not landed; D1 is *not* a blocker for it or for anything else — `pub(crate) trait ReadBackend`
+  ships with four impls, and D8's `validate()` hook, which AD 0053's 2026-08-04 amendment said had
+  never shipped, landed in `4f521e0` on 2026-08-21. AD 0053 carries a 2026-09-01 amendment
+  correcting that.
+
+The six entries as they stood, preserved verbatim rather than summarised, because their dated
+verification notes are the record of how each conclusion was reached:
+
+### `docs/API_REFERENCE.md` cites the retired record id "AD 0027"
+- **Type:** 1
+- **Verified:** no — refuted by reopen 2026-08-16: `docs/API_REFERENCE.md` contains no `AD 0027` citation, and `git log -S'AD 0027' -- docs/API_REFERENCE.md` returns no commit, so it never did; its only `0027` reference is the frontmatter tag `ADR-0027`, which resolves — `MADR-0027` tags itself the same way, and `ADR-NNNN` is the bundle-wide tag namespace (120 documents, 67 uses in `index.yaml`). The 2026-08-12 verification above was wrong. Kept per the outside-scan-set rule until `write-diataxis-manual` closes ticgit:d8262f20 itself
+- **Sources:** ticgit:d8262f20, manual/reference/user/en/errors-and-warnings.md,
+  docs/API_REFERENCE.md, docs/records/MADR-0027-reject-encrypted-archive-creation.md
+- **First seen:** 2026-08-07
+- **Last seen:** 2026-08-17
+- **Description:** `AD 0027` resolves to no record. The ruling is `MADR-0027`, renumbered in
+  the 2026-07-23 consolidation. `src/` was corrected on 2026-08-06 (`58b58363`) and `manual/`
+  on 2026-08-07, leaving `docs/API_REFERENCE.md` as the last hand-maintained document sending
+  readers to a record that does not exist.
+- **Background:** Low severity — the id dangles rather than resolving to the wrong ruling, so
+  a reader notices. Related but distinct from `dd119253`, which owns the dangerous
+  real-but-wrong case, where five reused `AD-` numbers are all real records so an existence
+  check passes on every wrong citation. Files under `docs/investigation/` carry the same id
+  and need no action: that tree is regenerated. **Scope correction (reopen 2026-08-12):** the
+  ticket's premise that `docs/API_REFERENCE.md` is the last hand-maintained document with
+  this defect is false — ten further English documents still cite the retired id, so closing
+  the ticket as filed would leave them. An owner call is owed only on which of those are
+  live: `design-baseline.md`, `intake.md`, `open-issues.md` and the architecture
+  matrix/surface files read as live reference and clearly need the fix, while
+  `decision-review-2026-07-19.md` and the 2026-04-29 deferred-OI plan read as dated
+  historical documents that may be intentionally immutable the way records are.
+  **Landed 2026-08-12:** 21 citations retargeted to `MADR-0027` across the ten live reference documents, and `config-surface.md`'s stale `Option<SecStr>` corrected in the same pass. Records, the dated historical documents and the regenerable `docs/investigation/` tree were deliberately left. The entry stays until `d8262f20` is closed by its filer, which is `write-diataxis-manual`'s call, not this command's.
+
+### AD 0057's D10 half: large-file refactors and the `#[cfg(test)]` move-out (ticgit `095eee`)
+- **Type:** 1
+- **Verified:** yes — ticket read first-hand 2026-08-21 (`open` / `new`, priority 3); the owner's
+  ruling is recorded on it as "queue and do it" (2026-08-20)
+- **Sources:** ticgit:095eee, docs/records/AD-0057-r0068-d10-large-file-refactor-deferred.md,
+  docs/architecture/decision-review-2026-07-19.md
+- **First seen:** 2026-08-21
+- **Last seen:** 2026-08-21
+- **Description:** Move the `#[cfg(test)]` modules out of the large production files into sibling
+  `tests.rs` children following the `src/inspection.rs` + `src/inspection/tests.rs` precedent, and
+  either perform AD 0057's D10 large-file refactors or restate them with a concrete trigger. AD 0057
+  is then amended with what was done and what stays deferred.
+- **Background:** Type 1 rather than Type 2 because the decision has been made — this is the third
+  of the three orphaned deferral targets the retired "Residual AD deferral targets" entry carried,
+  and it is the one the owner queued rather than retired. The AD 0052 half was ruled and closed
+  (`0a1e54f8`); the AD 0055 half was ruled bookkeeping and discharged by an amendment on that
+  record. The ticket's own scale note is the thing to plan around: `src/ffi/wrapper.rs` and
+  `src/ffi/zip_wrapper.rs` both carry substantial inline test modules, so the move-out is the bulk
+  of the work, and its acceptance criterion is that no test is lost or silently disabled — compare
+  test counts before and after, which is the same trap OI-0056-010 was filed for. The current
+  baseline to compare against is 38 suites / 1865 passed / 0 failed / 13 ignored (1833 was the pre-change baseline; the
+  figure first recorded here was that baseline rather than the observed run).
+  **Filed with its work already in flight (2026-08-21):** at the time this entry was written the
+  working tree already held untracked `src/ffi/wrapper/{tests.rs,staged_length_tests.rs}` and
+  `src/ffi/sevenz_wrapper/tests.rs` with roughly 2,700 lines removed from
+  `wrapper.rs` / `sevenz_wrapper.rs` / `zip_wrapper.rs` — i.e. the move-out is being done
+  concurrently and is uncommitted. The entry is filed anyway rather than skipped, because the
+  ticket is open and an unfiled item is invisible; but it is stated here so this file does not
+  repeat the 2026-08-16 mistake of describing as pending something the tree already carries. Whoever
+  commits the move-out should discharge this entry in the same pass and record the before/after test
+  counts, which is the only part of the acceptance criteria a later reader cannot reconstruct.
+  **Landed 2026-08-21, and here are those counts.** The move-out is complete and lossless. Per-module
+  totals after, each matching the count in the file it moved to: `ffi::wrapper` 37 (33 in
+  `wrapper/tests.rs` plus 4 in `wrapper/staged_length_tests.rs`), `ffi::zip_wrapper` 34
+  (`zip_wrapper/tests.rs`), `ffi::sevenz_wrapper` 23 (`sevenz_wrapper/tests.rs`) — 94 tests in four
+  new children, no test lost and none silently disabled. Nothing was widened from private to
+  `pub(crate)` to make a move compile, which the ticket forbade because it enlarges the internal
+  surface by stealth.
+  One follow-on the same review caught: the wave that emptied those three FFI files *added* a
+  126-line inline `#[cfg(test)]` block to `src/archive.rs` — a named D10 large-file target — on the
+  opposite principle. It is now `src/archive/in_place_payload_tests.rs`; `archive::` reports 69
+  passed before and after with the same 4 in-place tests, and the excision was 3 lines added and 136
+  removed, so nothing else moved with it.
+  **What is left of D10 is not uniformly deferred, and the record is precise about which part is
+  not.** AD 0057's amendment states the trigger: the two `src/ffi/zip_wrapper.rs` seams "may land
+  as soon as a reviewer has bandwidth, since they depend on neither D2 nor D9" — the raw
+  central-directory value layer (`RawRecord`, `RawCentralDirectory`, the exact central-directory
+  read), which does not touch the `ZipArchive` facade at all, and the AES/CRC-exemption cluster
+  (the AES extra-field constants, the vendor-version probe, the CRC exemption predicate, the
+  counted CRC drain).
+  **Both landed 2026-08-21.** `src/ffi/zip_wrapper/raw_directory.rs` (192 lines) and
+  `src/ffi/zip_wrapper/aes.rs` (121 lines); the parent went 1715 → 1445 lines. The `tests` child is
+  byte-identical to the previous commit, so no test was added, removed, renamed or re-pathed, and
+  `ffi::zip_wrapper` reports the same 34 passed. Nothing became `pub` or `pub(crate)`: fourteen
+  items are `pub(super)`, which on a child reaches exactly the `zip_wrapper` subtree a
+  module-private item already reached, and five items are now *more* encapsulated than before.
+  AD 0057 carries the amendment, including the two things a reference grep got wrong that the
+  compiler caught — `raw_len` is called from the sibling `tests` child, not just the parent, and
+  the parent's `Read` import went unused once the blocks left.
+  Genuinely deferred, and waiting on named work rather than on bandwidth: `src/ffi/wrapper.rs`
+  (2496 production LOC, the largest remaining offender, first in the queue once D2 clears) and
+  everything else, all of which waits for D2's backend-enum reshape and D9's libarchive wrapper
+  split. `src/ffi/sevenz_wrapper.rs` is explicitly **not** to be split mechanically — nearly its
+  whole production half is one `impl` block, so the concern boundaries have to be named inside
+  that impl first, which is D2/D4 work; splitting on the trailing free functions would produce a
+  file that is smaller without being clearer. `src/archive.rs` stays oversized and stays deferred;
+  only its test block left.
+  The reason the refactors were not mixed into the move-out: a judgement-heavy refactor inside a
+  mechanical move makes both unreviewable.
+
+### `module-map.md` lists a `pub(crate)` module as an sfx re-export
+- **Type:** 1
+- **Verified:** no — refuted by reopen 2026-08-16: the document now says what the claim says it fails to say. `docs/implementation/module-map.md` names `limits` and `signatures` as `pub(crate)` and lists the four re-exported items (`detect_sfx`, `SfxConfidence`, `SfxDetectionResult`, `StubType`), and its `src/sfx/signatures.rs` row adds "none reachable from outside the crate"; `src/sfx.rs` reads `pub(crate) mod signatures;`. Document and code agree. Kept per the outside-scan-set rule until `write-diataxis-manual` closes ticgit:0477055a itself
+- **Sources:** ticgit:0477055a, manual/reference/user/en/public-api-surface.md,
+  docs/implementation/module-map.md, src/sfx.rs
+- **First seen:** 2026-08-07
+- **Last seen:** 2026-08-17
+- **Description:** The `src/sfx.rs` row reads "Re-exports submodules (`detection`, `result`,
+  `signatures`, `stub_types`)". `signatures` is `pub(crate)` and is not re-exported, and what
+  the module re-exports is four items (`detect_sfx`, `SfxConfidence`, `SfxDetectionResult`,
+  `StubType`), not submodules.
+- **Background:** Low severity, but the row is the map a reader uses to decide what is public
+  surface, and the manual's public-API reference states the correct split — so the two
+  documents disagree.
+  **Landed 2026-08-12:** the `src/sfx.rs` row now names the public submodules, states that `limits` and `signatures` are `pub(crate)`, and lists the four re-exported items; `src/sfx/limits.rs` gained the row it never had. No code change — `pub(crate)` is correct. The entry stays until `0477055a` is closed by its filer.
+
+### Header-encrypted RAR archives report no recovery record (ticgit `3f8790`)
+- **Type:** 1
+- **Verified:** yes — 2026-08-26, first-hand against a fixture built for it. `unrar lt -ptest123 tests/fixtures/test_encrypted_recovery.rar` prints "Details: RAR 5, recovery record, encrypted headers"; `Archive::open_encrypted(path, "test123").has_recovery_record()` returns `false`
+- **Sources:** ticgit:3f8790, src/ffi/wrapper.rs, tests/recovery_percentage_edge_cases.rs,
+  tests/fixtures/test_encrypted_recovery.rar
+- **First seen:** 2026-08-26
+- **Last seen:** 2026-08-26
+- **Description:** `UnrarArchive::open_with_mode` stores `flags: open_data.flags` from
+  `RAROpenArchiveEx`, and `RARSetPassword` is called only afterwards. A `-hp` archive keeps its
+  main header inside a HEAD_CRYPT block, so it cannot be decrypted during the open and the
+  captured flags word never gains `ROADF_RECOVERY`; nothing revisits it later.
+- **Background:** Not recovery-specific — every main-header flag (`ROADF_SOLID`,
+  `ROADF_COMMENT`, `ROADF_VOLUME`, …) is lost the same way for header-encrypted archives. The
+  fix is to make the password available to the open itself: a `UCM_NEEDPASSWORD` /
+  `UCM_NEEDPASSWORDW` callback installed before `RAROpenArchiveEx`, or a re-open once the
+  password is known, inside AD 0019's process-wide lock. Type 1 rather than 2 because there is
+  no scope question — the answer is simply wrong today.
+  `test_recovery_percentage_header_encrypted_recovery_archive` asserts the defective answer on
+  purpose, so a fix breaks the test and forces both to move together.
+- **Landed 2026-08-26.** The password now reaches `RAROpenArchiveEx` through the SDK's
+  `UCM_NEEDPASSWORD` request, so the main header decrypts while the flags word is being derived.
+  Registration is conditional on having a password, which the fix had to learn the hard way: a
+  callback that *declines* the request makes the SDK proceed as though an empty password had been
+  given, which turned the no-password open of a header-encrypted archive from success into
+  `ERAR_MISSING_PASSWORD`. That open must keep working — reporting that a file is encrypted is how
+  a caller learns which password to ask for — so with no password the open is left byte-for-byte as
+  it was and the callback is installed immediately after. `test_is_encrypted_encrypted_rar` caught
+  the regression and now documents the invariant.
+
+  The fix exposed a second fault behind it: with the flag correct,
+  `recovery_percentage()`'s password-less byte walk became reachable for `-hp` archives for the
+  first time and reported `Corruption: "RAR5 header extends past end of archive"` — a false damage
+  report on a sound archive. It now short-circuits on `ROADF_ENCHEADERS`, so the answer is
+  "the record is there, its size is not knowable here": `true` and `None`, which the documented
+  contract already allows.
+
+  Proven non-vacuous: removing the open-time registration puts `has_recovery_record()` back to
+  `false` and fails the test with the message written for exactly that.
+
+### External RAR creator design hardening — partial (ticgit `642488`)
+- **Type:** 2
+- **Verified:** yes — 2026-08-27, read first-hand in `src/external/rar/session.rs`
+- **Sources:** ticgit:642488, docs/project/open-issues.md (OI-0076-006),
+  src/external/rar/session.rs, src/external/rar/argv.rs, src/ffi/common.rs
+- **First seen:** 2026-08-12
+- **Last seen:** 2026-08-27
+- **Description:** Two residual items on the external RAR creation lane: the destination-occupied
+  race, and archive-internal path layout.
+- **Landed 2026-08-27 (the ordering half).** `create_archive` checked the destination once, before
+  `probe_binary` — which spawns `rar` and waits for its banner — while its comment claimed the check
+  ran "immediately before the run". The check now runs twice: once before the probe (so an occupied
+  destination still costs no child process, which
+  `an_occupied_output_is_refused_without_running_anything` pins on purpose) and once after, adjacent
+  to the create. Moving the probe earlier would have closed the same gap but spawned on every
+  occupied destination, trading away the property that test protects. Pinned by ordering assertions
+  in `tests/external_rar_cli_contract.rs`, proven non-vacuous by deleting the second check.
+- **Still open, and both need an owner call:**
+  1. *Closing* the race rather than narrowing it — create under an exclusive temporary name and
+     install with `ffi::common::rename_noclobber`, which already exists in three cfg arms with unit
+     tests. Constraint to record before building it: `rar` writes companion files for `-v` (volumes),
+     `-rv` and `-rr`, and a single-file rename is wrong the moment any of those is used. `argv.rs`
+     emits none of them today, so this is a forward constraint rather than a present bug. The
+     alternative OI-0076-006 floated — a "fail if it already exists" switch — **does not exist** in
+     the vendored WinRAR switch table.
+  2. *Layout.* `argv.rs` emits no `-ep` switch at all, so `/Users/me/project/src` is stored as
+     `Users/me/project/src/main.rs`. `-ep1` stores `src/main.rs`, matching what the native creator
+     already promises. Two argv elements, no type change.
+- **Owner ruling, 2026-09-01 — both remaining items stay deferred, priority unchanged.** Asked
+  whether item 2 in particular should be raised, the answer is no, and the earlier suggestion to
+  raise it is withdrawn: present exposure is zero. `pub mod external` is gated on
+  `all(target_os = "windows", feature = "external-rar-create")`, that feature is not in `default`,
+  nothing inside the crate calls it, and no version of this crate has ever been published to a
+  registry. Neither the destination race nor the `-ep1` layout can reach a consumer before the
+  Windows lane is picked up deliberately, and both are cheap to do at that point. One caveat to
+  carry forward rather than rediscover: `-ep1`'s own documented behaviour is "Exclude base dir from
+  names… Ignored if path includes wildcards", so the layout fix is not unconditional and needs a
+  wildcard-path test when it does land.
+
+### `UnrarAbort::MissingVolume` never reaches a caller (ticgit `03ddc6`)
+- **Type:** 1
+- **Verified:** yes — 2026-08-26. Extraction of a set with its middle volume removed reports `ArchiveError::Io` / "UnRAR ERAR_EOPEN"; instrumenting `unrar_process_callback` logged nothing at all for that scenario, so the trampoline is never entered
+- **Sources:** ticgit:03ddc6, ticgit:d3cfce, src/ffi/wrapper.rs,
+  src/ffi/native/unrar/volume.cpp, tests/rar_multivolume_test.rs
+- **First seen:** 2026-08-26
+- **Last seen:** 2026-08-26
+- **Description:** `d3cfce` added the typed `MissingVolume` abort and a message telling the
+  caller to run `parse_volume_set` and read `VolumeSetReport::defects()`. That message cannot
+  reach a caller on the extraction path, because this crate registers its UnRAR callback per
+  operation — immediately before `RARProcessFile`, since `UnrarExtractContext` borrows caller
+  state — and nothing is registered at the moment UnRAR asks for the next volume.
+- **Background:** The vendored SDK explains the observable. `DllVolChange` ends with
+  `if (DllVolAborted || Cmd->Callback==NULL && Cmd->ChangeVolProc==NULL) { Cmd->DllError=ERAR_EOPEN; return false; }`,
+  so an abort and a missing callback are indistinguishable from outside, and the second case
+  never calls back. The practical consequence is that **boundedness on this path comes from the
+  SDK's own no-callback branch, not from the `d3cfce` fix** — that branch exists, in its author's
+  words, "to prevent an infinite loop if no callback is defined". The five callback unit tests in
+  `src/ffi/wrapper/tests.rs` remain valid for the paths where a callback *is* installed. Fixing
+  the diagnostic needs a handle-owned callback context; the ownership shape is an implementation
+  choice, not an owner decision, which is why this is Type 1.
+- **Landed 2026-08-26.** The callback context is now boxed on `UnrarArchive` and registered for the
+  handle's whole life — through `RAROpenArchiveDataEx` when a password makes that possible, and by
+  `RARSetCallback` immediately after the open otherwise. The extract path still installs its own
+  context for one `RARProcessFile`, but now **restores** the handle callback instead of clearing it
+  to `None`, so the walks between extractions keep answering. Extracting a set with its middle
+  volume removed reports the typed `MissingVolume` corruption error with the
+  `VolumeSetReport::defects()` advice, and `tests/rar_multivolume_test.rs` asserts both that and
+  the absence of `ERAR_EOPEN`.
+
+  Two smaller pieces that the fix required. `shared_abort_error` now holds the wording for the
+  abort reasons that need nothing but the archive path, so the extract and handle trampolines
+  cannot drift on the recovery advice — which named a non-existent method once already. And
+  `UnrarArchive::unrar_error` consults the context before falling back to `map_unrar_error`, at the
+  four sites where a walk can meet a volume request: header read, skip, directory extract, and the
+  integrity walk.
+
+  Proven non-vacuous: removing the registration fails the multi-volume test. The restore-not-clear
+  half has no behavioural test available — a complete volume set cannot be extracted at all
+  (ticgit 3b4d15), so a volume request *after* a successful extraction is unreachable — so it is
+  pinned by a source guard that rejects any `RARSetCallback(..., None, ...)`, itself proven by
+  injecting one.
+
+---
+
 
 Discharged 2026-08-21 by the reconciliation described in the header. Eighteen entries are removed
 from the live sections rather than restated; each verdict below was derived by reading the tree, not

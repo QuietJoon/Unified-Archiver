@@ -389,3 +389,51 @@ D5 and D7, recorded as landed in AD 0051, are unchanged. This record stays **act
 the governing baseline for the unexecuted remainder (D2 migration steps 3–4, the D3
 `&ReadArchive` re-homing, the D9 field-level split, and D10), with the statuses above superseding
 the "Implementation deferred" snapshot for everything else.
+
+## Amendment (2026-09-01, Type 1 reconciliation — D1's `validate()` hook landed; D10 progress)
+
+Two corrections to the 2026-08-04 amendment above, both from checking its claims against the tree
+rather than against sibling records.
+
+**D8's `validate()` hook, promised for D1, has shipped.** The 2026-08-04 amendment says it "never
+shipped: no `validate` method exists on `ReadBackend` or any backend wrapper", and that
+land-or-retire was an open owner decision. That was true when written and was overtaken seventeen
+days later: commit `4f521e0` (2026-08-21) added `fn validate(&self) -> Result<()>` to
+`ReadBackend` as a *provided* method whose default body is `self.list_files().map(|_| ())`, and
+`Archive::validate` exposes it through `dispatch_read_archive`, with `ModifyArchive` forwarding to
+the same place. No backend overrides it — one default body covers all four, which is why the
+per-backend timing differences are documented on the method rather than in the impls. AD 0052
+already records this properly in its own 2026-08-21 amendment ("deferral retired, first-operation
+validation is the contract, `validate()` landed"), so the two records disagreed and only this one
+was wrong. The owner decision the earlier amendment left open is therefore closed, and closed the
+way it named: landed, not retired.
+
+The design note that made the probe worth having is worth preserving here because it is what
+dissolved the original objection. Eager validation was deferred partly on a "redundant parse" cost:
+a `validate` followed by `list_files` would parse twice. Under the AD 0065 frozen-listing baseline
+it does not — `validate` populates the same memoised `Arc<Vec<ArchiveEntry>>` that `list_files`
+then hits, and `ffi::zip_wrapper::tests::validate_then_list_files_serves_the_cached_listing` fails
+if that stops being true. A failed `validate` does not poison the cache, because `get_or_try_init`
+stores only on `Ok`.
+
+**D10 has moved further than the 2026-08-04 status suggests, and what remains is smaller and more
+precisely bounded.** Since that amendment: the `#[cfg(test)]` move-out completed for the three
+large FFI files into `wrapper/{tests,staged_length_tests}.rs`, `zip_wrapper/tests.rs` and
+`sevenz_wrapper/tests.rs`; the two `zip_wrapper` seams AD 0057 marked as bandwidth-gated rather
+than dependency-gated landed as `zip_wrapper/raw_directory.rs` and `zip_wrapper/aes.rs`; and, on
+2026-09-01, the last two inline `#[cfg(test)]` blocks in `src/archive.rs` — a named large-file
+target that had kept them while every other target was cleared — moved to
+`archive/sfx_fallback_error_tests.rs` and `archive/sfx_payload_cap_tests.rs`, taking the parent
+from 2560 to 2369 lines. Module paths and test names are unchanged by that move, so no test was
+renamed, re-pathed or lost.
+
+What is left of D10 is unchanged in kind and still waits on named work rather than on bandwidth:
+the per-concern splits of `ffi/wrapper.rs` (the largest remaining production file),
+`extraction.rs`, `modification.rs`, `archive.rs`, `format.rs` and `security.rs`, all behind D2's
+backend-enum reshape. `ffi/sevenz_wrapper.rs` stays explicitly off the mechanical-split list:
+nearly its whole production half is a single `impl` block, so the concern boundaries have to be
+named inside that impl before a split can make it clearer rather than merely smaller.
+
+**The unexecuted remainder this record governs is therefore now: D2 migration steps 3-4, the D3
+`&ReadArchive` re-homing, the D9 field-level split, and D10's large-file splits.** D1 is complete,
+including the hook. The record stays **active**.
