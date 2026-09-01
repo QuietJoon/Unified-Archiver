@@ -497,6 +497,12 @@ records:
     reviews: [R0001-0020]
     ois: [OI-0001-002, OI-0001-003, OI-0081-001]
     mentions: [AD-0052, AD-0065, MADR-0009, DCR-006, DCR-007, DCR-011]
+  - id: DCR-015
+    type: DCR
+    title: "In-place offset opens extended to RAR and 7z; libarchive deferred on gate strength, not on FFI cost"
+    status: active
+    file: DCR-015-in-place-offset-opens-for-rar-and-sevenz.md
+    mentions: [AD-0006, AD-0015, AD-0040, AD-0052, AD-0065, MADR-0023, DCR-007, DCR-014]
   - id: MADR-0001
     type: MADR
     title: "AD: `Archive::list_files()` skips the libarchive CRC walk"

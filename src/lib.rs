@@ -231,6 +231,9 @@ pub(crate) mod extraction;
 pub(crate) mod fs_identity;
 pub(crate) mod inspection;
 pub(crate) mod modification;
+/// `Read + Seek` view of a byte range inside a larger file — how an SFX
+/// payload is opened where it lies instead of being copied out (DEF-001).
+pub(crate) mod payload_window;
 
 #[cfg(test)]
 pub(crate) mod test_utils;

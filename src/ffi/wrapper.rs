@@ -8,6 +8,7 @@ use crate::ffi::unrar::*;
 use crate::format::ArchiveFormat;
 use crate::options::{ProgressCallback, RateLimiter};
 use crate::password::Password;
+use crate::payload_window::PayloadWindow;
 use crate::security::sanitize_entry_path;
 use once_cell::sync::OnceCell;
 use std::cell::Cell;
@@ -111,12 +112,50 @@ fn unrar_lock() -> Result<UnrarLockGuard> {
     Ok(UnrarLockGuard { _guard: guard })
 }
 
+/// How far into a file UnRAR itself will look for the RAR signature of a
+/// self-extracting archive's payload.
+///
+/// `MAXSFXSIZE` is `0x400000` (4 MiB) in the vendored
+/// `src/ffi/native/unrar/rardefs.hpp`, and `Archive::IsArchive`
+/// (`src/ffi/native/unrar/archive.cpp`) reads that many bytes less the 16 it
+/// has already buffered, then scans them for the first marker. Bumping the
+/// vendored sources means checking this number against that header again.
+///
+/// Deliberately expressed as `MAXSFXSIZE - 16` so it is a few bytes
+/// *stricter* than the C++ loop rather than a few bytes looser. The
+/// asymmetry is free: an offset this bound declines is staged the way it
+/// always was, while an offset it wrongly admitted would hand the SDK an
+/// outer file whose payload it cannot find and fail the open outright.
+///
+/// Crate-visible because the gate that consults it lives in
+/// [`crate::Archive`], not here — this backend never refuses on its own;
+/// see [`UnrarArchive::open_at_offset`].
+pub(crate) const UNRAR_MAX_SFX_SCAN: u64 = 0x400000 - 16;
+
 /// Safe wrapper around UnRAR archive handle
 ///
 /// Automatically closes archive on drop (RAII pattern)
 pub struct UnrarArchive {
     handle: RARHandle,
     path: PathBuf,
+    /// Where the archive payload begins inside [`Self::path`]: `0` for an
+    /// ordinary open, non-zero only for a handle opened in place on a
+    /// self-extracting archive ([`Self::open_at_offset`]).
+    ///
+    /// The SDK handle needs nothing from this, which is why in-place RAR
+    /// support cost no FFI. `RAROpenArchiveEx` is handed the *outer*
+    /// pathname and re-derives the payload start itself: `Archive::IsArchive`
+    /// reads 7 bytes at position 0 and, finding no RAR marker, scans up to
+    /// `MAXSFXSIZE` bytes for the first one and sets its internal `SFXSize`
+    /// to that offset. Listing, extraction and integrity testing all go
+    /// through that handle, so they already read an SFX payload in place and
+    /// always did.
+    ///
+    /// This field exists for the one read that does *not* go through the
+    /// handle: [`Self::parse_recovery_percentage`] opens `self.path` itself
+    /// and walks raw block bytes, which on an in-place handle would
+    /// otherwise start on stub bytes and report nonsense.
+    payload_offset: u64,
     password: Option<Password>,
     /// Archive header flags (includes solid, volume, locked flags)
     flags: c_uint,
@@ -319,6 +358,9 @@ impl UnrarArchive {
             Ok(Self {
                 handle,
                 path: path_buf,
+                // Offset-zero is the ordinary case; `open_at_offset` is the
+                // only thing that moves it.
+                payload_offset: 0,
                 password: password.map(Password::new),
                 flags: open_data.flags,
                 listing: OnceCell::new(),
@@ -385,6 +427,45 @@ impl UnrarArchive {
             RARSetPassword(archive.handle, c_password.as_ptr());
         }
 
+        Ok(archive)
+    }
+
+    /// Open a RAR payload that begins at `offset` bytes into `path`, in
+    /// place — without first copying the payload out to a tempfile.
+    ///
+    /// The native open here is the *ordinary* one, on the outer pathname,
+    /// and that is the whole of the trick: UnRAR resolves the SFX itself
+    /// (see [`Self::payload_offset`]), so the handle this returns is
+    /// indistinguishable from one opened on a plain `.rar`. No offset
+    /// arithmetic reaches listing, extraction or integrity testing, and no
+    /// new FFI was needed to get here — the crate simply never routed
+    /// offset opens at this backend before.
+    ///
+    /// # What the caller has to have established first
+    ///
+    /// This constructor does not re-derive `offset` and cannot check it:
+    /// the SDK does not report its `SFXSize` back through the DLL API, so
+    /// there is no way to ask afterwards where the library actually landed.
+    /// The caller therefore owns three facts, and [`crate::Archive`]'s
+    /// in-place gate establishes all three before calling:
+    ///
+    /// 1. bytes at `offset` are a RAR marker;
+    /// 2. no *earlier* RAR marker exists in `[0, offset)` — UnRAR binds to
+    ///    the **first** one it finds, so an earlier byte-run in the stub
+    ///    would silently open a different archive than the caller addressed;
+    /// 3. `offset + 8` is within [`UNRAR_MAX_SFX_SCAN`] — past that the
+    ///    library cannot see the marker at all.
+    ///
+    /// # Identity
+    ///
+    /// The open-time binding is captured exactly as for every other
+    /// constructor, by name on `path`, and stays correct unchanged: for an
+    /// in-place handle the outer file *is* the archive, so binding the outer
+    /// pathname binds the bytes being read. The same holds for
+    /// [`Self::revalidate_identity`] and [`Self::fresh_handle`].
+    pub(crate) fn open_at_offset(path: impl AsRef<Path>, offset: u64) -> Result<Self> {
+        let mut archive = Self::open_with_mode(path, RAR_OM_EXTRACT)?;
+        archive.payload_offset = offset;
         Ok(archive)
     }
 
@@ -468,11 +549,17 @@ impl UnrarArchive {
             crate::fs_identity::FileIdentity::revalidate(expected, &self.path, op)?;
         }
 
-        let fresh = if let Some(pw) = self.password.as_ref() {
+        let mut fresh = if let Some(pw) = self.password.as_ref() {
             Self::open_with_password(&self.path, pw.as_str())?
         } else {
             Self::open(&self.path)?
         };
+        // A re-open of an in-place SFX handle is still an in-place handle.
+        // The native side does not care — it re-derives the payload start
+        // from the outer pathname either way — but a fresh handle that
+        // silently reset this to 0 would be a trap for the next raw-byte
+        // reader added to this type.
+        fresh.payload_offset = self.payload_offset;
 
         if let Some(expected) = self.identity {
             if fresh.identity != Some(expected) {
@@ -719,7 +806,22 @@ impl UnrarArchive {
         // handle. Non-Unix: skipped (no portable identity here).
         self.revalidate_identity()?;
 
-        let mut file = File::open(&self.path)
+        // The payload does not always start at byte 0. An in-place SFX
+        // handle ([`Self::open_at_offset`]) is bound to the outer
+        // executable, and this walk is the one read in this type that does
+        // *not* go through the SDK handle that resolves the offset for
+        // every other operation — left unwrapped it would read the stub as
+        // though it were a RAR block chain and report nonsense.
+        //
+        // A window makes byte `payload_offset` look like byte 0, which is
+        // what both parsers already assume: their `Start(8)` / `Start(7)`
+        // signature skips and their `End(0)` archive-length probe become
+        // payload-relative for free, because both are generic over
+        // `Read + Seek`. For the ordinary offset-0 handle the window spans
+        // the whole file and every position is its own translation.
+        let outer = File::open(&self.path)
+            .map_err(|e| ArchiveError::io("open", std::path::Path::new(&self.path), e))?;
+        let mut file = PayloadWindow::from_file(outer, self.payload_offset)
             .map_err(|e| ArchiveError::io("open", std::path::Path::new(&self.path), e))?;
 
         // Read first 16 bytes to check RAR signature and version

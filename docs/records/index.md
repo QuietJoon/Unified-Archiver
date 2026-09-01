@@ -115,6 +115,7 @@ Generated view; the authoritative catalogue is [`index.yaml`](index.yaml). See [
 - [DCR-012](DCR-012-content-digest-drops-per-path-occurrence-ordinal.md) — Content-multiset digest drops the per-path occurrence ordinal
 - [DCR-013](DCR-013-recursive-creation-emits-directory-metadata.md) — Recursive creation emits every directory once, carrying source metadata, on both writers
 - [DCR-014](DCR-014-read-handle-bound-to-archive-file-identity.md) — Read handles are bound to the archive file's identity, not to a wider per-entry fingerprint
+- [DCR-015](DCR-015-in-place-offset-opens-for-rar-and-sevenz.md) — In-place offset opens extended to RAR and 7z; libarchive deferred on gate strength, not on FFI cost
 
 ## Legacy review dispositions (DD / IG)
 

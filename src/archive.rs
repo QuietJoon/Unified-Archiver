@@ -84,6 +84,33 @@ pub enum PayloadAccess {
     /// No copy was made. Either an ordinary archive opened at offset
     /// zero, or an offset/SFX open that the backend could serve from
     /// the original file. The AD 0040 staging ceiling did not apply.
+    ///
+    /// # What the staged path was quietly buying
+    ///
+    /// A staged handle read a private copy, so it was **immune to a
+    /// concurrent rewrite of the source** — stronger than an ordinary
+    /// `Archive::open` has ever been. An in-place handle reads the live
+    /// file, so that extra strength is what this trades away. Three
+    /// things bound the exposure: the open-time identity binding refuses
+    /// a handle whose file was replaced (OI-0001-002), the payload window
+    /// freezes its length so post-open appends are invisible, and
+    /// per-entry CRC verification still catches mid-read tampering at
+    /// extraction. The net position is that an in-place SFX open is
+    /// *exactly* as exposed as `Archive::open("file.zip")` is today —
+    /// not a new class of exposure, but not the copy's guarantee either.
+    ///
+    /// Two more consequences worth knowing before relying on this:
+    ///
+    /// - **The ceiling doubled as a size refusal.** A caller using
+    ///   [`crate::ExtractionLimits::max_sfx_payload_size`] as a *size
+    ///   gate* rather than a disk-budget gate loses it here, because
+    ///   there is no copy for it to bound. If you need a size refusal,
+    ///   check the payload size yourself.
+    /// - **The outer file stays open** for the backend's lifetime. On
+    ///   Windows that blocks deleting or replacing the SFX while the
+    ///   [`Archive`] lives, where a staged handle released it after the
+    ///   copy. Again identical to how an ordinary open behaves on the
+    ///   same OS.
     InPlace,
     /// The archive bytes were copied into a tempfile before opening,
     /// under the AD 0040 staging ceiling
@@ -389,6 +416,47 @@ fn stage_sfx_payload(
             ),
         ));
     }
+    // Fail fast when the temp volume observably cannot hold the copy.
+    //
+    // The worst failure mode of staging is writing multiple GiB and only
+    // then hitting ENOSPC, which costs the caller the whole copy and tells
+    // them nothing until it is spent. One `statvfs` answers it up front.
+    //
+    // Deliberately ADVISORY, in both directions. If the question cannot be
+    // answered — an exotic filesystem, a sandbox, a permission problem —
+    // staging proceeds, because refusing to stage because the *check*
+    // failed would turn working setups into regressions. And a mid-copy
+    // ENOSPC still surfaces exactly as it does today, an
+    // `ArchiveError::io("copy", ..)` with the `NamedTempFile` cleaning
+    // itself up on drop; the space vanishing between this check and the
+    // write is accepted for the same reason. This is a courtesy, not a
+    // gate.
+    //
+    // `OperationBlocked` rather than a synthesised `Io` with
+    // `ErrorKind::StorageFull`: there is no OS error here to wrap, and
+    // faking one would attribute a refusal the crate made to a syscall
+    // that never failed.
+    #[cfg(any(unix, windows))]
+    {
+        // What `tempfile::Builder` picks by default, so this measures the
+        // volume the copy will actually land on.
+        let staging_dir = std::env::temp_dir();
+        if let Ok(available) = fs4::available_space(&staging_dir)
+            && available < payload_size
+        {
+            return Err(ArchiveError::operation_blocked(
+                "sfx_staging",
+                format!(
+                    "staging the {payload_size}-byte SFX payload needs more free space than \
+                     {} has available ({available} bytes); the payload can be read in place \
+                     without staging for archive formats that support it — see \
+                     Archive::payload_access",
+                    staging_dir.display()
+                ),
+            ));
+        }
+    }
+
     source
         .seek(SeekFrom::Start(offset))
         .map_err(|e| ArchiveError::io("seek", path_ref, e))?;
@@ -949,9 +1017,12 @@ impl Archive {
     /// hook exists to watch did not happen. Callers driving a progress
     /// bar off it should treat "no emissions, `Ok` returned" as instant
     /// completion, and can confirm with [`Archive::payload_access`].
-    /// Every input that still stages (the TAR family, ISO, 7z, RAR, and
-    /// any ZIP payload the in-place conditions decline) emits exactly as
-    /// before.
+    /// Every input that still stages emits exactly as before — the TAR
+    /// family and ISO always, plus any ZIP, RAR or 7z payload whose
+    /// in-place conditions decline. As of the RAR and 7z arms that is a
+    /// smaller set than it was, which is worth saying plainly: this is a
+    /// *staging* observer, not an open observer, and the fraction of SFX
+    /// opens it can see anything at all has shrunk.
     ///
     /// `path` must be an SFX. Non-SFX inputs surface the same error
     /// as [`Archive::open_sfx`].
@@ -1255,50 +1326,84 @@ impl Archive {
     ///
     /// # Which backend
     ///
-    /// ZIP only, today. The `zip` crate resolves prepended data itself:
-    /// it derives the archive's start from the end-of-central-directory
-    /// record and folds that offset into every local-header position
-    /// (`ZipArchive::offset()` reports it), and this crate's ZIP wrapper
-    /// already reads its raw central-directory index from the absolute
-    /// `central_directory_start()`. So handing the wrapper the *outer*
-    /// file is enough — no new reader plumbing, no copy, and no AD 0040
-    /// ceiling because nothing is written.
+    /// ZIP, RAR and 7z. Each reaches the same place by a different
+    /// route, which is why the arms do not share a mechanism:
     ///
-    /// libarchive (the TAR family and ISO), 7z and RAR still stage. See
-    /// the note on `LibarchiveArchive::open_read_handle` for what
-    /// libarchive would need.
+    /// - **ZIP** relocates itself. The `zip` crate derives the archive's
+    ///   start from the end-of-central-directory record and folds that
+    ///   offset into every local-header position (`ZipArchive::offset()`
+    ///   reports it), and this crate's wrapper already reads its raw
+    ///   central-directory index from the absolute
+    ///   `central_directory_start()`. Handing the wrapper the *outer*
+    ///   file is enough.
+    /// - **RAR** relocates itself too, inside the SDK: UnRAR's
+    ///   `Archive::IsArchive` reads seven bytes at position 0 and, when
+    ///   they are not a marker, scans up to `MAXSFXSIZE` for the first
+    ///   RAR signature and treats that as the start. So the SDK has
+    ///   always been able to read a RAR SFX in place — the crate simply
+    ///   never routed offset opens to it.
+    /// - **7z** does *not* relocate: `Archive::read` requires the
+    ///   signature at stream position 0. It is reached instead through
+    ///   [`crate::payload_window::PayloadWindow`], a `Read + Seek` view
+    ///   that makes byte `offset` look like byte 0.
     ///
-    /// # The three gates, and why each one exists
+    /// libarchive (the TAR family and ISO) still stages, and that is a
+    /// decision rather than an omission: its formats have no strong
+    /// magic at the payload offset — plain tar's `ustar` sits at +257,
+    /// gzip's is two bytes, the raw filter accepts nearly anything — so
+    /// a gate cheap enough to run would admit garbage, and committing to
+    /// an in-place open that then failed format bidding would need a
+    /// fall-back-after-failed-open path this function deliberately does
+    /// not have. See the note on `LibarchiveArchive::open_read_handle`.
     ///
-    /// 1. **Format.** A `format_hint` naming any format other than
-    ///    [`ArchiveFormat::Zip`] declines immediately; `None` (the
-    ///    raw-offset entry points, which have no detection behind them)
-    ///    falls through to the byte check. Either way the four bytes at
-    ///    `offset` must be a ZIP local file header (`PK\x03\x04`). An
-    ///    archive with no entries starts with its EOCD instead; that
-    ///    degenerate case stages, which costs a copy of a few dozen
-    ///    bytes.
-    /// 2. **Offset agreement.** The `zip` crate is asked, through the
-    ///    same default configuration the wrapper uses, where *it*
-    ///    thinks the archive starts. If that disagrees with `offset`,
-    ///    reading in place would hand back a different archive than the
-    ///    caller addressed, so the answer is "stage" — staging slices
-    ///    at exactly the caller's offset. This costs one throwaway
-    ///    central-directory parse (metadata only, no payload decode)
-    ///    against a copy of up to the whole payload.
-    /// 3. **SFX-shaped name.** The outer path must carry an executable
-    ///    extension. This is not cosmetic. When the caller supplies a
-    ///    password, extraction reopens the archive through
-    ///    [`Archive::open_encrypted`] (`reopen_with_password_if_set`)
-    ///    against [`Archive::source_path_for_reopen`] — the staged
-    ///    tempfile for a staged handle, but the outer file for an
-    ///    in-place one. `open_encrypted` resolves an embedded payload
-    ///    only through its SFX fallback, and an executable extension is
-    ///    what admits a file to that fallback. Without this gate,
-    ///    `open_at_offset("blob.bin", n)` followed by a
-    ///    password-bearing extraction would fail where staging
-    ///    succeeded. Lifting it needs an offset-aware reopen in
-    ///    `src/extraction.rs`.
+    /// The arms' order is irrelevant by construction: each requires its
+    /// own magic at `offset`, and the three signatures are mutually
+    /// exclusive.
+    ///
+    /// # The gates, and why each one exists
+    ///
+    /// **Common to every arm — SFX-shaped name.** The outer path must
+    /// carry an executable extension. This is not cosmetic. When the
+    /// caller supplies a password, extraction reopens the archive
+    /// through [`Archive::open_encrypted`] (`reopen_with_password_if_set`)
+    /// against [`Archive::source_path_for_reopen`] — the staged tempfile
+    /// for a staged handle, but the outer file for an in-place one.
+    /// `open_encrypted` resolves an embedded payload only through its SFX
+    /// fallback, and an executable extension is what admits a file to
+    /// that fallback. Without this gate, `open_at_offset("blob.bin", n)`
+    /// followed by a password-bearing extraction would fail where staging
+    /// succeeded. Lifting it needs an offset-aware reopen in
+    /// `src/extraction.rs`.
+    ///
+    /// **Common to every arm — magic at `offset`.** The staged path used
+    /// to re-detect the format from the tempfile's suffix; in place there
+    /// is nothing to re-detect, so the bytes at `offset` are the only
+    /// authority and each arm demands its own signature there.
+    ///
+    /// **ZIP — offset agreement.** The `zip` crate is asked, through the
+    /// same default configuration the wrapper uses, where *it* thinks the
+    /// archive starts. Disagreement means reading in place would hand
+    /// back a different archive than the caller addressed, so the answer
+    /// is "stage" — staging slices at exactly the caller's offset. Costs
+    /// one throwaway central-directory parse (metadata only, no payload
+    /// decode) against a copy of up to the whole payload.
+    ///
+    /// **RAR — offset agreement, and reach.** Agreement matters more here
+    /// than for ZIP, because the SDK binds to the *first* signature it
+    /// finds: if the stub happens to contain an earlier `Rar!` byte run,
+    /// unrar would open a different archive than `offset` addresses. So
+    /// the span before `offset` is scanned and any earlier RAR signature
+    /// declines to staging. Reach matters because the SDK's scan stops at
+    /// `MAXSFXSIZE`; a payload past that is invisible to it, so an offset
+    /// beyond [`crate::ffi::wrapper::UNRAR_MAX_SFX_SCAN`] stages instead.
+    /// Detection-driven offsets always qualify — `MAX_SCAN_SIZE` is far
+    /// smaller — but a raw `open_at_offset` caller can name any number.
+    ///
+    /// **7z — no agreement gate, and none is owed.** `Archive::read`
+    /// requires the signature at stream position 0 and searches for
+    /// nothing, so the window's base *is* the archive start. A wrong
+    /// offset fails the signature check and falls back to staging; there
+    /// is no "some other archive" for it to find.
     ///
     /// Any I/O or parse failure here also returns `Ok(None)`: the
     /// staging path is then responsible for producing the error, so a
@@ -1308,35 +1413,75 @@ impl Archive {
         offset: u64,
         format_hint: Option<ArchiveFormat>,
     ) -> Result<Option<Self>> {
-        use std::io::{Read, Seek, SeekFrom};
-
-        // Gate 1a: a non-ZIP hint is a definite decline.
-        if !matches!(format_hint, None | Some(ArchiveFormat::Zip)) {
-            return Ok(None);
-        }
-        // Gate 3: SFX-shaped outer name (see the doc comment).
+        // The one gate every arm shares. See the doc comment: without an
+        // executable extension a password-bearing extraction cannot reopen
+        // an in-place handle, so admitting one here would trade a copy for
+        // a failure.
         if !crate::format::extension_suggests_executable(path_ref) {
             return Ok(None);
         }
 
-        const LOCAL_FILE_HEADER: &[u8; 4] = b"PK\x03\x04";
-        let Ok(mut file) = std::fs::File::open(path_ref) else {
-            return Ok(None);
-        };
-        // Gate 1b: a ZIP entry stream must begin exactly at `offset`.
-        if file.seek(SeekFrom::Start(offset)).is_err() {
-            return Ok(None);
+        if matches!(format_hint, None | Some(ArchiveFormat::Zip))
+            && let Some(archive) = Self::try_open_zip_in_place(path_ref, offset)?
+        {
+            return Ok(Some(archive));
         }
-        let mut magic = [0u8; 4];
-        if file.read_exact(&mut magic).is_err() || &magic != LOCAL_FILE_HEADER {
+
+        #[cfg(feature = "rar-support")]
+        if matches!(
+            format_hint,
+            None | Some(ArchiveFormat::Rar) | Some(ArchiveFormat::Rar5)
+        ) && let Some(archive) = Self::try_open_rar_in_place(path_ref, offset)?
+        {
+            return Ok(Some(archive));
+        }
+
+        if matches!(format_hint, None | Some(ArchiveFormat::SevenZip))
+            && let Some(archive) = Self::try_open_sevenz_in_place(path_ref, offset)?
+        {
+            return Ok(Some(archive));
+        }
+
+        Ok(None)
+    }
+
+    /// Read the first `N` bytes at `offset`, or `None` if that cannot be
+    /// done — a short file, an unreadable one, an offset past the end.
+    ///
+    /// Every arm's magic check goes through here so that "the bytes do not
+    /// say what we need" and "we could not look" collapse to the same
+    /// answer: decline, and let staging produce the error.
+    fn magic_at<const N: usize>(path_ref: &Path, offset: u64) -> Option<[u8; N]> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = std::fs::File::open(path_ref).ok()?;
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        let mut magic = [0u8; N];
+        file.read_exact(&mut magic).ok()?;
+        Some(magic)
+    }
+
+    /// ZIP arm. See the doc comment on [`Self::try_open_in_place`].
+    fn try_open_zip_in_place(path_ref: &Path, offset: u64) -> Result<Option<Self>> {
+        use std::io::{Seek, SeekFrom};
+
+        const LOCAL_FILE_HEADER: [u8; 4] = *b"PK\x03\x04";
+        // An archive with no entries starts with its EOCD instead of a
+        // local header; that degenerate case stages, which costs a copy of
+        // a few dozen bytes.
+        if Self::magic_at::<4>(path_ref, offset) != Some(LOCAL_FILE_HEADER) {
             return Ok(None);
         }
 
-        // Gate 2: the `zip` crate's own view of where the archive
-        // starts must agree with the caller's offset. Built with
-        // `ZipArchive::new`, i.e. the same default `ArchiveOffset`
-        // resolution the wrapper's `open_zip` uses, so agreement here
-        // means agreement there.
+        let Ok(mut file) = std::fs::File::open(path_ref) else {
+            return Ok(None);
+        };
+        if file.seek(SeekFrom::Start(offset)).is_err() {
+            return Ok(None);
+        }
+
+        // Offset agreement. Built with `ZipArchive::new`, i.e. the same
+        // default `ArchiveOffset` resolution the wrapper's `open_zip`
+        // uses, so agreement here means agreement there.
         let probe = match zip::ZipArchive::new(std::io::BufReader::new(&mut file)) {
             Ok(probe) => probe,
             Err(_) => return Ok(None),
@@ -1350,14 +1495,192 @@ impl Archive {
         // The wrapper opens `path_ref` itself and re-derives the same
         // offset; `path` is already the caller-facing path, so nothing
         // has to be patched up afterwards.
-        let zip = ZipArchive::open(path_ref)?;
-        let mut archive = Self::new_read(
+        // Declines rather than propagates. The doc comment already
+        // promises that any failure here yields `Ok(None)` and lets
+        // staging report it; the `?` that used to be here contradicted
+        // that for the one case where the wrapper's own open failed after
+        // the gates had passed.
+        let Ok(zip) = ZipArchive::open(path_ref) else {
+            return Ok(None);
+        };
+        Ok(Some(Self::in_place_handle(
             ArchiveBackend::ZipReader(Box::new(zip)),
-            path_ref.to_path_buf(),
+            path_ref,
             ArchiveFormat::Zip,
-        );
+            offset,
+        )))
+    }
+
+    /// RAR arm. See the doc comment on [`Self::try_open_in_place`].
+    ///
+    /// The SDK re-derives the payload offset itself, so unlike 7z this
+    /// needs no reader adapter — but for the same reason it must be shown
+    /// that the SDK will land on the *caller's* offset and not an earlier
+    /// signature it happens to meet first.
+    #[cfg(feature = "rar-support")]
+    fn try_open_rar_in_place(path_ref: &Path, offset: u64) -> Result<Option<Self>> {
+        const RAR4_MARKER: [u8; 7] = *b"Rar!\x1a\x07\x00";
+        const RAR5_MARKER: [u8; 8] = *b"Rar!\x1a\x07\x01\x00";
+
+        // Reach, both ends. The SDK's SFX scan starts at byte 7 — it reads
+        // the marker at position 0 first, and only then scans from where
+        // that read left it — so a payload at 1..=6 is unreachable to
+        // unrar however well-formed it is. And the scan stops at
+        // `MAXSFXSIZE`, so a payload past that is invisible too. Both ends
+        // stage instead; neither is an error.
+        if (1..7).contains(&offset)
+            || offset.saturating_add(8) > crate::ffi::wrapper::UNRAR_MAX_SFX_SCAN
+        {
+            return Ok(None);
+        }
+
+        let Some(head) = Self::magic_at::<8>(path_ref, offset) else {
+            return Ok(None);
+        };
+        let format = if head == RAR5_MARKER {
+            ArchiveFormat::Rar5
+        } else if head[..7] == RAR4_MARKER {
+            ArchiveFormat::Rar
+        } else {
+            return Ok(None);
+        };
+
+        // Offset agreement, and the reason this arm needs a scan where 7z
+        // does not: unrar binds to the FIRST marker in the file. An
+        // earlier `Rar!` run in the stub — a string constant, another
+        // embedded archive — would silently redirect the open, so any
+        // earlier signature declines and lets staging slice at exactly the
+        // offset the caller named.
+        match Self::first_rar_signature_before(path_ref, offset) {
+            Ok(Some(_)) | Err(()) => return Ok(None),
+            Ok(None) => {}
+        }
+
+        // A failed native open declines to staging rather than
+        // propagating. This function's contract is that `Ok(None)` means
+        // "could not prove it, let staging try", and staging then owns the
+        // error — so a stub carrying a marker this crate's signature table
+        // does not know (unrar's `IsSignature` also accepts RARFMT14's
+        // `RE~^` and the RAR 2..4 future markers, which
+        // `scan_for_signatures` does not) fails closed into a copy rather
+        // than into a hard error the caller never got before.
+        let Ok(rar) = crate::ffi::wrapper::UnrarArchive::open_at_offset(path_ref, offset) else {
+            return Ok(None);
+        };
+        Ok(Some(Self::in_place_handle(
+            ArchiveBackend::Unrar(Box::new(rar)),
+            path_ref,
+            format,
+            offset,
+        )))
+    }
+
+    /// The offset of the first RAR marker strictly before `limit`, if any.
+    ///
+    /// `Err(())` when the span could not be read, which the caller treats
+    /// as "decline" rather than as "no earlier signature" — an unreadable
+    /// stub is exactly when guessing is wrong.
+    ///
+    /// Chunked with an overlap so a marker straddling a chunk boundary is
+    /// still seen. `limit` is bounded by the reach gate before this runs,
+    /// so the whole scan is bounded too.
+    #[cfg(feature = "rar-support")]
+    fn first_rar_signature_before(
+        path_ref: &Path,
+        limit: u64,
+    ) -> std::result::Result<Option<u64>, ()> {
+        use crate::sfx::signatures::scan_for_signatures;
+        use std::io::Read;
+
+        if limit == 0 {
+            return Ok(None);
+        }
+        const CHUNK: usize = 64 * 1024;
+        const OVERLAP: usize = 8;
+
+        let mut file = std::fs::File::open(path_ref).map_err(|_| ())?;
+        let mut window = vec![0u8; CHUNK];
+        let mut filled = 0usize;
+        let mut base = 0u64;
+        let mut remaining = limit;
+
+        while remaining > 0 {
+            let want = usize::try_from(remaining)
+                .unwrap_or(CHUNK)
+                .min(CHUNK - filled);
+            let read = file
+                .read(&mut window[filled..filled + want])
+                .map_err(|_| ())?;
+            if read == 0 {
+                break;
+            }
+            filled += read;
+            remaining -= read as u64;
+
+            // `scan_for_signatures` reports every known format; only the
+            // RAR family can misdirect unrar, so the rest are ignored here.
+            // Results come back sorted by offset, so the first RAR hit is
+            // the earliest one.
+            if let Some((found, _)) = scan_for_signatures(&window[..filled])
+                .into_iter()
+                .find(|(_, format)| matches!(format, ArchiveFormat::Rar | ArchiveFormat::Rar5))
+                && base + found as u64 <= limit
+            {
+                return Ok(Some(base + found as u64));
+            }
+
+            let keep = filled.min(OVERLAP);
+            window.copy_within(filled - keep..filled, 0);
+            base += (filled - keep) as u64;
+            filled = keep;
+        }
+        Ok(None)
+    }
+
+    /// 7z arm. See the doc comment on [`Self::try_open_in_place`].
+    fn try_open_sevenz_in_place(path_ref: &Path, offset: u64) -> Result<Option<Self>> {
+        const SEVENZ_SIGNATURE: [u8; 6] = [b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C];
+
+        if Self::magic_at::<6>(path_ref, offset) != Some(SEVENZ_SIGNATURE) {
+            return Ok(None);
+        }
+
+        // No agreement gate: `Archive::read` requires the signature at
+        // stream position 0 and searches for nothing, so the window's base
+        // *is* the archive start. AD 0052 is preserved too — `open_at_offset`
+        // parses nothing, so a 7z-magic'd but corrupt payload still fails at
+        // the first operation, exactly like an ordinary corrupt `.7z`.
+        // Declines rather than propagates, for the same reason as the
+        // other arms: staging owns the error.
+        let Ok(sevenz) =
+            crate::ffi::sevenz_wrapper::SevenZArchive::open_at_offset(path_ref, offset)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Self::in_place_handle(
+            ArchiveBackend::SevenZ(Box::new(sevenz)),
+            path_ref,
+            ArchiveFormat::SevenZip,
+            offset,
+        )))
+    }
+
+    /// A read handle over a payload that was opened where it lies.
+    ///
+    /// One constructor for all three arms so `PayloadSource::InPlace`
+    /// cannot be forgotten on a new one — it is what
+    /// [`Archive::payload_access`] reports and what keeps
+    /// `payload_size_for_ratio` measuring the payload rather than
+    /// `stub + payload` (R0069-0006).
+    fn in_place_handle(
+        backend: ArchiveBackend,
+        path_ref: &Path,
+        format: ArchiveFormat,
+        offset: u64,
+    ) -> Self {
+        let mut archive = Self::new_read(backend, path_ref.to_path_buf(), format);
         archive._backing_tempfile = Some(PayloadSource::InPlace { offset });
-        Ok(Some(archive))
+        archive
     }
 
     /// Stage an SFX payload to a tempfile and open it via

@@ -212,3 +212,117 @@ fn plain_archive_reports_in_place() {
     let archive = Archive::open_at_offset(fixture("test.zip"), 0).expect("open_at_offset(0)");
     assert_eq!(archive.payload_access(), PayloadAccess::InPlace);
 }
+
+/// The 7z half of the load-bearing pair. 7z is the arm that needed a
+/// reader adapter rather than self-relocation — `Archive::read` demands
+/// the signature at stream position 0 and searches for nothing — so this
+/// is what proves `PayloadWindow` carries a real backend and not just its
+/// own unit tests.
+///
+/// Non-vacuity is the same as the ZIP case: on the staging path this is
+/// `Err(ArchiveError::Format)`, "payload size N exceeds maximum 16
+/// bytes", so a pass here cannot also be a pass on the staged path.
+#[test]
+fn sevenz_sfx_opens_above_the_staging_ceiling() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = std::fs::read(fixture("test.7z")).expect("read test.7z");
+    let (path, offset) = build_sfx(dir.path(), "installer.sh", &bytes);
+    assert!(
+        bytes.len() as u64 > 16,
+        "the fixture must exceed the tiny ceiling, or this proves nothing"
+    );
+
+    let archive = Archive::open_at_offset_with_limits(&path, offset, &tiny_ceiling())
+        .expect("a 7z payload read in place is not bounded by a staging ceiling");
+    assert_eq!(archive.payload_access(), PayloadAccess::InPlace);
+    assert_eq!(archive.format(), ArchiveFormat::SevenZip);
+}
+
+#[test]
+fn open_sfx_reads_a_sevenz_payload_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = std::fs::read(fixture("test.7z")).expect("read test.7z");
+    let (path, _) = build_sfx(dir.path(), "installer.sh", &bytes);
+
+    let archive = Archive::open_sfx(&path).expect("open_sfx");
+    assert_eq!(archive.payload_access(), PayloadAccess::InPlace);
+    let entries = archive.list_files().expect("list_files");
+    assert!(!entries.is_empty(), "the payload must list its entries");
+
+    // Extraction decodes through the window too, not just the header
+    // walk — the arm is not listing-only.
+    let out = dir.path().join("out");
+    let options = unified_archive::ExtractionOptions::new(&out);
+    archive.extract_all(options).expect("extract_all");
+    assert!(
+        std::fs::read_dir(&out)
+            .expect("destination exists")
+            .next()
+            .is_some(),
+        "in-place extraction must materialise at least one entry"
+    );
+}
+
+/// The RAR half. RAR needed no adapter and no new FFI — UnRAR's own
+/// `IsArchive` scans for the first marker and relocates itself — so what
+/// this proves is that the crate now *routes* an offset open there, which
+/// it never did before, and that the agreement and reach gates let a
+/// legitimate payload through rather than declining everything.
+#[cfg(feature = "rar-support")]
+#[test]
+#[serial_test::file_serial(rar)]
+fn rar_sfx_opens_above_the_staging_ceiling() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = std::fs::read(fixture("test.rar")).expect("read test.rar");
+    let (path, offset) = build_sfx(dir.path(), "installer.sh", &bytes);
+
+    let archive = Archive::open_at_offset_with_limits(&path, offset, &tiny_ceiling())
+        .expect("a RAR payload read in place is not bounded by a staging ceiling");
+    assert_eq!(archive.payload_access(), PayloadAccess::InPlace);
+    let entries = archive.list_files().expect("list_files");
+    assert!(!entries.is_empty(), "the payload must list its entries");
+}
+
+/// The gate that has no counterpart on the other two arms: unrar binds to
+/// the FIRST marker it finds, so a stub carrying an earlier `Rar!` run
+/// would silently open a different archive than the caller addressed.
+/// That case must decline to staging — and under a ceiling too small to
+/// stage under, declining is observable as a refusal rather than as a
+/// quietly wrong archive.
+#[cfg(feature = "rar-support")]
+#[test]
+#[serial_test::file_serial(rar)]
+fn an_earlier_rar_marker_in_the_stub_declines_to_staging() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = std::fs::read(fixture("test.rar")).expect("read test.rar");
+
+    // A stub that itself contains a RAR4 marker, ahead of the real
+    // payload — the shape the agreement scan exists to catch.
+    let mut stub = b"#!/bin/sh\n# decoy follows\n".to_vec();
+    stub.extend_from_slice(b"Rar!\x1a\x07\x00");
+    stub.extend_from_slice(&[0u8; 256]);
+    let offset = stub.len() as u64;
+
+    let path = dir.path().join("installer.sh");
+    let mut file = std::fs::File::create(&path).unwrap();
+    file.write_all(&stub).unwrap();
+    file.write_all(&bytes).unwrap();
+    file.flush().unwrap();
+    drop(file);
+
+    // `Archive` is not `Debug`, so match rather than `expect_err`.
+    let err = match Archive::open_at_offset_with_limits(&path, offset, &tiny_ceiling()) {
+        Ok(_) => panic!(
+            "an earlier marker must decline the in-place path, and the tiny ceiling then \
+             refuses the staging fallback — a success here would mean unrar was handed an \
+             archive the caller did not ask for"
+        ),
+        Err(err) => err,
+    };
+    let message = err.to_string();
+    assert!(
+        message.contains("exceeds maximum"),
+        "the refusal must come from the staging ceiling, proving the in-place arm declined \
+         rather than opening the decoy: {message}"
+    );
+}

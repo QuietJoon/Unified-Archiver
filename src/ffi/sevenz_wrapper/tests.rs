@@ -1035,3 +1035,258 @@ fn test_sevenz_a_failed_first_operation_leaves_the_handle_retryable() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path, "only.txt");
 }
+
+// ── DEF-001: in-place reads of a 7z payload at a non-zero offset ──
+//
+// A self-extracting 7z is a stub executable with a real archive some way
+// in. The old answer copied `[offset, EOF)` to a tempfile and opened
+// that; `SevenZArchive::open_at_offset` opens it where it lies, over a
+// `PayloadWindow`. These tests pin the three things that makes true:
+// the payload is found and read correctly at a non-zero offset, offset 0
+// is untouched, and a *wrong* offset is refused rather than
+// misinterpreted.
+
+/// Write `stub` followed by the bytes of a freshly built single-entry
+/// 7z, and return `(path, offset_of_the_payload)`.
+///
+/// The 7z is built by this crate's own dependency, so no external
+/// archiver is invoked and nothing is read from `tests/fixtures/`.
+fn build_embedded_archive(dir: &Path, stub: &[u8], payload: &[u8]) -> (PathBuf, u64) {
+    let bare = dir.join("payload-source.7z");
+    build_single_entry_archive(&bare, payload);
+    let archive_bytes = std::fs::read(&bare).unwrap();
+
+    let embedded = dir.join("sfx.exe");
+    let mut blob = stub.to_vec();
+    blob.extend_from_slice(&archive_bytes);
+    std::fs::write(&embedded, &blob).unwrap();
+
+    (embedded, stub.len() as u64)
+}
+
+/// A stub whose bytes are deliberately *not* 7z-shaped, so nothing in
+/// the read path can succeed by accidentally starting at byte 0.
+fn sfx_stub() -> Vec<u8> {
+    let mut stub = b"MZ\x90\x00 not a 7z, this is the extractor stub ".to_vec();
+    stub.extend((0..8192u32).map(|i| (i % 253) as u8));
+    stub
+}
+
+/// The headline case: a real 7z embedded at a non-zero offset lists and
+/// extracts through `open_at_offset`, with no copy of the payload.
+///
+/// Non-vacuity: the same handle opened at offset 0 (the next test)
+/// fails, so the offset is doing the work rather than some fallback
+/// finding the archive on its own.
+#[test]
+fn test_sevenz_open_at_offset_lists_and_extracts_the_embedded_payload() {
+    let temp = tempfile::tempdir().unwrap();
+    let payload = decoy_payload();
+    let (embedded, offset) = build_embedded_archive(temp.path(), &sfx_stub(), &payload);
+    assert_ne!(offset, 0, "the fixture must actually be offset");
+
+    let archive = SevenZArchive::open_at_offset(&embedded, offset).unwrap();
+
+    let entries = archive.list_files().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].path, "only.txt");
+
+    assert_eq!(
+        archive.extract_to_memory("only.txt").unwrap(),
+        payload,
+        "the entry must decode to the bytes that went in, not to stub bytes"
+    );
+
+    assert!(
+        archive.test_integrity().unwrap().is_empty(),
+        "CRC32 verification must pass through the window"
+    );
+}
+
+/// Non-vacuity for the test above: opening the same SFX at offset 0
+/// fails, because the stub is not a 7z. If this ever passes, the
+/// offset test is proving nothing.
+#[test]
+fn test_sevenz_embedded_payload_is_invisible_at_offset_zero() {
+    let temp = tempfile::tempdir().unwrap();
+    let (embedded, _) = build_embedded_archive(temp.path(), &sfx_stub(), b"payload");
+
+    let err = refusal(
+        SevenZArchive::open(&embedded).unwrap().list_files(),
+        "an SFX stub is not a 7z and must not parse as one",
+    );
+    assert!(
+        matches!(err, ArchiveError::Format { .. }),
+        "expected a format failure at offset 0, got: {err:?}"
+    );
+}
+
+/// Offset 0 is the ordinary path and must be indistinguishable from
+/// what `open` does — same listing, same bytes.
+#[test]
+fn test_sevenz_offset_zero_matches_a_plain_open() {
+    let temp = tempfile::tempdir().unwrap();
+    let bare = temp.path().join("plain.7z");
+    let payload = decoy_payload();
+    build_single_entry_archive(&bare, &payload);
+
+    let plain = SevenZArchive::open(&bare).unwrap();
+    let at_zero = SevenZArchive::open_at_offset(&bare, 0).unwrap();
+
+    assert_eq!(
+        plain.list_files().unwrap().len(),
+        at_zero.list_files().unwrap().len()
+    );
+    assert_eq!(
+        plain.extract_to_memory("only.txt").unwrap(),
+        at_zero.extract_to_memory("only.txt").unwrap()
+    );
+    assert_eq!(at_zero.extract_to_memory("only.txt").unwrap(), payload);
+}
+
+/// A wrong offset must fail the six-byte signature check, not open
+/// something bogus. `sevenz_rust2::Archive::read` demands the signature
+/// at stream position 0 and searches for nothing, which is exactly why
+/// no offset-agreement gate is needed for 7z.
+#[test]
+fn test_sevenz_wrong_offset_fails_the_signature_check() {
+    let temp = tempfile::tempdir().unwrap();
+    let (embedded, offset) = build_embedded_archive(temp.path(), &sfx_stub(), &decoy_payload());
+
+    // One byte early and one byte late: both land inside the file, so
+    // the window is a perfectly good stream — it simply does not begin
+    // with `7z\xBC\xAF\x27\x1C`.
+    for wrong in [offset - 1, offset + 1] {
+        let archive = SevenZArchive::open_at_offset(&embedded, wrong).unwrap();
+        let err = refusal(
+            archive.list_files(),
+            "a payload window that does not start at the signature must be refused",
+        );
+        assert!(
+            matches!(err, ArchiveError::Format { .. }),
+            "offset {wrong} should be a format failure, got: {err:?}"
+        );
+    }
+}
+
+/// An offset past the end of the file is a caller bug worth naming:
+/// `PayloadWindow::from_file` refuses it and the backend surfaces a
+/// typed `Io` error rather than an empty window that reads as a corrupt
+/// archive.
+#[test]
+fn test_sevenz_offset_past_eof_is_an_io_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let bare = temp.path().join("plain.7z");
+    build_single_entry_archive(&bare, b"payload");
+    let len = std::fs::metadata(&bare).unwrap().len();
+
+    let archive = SevenZArchive::open_at_offset(&bare, len + 1).unwrap();
+    let err = refusal(
+        archive.list_files(),
+        "an offset past EOF cannot name a payload",
+    );
+    assert!(
+        matches!(err, ArchiveError::Io { .. }),
+        "expected a typed Io error, got: {err:?}"
+    );
+}
+
+/// R0070-0049 / precision improvement: a missing archive now surfaces as
+/// `ArchiveError::Io` instead of being funnelled through the sevenz
+/// error-*text* classifier as "Invalid 7z". `open_reader` owns the
+/// `File::open` since DEF-001, so the typed error is available and a
+/// file that cannot be opened is no longer reported as a format failure.
+#[test]
+fn test_sevenz_missing_archive_is_an_io_error_not_a_format_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing = temp.path().join("not-there.7z");
+
+    let archive = SevenZArchive::open(&missing).unwrap();
+    let err = refusal(
+        archive.list_files(),
+        "AD 0052 defers validation, so the *operation* must be the one to fail",
+    );
+    match err {
+        ArchiveError::Io {
+            operation, path, ..
+        } => {
+            assert_eq!(operation, "open");
+            assert_eq!(path, missing);
+        }
+        other => panic!("expected a typed Io error for a missing archive, got {other:?}"),
+    }
+}
+
+/// AD 0052 survives the offset constructor: `open_at_offset` parses
+/// nothing, so a payload that carries 7z magic but is corrupt fails at
+/// the *first operation*, exactly like an ordinary corrupt `.7z`.
+#[test]
+fn test_sevenz_open_at_offset_defers_validation_to_the_first_operation() {
+    let temp = tempfile::tempdir().unwrap();
+    let bare = temp.path().join("complete.7z");
+    build_single_entry_archive(&bare, &decoy_payload());
+    let archive_bytes = std::fs::read(&bare).unwrap();
+
+    // Magic intact, end-of-archive header gone.
+    let stub = sfx_stub();
+    let mut blob = stub.clone();
+    blob.extend_from_slice(&archive_bytes[..archive_bytes.len() / 2]);
+    let truncated = temp.path().join("truncated-sfx.exe");
+    std::fs::write(&truncated, &blob).unwrap();
+
+    let offset = stub.len() as u64;
+    assert_eq!(
+        &blob[stub.len()..stub.len() + 6],
+        b"7z\xBC\xAF\x27\x1C",
+        "the fixture must keep the signature — otherwise this proves nothing"
+    );
+
+    // The constructor touches no file.
+    let archive = SevenZArchive::open_at_offset(&truncated, offset)
+        .expect("open_at_offset must not parse, and so must not fail here");
+
+    let err = refusal(
+        archive.list_files(),
+        "a truncated payload must fail at the first operation",
+    );
+    assert!(
+        matches!(err, ArchiveError::Format { .. }),
+        "a truncated 7z is a format failure: {err:?}"
+    );
+}
+
+/// The identity binding is captured for an offset handle exactly as it
+/// is for an ordinary one: the first successful operation binds, and a
+/// same-name replacement of the *outer* file is refused afterwards.
+///
+/// Non-vacuity: both SFX files carry the same single entry name and the
+/// same stub, so no name or cardinality guard can tell them apart — the
+/// file-identity comparison is the only thing that can.
+#[test]
+fn test_sevenz_offset_handle_still_binds_its_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let stub = sfx_stub();
+
+    let live = temp.path().join("live.exe");
+    let (built, offset) = build_embedded_archive(temp.path(), &stub, b"original payload");
+    std::fs::rename(&built, &live).unwrap();
+
+    let archive = SevenZArchive::open_at_offset(&live, offset).unwrap();
+    assert_eq!(archive.list_files().unwrap()[0].path, "only.txt");
+
+    // A different SFX at the same pathname, same entry name, different
+    // length.
+    let decoy_dir = temp.path().join("decoy");
+    std::fs::create_dir(&decoy_dir).unwrap();
+    let (decoy, decoy_offset) = build_embedded_archive(&decoy_dir, &stub, &decoy_payload());
+    assert_eq!(decoy_offset, offset, "same stub, so same payload offset");
+    std::fs::rename(&decoy, &live).unwrap();
+
+    assert_identity_blocked(
+        refusal(
+            archive.extract_to_memory("only.txt"),
+            "an offset handle must refuse a swapped outer file",
+        ),
+        crate::error::ops::EXTRACT_TO_MEMORY,
+    );
+}

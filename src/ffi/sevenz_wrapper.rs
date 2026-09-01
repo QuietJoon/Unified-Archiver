@@ -12,6 +12,7 @@ use crate::ffi::common::{
 use crate::format::ArchiveFormat;
 use crate::fs_identity::{FileIdentity, identity_drift};
 use crate::options::ProgressCallback;
+use crate::payload_window::PayloadWindow;
 use crate::security::{canonicalize_dest_base, sanitize_entry_path, sanitize_entry_path_with_base};
 use once_cell::sync::OnceCell;
 use sevenz_rust2::{ArchiveReader, Password};
@@ -33,9 +34,19 @@ use std::path::{Path, PathBuf};
 /// pins the archive file the handle is bound to — the internal
 /// `open_reader` binds it on the first re-open and compares on every one
 /// after it, so a same-name replacement is refused instead of read.
+///
+/// **In-place offset reads (DEF-001):** `path` need not name a bare
+/// `.7z`. It may name a self-extracting executable whose real archive
+/// starts at `payload_offset`, in which case every reader is built over
+/// a `PayloadWindow` rather than over the raw `File` — see the
+/// crate-internal `open_at_offset`.
 pub struct SevenZArchive {
     path: PathBuf,
     password: Option<crate::Password>,
+    /// Byte offset of the 7z signature within `path`. `0` for an
+    /// ordinary `.7z`; non-zero only for an SFX payload opened where it
+    /// lies. See [`Self::open_at_offset`].
+    payload_offset: u64,
     listing: OnceCell<std::sync::Arc<Vec<ArchiveEntry>>>,
     /// The archive file this handle is bound to, captured lazily at the
     /// first `open_reader` — normally the listing walk, i.e. exactly
@@ -64,11 +75,56 @@ impl SevenZArchive {
     /// this parse and leaves it cached — it is not `validate_integrity`,
     /// which decodes every payload.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let path_buf = path.as_ref().to_path_buf();
+        Self::at_offset(path.as_ref().to_path_buf(), 0)
+    }
 
+    /// Open the 7z archive that starts at `offset` bytes into `path`,
+    /// reading it where it lies (DEF-001).
+    ///
+    /// This is the in-place answer to a self-extracting 7z: instead of
+    /// copying `[offset, EOF)` out to a tempfile and opening that (AD
+    /// 0040, and the payload ceiling that copy forces), every reader is
+    /// built over a [`PayloadWindow`] that makes byte `offset` look like
+    /// byte 0. No temp space is consumed and no payload-sized copy is
+    /// made before the first entry can be listed.
+    ///
+    /// **No offset agreement check is needed, or possible.**
+    /// `sevenz_rust2::Archive::read` requires the six-byte
+    /// `7z\xBC\xAF\x27\x1C` signature at *stream position 0* and
+    /// searches for nothing, so the window's base is definitionally the
+    /// archive start: a wrong `offset` fails the signature check at the
+    /// first operation rather than opening something bogus at a
+    /// plausible-looking position. Callers that want a cheap pre-flight
+    /// (`Archive::try_open_in_place` does) probe the magic themselves
+    /// before calling this.
+    ///
+    /// **Validation timing (AD 0052) is unchanged.** Like
+    /// [`SevenZArchive::open`], this parses nothing — it only records
+    /// the path and the offset. A payload that carries 7z magic but is
+    /// corrupt fails at the *first operation*, exactly as an ordinary
+    /// corrupt `.7z` does.
+    ///
+    /// **Modify mode cannot reach this.** `Archive::is_solid` has a
+    /// Modify-mode 7z probe that reopens the source by pathname through
+    /// `SevenZArchive::open` — i.e. at offset 0, which would answer for
+    /// the SFX stub rather than the payload. It is unreachable for an
+    /// offset handle: the probe is gated on `ArchiveMode::Modify`, and
+    /// offset opens produce Read-mode handles only
+    /// (`Archive::try_open_in_place` builds them via `new_read`).
+    /// Stated rather than defended against, so that a future
+    /// Modify-mode offset open trips this note instead of silently
+    /// probing the wrong bytes.
+    pub(crate) fn open_at_offset(path: impl AsRef<Path>, offset: u64) -> Result<Self> {
+        Self::at_offset(path.as_ref().to_path_buf(), offset)
+    }
+
+    /// The one constructor, so a new field cannot be initialised two
+    /// different ways in two places.
+    fn at_offset(path: PathBuf, payload_offset: u64) -> Result<Self> {
         Ok(Self {
-            path: path_buf,
+            path,
             password: None,
+            payload_offset,
             listing: OnceCell::new(),
             identity: OnceCell::new(),
         })
@@ -196,20 +252,40 @@ impl SevenZArchive {
     /// open-family placeholder.
     ///
     /// Identity comes from a path `stat` rather than an `fstat` of the
-    /// descriptor being read: `ArchiveReader::open` opens the `File`
-    /// internally and exposes no accessor for it, and constructing the
-    /// `File` here instead would change the missing-file error text
-    /// (sevenz-rust2's `Error::file_open` is crate-private). The
-    /// residual stat-to-open window is the one DCR-007 / R0081 I6
-    /// already accept.
-    fn open_reader(&self, op: &'static str) -> Result<ArchiveReader<std::fs::File>> {
+    /// descriptor being read. Since DEF-001 this method *does* own the
+    /// `File` — the in-place window has to be built over it — so an
+    /// `fstat` binding is now mechanically possible and would close the
+    /// residual stat-to-open window that DCR-007 / R0081 I6 accept.
+    /// It is deliberately not done here: it would change what the
+    /// binding *is* for every 7z handle, which is a change to the
+    /// identity contract rather than to offset reads, and belongs to
+    /// its own ticket alongside the same move for the other backends.
+    /// The residual window is unchanged by this ticket, not widened.
+    fn open_reader(&self, op: &'static str) -> Result<ArchiveReader<PayloadWindow<std::fs::File>>> {
         self.check_identity_if_bound(FileIdentity::capture(&self.path), op)?;
         let password = self
             .password
             .as_ref()
             .map(crate::Password::as_str)
             .map_or_else(Password::empty, Password::from);
-        let reader = ArchiveReader::open(&self.path, password).map_err(|e| {
+        // DEF-001: the source is a window, not the raw file, so an SFX
+        // payload at `payload_offset` is read where it lies. At offset 0
+        // the window is the whole file and this is what
+        // `ArchiveReader::open` did anyway — that call is just
+        // `File::open` + `ArchiveReader::new` — modulo the one `fstat`
+        // `PayloadWindow::from_file` needs to freeze the window length.
+        //
+        // Opening the `File` here also means a missing or unreadable
+        // archive now surfaces as a typed `ArchiveError::Io` instead of
+        // being funnelled through the sevenz error-*text* classifier
+        // below as an "Invalid 7z" format error. That is a deliberate
+        // improvement in precision, not an accident: a file that cannot
+        // be opened is not a format failure.
+        let file = std::fs::File::open(&self.path)
+            .map_err(|e| ArchiveError::io("open", self.path.clone(), e))?;
+        let window = PayloadWindow::from_file(file, self.payload_offset)
+            .map_err(|e| ArchiveError::io("open payload window", self.path.clone(), e))?;
+        let reader = ArchiveReader::new(window, password).map_err(|e| {
             let msg = e.to_string();
             // R0075-0027: phrase-based classifier so an archive whose
             // generic error text incidentally mentions "password" /

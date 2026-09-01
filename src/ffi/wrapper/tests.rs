@@ -1003,3 +1003,289 @@ fn the_identity_refusal_names_the_operation_that_asked() {
         "identity drift must not borrow the name-drift vocabulary: {err}"
     );
 }
+
+// ── in-place SFX payloads (ticket 5858e1 / DEF-001) ──
+//
+// UnRAR resolves an SFX by itself: `Archive::IsArchive` in the vendored
+// `src/ffi/native/unrar/archive.cpp` reads 7 bytes at position 0 and, finding
+// no RAR marker, scans a `MAXSFXSIZE`-sized buffer for the first one. So every
+// operation that goes through the SDK handle already reads a payload in place.
+// `parse_recovery_percentage` is the one read in this type that does *not* go
+// through that handle — it opens `self.path` and walks raw block bytes — and it
+// is therefore the one place an in-place handle could silently answer with a
+// parse of the stub. These tests are about that place.
+
+/// Stand-in for an SFX stub. All zeros, so it contains no `0x52` and neither
+/// unrar's own signature scan nor the crate's can find anything in it — a stub
+/// with a stray marker is a different scenario, and it belongs to the gate in
+/// `crate::Archive`, not here.
+fn sfx_stub(len: usize) -> Vec<u8> {
+    vec![0u8; len]
+}
+
+/// The RAR4 recovery walk, driven through a `PayloadWindow`, reads the payload
+/// rather than the bytes in front of it. This is the wrap inside
+/// `parse_recovery_percentage` in one assertion, with no FFI handle involved.
+#[test]
+fn the_rar4_recovery_walk_reads_a_payload_at_a_non_zero_offset() {
+    const STUB: usize = 4096;
+    let payload = synthetic_rar4_with_recovery();
+    let mut file = sfx_stub(STUB);
+    file.extend_from_slice(&payload);
+
+    let mut window = PayloadWindow::new(Cursor::new(file), STUB as u64, payload.len() as u64);
+    let pct = parse_rar4_recovery(Path::new("synthetic.exe"), &mut window)
+        .expect("the walk must run on the payload, not on the stub");
+    assert_eq!(pct, Some(5));
+}
+
+/// Non-vacuity for the wrap: the same bytes read from byte 0 — which is what
+/// the recovery walk did before it was wrapped — never reach the record. The
+/// claim is deliberately not "it errors": what matters is that the stub can
+/// never be mistaken for the archive's real answer, whichever way the walk
+/// happens to fall over.
+#[test]
+fn the_same_payload_read_from_byte_zero_never_reports_the_record() {
+    const STUB: usize = 4096;
+    let payload = synthetic_rar4_with_recovery();
+    let mut file = sfx_stub(STUB);
+    file.extend_from_slice(&payload);
+
+    let mut cursor = Cursor::new(file);
+    let answer = parse_rar4_recovery(Path::new("synthetic.exe"), &mut cursor);
+    assert!(
+        !matches!(answer, Ok(Some(5))),
+        "reading an SFX from byte 0 must not produce the payload's recovery \
+         percentage — if it does, this test is no longer distinguishing the \
+         wrapped walk from the unwrapped one: {answer:?}"
+    );
+}
+
+/// The archive-length probe both walkers open with — `seek(End(0))`, added by
+/// R0080-0055 (RAR5) and R0081-0072 (RAR4) to bound block offsets before
+/// seeking to them — has to resolve against the *payload*, not the file.
+///
+/// An SFX can carry bytes after the payload as readily as before it (a signed
+/// installer's certificate table, an appended data blob). A walk that measured
+/// to the file's end would let a block declare an extent that runs off the
+/// archive and into those bytes, and would then read them as archive
+/// structure instead of reporting the overrun. The window is what makes the
+/// existing bound mean what it says.
+#[test]
+fn the_archive_length_probe_stops_at_the_end_of_the_payload() {
+    const STUB: u64 = 64;
+
+    // A RAR5 block declaring a 64-byte header body, with only 8 bytes of it
+    // actually present in the payload. The length bound is checked before the
+    // header CRC is verified, so the CRC field here is deliberately not
+    // computed: this block is rejected for its extent, not its checksum.
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"Rar!\x1A\x07\x01\x00"); // RAR5 signature
+    payload.extend_from_slice(&[0u8; 4]); // HEAD_CRC
+    payload.push(0x40); // HeaderSize vint = 64
+    payload.extend_from_slice(&[0u8; 8]); // 8 of the 64 declared bytes
+    let payload_len = payload.len() as u64;
+
+    let mut file = sfx_stub(STUB as usize);
+    file.extend_from_slice(&payload);
+    // Trailing bytes the declared header would run into if the walk measured
+    // to the end of the *file*. Long enough to swallow the whole declaration.
+    file.extend_from_slice(&[0u8; 256]);
+    let file_len = file.len() as u64;
+
+    let mut window = PayloadWindow::new(Cursor::new(file.clone()), STUB, payload_len);
+    let err = parse_rar5_recovery(Path::new("synthetic.exe"), &mut window)
+        .expect_err("a header running past the payload must be reported as such");
+    match &err {
+        ArchiveError::Corruption { details, .. } => assert!(
+            details.contains("past end of archive"),
+            "the overrun must be named as an overrun, got {details}"
+        ),
+        other => panic!("expected Corruption for the overrunning header, got {other:?}"),
+    }
+
+    // Control, and the whole point of the test: widen the window to the end of
+    // the file and the very same block stops being an overrun, because the
+    // bound it is checked against moved. The refusal above is therefore about
+    // the window's end, not about the block being self-evidently malformed.
+    let mut whole = PayloadWindow::new(Cursor::new(file), STUB, file_len - STUB);
+    let widened = parse_rar5_recovery(Path::new("synthetic.exe"), &mut whole);
+    let widened_is_overrun = matches!(
+        &widened,
+        Err(ArchiveError::Corruption { details, .. }) if details.contains("past end of archive")
+    );
+    assert!(
+        !widened_is_overrun,
+        "with the window widened to the file's end the block fits, so this \
+         must fail some other way or not at all; if it still reports an \
+         overrun the first assertion proves nothing about `End`-relative \
+         seeks: {widened:?}"
+    );
+}
+
+/// A synthetic SFX built from an existing fixture: stub bytes, then
+/// `test_recovery.rar` verbatim. No RAR archive is created here — creation
+/// belongs to the standalone `scripts/generate-rar-fixtures.sh` and the `rar`
+/// binary is never invoked by the test suite.
+fn stage_rar_sfx(tmp: &std::path::Path, stub_len: usize) -> PathBuf {
+    let payload = std::fs::read(crate::test_utils::fixture("test_recovery.rar"))
+        .expect("read the recovery-record fixture");
+    let mut bytes = sfx_stub(stub_len);
+    bytes.extend_from_slice(&payload);
+    // An executable extension, because that is the shape `crate::Archive`'s
+    // in-place gate admits and the shape a real caller arrives with.
+    let sfx = tmp.join("installer.exe");
+    std::fs::write(&sfx, &bytes).expect("write the synthetic SFX");
+    sfx
+}
+
+/// End to end, through the FFI: an in-place handle answers recovery metadata
+/// from the payload.
+///
+/// The two halves have to agree and are asserted separately. `flags` comes
+/// from the main header the SDK read at its own `SFXSize`, so
+/// `has_recovery_record()` answering true is proof that unrar relocated itself
+/// with no help from the crate — the claim that made this ticket need no new
+/// FFI. `recovery_percentage()` then has to relocate the *same way* on the
+/// other path, the raw-byte walk that never touches the SDK handle, and it
+/// answers 5 — the fixture's `-rr5p` — rather than a reading of the stub.
+#[test]
+#[serial_test::file_serial(rar)]
+fn an_in_place_sfx_handle_parses_recovery_metadata_from_the_payload() {
+    const STUB: u64 = 4096;
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let sfx = stage_rar_sfx(tmp.path(), STUB as usize);
+
+    let archive = UnrarArchive::open_at_offset(&sfx, STUB).expect(
+        "unrar resolves the SFX payload itself; a failure here means the \
+         vendored MAXSFXSIZE scan is not doing what UNRAR_MAX_SFX_SCAN says \
+         it does",
+    );
+    assert!(
+        archive
+            .has_recovery_record()
+            .expect("read the recovery flag"),
+        "the main header the SDK parsed must be the payload's, not the stub's"
+    );
+    assert_eq!(
+        archive
+            .recovery_percentage()
+            .expect("parse the recovery percentage"),
+        Some(5),
+        "the raw-byte walk must start at the payload; a `None` or an error \
+         here is the unwrapped walk reading stub bytes as RAR blocks"
+    );
+    assert!(
+        !archive
+            .list_files()
+            .expect("list the in-place payload")
+            .is_empty(),
+        "an in-place handle lists the payload's entries like any other"
+    );
+}
+
+/// Non-vacuity for the previous test at the FFI altitude: the *same file*
+/// opened without the offset. The SDK handle still works — unrar relocated,
+/// as it always has — so `has_recovery_record()` is still true; only the walk
+/// that has no offset to work from goes wrong. Remove the `PayloadWindow` wrap
+/// in `parse_recovery_percentage` and the in-place test above degenerates into
+/// exactly this.
+#[test]
+#[serial_test::file_serial(rar)]
+fn the_same_sfx_opened_without_the_offset_cannot_parse_the_record() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let sfx = stage_rar_sfx(tmp.path(), 4096);
+
+    let archive = UnrarArchive::open(&sfx).expect("unrar opens an SFX by pathname");
+    assert!(
+        archive
+            .has_recovery_record()
+            .expect("read the recovery flag"),
+        "the SDK finds the payload regardless of how the crate opened it"
+    );
+
+    let answer = archive.recovery_percentage();
+    assert!(
+        !matches!(answer, Ok(Some(5))),
+        "a handle carrying no payload offset walks the stub, so it cannot \
+         report the payload's percentage: {answer:?}"
+    );
+}
+
+/// An offset of 0 is an ordinary open. The field is the only thing
+/// `open_at_offset` moves, and at 0 the payload window spans the whole file,
+/// so every position it translates is its own.
+#[test]
+#[serial_test::file_serial(rar)]
+fn an_offset_of_zero_is_an_ordinary_open() {
+    let path = crate::test_utils::fixture("test_recovery.rar");
+
+    let plain = UnrarArchive::open(&path).expect("open the fixture");
+    let at_zero = UnrarArchive::open_at_offset(&path, 0).expect("open the fixture at offset 0");
+
+    assert_eq!(at_zero.payload_offset, 0);
+    assert_eq!(
+        plain.recovery_percentage().expect("plain percentage"),
+        at_zero.recovery_percentage().expect("offset-0 percentage"),
+    );
+    assert_eq!(
+        plain.list_files().expect("plain listing").len(),
+        at_zero.list_files().expect("offset-0 listing").len(),
+    );
+}
+
+/// A re-open keeps the offset. Nothing native depends on it today — the SDK
+/// re-derives the payload start from the outer pathname on every open — but a
+/// fresh handle that reset it to 0 would silently arm the next raw-byte reader
+/// added to this type with the bug this ticket just removed.
+#[test]
+#[serial_test::file_serial(rar)]
+fn a_fresh_handle_inherits_the_payload_offset() {
+    const STUB: u64 = 4096;
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let sfx = stage_rar_sfx(tmp.path(), STUB as usize);
+
+    let archive = UnrarArchive::open_at_offset(&sfx, STUB).expect("open the synthetic SFX");
+    let fresh = archive
+        .fresh_handle(crate::error::ops::VALIDATE_INTEGRITY)
+        .expect("re-open the same file");
+    assert_eq!(fresh.payload_offset, STUB);
+    assert_eq!(
+        fresh
+            .recovery_percentage()
+            .expect("the re-opened handle parses the payload too"),
+        Some(5)
+    );
+}
+
+/// The reach constant is a claim about vendored C++, so check it against the
+/// vendored C++ rather than against itself: a `MAXSFXSIZE` bump in a future
+/// unrar drop has to fail here instead of quietly widening what the gate in
+/// `crate::Archive` will admit.
+#[test]
+fn the_sfx_scan_bound_tracks_the_vendored_maxsfxsize() {
+    let header = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ffi/native/unrar/rardefs.hpp"),
+    )
+    .expect("the vendored rardefs.hpp is compiled by build.rs, so it must be readable");
+    let line = header
+        .lines()
+        .find(|line| line.contains("define") && line.contains("MAXSFXSIZE"))
+        .expect("MAXSFXSIZE must still be defined in the vendored header");
+    let literal = line
+        .split_whitespace()
+        .next_back()
+        .expect("the define must carry a value");
+    let max_sfx_size = u64::from_str_radix(literal.trim_start_matches("0x"), 16)
+        .unwrap_or_else(|_| panic!("could not read MAXSFXSIZE out of {line:?}"));
+
+    // `IsArchive` reads `MAXSFXSIZE - 16` bytes and scans them for the first
+    // marker, so this is the whole of unrar's reach.
+    assert!(
+        UNRAR_MAX_SFX_SCAN <= max_sfx_size - 16,
+        "UNRAR_MAX_SFX_SCAN ({UNRAR_MAX_SFX_SCAN:#x}) must stay inside the \
+         reach of the vendored scan ({max_sfx_size:#x} - 16); the vendored \
+         sources changed and the gate in crate::Archive now admits offsets \
+         unrar cannot find"
+    );
+}
