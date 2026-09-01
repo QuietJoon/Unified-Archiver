@@ -52,10 +52,19 @@ fn limits(max_file: Cap, max_total: Cap) -> ExtractionLimits {
 ///
 /// The archive is a plain TAR — no per-entry checksum — and the shortfall
 /// is produced the way it happens in practice: the AD 0065 listing
-/// snapshot is taken, then the file on disk is replaced by one carrying
-/// the same entry name with a shorter payload. The name-only drift guards
+/// snapshot is taken, then the file on disk is rewritten so it carries the
+/// same entry name with a shorter payload. The name-only drift guards
 /// (OI-0001-002) pass it through, so the stream itself is the last line of
 /// defence. Before this change `read_to_end` returned `Ok(512)`.
+///
+/// The rewrite is deliberately **identity-preserving** (same inode, same
+/// length — see `common::rewrite_in_place_preserving_identity`). Since
+/// OI-0001-002 the read handle is bound to the archive file's identity, so
+/// a construction that moved the inode or the length — `std::fs::copy`,
+/// which this used to use, moves the length — would be refused by the
+/// identity guard and this test would stop exercising the exactness bound
+/// it exists for. The refusal is worth pinning too, so it has its own
+/// companion test below rather than being folded in here.
 #[test]
 fn declared_size_truncated_entry_surfaces_unexpected_eof() {
     let temp = common::temp_test_dir();
@@ -70,7 +79,7 @@ fn declared_size_truncated_entry_surfaces_unexpected_eof() {
     let (entry, declared) = only_entry(&archive);
     assert_eq!(declared, Some(4096), "TAR declares its entry size");
 
-    std::fs::copy(&short, &target).expect("swap in the shorter archive");
+    common::rewrite_in_place_preserving_identity(&target, &short);
 
     let mut stream = archive
         .extract_to_stream(&entry, StreamBound::DeclaredSize)
@@ -95,9 +104,75 @@ fn declared_size_truncated_entry_surfaces_unexpected_eof() {
     common::cleanup(&temp);
 }
 
+/// The companion to the test above, and the reason its construction is
+/// spelled out so carefully (OI-0001-002).
+///
+/// Byte-for-byte the *same* scenario — same two archives, same entry name,
+/// same shortfall — differing only in how the replacement reaches the
+/// pathname: `rename` installs a **different file**, where the in-place
+/// rewrite kept the same one. The read handle is bound to the archive
+/// file's identity, so this one never reaches the stream at all: it is
+/// refused at `extract_to_stream` call time, when the backend re-opens the
+/// path and re-checks the binding.
+///
+/// Without this test the pair above would look like an arbitrary
+/// preference for one file-replacement primitive over another. With it,
+/// the two constructions are pinned as genuinely different, and the guard
+/// is shown to be doing something rather than merely not getting in the
+/// way.
+///
+/// The replacement is a different length as well as a different inode, so
+/// the refusal also holds off Unix, where the identity degrades to the
+/// byte length alone.
+#[test]
+fn a_renamed_in_replacement_is_refused_before_the_stream_opens() {
+    use unified_archive::ArchiveError;
+
+    let temp = common::temp_test_dir();
+    let target = temp.join("payload.tar");
+    let short = temp.join("short.tar");
+
+    write_tar(&target, "payload.bin", 4096);
+    write_tar(&short, "payload.bin", 512);
+
+    let archive = Archive::open(&target).expect("open tar");
+    let (entry, declared) = only_entry(&archive);
+    assert_eq!(declared, Some(4096), "TAR declares its entry size");
+
+    // The precondition the whole test rests on: renaming moves the length
+    // too, so this is a distinct file on every platform, not only where
+    // inodes exist.
+    let bound_len = std::fs::metadata(&target).expect("stat target").len();
+    let replacement_len = std::fs::metadata(&short).expect("stat replacement").len();
+    assert_ne!(
+        bound_len, replacement_len,
+        "the two archives must differ in length for the off-Unix half of the identity to bind"
+    );
+
+    std::fs::rename(&short, &target).expect("rename the shorter archive over the target");
+
+    match archive.extract_to_stream(&entry, StreamBound::DeclaredSize) {
+        Ok(_) => panic!(
+            "a renamed-in replacement is a different file; the bound handle must refuse it \
+             instead of streaming bytes the safety gate never saw"
+        ),
+        Err(ArchiveError::OperationBlocked { reason, .. }) => assert!(
+            reason.contains("identity changed"),
+            "identity drift must be reported in its own vocabulary, not as listing drift: {reason}"
+        ),
+        Err(other) => panic!("expected OperationBlocked for the swapped file, got: {other}"),
+    }
+
+    common::cleanup(&temp);
+}
+
 /// The same shortfall under a ceiling-only bound is *not* an error:
 /// `Cap(n)` is a budget, not an assertion about the entry's size
 /// (unchanged contract, pinned so the exactness work cannot leak into it).
+///
+/// Same identity-preserving construction as the truncation test above, and
+/// for the same reason: the property under test is what the *bound* does
+/// with a short entry, so the archive must still reach the stream.
 #[test]
 fn cap_bound_tolerates_a_short_entry() {
     let temp = common::temp_test_dir();
@@ -109,7 +184,7 @@ fn cap_bound_tolerates_a_short_entry() {
 
     let archive = Archive::open(&target).expect("open tar");
     let (entry, _) = only_entry(&archive);
-    std::fs::copy(&short, &target).expect("swap in the shorter archive");
+    common::rewrite_in_place_preserving_identity(&target, &short);
 
     let mut stream = archive
         .extract_to_stream(&entry, StreamBound::Cap(4096))

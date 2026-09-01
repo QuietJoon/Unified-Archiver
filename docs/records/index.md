@@ -114,6 +114,7 @@ Generated view; the authoritative catalogue is [`index.yaml`](index.yaml). See [
 - [DCR-011](DCR-011-digest-exactness-for-crc-less-entries.md) — Digest methods hold CRC-less entries to their declared size exactly
 - [DCR-012](DCR-012-content-digest-drops-per-path-occurrence-ordinal.md) — Content-multiset digest drops the per-path occurrence ordinal
 - [DCR-013](DCR-013-recursive-creation-emits-directory-metadata.md) — Recursive creation emits every directory once, carrying source metadata, on both writers
+- [DCR-014](DCR-014-read-handle-bound-to-archive-file-identity.md) — Read handles are bound to the archive file's identity, not to a wider per-entry fingerprint
 
 ## Legacy review dispositions (DD / IG)
 

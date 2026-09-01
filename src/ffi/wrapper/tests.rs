@@ -781,3 +781,225 @@ fn the_handle_callback_is_restored_and_never_cleared_to_none() {
          installing its own"
     );
 }
+
+/// The bound-file fixture pair: a staged working copy the test owns, and a
+/// second, *different* existing fixture to swap in over it.
+///
+/// Both are checked-in fixtures. RAR archives are never created during a
+/// build or a test run (they need the proprietary `rar` binary); the
+/// standalone `scripts/generate-rar-fixtures.sh` owns that, so a swap test
+/// has to be built out of files that already exist.
+///
+/// `test.rar` and `test_multi.rar` differ in length as well as content, so
+/// the swap moves both halves of the identity — which matters, because
+/// `(dev, ino)` alone would miss an in-place `std::fs::copy` (it truncates
+/// the destination and keeps the inode) while the length would not.
+fn stage_bound_rar(tmp: &std::path::Path) -> PathBuf {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let staged = tmp.join("bound.rar");
+    std::fs::copy(fixtures.join("test.rar"), &staged).expect("stage the bound RAR fixture");
+    staged
+}
+
+/// Replace `staged` with a different existing RAR fixture, by rename, so the
+/// pathname keeps resolving while the file behind it becomes another file.
+fn swap_in_other_rar(tmp: &std::path::Path, staged: &std::path::Path) {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let replacement = tmp.join("replacement.rar");
+    // `test_recovery.rar` deliberately, not `test_multi.rar`: it is
+    // `rar a -rr5p -ep test_recovery.rar test_file.txt`, so it carries the
+    // *same* single member as `test.rar` and differs only by the recovery
+    // record. The swap is therefore invisible to every name and cardinality
+    // guard — which is what makes these tests exercise the identity binding
+    // rather than re-testing the name guard through a fixture that happened
+    // to rename entry 0.
+    std::fs::copy(fixtures.join("test_recovery.rar"), &replacement)
+        .expect("stage the replacement RAR fixture");
+    assert_ne!(
+        std::fs::metadata(&replacement)
+            .expect("replacement stat")
+            .len(),
+        std::fs::metadata(staged).expect("staged stat").len(),
+        "the two fixtures must differ in length, or the swap would not move \
+         the identity's length half"
+    );
+    std::fs::rename(&replacement, staged).expect("swap the archive under the live handle");
+}
+
+/// OI-0001-002: a handle is bound to the archive *file*, not just to the
+/// entry names in its cached listing.
+///
+/// Every operation after the AD 0065 listing snapshot re-opens the archive by
+/// pathname. If the file behind that pathname is replaced in between, the
+/// listing — and every safety-gate verdict computed from it — describes bytes
+/// that are no longer there, while the per-entry *name* comparisons downstream
+/// happily agree with a replacement that kept the names. `fresh_handle` now
+/// refuses instead.
+///
+/// Non-vacuity: delete the `fresh.identity != Some(expected)` comparison in
+/// `UnrarArchive::fresh_handle` and `expect_err` below fails outright —
+/// `test_integrity` walks the swapped-in archive and returns `Ok`. Nothing
+/// else on that path can object: the replacement carries the same single
+/// member name as the bound fixture, so the name and cardinality guards see
+/// an archive they agree with.
+#[test]
+#[serial_test::file_serial(rar)]
+fn a_swapped_archive_is_refused_at_the_next_by_path_reopen() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let staged = stage_bound_rar(tmp.path());
+
+    let archive = UnrarArchive::open(&staged).expect("open the staged RAR fixture");
+    let listing = archive.list_files().expect("list the staged fixture");
+    assert!(
+        !listing.is_empty(),
+        "the fixture must carry at least one entry, or the swap proves nothing"
+    );
+
+    // Control: with nothing swapped, the binding is silent. Without this the
+    // test could pass on a guard that refuses every reopen.
+    archive
+        .test_integrity()
+        .expect("an untouched archive must still pass validate_integrity");
+
+    swap_in_other_rar(tmp.path(), &staged);
+
+    let err = archive.test_integrity().expect_err(
+        "validate_integrity must refuse a re-open of a pathname whose file was \
+         replaced after the listing snapshot",
+    );
+    match &err {
+        ArchiveError::OperationBlocked { operation, reason } => {
+            assert_eq!(
+                operation.as_str(),
+                crate::error::ops::VALIDATE_INTEGRITY,
+                "the refusal must name the caller's operation, got {operation}"
+            );
+            assert!(
+                reason.contains("identity changed"),
+                "identity drift has one phrasing, and this is not it: {reason}"
+            );
+        }
+        other => panic!("expected OperationBlocked, got {other:?}"),
+    }
+
+    // The two drift vocabularies stay disjoint: identity drift is
+    // `OperationBlocked` / "identity changed", name and cardinality drift is
+    // `Format` / "listing drift".
+    assert!(
+        !err.to_string().contains("listing drift"),
+        "identity drift must not borrow the name-drift vocabulary: {err}"
+    );
+}
+
+/// The drift is reported as drift even when the replacement cannot be opened
+/// at all — which is the case the pre-open half of the bracket exists for.
+///
+/// UnRAR was the one backend that opened first and compared afterwards, and
+/// the ordering hid the answer whenever the native open failed on the
+/// replacement. A header-encrypted RAR answers `ERAR_MISSING_PASSWORD`,
+/// `map_unrar_error` turns that into `ArchiveError::Password`, and `?` carried
+/// it out before the identity comparison was ever reached — so a caller whose
+/// unencrypted archive had been swapped was told it now needs a password.
+/// That is a wrong answer twice over: it names the wrong problem, and it
+/// invites the caller to supply a passphrase to a file chosen by whoever did
+/// the swapping.
+///
+/// Non-vacuity: delete the pre-open `FileIdentity::revalidate` at the top of
+/// `UnrarArchive::fresh_handle` and this test fails on the `OperationBlocked`
+/// arm, because the error becomes `ArchiveError::Password` from the native
+/// open — the post-open comparison never runs, since `?` has already left.
+#[test]
+#[serial_test::file_serial(rar)]
+fn a_replacement_that_cannot_be_opened_is_still_reported_as_drift() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let staged = stage_bound_rar(tmp.path());
+
+    let archive = UnrarArchive::open(&staged).expect("open the staged RAR fixture");
+    archive.list_files().expect("list the staged fixture");
+
+    // `test_encrypted.rar` has ENCRYPTED HEADERS, so opening it without a
+    // password cannot get as far as a listing. The bound handle has no
+    // password, which is the whole point: the replacement is unopenable on
+    // this path.
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let replacement = tmp.path().join("header_encrypted.rar");
+    std::fs::copy(fixtures.join("test_encrypted.rar"), &replacement)
+        .expect("stage the header-encrypted replacement");
+    std::fs::rename(&replacement, &staged).expect("swap the archive under the live handle");
+
+    let err = archive
+        .test_integrity()
+        .expect_err("a swapped-in unopenable archive must still be refused");
+
+    match &err {
+        ArchiveError::OperationBlocked { operation, reason } => {
+            assert_eq!(
+                operation.as_str(),
+                crate::error::ops::VALIDATE_INTEGRITY,
+                "the refusal must name the caller's operation, got {operation}"
+            );
+            assert!(
+                reason.contains("identity changed"),
+                "the file changed; that is what the caller needs told: {reason}"
+            );
+        }
+        ArchiveError::Password { .. } => panic!(
+            "the replacement's encryption is being reported instead of the swap — \
+             the pre-open revalidate in fresh_handle is missing or ineffective"
+        ),
+        other => panic!("expected the identity refusal, got {other:?}"),
+    }
+}
+
+/// The op label is threaded from the caller, not hard-coded — the same swap
+/// reported through the single-entry path names that path — and identity
+/// drift is reported as identity drift, not as name drift.
+///
+/// Non-vacuity, precisely: delete the `fresh.identity != Some(expected)`
+/// comparison in `UnrarArchive::fresh_handle` and the `expect_err` below
+/// panics, because *nothing* refuses this swap. The replacement keeps
+/// `test_file.txt` at index 0 with the same CRC and differs only in the
+/// recovery record, so every surviving name and cardinality guard agrees with
+/// it. That is the ticket in one assertion: the guards were only ever
+/// comparing names, and a replacement that keeps the names walks straight
+/// through them.
+#[test]
+#[serial_test::file_serial(rar)]
+fn the_identity_refusal_names_the_operation_that_asked() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let staged = stage_bound_rar(tmp.path());
+
+    let archive = UnrarArchive::open(&staged).expect("open the staged RAR fixture");
+    let listing = archive.list_files().expect("list the staged fixture");
+    let entry = listing[0].path.clone();
+
+    swap_in_other_rar(tmp.path(), &staged);
+
+    // The cached listing still answers, so the single-entry gate resolves the
+    // name exactly as before; only the file binding can catch this.
+    let err = archive
+        .extract_to_memory(&entry)
+        .expect_err("extract_to_memory must refuse a swapped archive");
+    match &err {
+        ArchiveError::OperationBlocked { operation, reason } => {
+            assert_eq!(
+                operation.as_str(),
+                crate::error::ops::EXTRACT_TO_MEMORY,
+                "the refusal must name extract_to_memory, got {operation}"
+            );
+            assert!(
+                reason.contains("identity changed"),
+                "identity drift has one phrasing, and this is not it: {reason}"
+            );
+        }
+        other => panic!(
+            "expected OperationBlocked identity drift, got {other:?} — a \
+             `Format`/\"listing drift\" error here means the file binding is \
+             gone and only the name guard is left"
+        ),
+    }
+    assert!(
+        !err.to_string().contains("listing drift"),
+        "identity drift must not borrow the name-drift vocabulary: {err}"
+    );
+}

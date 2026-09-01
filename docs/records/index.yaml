@@ -489,6 +489,14 @@ records:
     reviews: [R0001-0074]
     ois: [OI-0001-010, OI-0080-005]
     mentions: [AD-0044, DCR-010, DCR-012]
+  - id: DCR-014
+    type: DCR
+    title: "Read handles are bound to the archive file's identity, not to a wider per-entry fingerprint"
+    status: active
+    file: DCR-014-read-handle-bound-to-archive-file-identity.md
+    reviews: [R0001-0020]
+    ois: [OI-0001-002, OI-0001-003, OI-0081-001]
+    mentions: [AD-0052, AD-0065, MADR-0009, DCR-006, DCR-007, DCR-011]
   - id: MADR-0001
     type: MADR
     title: "AD: `Archive::list_files()` skips the libarchive CRC walk"

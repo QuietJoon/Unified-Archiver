@@ -1961,6 +1961,27 @@ impl Archive {
         }
     }
 
+    /// The archive file the active read backend is bound to
+    /// (OI-0001-002), or `None` when nothing is bound: a write-mode
+    /// handle, a backend whose open-time `stat` failed, or a read
+    /// backend no operation has warmed yet.
+    ///
+    /// All four read backends carry a binding and re-check it at their
+    /// own by-path re-opens; this accessor exists for the one by-path
+    /// re-resolution that happens at the *facade* altitude instead —
+    /// [`Archive::payload_size_for_ratio`].
+    pub(crate) fn bound_file_identity(&self) -> Option<crate::fs_identity::FileIdentity> {
+        match &self.backend {
+            #[cfg(feature = "rar-support")]
+            ArchiveBackend::Unrar(unrar) => unrar.bound_identity(),
+            ArchiveBackend::SevenZ(sevenz) => sevenz.bound_identity(),
+            ArchiveBackend::ZipReader(zip) => zip.bound_identity(),
+            ArchiveBackend::Libarchive(libarchive) => libarchive.bound_identity(),
+            // Write mode: there is no archive on disk yet to bind to.
+            ArchiveBackend::ZipWriter(_) => None,
+        }
+    }
+
     /// Compressed-size denominator for ratio gates. For SFX archives
     /// this is the embedded payload's size — the staged tempfile's
     /// length, or, for an in-place handle, the source file's length
@@ -1969,14 +1990,65 @@ impl Archive {
     /// and quietly loosen the zip-bomb ratio gate by the size of the
     /// stub (R0069-0006). For ordinary archives it's the file size on
     /// disk.
-    pub(crate) fn payload_size_for_ratio(&self) -> Result<u64> {
+    ///
+    /// # Why this stat is identity-guarded (OI-0001-002)
+    ///
+    /// This is the compression-ratio *denominator*, and the numerator
+    /// comes from the AD 0065 cached listing. Re-resolving the pathname
+    /// here therefore straddles two files whenever the archive is
+    /// replaced after the listing snapshot — and a *smaller* replacement
+    /// talks the zip-bomb gate down rather than up:
+    ///
+    /// > `a.zip` holds one entry declaring 900 MiB uncompressed in a
+    /// > 100 KiB archive; the ratio is ~9216 and the 1000 default
+    /// > refuses it. The caller opens and lists, warming the listing and
+    /// > the identity binding. A 2 MiB blob is renamed over `a.zip` — it
+    /// > need not even be a valid ZIP, nothing parses it. `extract_all`
+    /// > still sees 900 MiB in the numerator, this stat returns 2 MiB,
+    /// > the ratio reads 450, the gate passes, and extraction proceeds
+    /// > through the *cached* descriptor — the original bomb — writing
+    /// > 900 MiB.
+    ///
+    /// ZIP is the worst case, because once its descriptor is cached
+    /// there is no second by-path open in that backend for an identity
+    /// refusal to come from. On the other three the same straddle
+    /// happens here and is only masked by the later re-open refusing.
+    /// So the guard belongs at the stat, not downstream of it.
+    ///
+    /// The bare stat is still the answer when there is **no** binding:
+    /// write mode, a backend whose capture failed, and the modify-mode
+    /// handles that never bound. Both SFX shapes are guarded rather than
+    /// excepted — the staged arm's binding is on the tempfile and so is
+    /// the stat, and the in-place arm compares whole-file identities and
+    /// only then subtracts the payload offset, so an offset-adjusted
+    /// length is never compared against a whole-file one.
+    pub(crate) fn payload_size_for_ratio(&self, op: &str) -> Result<u64> {
         let path = self.source_path_for_reopen();
-        let len = std::fs::metadata(path)
-            .map(|m| m.len())
-            .map_err(|e| ArchiveError::io("stat archive", path.to_path_buf(), e))?;
+        // One `stat`, used for both the comparison and the answer: a
+        // second round-trip would reopen the very window this closes.
+        // A failed `stat` is `Io { operation: "stat", .. }`, not a swap
+        // report — the crate does not know anything was replaced.
+        let found = crate::fs_identity::FileIdentity::stat(path)?;
+        if let Some(expected) = self.bound_file_identity() {
+            if found != expected {
+                // The caller's own op, threaded from the six ratio-gate
+                // call sites. A fixed label was tried first and was
+                // wrong: this gate runs *before* the backend re-opens,
+                // so its label wins the race, and a fixed one silently
+                // downgraded refusals that used to name `extract_file`
+                // or `extract_to_memory` precisely. Two 7z tests caught
+                // it — see the note on `Archive::payload_size_for_ratio`.
+                return Err(crate::fs_identity::identity_drift(
+                    expected,
+                    Some(found),
+                    path,
+                    op,
+                ));
+            }
+        }
         match &self._backing_tempfile {
-            Some(PayloadSource::InPlace { offset }) => Ok(len.saturating_sub(*offset)),
-            Some(PayloadSource::Staged(_)) | None => Ok(len),
+            Some(PayloadSource::InPlace { offset }) => Ok(found.len.saturating_sub(*offset)),
+            Some(PayloadSource::Staged(_)) | None => Ok(found.len),
         }
     }
 

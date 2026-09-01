@@ -435,7 +435,7 @@ fn extract_selected(
 
     check_extraction_safe_with_archive(
         &selected,
-        archive.payload_size_for_ratio()?,
+        archive.payload_size_for_ratio(operation)?,
         &options.limits,
     )?;
 
@@ -568,7 +568,7 @@ impl Archive {
             .list_files_for_limits_budgeted(Some(options.limits.max_entry_count().as_usize()))?;
         check_extraction_safe_with_archive(
             &entries,
-            archive.payload_size_for_ratio()?,
+            archive.payload_size_for_ratio(ops::EXTRACT_ALL)?,
             &options.limits,
         )?;
 
@@ -705,7 +705,7 @@ impl Archive {
         // check against the target entry's uncompressed size.
         check_extraction_safe_with_archive(
             &to_extract,
-            archive.payload_size_for_ratio()?,
+            archive.payload_size_for_ratio(ops::EXTRACT_FILE)?,
             &options.limits,
         )?;
 
@@ -830,7 +830,7 @@ impl Archive {
             check_single_entry_safe_with_archive(
                 &entries,
                 file_path,
-                self.payload_size_for_ratio()?,
+                self.payload_size_for_ratio(ops::EXTRACT_TO_MEMORY)?,
                 &limits,
                 ops::EXTRACT_TO_MEMORY,
             )?;
@@ -882,7 +882,7 @@ impl Archive {
             check_single_entry_safe_with_archive(
                 &entries,
                 file_path,
-                archive.payload_size_for_ratio()?,
+                archive.payload_size_for_ratio(ops::EXTRACT_TO_MEMORY)?,
                 &options.limits,
                 ops::EXTRACT_TO_MEMORY,
             )?;
@@ -1151,7 +1151,7 @@ impl Archive {
             check_single_entry_safe_with_archive(
                 &entries,
                 file_path,
-                archive.payload_size_for_ratio()?,
+                archive.payload_size_for_ratio(ops::EXTRACT_TO_STREAM)?,
                 &options.limits,
                 ops::EXTRACT_TO_STREAM,
             )?;

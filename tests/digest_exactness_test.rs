@@ -52,11 +52,19 @@ fn write_tar(path: &Path, entry: &str, len: usize) {
 
 /// R6 property 1. The shortfall is produced exactly as
 /// `stream_bound_test`'s truncation case does it: take the AD 0065 listing
-/// snapshot, then swap the file on disk for one carrying the same entry
+/// snapshot, then rewrite the file on disk so it carries the same entry
 /// name with a shorter payload. The name-only drift guards (OI-0001-002)
 /// pass it through, so the digest's own stream bound is the last line of
 /// defence. Before this change the call returned `Ok` with a digest over
 /// the 512-byte payload.
+///
+/// The rewrite is identity-preserving — same inode, same length — because
+/// the read handle is bound to the archive file's identity (OI-0001-002).
+/// A construction that moved either half (`std::fs::copy`, which this used
+/// to use, moves the length) is refused by the identity guard before the
+/// digest walk starts, and the corruption verdict this test exists to pin
+/// would never be reached. `tests/listing_identity_test.rs` covers that
+/// refusal for the digest surface's siblings.
 #[test]
 fn truncated_tar_entry_makes_the_digest_report_corruption() {
     let temp = common::temp_test_dir();
@@ -76,7 +84,7 @@ fn truncated_tar_entry_makes_the_digest_report_corruption() {
         .expect("TAR declares its entry size");
     assert_eq!(declared, 4096);
 
-    std::fs::copy(&short, &target).expect("swap in the shorter archive");
+    common::rewrite_in_place_preserving_identity(&target, &short);
 
     match archive.calculate_content_multiset_digest_and_size() {
         Ok((digest, total)) => panic!(

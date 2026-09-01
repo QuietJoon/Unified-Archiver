@@ -4,6 +4,7 @@ use super::common::path_to_cstring_checked;
 use super::libarchive::*;
 use crate::entry::{ArchiveEntry, EntryType};
 use crate::error::{ArchiveError, ArchiveWarning, Result};
+use crate::fs_identity::FileIdentity;
 use crate::options::{ProgressCallback, RateLimiter};
 use crate::security::sanitize_entry_path;
 use once_cell::sync::OnceCell;
@@ -68,6 +69,27 @@ pub struct LibarchiveArchive {
     /// read backend now agrees that the listing is frozen at first
     /// observation. Write-mode handles never populate this cell.
     cached_listing: OnceCell<std::sync::Arc<Vec<ArchiveEntry>>>,
+    /// Identity of the archive file this *read* handle is bound to
+    /// (OI-0001-002), captured in [`LibarchiveArchive::open`] around the
+    /// first native open and re-checked at every later by-path re-open.
+    ///
+    /// This backend re-opens the archive by pathname for every operation
+    /// — libarchive's read handle is iterator-shaped and cannot be
+    /// rewound — so it has the widest swap window in the crate and the
+    /// weakest per-entry metadata to guard it with (the tar/ISO/raw
+    /// family carries no CRC at all). Binding the handle to the file
+    /// asks "is this still the same file?", which the name-drift guards
+    /// were being asked and could not answer.
+    ///
+    /// `None` means the open-time `stat` failed: capture is best-effort
+    /// (the native open stays the authority on whether the file is
+    /// usable), so such a handle simply carries no binding. The
+    /// *comparison* is not best-effort — see
+    /// [`FileIdentity::revalidate`].
+    ///
+    /// Write-mode handles set this to `None`: they never re-open by path
+    /// and never take a listing snapshot, so there is nothing to bind.
+    identity: Option<FileIdentity>,
     /// Free-form `ARCHIVE_WARN` text libarchive produced while reading
     /// headers, in production order (OI-0080-006 / ticgit 12d431).
     ///
@@ -426,22 +448,327 @@ mod tests {
         );
     }
 
+    /// Fixture length for the in-place drift rewrites below.
+    ///
+    /// Those tests replace the archive *at the same byte length* so the
+    /// OI-0001-002 identity binding stays satisfied and the name and
+    /// cardinality guards are the thing actually under test. That needs
+    /// the original to be at least as long as every replacement, and it
+    /// is not: libarchive does not pad tar output to the 10240 block
+    /// factor when writing to a regular file, so the three-entry "extra
+    /// live entries" replacement is genuinely *longer* than the
+    /// two-entry archive it stands in for. Padding the fixture up front
+    /// buys the room. 32 KiB is a whole number of 512-byte tar blocks
+    /// and comfortably above every tar these tests build.
+    const DRIFT_FIXTURE_LEN: u64 = 32 * 1024;
+
+    /// Build a tar carrying one entry per name, each with `payload`, and
+    /// return its bytes.
+    fn build_drift_tar_with_payload(dir: &Path, names: &[&str], payload: &[u8]) -> Vec<u8> {
+        let staged = dir.join("staged-build.tar");
+        let mut options = crate::options::CompressionOptions::default();
+        let mut writer =
+            LibarchiveArchive::create(&staged, crate::ArchiveFormat::Tar, &mut options)
+                .expect("create replacement tar");
+        for name in names {
+            writer
+                .add_file_from_data(name, payload)
+                .expect("add replacement entry");
+        }
+        writer.close_write().expect("finish replacement");
+        let bytes = std::fs::read(&staged).expect("read replacement tar");
+        std::fs::remove_file(&staged).expect("remove staging tar");
+        bytes
+    }
+
+    /// Build a tar carrying one small entry per name and return its bytes.
+    fn build_drift_tar(dir: &Path, names: &[&str]) -> Vec<u8> {
+        build_drift_tar_with_payload(dir, names, b"xxxxx")
+    }
+
+    /// The replacement the identity tests swap in: the *same* two entry
+    /// names in the same order, the *same* declared sizes, different
+    /// payload bytes, and a different file length.
+    ///
+    /// This is deliberately the case no guard in this backend other than
+    /// the identity binding can see. Every per-index name matches, the
+    /// entry count matches, and the tar/ISO/raw family carries no CRC to
+    /// compare — so with the revalidation removed each operation in
+    /// those tests succeeds and hands back content the safety gate never
+    /// saw, and their `expect_err`s fail. That is what makes them
+    /// non-vacuous rather than a restatement of the name guards.
+    fn identity_swap_replacement(dir: &Path) -> Vec<u8> {
+        let mut bytes = build_drift_tar_with_payload(dir, &["a.txt", "b.txt"], b"zzzzz");
+        // One extra block of end-of-archive padding: the archive stays
+        // well-formed and lists identically, but the byte length — half
+        // of the identity on Unix, all of it elsewhere — moves.
+        bytes.extend_from_slice(&[0u8; 512]);
+        bytes
+    }
+
+    /// Grow `path` to exactly `len` bytes with trailing zeros.
+    ///
+    /// Trailing NUL blocks are tar end-of-archive padding, so the archive
+    /// stays well-formed and its listing is unchanged — this only buys
+    /// headroom for [`rewrite_in_place_same_length`].
+    fn pad_tar_to(path: &Path, len: u64) {
+        use std::io::Write;
+        let current = std::fs::metadata(path).expect("stat fixture").len();
+        assert!(
+            current <= len,
+            "fixture is already longer than the padded target ({current} > {len})"
+        );
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("reopen fixture for padding");
+        file.write_all(&vec![0u8; (len - current) as usize])
+            .expect("pad fixture");
+        file.sync_all().expect("flush padding");
+        assert_eq!(
+            std::fs::metadata(path).expect("stat padded fixture").len(),
+            len,
+            "padding did not reach the requested length"
+        );
+    }
+
+    /// Replace `path`'s contents with `bytes`, zero-padded back to the
+    /// file's current length, through the *same* inode.
+    ///
+    /// What matters here is what this does **not** do. `std::fs::rename`
+    /// installs a new inode and `std::fs::copy` moves the length, and
+    /// either one now trips the OI-0001-002 identity binding *before* any
+    /// name guard runs — a drift test built that way would keep passing
+    /// while silently no longer testing drift. Writing through
+    /// `OpenOptions::write(true).truncate(true)` on the same path keeps
+    /// the inode, and padding back to the original byte count keeps the
+    /// length, so the identity is unchanged by construction and the
+    /// name/cardinality guards are the only line of defence left —
+    /// which is exactly the residual §2 documents and exactly what the
+    /// callers of this helper assert on.
+    ///
+    /// The before/after length assertion is deliberately inside the
+    /// helper so the precondition fails loudly rather than quietly
+    /// turning its callers into duplicates of the identity tests.
+    fn rewrite_in_place_same_length(path: &Path, bytes: &[u8]) {
+        use std::io::Write;
+        let before = std::fs::metadata(path).expect("stat before rewrite").len();
+        assert!(
+            bytes.len() as u64 <= before,
+            "replacement ({} bytes) does not fit the original length ({before}); \
+             pad the fixture further",
+            bytes.len()
+        );
+        let mut padded = bytes.to_vec();
+        padded.resize(before as usize, 0);
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(path)
+                .expect("reopen for in-place rewrite");
+            file.write_all(&padded).expect("write replacement bytes");
+            file.sync_all().expect("flush replacement");
+        }
+        let after = std::fs::metadata(path).expect("stat after rewrite").len();
+        assert_eq!(
+            before, after,
+            "the in-place rewrite must preserve the file length, or this test \
+             degenerates into an identity-drift test"
+        );
+    }
+
+    /// Assert `err` is the OI-0001-002 identity refusal for `op`.
+    ///
+    /// Pins both halves of the two-vocabulary rule: identity drift is
+    /// `OperationBlocked` + "identity changed", name and cardinality
+    /// drift is `Format` + "listing drift", and neither may borrow the
+    /// other's words.
+    #[track_caller]
+    fn assert_identity_drift(err: &ArchiveError, op: &str) {
+        match err {
+            ArchiveError::OperationBlocked { operation, reason } => {
+                assert_eq!(operation, op, "wrong operation label: {err}");
+                assert!(
+                    reason.contains("identity changed"),
+                    "expected the identity-drift phrasing, got: {reason}"
+                );
+                assert!(
+                    !reason.contains("listing drift"),
+                    "identity drift must not borrow the name-guard vocabulary: {reason}"
+                );
+            }
+            other => panic!("expected OperationBlocked for a swapped archive, got: {other}"),
+        }
+    }
+
+    /// Install `replacement` at `tar_path` via `rename` — a new inode
+    /// under the same pathname, the shape `std::fs::copy` cannot produce
+    /// — and assert the swap moves the length too, so the scenario stays
+    /// meaningful off Unix, where the identity is the length alone.
+    fn rename_swap_in(dir: &Path, tar_path: &Path, replacement: &[u8]) {
+        let swapped = dir.join("swapped.tar");
+        std::fs::write(&swapped, replacement).expect("write replacement");
+        let before = std::fs::metadata(tar_path).expect("stat original").len();
+        let after = std::fs::metadata(&swapped).expect("stat replacement").len();
+        assert_ne!(
+            before, after,
+            "the replacement must differ in length too, or this test would prove \
+             nothing off Unix, where the identity is the length alone"
+        );
+        std::fs::rename(&swapped, tar_path).expect("swap archive on disk");
+    }
+
+    /// OI-0001-002: a whole-file swap under the archive's pathname is
+    /// refused by the read handle's identity binding on every
+    /// single-entry route.
+    ///
+    /// The swapped-in file keeps every entry name, order and declared
+    /// size ([`identity_swap_replacement`]), so no name or cardinality
+    /// guard can see it and no CRC exists in the tar family to catch it
+    /// — this is precisely the hole OI-0001-002 was filed for. Delete
+    /// the revalidation from any of the four re-open sites below and the
+    /// matching `expect_err` fails outright, because the operation
+    /// succeeds against payload bytes the safety gate never saw.
+    ///
+    /// This is the half of the old `stale_cached_listing_surfaces_drift_errors`
+    /// that its `std::fs::rename` construction actually exercises now.
+    /// The name-guard half lives in that test, which was reworked onto
+    /// an identity-preserving in-place rewrite so it keeps testing what
+    /// it was written to test.
+    #[test]
+    fn swapped_archive_file_refuses_single_entry_operations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tar_path = dir.path().join("identity.tar");
+        std::fs::write(&tar_path, build_drift_tar(dir.path(), &["a.txt", "b.txt"]))
+            .expect("write fixture");
+
+        let archive = LibarchiveArchive::open(&tar_path).expect("open");
+        // Freeze the AD 0065 snapshot at [a.txt, b.txt]; every refusal
+        // below is therefore a re-open refusal, not a gate rejection.
+        let listed = archive.list_files_metadata_only().expect("list");
+        assert_eq!(listed.len(), 2);
+
+        rename_swap_in(
+            dir.path(),
+            &tar_path,
+            &identity_swap_replacement(dir.path()),
+        );
+
+        let err = archive
+            .extract_to_memory("a.txt")
+            .expect_err("memory extraction from a swapped file must be refused");
+        assert_identity_drift(&err, crate::error::ops::EXTRACT_TO_MEMORY);
+
+        let err = archive
+            .extract_to_stream("a.txt")
+            .map(|_| ())
+            .expect_err("streaming from a swapped file must be refused");
+        assert_identity_drift(&err, crate::error::ops::EXTRACT_TO_STREAM);
+
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).expect("mkdir out");
+        let err = archive
+            .extract_file("a.txt", &out)
+            .expect_err("disk extraction from a swapped file must be refused");
+        assert_identity_drift(&err, crate::error::ops::EXTRACT_FILE);
+
+        let err = archive
+            .test_integrity()
+            .map(|_| ())
+            .expect_err("an integrity verdict on a swapped file must be refused");
+        assert_identity_drift(&err, crate::error::ops::VALIDATE_INTEGRITY);
+    }
+
+    /// OI-0001-002, listing half: the AD 0065 snapshot is itself taken
+    /// through an identity-bound re-open, so a swap between
+    /// [`LibarchiveArchive::open`] and the *first* `list_files` is
+    /// refused rather than memoised.
+    ///
+    /// This is the site the other identity tests cannot reach — they
+    /// freeze the listing before swapping, so the listing walk never
+    /// runs again. Capturing at `open` rather than at listing population
+    /// is what makes this catchable at all: it puts the AD 0052 eager
+    /// first-header probe and the listing provably on the same bytes.
+    #[test]
+    fn swapped_archive_file_refuses_the_first_listing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tar_path = dir.path().join("identity-listing.tar");
+        std::fs::write(&tar_path, build_drift_tar(dir.path(), &["a.txt", "b.txt"]))
+            .expect("write fixture");
+
+        // Deliberately no `list_files_metadata_only` here: the handle is
+        // bound at construction, and nothing has been memoised yet.
+        let archive = LibarchiveArchive::open(&tar_path).expect("open");
+
+        rename_swap_in(
+            dir.path(),
+            &tar_path,
+            &identity_swap_replacement(dir.path()),
+        );
+
+        let err = archive
+            .list_files_metadata_only()
+            .map(|_| ())
+            .expect_err("listing a swapped file must be refused");
+        assert_identity_drift(&err, crate::error::ops::LIST_FILES);
+    }
+
+    /// OI-0001-002, bulk half: `extract_all` re-opens by pathname like
+    /// every other operation on this backend, so the same invisible swap
+    /// must be refused there too. Same replacement as its single-entry
+    /// sibling — identical names, order and sizes — so the cardinality
+    /// guard has nothing to report and only the identity binding can
+    /// refuse.
+    #[test]
+    fn swapped_archive_file_refuses_bulk_extraction() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tar_path = dir.path().join("identity-bulk.tar");
+        std::fs::write(&tar_path, build_drift_tar(dir.path(), &["a.txt", "b.txt"]))
+            .expect("write fixture");
+
+        let archive = LibarchiveArchive::open(&tar_path).expect("open");
+        let listed = archive.list_files_metadata_only().expect("list");
+        assert_eq!(listed.len(), 2);
+
+        rename_swap_in(
+            dir.path(),
+            &tar_path,
+            &identity_swap_replacement(dir.path()),
+        );
+
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).expect("mkdir out");
+        let err = archive
+            .extract_all(&out, None)
+            .map(|_| ())
+            .expect_err("bulk extraction from a swapped file must be refused");
+        assert_identity_drift(&err, crate::error::ops::EXTRACT_ALL);
+    }
+
     /// OI-0076-002: single-entry extraction validates against the AD
     /// 0065 memoised listing first (gate shapes), and the index walk
     /// must refuse a stale snapshot — name drift at the target index,
     /// or EOF before the target index — when the archive file is
     /// rewritten on disk after listing.
+    ///
+    /// The rewrite is deliberately **in place at the same length**
+    /// ([`rewrite_in_place_same_length`]). This test used to swap the
+    /// file with `std::fs::rename`, which OI-0001-002 now refuses at the
+    /// re-open, one layer above these assertions; the rename half moved
+    /// to `swapped_archive_file_refuses_single_entry_operations`. What
+    /// is left here is the residual the identity binding cannot see — a
+    /// same-inode, same-length rewrite — which is precisely why the name
+    /// and index guards below were kept rather than superseded.
     #[test]
     fn stale_cached_listing_surfaces_drift_errors() {
         let dir = tempfile::tempdir().expect("tempdir");
         let tar_path = dir.path().join("drift.tar");
-        let mut options = crate::options::CompressionOptions::default();
-        let mut writer =
-            LibarchiveArchive::create(&tar_path, crate::ArchiveFormat::Tar, &mut options)
-                .expect("create tar");
-        writer.add_file_from_data("a.txt", b"alpha").expect("add a");
-        writer.add_file_from_data("b.txt", b"bravo").expect("add b");
-        writer.close_write().expect("finish");
+        std::fs::write(&tar_path, build_drift_tar(dir.path(), &["a.txt", "b.txt"]))
+            .expect("write fixture");
+        // Headroom for the same-length rewrite below; the listing is
+        // unchanged, trailing NUL blocks are tar end-of-archive padding.
+        pad_tar_to(&tar_path, DRIFT_FIXTURE_LEN);
 
         let archive = LibarchiveArchive::open(&tar_path).expect("open");
         // Gate shape (OI-0076-002): unknown names are rejected from the
@@ -455,16 +782,11 @@ mod tests {
             "unexpected error: {err}"
         );
 
-        // Rewrite the archive on disk behind the memoised listing:
-        // one entry, different name.
-        let swapped = dir.path().join("swapped.tar");
-        let mut options = crate::options::CompressionOptions::default();
-        let mut writer =
-            LibarchiveArchive::create(&swapped, crate::ArchiveFormat::Tar, &mut options)
-                .expect("create replacement tar");
-        writer.add_file_from_data("x.txt", b"xxxxx").expect("add x");
-        writer.close_write().expect("finish replacement");
-        std::fs::rename(&swapped, &tar_path).expect("swap archive on disk");
+        // Rewrite the archive on disk behind the memoised listing: one
+        // entry, different name — same inode, same length, so the
+        // identity binding is satisfied and the name guards are what
+        // must catch this.
+        rewrite_in_place_same_length(&tar_path, &build_drift_tar(dir.path(), &["x.txt"]));
 
         // Target index still exists but carries a different name.
         let err = archive
@@ -536,17 +858,22 @@ mod tests {
     /// it. A post-listing on-disk swap — name drift at a consumed index,
     /// extra live entries, or EOF before the listing length — must be
     /// refused instead of extracting unchecked content.
+    ///
+    /// As with its single-entry sibling, the rewrite is in place at the
+    /// same length ([`rewrite_in_place_same_length`]): the `std::fs::rename`
+    /// this test used to use is now refused one layer earlier by the
+    /// OI-0001-002 identity binding, and that half lives in
+    /// `swapped_archive_file_refuses_bulk_extraction`.
     #[test]
     fn stale_cached_listing_surfaces_bulk_drift_errors() {
         let dir = tempfile::tempdir().expect("tempdir");
         let tar_path = dir.path().join("bulk-drift.tar");
-        let mut options = crate::options::CompressionOptions::default();
-        let mut writer =
-            LibarchiveArchive::create(&tar_path, crate::ArchiveFormat::Tar, &mut options)
-                .expect("create tar");
-        writer.add_file_from_data("a.txt", b"alpha").expect("add a");
-        writer.add_file_from_data("b.txt", b"bravo").expect("add b");
-        writer.close_write().expect("finish");
+        std::fs::write(&tar_path, build_drift_tar(dir.path(), &["a.txt", "b.txt"]))
+            .expect("write fixture");
+        // The three-entry replacement below is longer than this
+        // two-entry archive, so the fixture is padded to give the
+        // same-length rewrite somewhere to land.
+        pad_tar_to(&tar_path, DRIFT_FIXTURE_LEN);
 
         let archive = LibarchiveArchive::open(&tar_path).expect("open");
         // Freeze the AD 0065 snapshot at [a.txt, b.txt].
@@ -554,20 +881,11 @@ mod tests {
         assert_eq!(listed.len(), 2);
 
         // Rewrite the archive file on disk with the given entry names,
-        // behind the memoised listing.
+        // behind the memoised listing — in place, at the same length, so
+        // the identity binding stays satisfied and the cardinality and
+        // name guards are what the assertions exercise.
         let rewrite = |names: &[&str]| {
-            let staged = dir.path().join("staged.tar");
-            let mut options = crate::options::CompressionOptions::default();
-            let mut writer =
-                LibarchiveArchive::create(&staged, crate::ArchiveFormat::Tar, &mut options)
-                    .expect("create replacement tar");
-            for name in names {
-                writer
-                    .add_file_from_data(name, b"xxxxx")
-                    .expect("add replacement entry");
-            }
-            writer.close_write().expect("finish replacement");
-            std::fs::rename(&staged, &tar_path).expect("swap archive on disk");
+            rewrite_in_place_same_length(&tar_path, &build_drift_tar(dir.path(), names));
         };
 
         // Name drift at a consumed index.
@@ -670,6 +988,14 @@ mod tests {
         let raw_secs = {
             let c_path = path_to_cstring_checked(&tar_path).expect("cstring");
             unsafe {
+                // Deliberately the *raw* handle opener, not
+                // `bound_read_handle`: there is no `LibarchiveArchive`
+                // here to be bound to, and nothing to be stale against —
+                // this reads the tar back through the FFI in the same
+                // statement that wrote it, with no listing snapshot and
+                // no swap window in between. Routing it through the
+                // identity guard would only assert that the file we just
+                // created is the file we just created.
                 let archive = LibarchiveArchive::open_read_handle(&c_path).expect("open read");
                 let _guard = ReadHandleGuard(archive);
                 let mut entry_ptr: *mut LibarchiveEntry = std::ptr::null_mut();

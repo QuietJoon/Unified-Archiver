@@ -241,13 +241,6 @@ fn zip_entry_times(zip_file: &zip::read::ZipFile) -> ZipEntryTimes {
     times
 }
 
-/// Open a ZIP file and create a RawZipArchive
-fn open_zip(path: &Path) -> Result<RawZipArchive<File>> {
-    let file = File::open(path).map_err(|e| ArchiveError::io("open", path.to_path_buf(), e))?;
-    RawZipArchive::new(file)
-        .map_err(|e| ArchiveError::format(Some(ArchiveFormat::Zip), format!("Invalid ZIP: {}", e)))
-}
-
 /// Native Rust ZIP archive wrapper
 ///
 /// Provides fast ZIP operations with CRC32 from metadata (no decompression needed).
@@ -275,6 +268,13 @@ fn open_zip(path: &Path) -> Result<RawZipArchive<File>> {
 /// that consume the whole collapsed view (bulk extraction, the integrity
 /// walk, an id-addressed stream) refuse the archive instead of silently
 /// omitting a shadowed record.
+///
+/// **File-identity binding (OI-0001-002).** The cached listing describes
+/// one particular file, so the handle is bound to that file's identity —
+/// captured by `fstat` of the cached descriptor itself — and the binding
+/// is re-checked at the single place this backend can ever re-resolve the
+/// pathname, `open_zip_bound`. See that method for why ZIP's window is the
+/// narrowest of the four read backends.
 pub struct ZipArchive {
     path: PathBuf,
     password: Option<Password>,
@@ -285,6 +285,15 @@ pub struct ZipArchive {
     /// it, which since OI-0001-003 is any listing, extraction or integrity
     /// call rather than only a by-name single-entry extraction.
     raw_directory: once_cell::sync::OnceCell<RawCentralDirectory>,
+    /// Identity of the file this handle is bound to (OI-0001-002), taken
+    /// from the descriptor the cached `RawZipArchive` reads through. Bound
+    /// on the first cache population and compared on every later one; see
+    /// [`ZipArchive::open_zip_bound`].
+    ///
+    /// A `OnceCell` to match the two memo cells beside it, not because a
+    /// race needs guarding: both writers run under the `cached_zip` mutex,
+    /// so the cell is only ever touched by one thread at a time.
+    identity: once_cell::sync::OnceCell<crate::fs_identity::FileIdentity>,
 }
 
 impl ZipArchive {
@@ -303,6 +312,13 @@ impl ZipArchive {
     /// [`crate::backend::ReadBackend::validate`]), which forces exactly
     /// this parse and leaves it cached — it is not
     /// `validate_integrity`, which decodes every payload.
+    ///
+    /// That same contract is why the OI-0001-002 file-identity binding is
+    /// *not* taken here: a constructor `stat` would report a missing or
+    /// unreadable file from `open()` instead of from the first operation,
+    /// changing a documented contract. The binding is taken at the first
+    /// cache population instead (`open_zip_bound`), from the very
+    /// descriptor that operation will read through.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
 
@@ -312,7 +328,123 @@ impl ZipArchive {
             cached_zip: std::sync::Mutex::new(None),
             listing: once_cell::sync::OnceCell::new(),
             raw_directory: once_cell::sync::OnceCell::new(),
+            identity: once_cell::sync::OnceCell::new(),
         })
+    }
+
+    /// The archive file this handle is bound to, or `None` if no
+    /// operation has populated the cache yet.
+    ///
+    /// Exists so the facade can revalidate at the one by-path
+    /// re-resolution that does not go through this backend at all:
+    /// [`crate::Archive::payload_size_for_ratio`] stats the pathname to
+    /// produce the compression-ratio *denominator* while the numerator
+    /// comes from the cached listing. ZIP is the worst case for that
+    /// straddle — after the descriptor is cached there is no second
+    /// by-path open here, so no identity refusal from this backend is
+    /// even possible.
+    pub(crate) fn bound_identity(&self) -> Option<crate::fs_identity::FileIdentity> {
+        self.identity.get().copied()
+    }
+
+    /// Op label for the identity guard in [`Self::open_zip_bound`].
+    ///
+    /// The ZIP cache layer sits below every public entry point and has no
+    /// caller op at that altitude: `with_zip` is reached from listing,
+    /// extraction, streaming and integrity alike, and `with_cached_file`
+    /// from the raw-directory scan those all consult. Threading an op
+    /// through the cache would mean widening two internal helpers and
+    /// every one of their call sites purely to decorate one message. A
+    /// fixed `"open"`-family label is used instead, matching the
+    /// read-side open-time guard in [`crate::Archive`] (OI-0081-001),
+    /// which reports the same condition under the same word: the failing
+    /// operation really is *opening the archive file*, not whatever the
+    /// caller was going to do with it afterwards.
+    const IDENTITY_OP: &str = "open";
+
+    /// Open `self.path` and bind — or re-check — this handle's file
+    /// identity, then build the raw archive.
+    ///
+    /// This is ZIP's *only* by-path re-open. Every listing, extraction,
+    /// streaming and integrity path reads through the cached
+    /// `RawZipArchive` ([`Self::with_zip`]) or the very descriptor it owns
+    /// ([`Self::with_cached_file`], OI-0001-003), so the window this guard
+    /// closes is exactly "cache empty, or dropped after a failed rebuild".
+    ///
+    /// **No stat-to-open window at all (OI-0001-002).** The identity comes
+    /// from [`std::fs::File::metadata`] — an `fstat` of the descriptor
+    /// *every subsequent read goes through* — not from a path `stat` that
+    /// something could swap out before the open lands. The other three
+    /// read backends hand a pathname to a native opener and can only
+    /// narrow that window; here it is genuinely closed, because the
+    /// inode measured is by construction the inode read.
+    ///
+    /// First *successful* open binds; later calls compare and fail closed
+    /// on a mismatch with the shared "identity changed" refusal
+    /// ([`crate::fs_identity::identity_drift`]), which stays disjoint from
+    /// the `Format` / "listing drift" vocabulary the name and cardinality
+    /// guards use — those are additive and all still stand, because a
+    /// same-inode same-length rewrite is invisible to any stat identity.
+    ///
+    /// **Why the bind is after the parse, not before it.** AD 0052 says
+    /// `open()` touches no file and the *first operation* validates, so a
+    /// first operation run against an archive a producer is still writing
+    /// is a supported, recoverable shape: the central directory lives at
+    /// the end of a ZIP, `RawZipArchive::new` fails until the writer is
+    /// done, and every entry point takes `&self`, so the caller simply
+    /// retries. Binding before the parse turned that transient `Format`
+    /// error into a permanent one — the failed attempt recorded `len` at
+    /// its half-written value, and the retry against the finished,
+    /// healthy file was refused forever as "identity changed" with nobody
+    /// having swapped anything. Recording the binding only once a parse
+    /// has succeeded keeps the retry working while losing no swap
+    /// coverage: the comparison above still runs on every call that finds
+    /// a binding already in place.
+    ///
+    /// Both call sites hold the `cached_zip` mutex, so the cell is never
+    /// written concurrently.
+    fn open_zip_bound(&self) -> Result<RawZipArchive<File>> {
+        let file =
+            File::open(&self.path).map_err(|e| ArchiveError::io("open", self.path.clone(), e))?;
+        let meta = file
+            .metadata()
+            .map_err(|e| ArchiveError::io("stat", self.path.clone(), e))?;
+        let found = crate::fs_identity::FileIdentity::from_metadata(&meta);
+        // Compare-only: an existing binding is enforced before a single
+        // byte of the replacement is parsed.
+        if let Some(&expected) = self.identity.get() {
+            if expected != found {
+                return Err(crate::fs_identity::identity_drift(
+                    expected,
+                    Some(found),
+                    &self.path,
+                    Self::IDENTITY_OP,
+                ));
+            }
+        }
+        let zip = RawZipArchive::new(file).map_err(|e| {
+            ArchiveError::format(Some(ArchiveFormat::Zip), format!("Invalid ZIP: {}", e))
+        })?;
+        // Bind only now. `found` is the `fstat` of the very descriptor
+        // this archive reads through, so the binding still names the
+        // inode that was parsed, not whatever the path resolves to next.
+        let _ = self.identity.set(found);
+        Ok(zip)
+    }
+
+    /// Test-only: empty the memoised `RawZipArchive` so the next operation
+    /// has to re-open `self.path` through [`Self::open_zip_bound`].
+    ///
+    /// In production that second population happens when a
+    /// [`Self::with_cached_file`] rebuild fails and leaves the slot empty;
+    /// staging a rebuild failure *and* a file swap in one test would prove
+    /// less about the guard than reaching the same state directly does.
+    #[cfg(test)]
+    fn drop_cached_zip(&self) {
+        *self
+            .cached_zip
+            .lock()
+            .expect("test helper: the cache mutex must not be poisoned") = None;
     }
 
     /// Run `f` against a `RawZipArchive<File>`, populating the cache on
@@ -333,7 +465,7 @@ impl ZipArchive {
         })?;
         let zip = match &mut *guard {
             Some(zip) => zip,
-            slot => slot.insert(open_zip(&self.path)?),
+            slot => slot.insert(self.open_zip_bound()?),
         };
         f(zip)
     }
@@ -345,9 +477,12 @@ impl ZipArchive {
     /// `File::open(&self.path)`, so the scan and every subsequent extraction
     /// could read two different files: replace the path between the two
     /// opens and the guard blesses one archive while the extractor reads
-    /// another. There is no revalidation to add because the backend records
-    /// no open-time identity — so instead of opening twice, this hands out
-    /// the descriptor that is already open. The `zip` crate exposes its
+    /// another. Rather than open twice and reconcile, this hands out the
+    /// descriptor that is already open, so there is nothing to reconcile:
+    /// one file, one answer. (Since OI-0001-002 the backend *does* record
+    /// an open-time identity, but that guard covers the other direction —
+    /// a re-open when the cache is empty — and is no substitute for
+    /// reading one source here.) The `zip` crate exposes its
     /// reader only by consuming the archive (`into_inner`), so the cached
     /// handle is taken apart under the same mutex acquisition and rebuilt
     /// from the same descriptor before the lock is released; the one extra
@@ -363,7 +498,7 @@ impl ZipArchive {
         // Materialise the cache first: `f` must receive the descriptor every
         // other operation reads through, whether or not one was open yet.
         if guard.is_none() {
-            *guard = Some(open_zip(&self.path)?);
+            *guard = Some(self.open_zip_bound()?);
         }
         let zip = guard
             .take()

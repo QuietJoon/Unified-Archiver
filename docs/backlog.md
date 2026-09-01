@@ -752,6 +752,31 @@ bookkeeping. The two `manual/` items are unchanged and both were re-confirmed re
   message of 2026-08-21 mentions this work. Nothing is half-landed, so there is nothing to revert:
   the entry stands as written and its "Impact if deferred" reading is still the accurate exposure.
   Reopening the ticket, or filing a successor, is its closer's call.
+- **Discharged 2026-09-01 — by file identity, NOT by the per-entry fingerprint the criteria ask
+  for.** Read the previous note as still true of the tree it described; this note records what
+  landed afterwards, and the two do not conflict. Every read backend now binds its handle to the
+  archive **file's** identity — `(dev, ino, len)` on Unix, `len` alone off Unix — captured when the
+  handle is opened and re-checked at every by-path re-open, refusing with `OperationBlocked`
+  carrying "identity changed". libarchive got a bracketed capture at `open` and a bound re-open at
+  all six read sites plus the stream reader (`open` keeps the raw opener and brackets it inline,
+  being the capture point rather than a comparison point); ZIP captures from an `fstat` of the descriptor every
+  later read uses; 7z captures and compares inside `open_reader` with an op label threaded from its
+  six callers; UnRAR compares in `fresh_handle` and its pre-existing `UnrarFileIdentity` was
+  migrated onto the shared type. All five name and cardinality guards were **kept** — the binding
+  is additive.
+- **Do not read the Required Actions against the tree and conclude this is unfinished.** The
+  acceptance criteria asked for a per-entry metadata fingerprint (type, declared size, CRC,
+  encryption) applied at all five guard sites; that approach was **rejected by the owner**, and no
+  fingerprint helper exists or is going to. The reason is Action 2 — per-backend normalisation does
+  not agree (directory sizes are `None` on ZIP/7z/UnRAR but `Some(0)` on libarchive tar; CRC is
+  `None` for the whole tar/ISO/raw family and a placeholder for AE-2 ZIP), so a widened comparison
+  is exactly the fail-closed-on-healthy-archives trap the entry's own Background paragraph warns
+  about. The choice was made on false-positive risk, **not** on coverage dominance: a fingerprint
+  would catch the same-inode same-length in-place rewrite that identity misses, while identity
+  catches every replacement primitive a fingerprint would have to be perfect to see. So the
+  criteria are formally unmet and deliberately so, and the residual they would have covered stays
+  open work. Full reasoning, the residual, the non-Unix degradation, the per-backend asymmetry and
+  the UnRAR multi-volume gap: `docs/records/DCR-014-read-handle-bound-to-archive-file-identity.md`.
 
 ### ZIP duplicate-collapse guard is neither source-atomic nor applied across the API (OI-0001-003)
 - **Type:** 2

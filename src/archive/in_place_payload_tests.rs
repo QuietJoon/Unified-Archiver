@@ -39,7 +39,9 @@ fn in_place_ratio_denominator_excludes_the_stub() {
     let archive = Archive::open_at_offset(&path, offset).expect("in-place open");
     assert_eq!(archive.payload_access(), PayloadAccess::InPlace);
     assert_eq!(
-        archive.payload_size_for_ratio().unwrap(),
+        archive
+            .payload_size_for_ratio(crate::error::ops::EXTRACT_ALL)
+            .unwrap(),
         zip_bytes.len() as u64,
         "the ratio denominator must be the payload, not stub + payload",
     );
@@ -62,7 +64,9 @@ fn staged_ratio_denominator_is_the_staged_payload() {
     let archive = Archive::open_at_offset(&path, offset).expect("staged open");
     assert_eq!(archive.payload_access(), PayloadAccess::Staged);
     assert_eq!(
-        archive.payload_size_for_ratio().unwrap(),
+        archive
+            .payload_size_for_ratio(crate::error::ops::EXTRACT_ALL)
+            .unwrap(),
         zip_bytes.len() as u64,
     );
 }

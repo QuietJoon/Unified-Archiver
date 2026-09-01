@@ -143,7 +143,7 @@ fn test_sevenz_visit_order_is_block_major() {
     let temp = tempfile::tempdir().unwrap();
     let archive_path = build_mixed_layout_archive(temp.path());
     let archive = SevenZArchive::open(&archive_path).unwrap();
-    let reader = archive.open_reader().unwrap();
+    let reader = archive.open_reader(crate::error::ops::LIST_FILES).unwrap();
 
     // Stream files in block order (a, b, top), then no-stream
     // files (dir, empty.txt) in files order.
@@ -748,4 +748,290 @@ fn test_sevenz_crcless_duplicate_path_digests_through_the_facade() {
         format!("{:08x}", crc32fast::hash(elements.join(",").as_bytes()))
     );
     assert_eq!(total_size, b"seven content".len() as u64);
+}
+
+// ── OI-0001-002: the handle is bound to the archive FILE ──
+//
+// The listing is memoised once (AD 0065) and every later 7z operation
+// re-opens the archive by pathname. The per-entry guards on those
+// re-opens compare the normalised entry *name*, so a replacement that
+// keeps the names passed all of them while the safety-gate decisions
+// stayed those of the stale snapshot. `SevenZArchive::open_reader` now
+// binds the handle to the file itself and re-checks at every re-open.
+
+/// Build a single-entry 7z at `path` whose sole entry is `only.txt`
+/// carrying `payload`.
+///
+/// Two calls with different payloads produce archives that agree on
+/// every entry name and cardinality and disagree on file length — the
+/// exact shape the name guards cannot tell apart.
+fn build_single_entry_archive(path: &Path, payload: &[u8]) {
+    let mut writer = sevenz_rust2::ArchiveWriter::create(path).unwrap();
+    writer
+        .push_archive_entry(
+            sevenz_rust2::ArchiveEntry::new_file("only.txt"),
+            Some(payload),
+        )
+        .unwrap();
+    writer.finish().unwrap();
+}
+
+/// A decoy payload long enough that the two archives cannot come out
+/// the same length — the length half of the identity is the only half
+/// that exists off Unix.
+fn decoy_payload() -> Vec<u8> {
+    (0..4096u32).map(|i| (i % 251) as u8).collect()
+}
+
+/// The error from a call that must have been refused.
+///
+/// Spelled as a helper rather than `.err().expect(..)` (which clippy's
+/// `err_expect` rejects) or `.expect_err(..)` (which needs `T: Debug`,
+/// and several of these `Ok` types are not).
+#[track_caller]
+fn refusal<T>(result: crate::error::Result<T>, what: &str) -> ArchiveError {
+    match result {
+        Ok(_) => panic!("{what}"),
+        Err(err) => err,
+    }
+}
+
+/// Assert `err` is the identity refusal, raised for `op`.
+///
+/// Pins both halves of the two-vocabulary split: identity drift is
+/// `OperationBlocked` + "identity changed", name/cardinality drift stays
+/// `Format` + "listing drift", and neither borrows the other's words.
+#[track_caller]
+fn assert_identity_blocked(err: ArchiveError, op: &str) {
+    match err {
+        ArchiveError::OperationBlocked { operation, reason } => {
+            assert_eq!(
+                operation, op,
+                "the refusal must name the caller's own operation, not a fixed open-family label"
+            );
+            assert!(
+                reason.contains("identity changed"),
+                "expected the identity-drift vocabulary, got: {reason}"
+            );
+            assert!(
+                !reason.contains("listing drift"),
+                "identity drift must not borrow the name-guard vocabulary: {reason}"
+            );
+        }
+        other => panic!("expected the identity refusal for {op}, got {other:?}"),
+    }
+}
+
+/// Every operation that re-opens the archive refuses a same-name
+/// replacement, at the facade — the altitude a caller actually uses.
+///
+/// **Non-vacuity.** The decoy lists the same single entry name as the
+/// original (asserted before the swap), so no name or cardinality guard
+/// can see anything wrong here; the file-identity comparison is the
+/// only thing that can refuse. Delete the comparison in
+/// `SevenZArchive::bind_or_check_identity` and every
+/// `assert_identity_blocked` below fails — starting with
+/// `extract_to_memory`, which would hand back the decoy's payload as
+/// though it were the listed entry's.
+#[test]
+fn test_sevenz_same_name_file_swap_is_refused_by_every_reopening_operation() {
+    let temp = tempfile::tempdir().unwrap();
+    let live = temp.path().join("live.7z");
+    let decoy = temp.path().join("decoy.7z");
+    build_single_entry_archive(&live, b"original 7z payload");
+    build_single_entry_archive(&decoy, &decoy_payload());
+
+    let archive = crate::Archive::open(&live).unwrap();
+    let listed: Vec<String> = archive
+        .list_files()
+        .unwrap()
+        .iter()
+        .map(|entry| entry.path.clone())
+        .collect();
+    assert_eq!(listed, vec!["only.txt".to_string()]);
+
+    {
+        let decoy_handle = crate::Archive::open(&decoy).unwrap();
+        let decoy_listed: Vec<String> = decoy_handle
+            .list_files()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        assert_eq!(
+            decoy_listed, listed,
+            "the replacement must be invisible to the name and cardinality guards"
+        );
+    }
+    assert_ne!(
+        std::fs::metadata(&live).unwrap().len(),
+        std::fs::metadata(&decoy).unwrap().len(),
+        "the two archives must differ in length, or the off-Unix half of the binding proves nothing"
+    );
+
+    std::fs::rename(&decoy, &live).unwrap();
+
+    // `EXTRACT_ALL`, not this backend's own `EXTRACT`: the facade's
+    // compression-ratio gate revalidates the binding before dispatching, so
+    // for `extract_all` its refusal lands first and names the public call.
+    // The 7z backend's own guard still says `extract` and would be what a
+    // caller saw if the gate were removed — that divergence is real and is
+    // tracked separately (ticgit c9e726, op labels differ by backend).
+    assert_identity_blocked(
+        refusal(
+            archive.extract_all(crate::ExtractionOptions::new(temp.path().join("all"))),
+            "extract_all must refuse a swapped archive",
+        ),
+        crate::error::ops::EXTRACT_ALL,
+    );
+    assert_identity_blocked(
+        refusal(
+            archive.extract_file(
+                "only.txt",
+                crate::ExtractionOptions::new(temp.path().join("one")),
+            ),
+            "extract_file must refuse a swapped archive",
+        ),
+        crate::error::ops::EXTRACT_FILE,
+    );
+    assert_identity_blocked(
+        refusal(
+            archive.extract_to_memory("only.txt"),
+            "extract_to_memory must refuse a swapped archive",
+        ),
+        crate::error::ops::EXTRACT_TO_MEMORY,
+    );
+    assert_identity_blocked(
+        refusal(
+            archive.extract_to_stream("only.txt", crate::StreamBound::DeclaredSize),
+            "extract_to_stream must refuse a swapped archive",
+        ),
+        crate::error::ops::EXTRACT_TO_STREAM,
+    );
+    assert_identity_blocked(
+        refusal(
+            archive.validate_integrity(),
+            "validate_integrity must refuse a swapped archive",
+        ),
+        crate::error::ops::VALIDATE_INTEGRITY,
+    );
+    assert_identity_blocked(
+        refusal(archive.is_solid(), "is_solid must refuse a swapped archive"),
+        crate::error::ops::LIST_FILES,
+    );
+}
+
+/// The listing walk is a bound re-open too, not just its consumers.
+///
+/// Binding through `is_solid` leaves the AD 0065 listing cache empty, so
+/// the swap lands *before* the snapshot is taken and the walk itself is
+/// what refuses. Without the comparison the walk would happily adopt the
+/// decoy's table of contents as this handle's listing.
+#[test]
+fn test_sevenz_listing_walk_refuses_a_swapped_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let live = temp.path().join("live.7z");
+    let decoy = temp.path().join("decoy.7z");
+    build_single_entry_archive(&live, b"original 7z payload");
+    build_single_entry_archive(&decoy, &decoy_payload());
+
+    let archive = SevenZArchive::open(&live).unwrap();
+    archive
+        .is_solid()
+        .expect("the first probe binds the handle");
+
+    std::fs::rename(&decoy, &live).unwrap();
+
+    assert_identity_blocked(
+        refusal(
+            archive.list_files(),
+            "the listing walk must refuse a swapped archive",
+        ),
+        crate::error::ops::LIST_FILES,
+    );
+}
+
+/// `len` is part of the identity on purpose: an append keeps the inode,
+/// so `(dev, ino)` alone would be blind to entries the safety gate never
+/// saw. Unix-only because the inode precondition is what makes the test
+/// mean anything — off Unix the identity is the length already.
+#[cfg(unix)]
+#[test]
+fn test_sevenz_append_under_a_live_handle_is_refused() {
+    use std::io::Write as _;
+
+    let temp = tempfile::tempdir().unwrap();
+    let live = temp.path().join("live.7z");
+    build_single_entry_archive(&live, b"original 7z payload");
+
+    let archive = crate::Archive::open(&live).unwrap();
+    archive.list_files().unwrap();
+    let before = std::fs::metadata(&live).unwrap();
+
+    let mut appended = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&live)
+        .unwrap();
+    appended.write_all(b"trailing bytes").unwrap();
+    appended.flush().unwrap();
+    drop(appended);
+
+    let after = std::fs::metadata(&live).unwrap();
+    assert_eq!(
+        crate::fs_identity::InodeId::from_metadata(&before),
+        crate::fs_identity::InodeId::from_metadata(&after),
+        "an append keeps the inode — that precondition is the whole point of this test"
+    );
+    assert_ne!(before.len(), after.len());
+
+    assert_identity_blocked(
+        refusal(
+            archive.extract_to_memory("only.txt"),
+            "an appended-to archive must be refused",
+        ),
+        crate::error::ops::EXTRACT_TO_MEMORY,
+    );
+}
+
+/// AD 0052: `open()` touches no file and the *first operation* validates,
+/// so a first operation against an archive a producer is still writing is
+/// a supported, recoverable shape — the 7z directory lives at the end, the
+/// parse fails, and the caller (every entry point takes `&self`) retries.
+///
+/// Non-vacuity: move the bind in `SevenZArchive::open_reader` back ahead of
+/// `ArchiveReader::open` — i.e. make the pre-open half
+/// `bind_or_check_identity` again — and the retry below fails with
+/// `OperationBlocked` / "identity changed", because the failed attempt
+/// recorded the half-written length as the binding. Nobody swapped
+/// anything; the archive is complete and healthy.
+#[test]
+fn test_sevenz_a_failed_first_operation_leaves_the_handle_retryable() {
+    let dir = tempfile::tempdir().unwrap();
+    let complete = dir.path().join("complete.7z");
+    build_single_entry_archive(&complete, &decoy_payload());
+    let bytes = std::fs::read(&complete).unwrap();
+
+    // The producer is mid-write: the end-of-archive header is not there
+    // yet, so nothing can parse this.
+    let path = dir.path().join("still-being-written.7z");
+    std::fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
+
+    let archive = SevenZArchive::open(&path).unwrap();
+    let err = refusal(
+        archive.list_files(),
+        "a half-written 7z must not parse — the fixture proves nothing otherwise",
+    );
+    assert!(
+        matches!(err, ArchiveError::Format { .. }),
+        "a truncated 7z is a format failure, not an identity one: {err:?}"
+    );
+
+    // The producer finishes, in place: same inode, full length.
+    std::fs::write(&path, &bytes).unwrap();
+
+    let entries = archive
+        .list_files()
+        .expect("the retry runs against a complete, healthy archive nobody swapped");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].path, "only.txt");
 }

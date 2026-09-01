@@ -81,6 +81,95 @@ pub fn default_extraction_options(dest: impl Into<PathBuf>) -> ExtractionOptions
     ExtractionOptions::new(dest)
 }
 
+/// Replace `target`'s bytes with `replacement`'s **without changing the
+/// file's stat identity**, and return the length both files share
+/// afterwards.
+///
+/// # Why this exists (OI-0001-002)
+///
+/// A read handle is bound to the archive file's identity — on Unix
+/// `(dev, ino, len)`, off Unix `len` alone — captured when the handle is
+/// opened and re-checked at every by-path re-open. Tests that want to
+/// reach a *content*-level defence (the `DeclaredSize` exactness bound,
+/// the digest's corruption verdict, a `Cap` budget) must therefore put the
+/// replacement bytes in place without moving that identity, or the
+/// identity guard refuses the operation first and the property under test
+/// is never exercised at all.
+///
+/// `std::fs::copy` is not that primitive: it opens and truncates the
+/// destination, so the inode survives but the **length changes** (probed
+/// on the dev host: same inode, 8 bytes → 4 bytes). This helper keeps both
+/// halves stable:
+///
+/// - the file is opened in place (`write` + `truncate`, never `create_new`,
+///   never a rename), so the inode is untouched;
+/// - the replacement's bytes are zero-padded up to `target`'s *current*
+///   length, so the byte count is unchanged. For TAR that padding is not a
+///   hack — trailing zero blocks are the end-of-archive marker, so the
+///   padded result is still a well-formed archive.
+///
+/// A replacement that is **longer** than the target is a panic, not a
+/// silent truncation: a truncated archive would still let the test run,
+/// but it would be testing a differently-damaged file than the one the
+/// author described.
+///
+/// Both invariants are asserted after the write, so a caller reading the
+/// test can see the precondition it depends on rather than having to
+/// trust this doc comment.
+#[allow(dead_code)] // Not every test binary that includes common/mod.rs uses this.
+pub fn rewrite_in_place_preserving_identity(target: &Path, replacement: &Path) -> u64 {
+    use std::io::Write as _;
+
+    let before = fs::metadata(target).expect("stat the target archive before the in-place rewrite");
+    let target_len = before.len();
+
+    let mut bytes = fs::read(replacement).expect("read the replacement archive");
+    assert!(
+        bytes.len() as u64 <= target_len,
+        "replacement {} is {} bytes but target {} is only {target_len}; truncating it would \
+         put a *differently* damaged archive on disk than the test claims to construct",
+        replacement.display(),
+        bytes.len(),
+        target.display(),
+    );
+    bytes.resize(
+        usize::try_from(target_len).expect("archive fixtures fit in memory"),
+        0u8,
+    );
+
+    {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(target)
+            .expect("open the target archive for an in-place rewrite");
+        file.write_all(&bytes)
+            .expect("write the padded replacement bytes");
+        file.sync_all().expect("flush the in-place rewrite");
+    }
+
+    let after = fs::metadata(target).expect("stat the target archive after the in-place rewrite");
+    assert_eq!(
+        after.len(),
+        target_len,
+        "the in-place rewrite must not move {}'s length — that is half of the identity the \
+         read handle is bound to",
+        target.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        assert_eq!(
+            (after.dev(), after.ino()),
+            (before.dev(), before.ino()),
+            "the in-place rewrite must not move {}'s inode — that is the other half",
+            target.display()
+        );
+    }
+
+    target_len
+}
+
 /// Get fixture path for test files
 ///
 /// Returns absolute path to tests/fixtures/{name}

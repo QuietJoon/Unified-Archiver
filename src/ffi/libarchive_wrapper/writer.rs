@@ -402,6 +402,13 @@ impl LibarchiveArchive {
                 write_poisoned: false,
                 finish_failure: None,
                 cached_listing: OnceCell::new(),
+                // OI-0001-002: the identity binding exists to prove a
+                // *read* handle is still looking at the file its cached
+                // listing describes. A write handle has no cached
+                // listing and never re-opens by path, so there is
+                // nothing to bind and `None` is the honest value — not
+                // a capture that failed.
+                identity: None,
                 // Write-mode handles read no headers, so nothing can
                 // ever land here.
                 backend_warnings: std::cell::RefCell::new(Vec::new()),
@@ -1166,6 +1173,7 @@ mod close_write_state_tests {
             write_poisoned: false,
             finish_failure: finish_failure.map(str::to_string),
             cached_listing: OnceCell::new(),
+            identity: None,
             backend_warnings: std::cell::RefCell::new(Vec::new()),
         }
     }

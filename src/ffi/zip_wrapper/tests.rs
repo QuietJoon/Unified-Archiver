@@ -73,7 +73,7 @@ fn validate_then_list_files_serves_the_cached_listing() {
     assert_eq!(
         Arc::as_ptr(zip.listing.get().unwrap()),
         parsed_arc,
-        "the backend listing cache changed identity across list_files()"
+        "the backend listing cache identity changed across list_files()"
     );
 }
 
@@ -1063,6 +1063,12 @@ fn test_zip_duplicate_scan_rejects_malformed_central_directory() {
 /// the archive the extractor is actually reading — the "guard blesses one
 /// file while extraction reads another" defect, observed from its safe
 /// side. Reading one source means the verdict follows the descriptor.
+///
+/// It doubles as the record of why ZIP's OI-0001-002 identity window is
+/// the narrowest of the four read backends: the swap below happens after
+/// the cached handle is warm, so no `open_zip_bound` re-run occurs and the
+/// identity comparison never fires — there is simply no by-path re-open
+/// left for it to guard. The assertions here are unchanged by that guard.
 #[test]
 fn test_zip_raw_index_reads_the_cached_handle_not_the_path() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1289,4 +1295,109 @@ fn test_zip_extraction_restores_extended_timestamp() {
         expected,
         "extract_file must restore the listed (0x5455) mtime"
     );
+}
+
+/// OI-0001-002: the identity binding is not vacuous. The one window ZIP
+/// has is the (re)population of the cached handle, and a same-NAME
+/// replacement moved onto the path inside that window must be refused
+/// rather than read as if it were the file the listing describes.
+///
+/// The fixture is deliberately the shape every pre-existing guard passes:
+/// one entry, same normalised name, same id — only the payload (and hence
+/// the file length) differs, so `check_listing_drift`'s name comparison
+/// and the cardinality checks all agree. Only the file identity disagrees.
+#[test]
+fn test_zip_identity_binding_refuses_a_swapped_file_at_cache_repopulation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("live.zip");
+    build_plain_zip(&path, "a.txt", b"original");
+
+    let archive = ZipArchive::open(&path).unwrap();
+    // Warm the listing, the raw index and the cached descriptor: this is
+    // the moment the handle binds to the file.
+    let entries = archive.list_files().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(archive.extract_to_memory("a.txt").unwrap(), b"original");
+
+    // Same entry name, different bytes, different length, new inode.
+    let replacement = tmp.path().join("replacement.zip");
+    build_plain_zip(&replacement, "a.txt", b"attacker-payload-of-another-length");
+    // Non-vacuity of the fixture itself: read on its own the replacement
+    // is a perfectly healthy archive carrying the same single name, so
+    // nothing but the identity comparison can tell the two apart.
+    let probe = ZipArchive::open(&replacement).unwrap();
+    let probe_entries = probe.list_files().unwrap();
+    assert_eq!(probe_entries.len(), 1);
+    assert_eq!(probe_entries[0].path, "a.txt");
+    assert_ne!(
+        std::fs::metadata(&replacement).unwrap().len(),
+        std::fs::metadata(&path).unwrap().len(),
+        "the swap must move the byte length, or off-Unix hosts have no signal"
+    );
+
+    let staged = tmp.path().join("staged.zip");
+    std::fs::copy(&replacement, &staged).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::rename(&staged, &path).unwrap();
+
+    // Force the backend back through its one by-path re-open.
+    archive.drop_cached_zip();
+
+    match archive.extract_to_memory("a.txt") {
+        Err(ArchiveError::OperationBlocked { operation, reason }) => {
+            assert_eq!(operation, ZipArchive::IDENTITY_OP);
+            assert!(
+                reason.contains("identity changed"),
+                "identity drift keeps its own vocabulary, disjoint from \
+                 the name guards' \"listing drift\": {reason}"
+            );
+        }
+        // Without the comparison in `open_zip_bound` this is
+        // `Ok(b"attacker-payload-of-another-length")`: the name guards
+        // pass, and the caller is handed bytes the safety gate never saw.
+        other => panic!("a swapped file must be refused at re-open, got {other:?}"),
+    }
+}
+
+/// AD 0052: `ZipArchive::open` does not touch the file and the *first
+/// operation* validates, so a first operation against an archive a
+/// producer is still writing is a supported, recoverable shape — the
+/// central directory lives at the end of a ZIP, `RawZipArchive::new`
+/// fails until the writer is done, and every entry point takes `&self`,
+/// so the caller retries.
+///
+/// Non-vacuity: move `self.identity.set(found)` in
+/// `ZipArchive::open_zip_bound` back above `RawZipArchive::new` and the
+/// retry below fails with `OperationBlocked` / "identity changed" — the
+/// failed attempt recorded the half-written length as the binding, and
+/// the complete, healthy archive is refused forever with nobody having
+/// swapped anything.
+#[test]
+fn a_failed_first_operation_leaves_the_handle_retryable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let complete = tmp.path().join("complete.zip");
+    build_stored_zip(&complete, &["a.txt", "b.txt"]);
+    let bytes = std::fs::read(&complete).unwrap();
+
+    // Mid-write: the local headers are down but the central directory
+    // and EOCD are not, so nothing can parse this yet.
+    let path = tmp.path().join("still-being-written.zip");
+    std::fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
+
+    let archive = ZipArchive::open(&path).unwrap();
+    match archive.list_files() {
+        Err(ArchiveError::Format { .. }) => {}
+        other => panic!(
+            "a half-written ZIP must fail the parse — the fixture proves \
+             nothing otherwise, got {other:?}"
+        ),
+    }
+
+    // The producer finishes, in place: same inode, full length.
+    std::fs::write(&path, &bytes).unwrap();
+
+    let entries = archive
+        .list_files()
+        .expect("the retry runs against a complete, healthy archive nobody swapped");
+    assert_eq!(entries.len(), 2);
 }

@@ -111,45 +111,6 @@ fn unrar_lock() -> Result<UnrarLockGuard> {
     Ok(UnrarLockGuard { _guard: guard })
 }
 
-/// Identity of the archive file captured at [`UnrarArchive`] construction,
-/// used to detect a swap-under-us before recovery metadata is re-parsed
-/// from a fresh open (R0080-0061). Unix-only: `(dev, ino)`. On other
-/// platforms this is a zero-sized marker and revalidation is skipped —
-/// mirroring the `modification::LockedFileIdentity` approach.
-#[cfg(unix)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct UnrarFileIdentity(crate::fs_identity::InodeId);
-
-#[cfg(not(unix))]
-#[expect(
-    dead_code,
-    reason = "non-Unix zero-sized identity marker; drift revalidation is Unix-only, so this variant is never constructed off-Unix"
-)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct UnrarFileIdentity;
-
-/// Capture `path`'s `(dev, ino)` identity. Best-effort: a `stat` failure
-/// simply disables the later drift check rather than blocking `open`.
-/// Returns `None` on non-Unix.
-///
-/// UnRAR is a path-only backend: the SDK's `RAROpenArchiveEx` takes a
-/// pathname and cannot accept a descriptor, so an owned-fd hand-off is
-/// impossible here regardless of platform. This by-name capture +
-/// re-`stat` comparison is the strongest guard available (R0080-0061;
-/// see [`crate::fs_identity`] for why the fd hand-off was rejected for
-/// the fd-capable libarchive backend too).
-#[cfg(unix)]
-fn capture_file_identity(path: &Path) -> Option<UnrarFileIdentity> {
-    std::fs::metadata(path)
-        .ok()
-        .map(|m| UnrarFileIdentity(crate::fs_identity::InodeId::from_metadata(&m)))
-}
-
-#[cfg(not(unix))]
-fn capture_file_identity(_path: &Path) -> Option<UnrarFileIdentity> {
-    None
-}
-
 /// Safe wrapper around UnRAR archive handle
 ///
 /// Automatically closes archive on drop (RAII pattern)
@@ -165,11 +126,31 @@ pub struct UnrarArchive {
     /// the cached view via `Arc::clone` regardless of how `self.handle`
     /// has been positioned in between.
     listing: OnceCell<std::sync::Arc<Vec<ArchiveEntry>>>,
-    /// File identity (`(dev, ino)` on Unix) captured at open, used to
-    /// detect a swap-under-us before re-parsing recovery metadata from a
-    /// fresh open of `self.path` (R0080-0061). `None` when identity could
-    /// not be captured, or on non-Unix where the drift check is skipped.
-    identity: Option<UnrarFileIdentity>,
+    /// Identity of the archive file this handle is bound to, captured at
+    /// open inside the R0081-0064 lock bracket.
+    ///
+    /// Two guards read it, at two altitudes:
+    ///
+    /// - [`Self::revalidate_identity`] — the recovery-metadata reader
+    ///   re-parses `self.path` through a plain `File`, so it re-`stat`s
+    ///   and compares before trusting those bytes (R0080-0061).
+    /// - [`Self::fresh_handle`] — every later operation re-opens the
+    ///   archive *by pathname* while the AD 0065 listing snapshot, and
+    ///   every safety-gate decision taken from it, still describes the
+    ///   file seen at open (OI-0001-002).
+    ///
+    /// `None` when the `stat` failed: capture is deliberately best-effort,
+    /// because the native open — not this — is the authority on whether
+    /// the file is usable, so a handle that could not be bound still
+    /// works, it simply carries no binding. The *comparisons* are not
+    /// best-effort; see [`crate::fs_identity::FileIdentity::revalidate`].
+    ///
+    /// UnRAR is a path-only backend: `RAROpenArchiveEx` takes a pathname
+    /// and cannot accept a descriptor, so the owned-fd hand-off that would
+    /// close the residual stat-to-open window is impossible here on every
+    /// platform — see [`crate::fs_identity`] for why that hand-off was
+    /// rejected even for the fd-capable libarchive backend.
+    identity: Option<crate::fs_identity::FileIdentity>,
     /// Callback state registered with this handle for its whole life.
     ///
     /// Boxed so its address is stable: the SDK holds a raw pointer to it
@@ -268,8 +249,9 @@ impl UnrarArchive {
             // after the open (as before) would bind the handle to the bytes
             // seen at open while recording identity for whatever the file was
             // afterwards, defeating the recovery-metadata revalidation that
-            // relies on this identity (R0080-0061).
-            let identity = capture_file_identity(&path_buf);
+            // relies on this identity (R0080-0061) and the fresh-handle
+            // binding OI-0001-002 layers on top of it.
+            let identity = crate::fs_identity::FileIdentity::capture(&path_buf);
             let handle = RAROpenArchiveEx(&mut open_data);
 
             if handle.is_null() || open_data.open_result != ERAR_SUCCESS as u32 {
@@ -284,10 +266,31 @@ impl UnrarArchive {
                 return Err(map_unrar_error(open_data.open_result as c_int, &path_buf));
             }
 
-            // Re-stat and compare. A `None` capture (stat failure or non-Unix)
-            // skips the check, mirroring `revalidate_identity`.
+            // Re-stat and compare. A `None` capture (a `stat` failure) skips
+            // the check, mirroring `revalidate_identity`.
+            //
+            // Deliberately the `(dev, ino)` half only, and deliberately
+            // Unix-only — which is *not* what `fresh_handle` does a few
+            // methods down, and the asymmetry is the point rather than an
+            // oversight. This bracket is R0081-0064's, and it was reviewed
+            // as an inode comparison that is a static no-op off Unix;
+            // moving `UnrarFileIdentity` onto the shared `FileIdentity`
+            // must not quietly widen it. A length comparison here has a
+            // false positive the inode comparison does not: an external
+            // `rar a` append or an in-progress download is still growing
+            // the archive, and for a multi-volume set `RAROpenArchiveEx`
+            // walks the whole volume chain inside this call, so the window
+            // is milliseconds rather than microseconds — `open()` would
+            // start failing where it used to succeed. `fresh_handle` keeps
+            // the *full* comparison because it answers a different
+            // question: whether the file still matches the AD 0065 listing
+            // snapshot a safety gate already ruled on, and there the
+            // appended archive is exactly what must be refused.
+            #[cfg(unix)]
             if let Some(expected) = identity {
-                if capture_file_identity(&path_buf) != Some(expected) {
+                if crate::fs_identity::FileIdentity::capture(&path_buf).map(|found| found.inode)
+                    != Some(expected.inode)
+                {
                     // The handle was bound to whatever the open saw; close it
                     // before surfacing the swap. We already hold the lock, so
                     // the raw close is correctly serialized (re-acquiring would
@@ -385,16 +388,106 @@ impl UnrarArchive {
         Ok(archive)
     }
 
-    /// Create a fresh handle for extraction operations
+    /// Create a fresh handle for extraction operations, bound to the same
+    /// file this handle was opened on.
     ///
     /// UnRAR handles get exhausted after list_files(), so extraction operations
     /// need a fresh handle. This creates a new handle with the same path/password.
-    fn fresh_handle(&self) -> Result<Self> {
-        if let Some(pw) = self.password.as_ref() {
-            Self::open_with_password(&self.path, pw.as_str())
-        } else {
-            Self::open(&self.path)
+    ///
+    /// # Why the re-open is guarded (OI-0001-002)
+    ///
+    /// The re-open is **by pathname**, but the AD 0065 listing snapshot —
+    /// and every safety-gate decision already taken from it: the
+    /// extraction-ratio verdict, the total- and per-entry-size ceilings,
+    /// the entry-kind policy — describes the file that was open when the
+    /// snapshot was taken. An archive rewritten on disk in between can
+    /// keep every entry *name* and still carry different payloads, sizes,
+    /// CRCs, entry types or encryption, so the per-entry name comparisons
+    /// downstream cannot answer the question they are being asked.
+    /// Comparing the file identity can: the fresh open re-captured its own
+    /// identity inside the same R0081-0064 lock bracket, so when that
+    /// disagrees with the identity this handle is bound to, `op` is
+    /// refused rather than run against bytes the safety gate never saw.
+    ///
+    /// The comparison is bracketed the way the other three read backends
+    /// bracket theirs — *before* the native open as well as after. The
+    /// pre-open half is what makes the refusal reachable at all when the
+    /// replacement is not a plainly openable RAR, and what keeps the
+    /// caller's passphrase away from attacker-chosen bytes; see the
+    /// comment on it.
+    ///
+    /// Note the asymmetry with the R0081-0064 open-time bracket inside
+    /// [`Self::open_with_mode_and_password`], which compares the `(dev, ino)` half
+    /// only. This one compares the *full* identity, length included,
+    /// on purpose: an archive that grew under a live handle no longer
+    /// matches the listing snapshot, and refusing that is the guard, not
+    /// a false positive.
+    ///
+    /// Both disagreements fail closed — a *different* identity, and an
+    /// identity that can no longer be captured at all (a `stat` that now
+    /// fails on a file the SDK just opened). A handle that never captured
+    /// an identity carries no binding and is not second-guessed here:
+    /// capture is best-effort, comparison is not.
+    ///
+    /// This is **additive**. None of the name or cardinality guards
+    /// downstream ([`listing_drift_mismatch`], [`listing_drift_extra`],
+    /// [`listing_drift_eof`]) is superseded by it, because they catch what
+    /// a `stat` cannot: a same-inode, same-length in-place rewrite; any
+    /// same-length replacement off Unix; the accepted stat-to-native-open
+    /// window; and plain index-bookkeeping bugs, where no file was swapped
+    /// at all.
+    ///
+    /// # Residual: continuation volumes are not bound
+    ///
+    /// Only the first volume's path is identity-bound. The continuation
+    /// volumes of a multi-volume set are opened *inside* the SDK by the
+    /// volume-change callback and never pass through this method — and
+    /// there is no per-continuation-volume listing snapshot for them to be
+    /// bound to in the first place, since the listing is one walk across
+    /// the whole set. That makes this out of scope here rather than an
+    /// oversight: closing it would mean checking identity inside the
+    /// volume-change callback against a snapshot that does not exist yet.
+    fn fresh_handle(&self, op: &'static str) -> Result<Self> {
+        // Pre-open half. libarchive, ZIP and 7z all revalidate *before*
+        // handing the pathname to their native opener; UnRAR used to be
+        // the one backend that opened first and compared afterwards, and
+        // that ordering cost two things.
+        //
+        // It masked the drift whenever the replacement was not a plainly
+        // openable RAR: a header-encrypted file answers
+        // `ERAR_MISSING_PASSWORD`, `map_unrar_error` turns that into
+        // `ArchiveError::password("Password required")`, and `?` carried
+        // it out before the comparison below was ever reached — so the
+        // caller was told their unencrypted archive now needs a password
+        // instead of being told the file changed.
+        //
+        // And in the password-carrying branch it handed the caller's real
+        // passphrase to the SDK against attacker-chosen bytes before any
+        // identity check had run.
+        if let Some(expected) = self.identity {
+            crate::fs_identity::FileIdentity::revalidate(expected, &self.path, op)?;
         }
+
+        let fresh = if let Some(pw) = self.password.as_ref() {
+            Self::open_with_password(&self.path, pw.as_str())?
+        } else {
+            Self::open(&self.path)?
+        };
+
+        if let Some(expected) = self.identity {
+            if fresh.identity != Some(expected) {
+                // `fresh` is dropped on the way out, which closes its
+                // native handle (see the `Drop` impl).
+                return Err(crate::fs_identity::identity_drift(
+                    expected,
+                    fresh.identity,
+                    &self.path,
+                    op,
+                ));
+            }
+        }
+
+        Ok(fresh)
     }
 
     /// Read next entry header with CRC32 and metadata
@@ -452,7 +545,7 @@ impl UnrarArchive {
     ) -> Result<std::sync::Arc<Vec<ArchiveEntry>>> {
         self.listing
             .get_or_try_init(|| {
-                self.fresh_handle()?
+                self.fresh_handle(crate::error::ops::LIST_FILES)?
                     .walk_entries(budget)
                     .map(std::sync::Arc::new)
             })
@@ -488,6 +581,18 @@ impl UnrarArchive {
     /// Get archive path (preserves raw bytes per AD 0064)
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The archive file this handle is bound to (OI-0001-002 /
+    /// R0081-0064), or `None` if the open-time `stat` failed.
+    ///
+    /// Exists so [`crate::Archive::payload_size_for_ratio`] can
+    /// revalidate before the `stat` that produces the compression-ratio
+    /// denominator: that stat is a by-path re-resolution the facade does
+    /// on its own, outside [`Self::fresh_handle`]'s bracket, while the
+    /// numerator comes from the cached listing.
+    pub(crate) fn bound_identity(&self) -> Option<crate::fs_identity::FileIdentity> {
+        self.identity
     }
 
     /// Check if archive uses solid compression
@@ -541,7 +646,13 @@ impl UnrarArchive {
     /// construction, comparing a fresh `stat` against the captured
     /// `(dev, ino)` identity (R0080-0061). Returns `OperationBlocked` on
     /// drift so recovery metadata is never parsed from a swapped file. A
-    /// `None` captured identity (capture failed or non-Unix) skips the check.
+    /// `None` captured identity (capture failed) skips the check.
+    ///
+    /// Deliberately compares only the `(dev, ino)` half of the shared
+    /// [`crate::fs_identity::FileIdentity`], so this guard keeps exactly
+    /// the reach it was reviewed with under R0080-0061; the length half
+    /// belongs to the handle binding of [`Self::fresh_handle`], which
+    /// answers a different question about a different window.
     #[cfg(unix)]
     fn revalidate_identity(&self) -> Result<()> {
         let Some(expected) = self.identity else {
@@ -549,17 +660,17 @@ impl UnrarArchive {
         };
         let meta = std::fs::metadata(&self.path)
             .map_err(|e| ArchiveError::io("recovery-identity-revalidate", self.path.clone(), e))?;
-        let found = UnrarFileIdentity(crate::fs_identity::InodeId::from_metadata(&meta));
-        if found != expected {
+        let found = crate::fs_identity::FileIdentity::from_metadata(&meta);
+        if found.inode != expected.inode {
             return Err(ArchiveError::operation_blocked(
                 "recovery_percentage",
                 format!(
                     "archive path {} identity changed since open (expected dev/ino {}/{}, found {}/{}); refusing to parse recovery metadata from a swapped file",
                     self.path.display(),
-                    expected.0.dev,
-                    expected.0.ino,
-                    found.0.dev,
-                    found.0.ino
+                    expected.inode.dev,
+                    expected.inode.ino,
+                    found.inode.dev,
+                    found.inode.ino
                 ),
             ));
         }
@@ -697,7 +808,7 @@ impl UnrarArchive {
         };
 
         // Fresh handle for extraction (`self.handle` may be EOF-positioned).
-        let fresh = self.fresh_handle()?;
+        let fresh = self.fresh_handle(crate::error::ops::EXTRACT_ALL)?;
 
         let abs_dest = resolve_dest_path(dest_path)?;
         // Canonicalize the destination once — every entry's sanitize
@@ -924,8 +1035,11 @@ impl UnrarArchive {
         let target_id = validated.id();
         let validated_path = validated.path().to_string();
 
-        // Create fresh handle for extraction (avoid state exhaustion)
-        let fresh = self.fresh_handle()?;
+        // Create fresh handle for extraction (avoid state exhaustion).
+        // `op` is the caller's own label, so a refusal on this path names
+        // extract_file / extract_to_memory / extract_to_stream, not a
+        // generic one (R5, ti-581bcda4).
+        let fresh = self.fresh_handle(op)?;
 
         let abs_dest = resolve_dest_path(dest_path)?;
 
@@ -1228,7 +1342,7 @@ impl UnrarArchive {
         let mut failed_files = Vec::new();
 
         // Open a fresh handle for testing (preserves password for encrypted archives)
-        let fresh = self.fresh_handle()?;
+        let fresh = self.fresh_handle(crate::error::ops::VALIDATE_INTEGRITY)?;
 
         // Count of entries actually submitted to RAR_TEST, for the
         // partial-progress error if cursor recovery later fails (R0080-0020).

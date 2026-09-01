@@ -1047,6 +1047,68 @@ impl LibarchiveArchive {
         Ok(archive)
     }
 
+    /// [`Self::open_read_handle`], bracketed by the read handle's
+    /// file-identity binding (OI-0001-002).
+    ///
+    /// Every read operation on this backend re-opens the archive by
+    /// pathname, because libarchive's read handle is iterator-shaped and
+    /// cannot be rewound. The AD 0065 listing snapshot — and every
+    /// safety-gate decision taken against it — therefore describes the
+    /// bytes that were on disk at [`LibarchiveArchive::open`], not
+    /// necessarily the bytes the next open will read. This is the one
+    /// place that difference is checked.
+    ///
+    /// Shape: the R0081-0064 bracket the UnRAR backend already uses —
+    /// re-`stat` before the native open, open, re-`stat` again. The
+    /// second check is what closes the window between the first `stat`
+    /// and the open. libarchive holds no Rust-side descriptor here
+    /// (`archive_read_open_filename` takes a pathname), so an `fstat` of
+    /// the descriptor that will actually be read is not available to
+    /// this backend and a residual stat-to-open sliver is accepted —
+    /// exactly what DCR-007's 2026-07-22 amendment records for the
+    /// path-only backends, and one of the reasons the name and
+    /// cardinality guards all stay.
+    ///
+    /// `identity == None` — the open-time capture failed — skips the
+    /// check and behaves as a bare [`Self::open_read_handle`]: capture
+    /// is best-effort, the native open is the authority on whether the
+    /// file is usable. A re-`stat` that *fails* once a binding exists
+    /// does not skip; it fails closed, because a file that vanished is
+    /// as disqualifying as one that was swapped.
+    ///
+    /// The refusal is [`ArchiveError::OperationBlocked`] carrying
+    /// "identity changed", which shares no vocabulary with the `Format`
+    /// / "listing drift" errors the name and cardinality guards raise.
+    /// Both layers survive, because neither subsumes the other: identity
+    /// cannot see a same-inode same-length in-place rewrite, and the
+    /// name guards cannot see a whole-file swap that kept every name.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`Self::open_read_handle`]: the returned handle
+    /// is owned by the caller, which must free it — every call site
+    /// wraps it in a [`ReadHandleGuard`] on the following line.
+    unsafe fn bound_read_handle(
+        path: &Path,
+        identity: Option<FileIdentity>,
+        c_path: &std::ffi::CStr,
+        op: &'static str,
+    ) -> Result<*mut Archive> {
+        let Some(expected) = identity else {
+            return unsafe { Self::open_read_handle(c_path) };
+        };
+        FileIdentity::revalidate(expected, path, op)?;
+        let archive = unsafe { Self::open_read_handle(c_path) }?;
+        if let Err(err) = FileIdentity::revalidate(expected, path, op) {
+            // The handle is already bound to whatever the open saw, so
+            // free it before surfacing the swap rather than leaking a
+            // handle onto a file we are about to refuse.
+            unsafe { archive_read_free(archive) };
+            return Err(err);
+        }
+        Ok(archive)
+    }
+
     /// Open an archive with libarchive.
     ///
     /// **Validation timing (AD 0052):** the crate-wide contract is
@@ -1088,11 +1150,33 @@ impl LibarchiveArchive {
         // Verify file exists by attempting to open
         let c_path = path_to_cstring_checked(&path_buf)?;
 
+        // OI-0001-002: bind this handle to the archive *file*, in the
+        // R0081-0064 bracket shape — capture immediately before the
+        // native open, re-check immediately after it returns, so a swap
+        // between the two is caught rather than recorded as the
+        // binding. Capturing here rather than at listing population is
+        // deliberately stronger: the AD 0052 eager first-header probe
+        // below and the AD 0065 listing are then provably bound to the
+        // same bytes.
+        //
+        // Best-effort by design: a `stat` failure leaves `identity` at
+        // `None` and the handle simply carries no binding, because the
+        // native open — not our `stat` — is the authority on whether
+        // this file is usable.
+        let identity = FileIdentity::capture(&path_buf);
+
         unsafe {
             let archive = Self::open_read_handle(&c_path)?;
             // The validation handle closes on every exit — each
             // subsequent operation reopens the archive itself.
             let _archive_guard = ReadHandleGuard(archive);
+
+            // Closing half of the bracket. `"open"` is the op label the
+            // sibling open-time guard in `crate::archive` already uses
+            // for this same condition at the facade altitude.
+            if let Some(expected) = identity {
+                FileIdentity::revalidate(expected, &path_buf, "open")?;
+            }
 
             // R0001-0012: probe the first header for *every* format, not
             // just the compressed-tar names checked below. Opening the
@@ -1173,6 +1257,7 @@ impl LibarchiveArchive {
             write_poisoned: false,
             finish_failure: None,
             cached_listing: OnceCell::new(),
+            identity,
             backend_warnings: std::cell::RefCell::new(open_advisories),
         })
     }
@@ -1221,7 +1306,15 @@ impl LibarchiveArchive {
         let c_path = path_to_cstring_checked(&self.path)?;
 
         unsafe {
-            let archive = Self::open_read_handle(&c_path)?;
+            // OI-0001-002: identity-bound re-open. This one binds the AD
+            // 0065 snapshot itself — the constructor's eager first-header
+            // probe and this listing walk now provably read the same file.
+            let archive = Self::bound_read_handle(
+                &self.path,
+                self.identity,
+                &c_path,
+                crate::error::ops::LIST_FILES,
+            )?;
             // Free-on-every-exit guard (R0070-0017).
             let _archive_guard = ReadHandleGuard(archive);
 
@@ -1391,7 +1484,15 @@ impl LibarchiveArchive {
         let canonical_dest = crate::security::canonicalize_dest_base(dest_path)?;
 
         unsafe {
-            let archive = Self::open_read_handle(&c_path)?;
+            // OI-0001-002: identity-bound re-open. The bulk walk is
+            // cross-checked against the listing the safety gate validated,
+            // so it is only sound against the file that listing came from.
+            let archive = Self::bound_read_handle(
+                &self.path,
+                self.identity,
+                &c_path,
+                crate::error::ops::EXTRACT_ALL,
+            )?;
             // Free-on-every-exit guards (R0070-0017): reverse drop order
             // frees the disk writer before the read handle, matching the
             // manual free order the error ladders used to maintain.
@@ -1868,7 +1969,15 @@ impl LibarchiveArchive {
         let c_path = path_to_cstring_checked(&self.path)?;
 
         unsafe {
-            let archive = Self::open_read_handle(&c_path)?;
+            // OI-0001-002: identity-bound re-open. The walk seeks by the
+            // stable listing id the gate resolved, so it trusts the listing
+            // for the target index.
+            let archive = Self::bound_read_handle(
+                &self.path,
+                self.identity,
+                &c_path,
+                crate::error::ops::EXTRACT_FILE,
+            )?;
             // Free-on-every-exit guard (R0070-0018).
             let _archive_guard = ReadHandleGuard(archive);
 
@@ -2100,7 +2209,15 @@ impl LibarchiveArchive {
         let c_path = path_to_cstring_checked(&self.path)?;
 
         unsafe {
-            let archive = Self::open_read_handle(&c_path)?;
+            // OI-0001-002: identity-bound re-open. The walk seeks by the
+            // stable listing id the gate resolved, so it trusts the listing
+            // for the target index.
+            let archive = Self::bound_read_handle(
+                &self.path,
+                self.identity,
+                &c_path,
+                crate::error::ops::EXTRACT_TO_MEMORY,
+            )?;
             // Free-on-every-exit guard (R0070-0017).
             let _archive_guard = ReadHandleGuard(archive);
 
@@ -2371,6 +2488,19 @@ impl LibarchiveArchive {
         &self.path
     }
 
+    /// The archive file this read handle is bound to (OI-0001-002), or
+    /// `None` for a write-mode handle or one whose open-time `stat`
+    /// failed.
+    ///
+    /// Exists so [`crate::Archive::payload_size_for_ratio`] can
+    /// revalidate before the `stat` that produces the compression-ratio
+    /// denominator: that stat is a by-path re-resolution the facade does
+    /// on its own, outside [`Self::bound_read_handle`]'s bracket, while
+    /// the numerator comes from the cached listing.
+    pub(crate) fn bound_identity(&self) -> Option<FileIdentity> {
+        self.identity
+    }
+
     /// Extract a single file to a stream (Phase 2.4)
     ///
     /// Returns a StreamingExtractor that reads data directly from the archive
@@ -2390,7 +2520,8 @@ impl LibarchiveArchive {
             file_path,
             crate::error::ops::EXTRACT_TO_STREAM,
         )?;
-        let mut reader = LibarchiveStreamReader::open(&self.path, target.id(), target.path())?;
+        let mut reader =
+            LibarchiveStreamReader::open(&self.path, self.identity, target.id(), target.path())?;
         // The header seek that positioned this reader is a header read like
         // any other, so anything libarchive reported there joins this
         // handle's sink instead of dying with the local.
@@ -2422,7 +2553,8 @@ impl LibarchiveArchive {
         id: usize,
         validated_path: &str,
     ) -> Result<crate::streaming::StreamingExtractor> {
-        let mut reader = LibarchiveStreamReader::open(&self.path, id, validated_path)?;
+        let mut reader =
+            LibarchiveStreamReader::open(&self.path, self.identity, id, validated_path)?;
         for warning in reader.take_backend_warnings() {
             self.record_backend_warning(warning);
         }
@@ -2480,7 +2612,14 @@ impl LibarchiveArchive {
         let c_path = path_to_cstring_checked(&self.path)?;
 
         unsafe {
-            let archive = Self::open_read_handle(&c_path)?;
+            // OI-0001-002: identity-bound re-open. The digest walk resolves
+            // every target from the listing in one forward traversal.
+            let archive = Self::bound_read_handle(
+                &self.path,
+                self.identity,
+                &c_path,
+                crate::error::ops::EXTRACT_BY_IDS,
+            )?;
             // Free-on-every-exit guard (R0070-0017) — including the early
             // returns below and any error `visit` propagates.
             let _archive_guard = ReadHandleGuard(archive);
@@ -2561,7 +2700,14 @@ impl LibarchiveArchive {
         let mut failed_files = Vec::new();
 
         unsafe {
-            let archive = Self::open_read_handle(&c_path)?;
+            // OI-0001-002: identity-bound re-open. An integrity verdict is
+            // only meaningful for the file the listing describes.
+            let archive = Self::bound_read_handle(
+                &self.path,
+                self.identity,
+                &c_path,
+                crate::error::ops::VALIDATE_INTEGRITY,
+            )?;
             // Free-on-every-exit guard (R0070-0017).
             let _archive_guard = ReadHandleGuard(archive);
 
@@ -2796,11 +2942,31 @@ impl LibarchiveStreamReader {
     /// by `validate_single_entry`, and `validated_path` the matching
     /// normalized listing name — the walk seeks by index and refuses a
     /// name mismatch instead of re-matching by name.
-    fn open(archive_path: &Path, target_id: usize, validated_path: &str) -> Result<Self> {
+    /// `identity` is the owning [`LibarchiveArchive`]'s file binding
+    /// (OI-0001-002): this reader re-opens the archive by pathname like
+    /// every other operation on this backend, and seeks by the stable
+    /// listing id the gate resolved, so the seek is only sound against
+    /// the file that listing was taken from. Both callers pass
+    /// `self.identity`; `None` means the owner never captured one and
+    /// the binding is skipped.
+    fn open(
+        archive_path: &Path,
+        identity: Option<FileIdentity>,
+        target_id: usize,
+        validated_path: &str,
+    ) -> Result<Self> {
         let c_path = path_to_cstring_checked(archive_path)?;
 
         unsafe {
-            let archive = LibarchiveArchive::open_read_handle(&c_path)?;
+            // OI-0001-002: identity-bound re-open — the seek is by
+            // stable listing id, so it is only sound against the file
+            // that listing was taken from.
+            let archive = LibarchiveArchive::bound_read_handle(
+                archive_path,
+                identity,
+                &c_path,
+                crate::error::ops::EXTRACT_TO_STREAM,
+            )?;
             // Free-on-every-exit guard; disarmed via `mem::forget` on
             // the success path, where ownership of the handle moves to
             // the returned reader (whose Drop frees it).

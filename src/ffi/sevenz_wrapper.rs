@@ -10,6 +10,7 @@ use crate::ffi::common::{
     read_entry_to_memory_capped, unix_mode_is_symlink, write_entry_atomically,
 };
 use crate::format::ArchiveFormat;
+use crate::fs_identity::{FileIdentity, identity_drift};
 use crate::options::ProgressCallback;
 use crate::security::{canonicalize_dest_base, sanitize_entry_path, sanitize_entry_path_with_base};
 use once_cell::sync::OnceCell;
@@ -25,10 +26,26 @@ use std::path::{Path, PathBuf};
 /// `list_files` call walks a fresh reader; later calls clone the
 /// snapshot. Extraction paths still open their own reader because
 /// sevenz-rust2's walk API consumes it.
+///
+/// **Identity binding (OI-0001-002):** because every later operation
+/// re-opens the archive *by pathname*, the memoised listing can end up
+/// describing a file that is no longer the one being read. `identity`
+/// pins the archive file the handle is bound to — the internal
+/// `open_reader` binds it on the first re-open and compares on every one
+/// after it, so a same-name replacement is refused instead of read.
 pub struct SevenZArchive {
     path: PathBuf,
     password: Option<crate::Password>,
     listing: OnceCell<std::sync::Arc<Vec<ArchiveEntry>>>,
+    /// The archive file this handle is bound to, captured lazily at the
+    /// first `open_reader` — normally the listing walk, i.e. exactly
+    /// when the AD 0065 snapshot is taken.
+    ///
+    /// `OnceCell` rather than a plain field because the constructor is
+    /// file-untouching (AD 0052): a `stat` in `open()` would move the
+    /// missing-file error from the first operation to `open()` and break
+    /// the documented first-operation-validation contract.
+    identity: OnceCell<FileIdentity>,
 }
 
 impl SevenZArchive {
@@ -53,6 +70,7 @@ impl SevenZArchive {
             path: path_buf,
             password: None,
             listing: OnceCell::new(),
+            identity: OnceCell::new(),
         })
     }
 
@@ -74,6 +92,73 @@ impl SevenZArchive {
         &self.path
     }
 
+    /// The archive file this handle is bound to, or `None` if no
+    /// operation has opened a reader yet.
+    ///
+    /// Exists so [`crate::Archive::payload_size_for_ratio`] can
+    /// revalidate before the `stat` that produces the compression-ratio
+    /// denominator: that stat is a by-path re-resolution the facade does
+    /// on its own, outside every backend's bracket, while the numerator
+    /// comes from the cached listing.
+    pub(crate) fn bound_identity(&self) -> Option<FileIdentity> {
+        self.identity.get().copied()
+    }
+
+    /// Bind — or re-check — the archive file this handle reads from.
+    ///
+    /// `found` is a *best-effort* capture: `None` means the `stat`
+    /// failed. The first successful capture becomes the binding; every
+    /// later one must match it. A capture that fails **after** a binding
+    /// exists is a refusal, not a skip — a file that vanished under a
+    /// live handle is exactly as disqualifying as one that was swapped,
+    /// which is the same fail-closed rule
+    /// [`FileIdentity::revalidate`] applies.
+    /// Compare against an existing binding — never create one.
+    ///
+    /// The *pre*-open half of [`Self::open_reader`]'s bracket. It cannot
+    /// bind, because at that point nothing has proved the file is an
+    /// archive at all: AD 0052 makes the first operation the validator,
+    /// and a first operation against a 7z a producer is still writing
+    /// fails (the 7z directory lives at the end). Binding there recorded
+    /// the half-written `len` and then refused the retry against the
+    /// finished file as a swap — a permanent refusal on a healthy
+    /// archive nobody touched. Binding happens in the post-open half
+    /// ([`Self::bind_or_check_identity`]) instead, once the native open
+    /// has succeeded.
+    ///
+    /// No swap coverage is lost: once a binding exists this compares on
+    /// every call, before the native open reads a byte.
+    fn check_identity_if_bound(&self, found: Option<FileIdentity>, op: &'static str) -> Result<()> {
+        let Some(&expected) = self.identity.get() else {
+            return Ok(());
+        };
+        match found {
+            Some(found) if found == expected => Ok(()),
+            found => Err(identity_drift(expected, found, &self.path, op)),
+        }
+    }
+
+    fn bind_or_check_identity(&self, found: Option<FileIdentity>, op: &'static str) -> Result<()> {
+        let expected = match found {
+            // The first successful capture wins and becomes the binding.
+            // `get_or_init` returns the *winner's* value, so a racing
+            // loser is compared against it instead of silently
+            // overwriting it.
+            Some(found) => *self.identity.get_or_init(|| found),
+            None => match self.identity.get() {
+                // Never bound and still unable to stat: capture stays
+                // best-effort, and the native open below remains the
+                // authority on whether the file is usable at all.
+                None => return Ok(()),
+                Some(&expected) => expected,
+            },
+        };
+        match found {
+            Some(found) if found == expected => Ok(()),
+            found => Err(identity_drift(expected, found, &self.path, op)),
+        }
+    }
+
     /// Open a 7z ArchiveReader with the stored path and password.
     ///
     /// Maps wrong-password / encryption-required failures to
@@ -81,13 +166,50 @@ impl SevenZArchive {
     /// collapsed every sevenz-rust2 error onto `ArchiveError::Format`,
     /// breaking the API contract that says wrong passwords surface as
     /// `Password { .. }`.
-    fn open_reader(&self) -> Result<ArchiveReader<std::fs::File>> {
+    ///
+    /// # Identity binding (OI-0001-002)
+    ///
+    /// Every 7z operation routes through here, so this is the one place
+    /// the by-pathname re-open happens — and therefore the one place the
+    /// handle can be bound to the archive *file*. The native open is
+    /// bracketed: [`Self::check_identity_if_bound`] before, so the reader
+    /// is built from the file this handle is bound to, and
+    /// [`Self::bind_or_check_identity`] after, so a swap *during* the
+    /// open cannot leave a foreign reader in the caller's hands. The
+    /// first *successful* open binds; on the facade path that is the
+    /// listing walk, i.e. exactly when the AD 0065 snapshot is taken, so
+    /// the snapshot and every later read provably describe one file.
+    /// A failed open binds nothing, which is what keeps the AD 0052
+    /// retry-a-still-being-written-archive shape working — see
+    /// [`Self::check_identity_if_bound`].
+    ///
+    /// A drift here is [`ArchiveError::OperationBlocked`] carrying
+    /// "identity changed" — deliberately a different variant *and* a
+    /// disjoint vocabulary from the per-entry name/cardinality guards,
+    /// which stay `ArchiveError::Format` with "listing drift" and are
+    /// **not** superseded: they still catch a same-inode same-length
+    /// in-place rewrite, any same-length replacement off Unix, the
+    /// accepted stat-to-open window, and plain index-bookkeeping bugs.
+    ///
+    /// `op` is the caller's operation label, so the refusal names the
+    /// public call the user actually made rather than a fixed
+    /// open-family placeholder.
+    ///
+    /// Identity comes from a path `stat` rather than an `fstat` of the
+    /// descriptor being read: `ArchiveReader::open` opens the `File`
+    /// internally and exposes no accessor for it, and constructing the
+    /// `File` here instead would change the missing-file error text
+    /// (sevenz-rust2's `Error::file_open` is crate-private). The
+    /// residual stat-to-open window is the one DCR-007 / R0081 I6
+    /// already accept.
+    fn open_reader(&self, op: &'static str) -> Result<ArchiveReader<std::fs::File>> {
+        self.check_identity_if_bound(FileIdentity::capture(&self.path), op)?;
         let password = self
             .password
             .as_ref()
             .map(crate::Password::as_str)
             .map_or_else(Password::empty, Password::from);
-        ArchiveReader::open(&self.path, password).map_err(|e| {
+        let reader = ArchiveReader::open(&self.path, password).map_err(|e| {
             let msg = e.to_string();
             // R0075-0027: phrase-based classifier so an archive whose
             // generic error text incidentally mentions "password" /
@@ -103,7 +225,12 @@ impl SevenZArchive {
                     format!("Invalid 7z: {}", msg),
                 )
             }
-        })
+        })?;
+        // Close the bracket: a replacement that landed between the stat
+        // above and the open just now is caught here, before the caller
+        // ever sees the reader.
+        self.bind_or_check_identity(FileIdentity::capture(&self.path), op)?;
+        Ok(reader)
     }
 
     /// Check if archive uses solid compression
@@ -116,7 +243,11 @@ impl SevenZArchive {
     /// * `Ok(false)` - Archive uses non-solid (independent file) compression
     /// * `Err(...)` - I/O error or invalid archive
     pub fn is_solid(&self) -> Result<bool> {
-        let reader = self.open_reader()?;
+        // `ops` has no `is_solid` label and adding one is a change to
+        // `crate::error`, not to this backend; `LIST_FILES` is the honest
+        // stand-in — the probe parses exactly the TOC the listing walk
+        // parses, and reports nothing else.
+        let reader = self.open_reader(crate::error::ops::LIST_FILES)?;
 
         let archive = reader.archive();
 
@@ -516,7 +647,10 @@ impl SevenZArchive {
     }
 
     fn walk_listing(&self, budget: Option<usize>) -> Result<Vec<ArchiveEntry>> {
-        let reader = self.open_reader()?;
+        // First call on the facade path: this is where the handle binds
+        // to the archive file, so the AD 0065 snapshot below and every
+        // later re-open are provably reading one file (OI-0001-002).
+        let reader = self.open_reader(crate::error::ops::LIST_FILES)?;
         let archive = reader.archive();
 
         // OI-0080-003: `archive.files` is the TOC sevenz-rust2 already parsed
@@ -644,7 +778,7 @@ impl SevenZArchive {
         selection: Option<&std::collections::HashSet<usize>>,
     ) -> Result<Vec<ArchiveWarning>> {
         let mut warnings: Vec<ArchiveWarning> = Vec::new();
-        let mut reader = self.open_reader()?;
+        let mut reader = self.open_reader(crate::error::ops::EXTRACT)?;
 
         // R0079-0004: for_each_entries visits entries block-major (stream
         // files per block, then no-stream files), not in TOC order.
@@ -979,7 +1113,7 @@ impl SevenZArchive {
         let target_id = validated.id();
         let validated_path = validated.path().to_string();
 
-        let mut reader = self.open_reader()?;
+        let mut reader = self.open_reader(crate::error::ops::EXTRACT_FILE)?;
 
         // R0079-0006: per-entry encryption flags for password-suspect
         // error classification; callback positions translate through
@@ -1147,7 +1281,11 @@ impl SevenZArchive {
         max_bytes: Option<u64>,
         op: &'static str,
     ) -> Result<Vec<u8>> {
-        let mut reader = self.open_reader()?;
+        // `op` already distinguishes the memory path from the by-id
+        // stream path this method also serves, so an identity refusal
+        // names the public call the caller actually made (R5 /
+        // ti-581bcda4, same reason the gate errors are labelled).
+        let mut reader = self.open_reader(op)?;
 
         // R0079-0006: per-entry encryption flags for password-suspect
         // error classification; callback positions translate through
@@ -1339,7 +1477,7 @@ impl SevenZArchive {
     /// itself) propagates as `Err` (R0080-0030). Returns a list of paths
     /// that failed.
     pub fn test_integrity(&self) -> Result<Vec<String>> {
-        let mut reader = self.open_reader()?;
+        let mut reader = self.open_reader(crate::error::ops::VALIDATE_INTEGRITY)?;
 
         // R0001-0025: the validated visit-order mapping (R0079-0004 /
         // R0081-0073 / R0081-0074) is the declared-entry census. Building

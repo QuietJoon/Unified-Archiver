@@ -2528,8 +2528,12 @@ short file.
 
 - DCR-006 (bounded streaming hard cap) — the over-production half; Amendment 3 carries this one
 - R0001-0008 (accepted, fixed in this run) — makes the declared size authoritative
-- OI-0001-002 (open) — the name-only drift guards are what let the shortened archive through; the
-  exact-length stream is now a partial backstop for that class, not a replacement for the guards
+- OI-0001-002 (open when written; PARTIALLY LANDED 2026-09-01) — the name-only drift guards are what
+  let the shortened archive through; the exact-length stream is now a partial backstop for that
+  class, not a replacement for the guards. Since 2026-09-01 a read handle is also bound to the
+  archive file's identity, which refuses the *shortened* archive outright (the length moves) — but
+  a same-inode same-length in-place rewrite is invisible to that binding, so this exactness bound is
+  named in DCR-014 as one of the defences that remain load-bearing
 
 ---
 
@@ -2538,7 +2542,16 @@ short file.
 - **Source:** R0001-0020 (Review 0001)
 - **Date:** 2026-08-09
 - **Decision:** ACCEPT (user-routed `track`, Phase 2)
-- **Status:** OPEN
+- **Status:** PARTIALLY LANDED 2026-09-01 (ticgit `f84b31d1`) — the exposure this entry describes is
+  closed by a **different mechanism than the one Required Actions 1–3 ask for**, and the difference
+  is deliberate, not a shortfall in execution. Every read backend now binds its handle to the
+  archive **file's** identity — `(dev, ino, len)` on Unix, `len` alone off Unix — captured when the
+  handle is opened and re-checked at every by-path re-open, refusing with `OperationBlocked`
+  carrying "identity changed". There is still **no per-entry metadata fingerprint**, there is not
+  going to be one under this entry, and the Verification boxes below stay unticked because of it.
+  See the Update of 2026-09-01 for what landed, why the fingerprint was rejected, and what the
+  identity binding cannot see. Controlling record:
+  `docs/records/DCR-014-read-handle-bound-to-archive-file-identity.md`.
 
 ### Update (2026-08-21) — the ticket is closed; the tree does not carry the fix
 
@@ -2566,6 +2579,57 @@ site), which is what Required Action 1 asks for and Required Action 3 asks to be
 sites. The two commits of 2026-08-21 do not mention this work in either message. Nothing here is
 half-landed, so there is nothing to revert — the entry stands as originally written, and its
 "Impact if deferred" paragraph is still the accurate statement of exposure.
+
+### Update (2026-09-01) — the read handle is bound to the archive **file**, not to a fingerprint
+
+The note above stays exactly as written: it was true of the tree it was checked against, and
+deleting a dated finding to make a later one read cleanly would falsify the record. What follows is
+what landed afterwards, under the same ticket.
+
+**What landed.** A shared `FileIdentity` in `src/fs_identity.rs` — the module that already owns the
+crate's single audited `MetadataExt` site — with best-effort capture, fail-closed revalidation, and
+one shared drift-error constructor. Each read backend records the identity of the file its cached
+listing describes and re-checks it at every by-path re-open: libarchive captures in `open` inside a
+`stat` / open / `stat` bracket and re-opens through a bound helper at all six read sites plus the
+stream reader (`open` itself keeps the raw opener, being the capture point); ZIP captures from an `fstat` of the descriptor every later read goes through; 7z
+captures-or-compares inside `open_reader`, with an op label threaded from its six callers; UnRAR
+compares in `fresh_handle`, and its pre-existing `UnrarFileIdentity` was migrated onto the shared
+type in the same change. **All five name and cardinality guards were kept** — the binding is
+additive, and the two failure vocabularies are disjoint by construction: identity drift is
+`OperationBlocked` + "identity changed", name and cardinality drift stays `ArchiveError::Format` +
+"listing drift".
+
+**What was rejected, and why it is not a shortfall.** Required Actions 1–3 ask for a per-entry
+metadata fingerprint over entry type, declared size, CRC and encryption. That approach was rejected
+by the owner on the strength of this entry's own Action 2. Reading the tree, the per-backend
+normalisations do not agree: a directory's declared size is `None` on ZIP, 7z and UnRAR but
+`Some(0)` on libarchive tar; CRC is `None` for the entire tar / ISO / raw family and a placeholder
+for AE-2 ZIP. A comparison widened over those fields is the fail-closed-on-healthy-archives outcome
+Action 2 warns about, paid on the formats this crate supports best.
+
+**The two approaches are not ordered, and this entry should not be read as saying the fingerprint
+was wrong.** A fingerprint *would* catch the same-inode same-length in-place rewrite that a
+stat-based identity cannot see. Identity *does* catch every replacement primitive a fingerprint
+would have to be perfect to notice — rename-over, `fs::copy`-over (which preserves the destination
+inode; verified on the dev host), append, truncate-and-rewrite to a different length — and catches
+them at the file, before an entry is read. The choice was made on **false-positive risk**, not on
+coverage dominance.
+
+**What the binding does not cover**, stated here rather than left to be rediscovered:
+
+* a same-inode, same-length in-place rewrite is invisible to any stat-based identity; off Unix, so
+  is any same-length replacement, because `InodeId` is Unix-only (stable `std` has no analogue —
+  `volume_serial_number` / `file_index` are nightly `windows_by_handle`). Timestamps were rejected
+  as the substitute: forgeable, and selling forgeable metadata as identity is worse than a
+  documented gap. The name and cardinality guards, DCR-006's declared-size exactness bound and
+  ZIP/7z/RAR CRC verification remain the defence for that case, which is why none was removed;
+* ZIP's window is genuinely **closed** (identity comes from an `fstat` of the descriptor every later
+  read uses); libarchive, 7z and UnRAR capture by path `stat` and retain the accepted stat-to-open
+  sliver that DCR-007's 2026-07-22 amendment already evaluated and closed off as
+  accepted-permanent when it rejected the fd hand-off;
+* for a multi-volume RAR set only the **first** volume is bound: continuation volumes are opened
+  inside the SDK via the volume-change callback, and there is no per-continuation-volume listing
+  snapshot to bind them to. Out of scope by structure, not by oversight.
 
 ### Problem
 
@@ -2603,13 +2667,18 @@ common accidental cases. What remains uncovered is deliberate same-name substitu
 ### Verification
 
 - [ ] One fingerprint helper, used by all five guards
+  <!-- Unticked 2026-09-01, and deliberately so: the fingerprint approach was rejected, not deferred. No `fingerprint` / `entry_matches` helper exists in src/ and none is planned under this entry. What landed instead is one shared `FileIdentity` in src/fs_identity.rs used by all four read backends. This box cannot be ticked by the change that discharged the exposure, and overwriting it to say otherwise would misreport what is in the tree. -->
 - [ ] Per-backend normalisation agreement demonstrated by test, not assumed
+  <!-- Unticked 2026-09-01: this is the criterion the rejection turns on, not one the change skipped. The disagreements are real and were read first-hand — directory declared size is None on ZIP/7z/UnRAR and Some(0) on libarchive tar; CRC is None for the tar/ISO/raw family and a placeholder for AE-2 ZIP — so the agreement this box asks for does not hold today and would have to be manufactured per backend before a widened comparison could be trusted. -->
 - [ ] No false refusal on the control fixtures across all backends
+  <!-- Unticked 2026-09-01 for the fingerprint it was written about. The identity binding has its own equivalent evidence in tests/listing_identity_test.rs (healthy archives read normally; only a swapped, renamed-over or appended file is refused) plus the reworked in-place-rewrite tests in tests/common, but that is not the fixture matrix Action 4 specifies and is not claimed as one. -->
 
 ### Related
 
 - OI-0081-001 (RESOLVED) — names these cross-checks as the mitigation; this is a completeness gap in it
 - OI-0076-002 (RESOLVED) — the single-entry `ValidatedEntry` gate the guards hang off
+- DCR-014 (2026-09-01) — the controlling record for what landed: the file-identity binding, the
+  rejected per-entry fingerprint, and the residual each one leaves
 
 ---
 
