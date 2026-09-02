@@ -4,15 +4,24 @@
 //! Tests compression ratios, entry count consistency, and CRC32 verification.
 
 use proptest::prelude::*;
+#[cfg(feature = "rar-support")]
 use std::path::PathBuf;
+// Every property in this file is `rar-support`-gated, and so is everything
+// that feeds them — including the fixture strategies, which is why
+// `ArchiveFormat` is gated too. On the minimal profile this file compiles to
+// nothing. AD-0070 makes that profile a release lane run under `-D warnings`,
+// so "nothing" has to mean no dangling items either.
+#[cfg(feature = "rar-support")]
 use unified_archive::{Archive, ArchiveFormat, EntryType, StreamBound};
 
 /// Helper to get test fixtures directory
+#[cfg(feature = "rar-support")]
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
 /// Strategy: pick one of the available test fixture files
+#[cfg(feature = "rar-support")]
 fn fixture_file_strategy() -> impl Strategy<Value = (&'static str, ArchiveFormat)> {
     prop_oneof![
         Just(("test.rar", ArchiveFormat::Rar5)),
@@ -22,6 +31,7 @@ fn fixture_file_strategy() -> impl Strategy<Value = (&'static str, ArchiveFormat
 }
 
 /// Strategy: pick a fixture filename
+#[cfg(feature = "rar-support")]
 fn fixture_name_strategy() -> impl Strategy<Value = &'static str> {
     prop_oneof![Just("test.rar"), Just("test.zip"), Just("test.7z"),]
 }

@@ -43,10 +43,28 @@ default = ["rar-support"]
 rar-support = []  # RAR/RAR5 support (requires UnRAR license compliance)
 external-rar-create = []  # RAR creation via external WinRAR CLI (Windows only)
 # D2 typed-handle split (ReadArchive / WriteArchive / ModifyArchive). Additive since v0.3 and
-# still opt-in: the planned v0.4 default flip is BLOCKED, not forgotten. AD 0058 ordering
-# constraint 2 forbids flipping default features until the `read-minimal` and `full` profiles
-# have CI coverage, and this repository has no CI (ticgit 1340e9). OI-0058-001 / ticgit a0503f
-# also wants Stage 1 feature gating committed before the flip.
+# still opt-in.
+#
+# The flip is NOT blocked on CI (AD-0070, 2026-09-03). This comment used to say
+# it was: "AD 0058 ordering constraint 2 forbids flipping default features until
+# the read-minimal and full profiles have CI coverage, and this repository has no
+# CI". Two things were wrong with that. Constraint 2 was written about AD 0058's
+# FOOTPRINT features, and borrowing it for `v2-api` imported a condition that has
+# nothing to do with this flag — `v2-api` gates a module, two cfg sites and a set
+# of in-crate tests, and no platform-specific code at all. And "no CI" was never
+# the real obstacle: both sides of this flip are observable on any dev host.
+#
+# What the flip actually needs is that both sides are RUN. As of 2026-09-03 they
+# are: `cargo test --all-features` (v2 on) and `cargo test --no-default-features`
+# (v2 off) are both release-gate lanes in scripts/release-gate.sh, and the
+# minimal profile was made clippy-clean in the same pass — eight test files had
+# dangling imports on it, because nobody had ever built it.
+#
+# Remaining before the flip: an owner decision on which release it rides, and
+# note that `v2-api` currently has in-crate tests only and no integration
+# coverage. Tracked as ticgit a0503f alongside AD 0058 Stage 1, which is
+# sequenced independently (the two are deliberately NOT tied — see AD-0058's
+# 2026-09-02 amendment).
 v2-api = []
 
 [[example]]

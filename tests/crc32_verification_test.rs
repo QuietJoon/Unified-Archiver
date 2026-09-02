@@ -17,6 +17,10 @@
 //! The `verify_crc32` flag in ExtractionOptions documents this behavior but cannot
 //! disable it, as both backend libraries provide no option to skip CRC32 verification.
 
+// Only the two `rar-support`-gated lanes touch the filesystem directly; the
+// third reads through the facade. Gated so the minimal profile compiles
+// warning-free (AD-0070).
+#[cfg(feature = "rar-support")]
 use std::fs;
 use std::path::PathBuf;
 use unified_archive::{Archive, ArchiveError, ExtractionOptions};

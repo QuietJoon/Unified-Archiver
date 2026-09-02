@@ -7,9 +7,15 @@
 //!
 //! These tests use actual timing assertions rather than relative benchmarks.
 
+// `Read`, `Archive` and `StreamBound` are used only by the RAR lanes below.
+// Gated so `--no-default-features` compiles warning-free: that profile is a
+// release-gate lane (AD-0070) and runs under `-D warnings`, where an unused
+// import is a failure rather than a nuisance.
+#[cfg(feature = "rar-support")]
 use std::io::Read;
 use std::path::PathBuf;
 use std::time::Instant;
+#[cfg(feature = "rar-support")]
 use unified_archive::{Archive, StreamBound};
 
 /// Helper to get test fixtures directory

@@ -16,7 +16,11 @@ mod common;
 
 use common::fixture;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+// `AtomicU64` is used only by a RAR-gated lane; gated so the
+// `--no-default-features` release lane compiles warning-free (AD-0070).
+#[cfg(feature = "rar-support")]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use unified_archive::{Archive, ExtractionOptions};
 
 // ── Contract 1: Progress callback is called ──

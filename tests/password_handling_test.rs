@@ -6,11 +6,20 @@
 #[path = "common/mod.rs"]
 mod common;
 
+// Every test in this file is `rar-support`-gated, so under
+// `--no-default-features` the file compiles to nothing and each of these
+// would dangle. That profile is a release-gate lane (AD-0070) run under
+// `-D warnings`, where a dangling import is a build failure rather than
+// noise — hence the gates rather than an `#[allow]`.
+#[cfg(feature = "rar-support")]
 use std::fs;
+#[cfg(feature = "rar-support")]
 use std::path::PathBuf;
+#[cfg(feature = "rar-support")]
 use unified_archive::{Archive, ArchiveError};
 
 /// Helper to get test fixtures directory
+#[cfg(feature = "rar-support")]
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }

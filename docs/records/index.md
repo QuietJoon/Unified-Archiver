@@ -63,6 +63,7 @@ Generated view; the authoritative catalogue is [`index.yaml`](index.yaml). See [
 - [AD-0067](AD-0067-r0076-closure-and-routing-record.md) — AD 0067: Review 0076 closure and routing record
 - [AD-0068](AD-0068-reject-review-0067-duplicate-of-0066.md) — AD 0068: Reject Review 0067 as byte-identical duplicate of Review 0066 — _archived_
 - [AD-0069](AD-0069-focused-closure-records-replace-omnibus-routing-tables.md) — AD 0069: Review closure is recorded in focused records, not in one omnibus routing table
+- [AD-0070](AD-0070-ci-means-recorded-per-platform-verification.md) — AD 0070: CI means recorded per-platform verification, not a hosted service
 
 ## Review-gate Decisions (MADR)
 

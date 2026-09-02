@@ -90,3 +90,24 @@ to Windows. On the evidence that inversion has not happened yet — the reposito
 configuration at all, so nothing has release-verified a Windows build — and stating verification
 that has not run would be a stronger defect than under-claiming. The messaging upgrade is
 therefore recorded as due-on-CI, not as due-now.
+
+## Amendment (2026-09-03, AD-0070 — the Windows CI job is not coming; the reasoning survives it)
+
+This record repeatedly anticipates a "Windows CI job … committed under
+OI-0065-001" and treats its landing as the trigger for release-verification
+becoming true. **Under AD-0070 that job will never land.** The owner has ruled
+that this project adopts no hosted CI of any kind; verification is run by the
+owner on each platform and recorded under `docs/verification/`.
+
+**The rejection this record makes is unaffected.** Downgrading the Windows
+support message was rejected because the support is real and the messaging
+should describe it accurately — that argument never depended on *how* the
+verification is produced, only on whether it exists. Substitute the mechanism
+and every sentence of the reasoning still holds.
+
+The trigger is therefore restated: release-verification for Windows becomes
+true when a `docs/verification/` record exists, produced on a Windows host,
+whose fingerprint matches the released commit. As of this amendment the owner's
+Windows machine is the intended host and the run is pending, so the current
+"present but not release-verified" wording remains correct — which is the
+outcome this record argued for in the first place.

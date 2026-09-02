@@ -164,3 +164,23 @@ The original Decision Outcome, Implementation, and Consequences above are
 retained verbatim as the historical record; this amendment supersedes
 their operative guidance for new and existing tests, and the frontmatter
 `status` is updated to `superseded` to reflect that.
+
+## Amendment (2026-09-03, AD-0070 — "committed Windows CI" is not a thing this project has)
+
+The owner-reversal amendment above justifies first-class Windows support partly
+by pointing at "committed Windows CI". **There is no committed CI job, and
+under AD-0070 there will not be one.** The owner runs verification on each
+platform themselves and the result is recorded under `docs/verification/`; no
+hosted CI service is adopted for any lane.
+
+**This changes nothing about the decision.** The rejection of the scratch-path
+portability sweep stands on its own reasoning, and so does the first-class
+status of Windows — what changes is only the mechanism by which Windows gets
+verified, which is the owner's Windows machine rather than a job in a hosted
+runner. The phrase is corrected here because a reader checking whether this
+record's premise holds would go looking for a CI configuration that does not
+exist and conclude the premise had failed.
+
+See AD-0070 for the definition of what counts as verified, and for why three of
+the four items previously blocked on "no CI" were never blocked on a service at
+all.

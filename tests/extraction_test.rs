@@ -4,7 +4,11 @@
 
 mod common;
 
+// All seven tests here are `rar-support`-gated, so the minimal profile
+// compiles this file to nothing (AD-0070).
+#[cfg(feature = "rar-support")]
 use std::fs;
+#[cfg(feature = "rar-support")]
 use unified_archive::Archive;
 
 #[cfg(feature = "rar-support")]

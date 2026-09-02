@@ -391,6 +391,13 @@ records:
     file: AD-0069-focused-closure-records-replace-omnibus-routing-tables.md
     reviews: [R0076-0049, R0076-0050, R0076-0051, R0076-0052]
     mentions: [AD-0059, AD-0060, AD-0061, AD-0063, AD-0067]
+  - id: AD-0070
+    type: AD
+    title: "AD 0070: CI means recorded per-platform verification, not a hosted service"
+    status: active
+    file: AD-0070-ci-means-recorded-per-platform-verification.md
+    ois: [OI-0065-001, OI-0080-001, OI-0058-001]
+    mentions: [AD-0046, AD-0058, MADR-0029]
   - id: DCR-001
     type: DCR
     title: "Design Change Record"

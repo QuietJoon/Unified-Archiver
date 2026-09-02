@@ -2,7 +2,12 @@
 //!
 //! Tests the high-level Archive interface with RAR/RAR5 backend
 
-use unified_archive::{Archive, ArchiveFormat, EntryType};
+// Every use of `ArchiveFormat` and `EntryType` in this file is inside a
+// RAR-gated test, so the import has to be gated too or
+// `--no-default-features` warns. See AD-0070: that profile is a release lane.
+use unified_archive::Archive;
+#[cfg(feature = "rar-support")]
+use unified_archive::{ArchiveFormat, EntryType};
 
 #[cfg(feature = "rar-support")]
 #[test]

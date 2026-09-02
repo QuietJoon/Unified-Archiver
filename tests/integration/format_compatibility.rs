@@ -15,10 +15,17 @@
 //! broader cross-format expectations. Future consolidation tracked
 //! under R0074-0079 (test taxonomy).
 
+// This suite's cases are `rar-support`-gated, so the minimal profile compiles
+// the file to nothing and every helper below it dangles. AD-0070 makes that
+// profile a release lane under `-D warnings`, where a dangling helper is a
+// build failure.
+#[cfg(feature = "rar-support")]
 use std::path::PathBuf;
+#[cfg(feature = "rar-support")]
 use unified_archive::{Archive, ArchiveFormat};
 
 /// Helper to get fixture path
+#[cfg(feature = "rar-support")]
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -32,6 +39,7 @@ fn fixture_path(name: &str) -> PathBuf {
 /// missing file signals a mispackaged checkout rather than an optional case to
 /// skip. Panicking here keeps the cross-format matrix from passing vacuously
 /// when no fixtures are exercised (R0081-0089).
+#[cfg(feature = "rar-support")]
 fn require_fixture(name: &str) -> PathBuf {
     let path = fixture_path(name);
     assert!(
