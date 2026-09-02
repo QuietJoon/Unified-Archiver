@@ -84,10 +84,13 @@ fn duplicate_path_tar_digests_both_payloads_distinctly() {
         "duplicate-path digest must reflect the second occurrence's distinct payload"
     );
 
-    // (c) total size sums BOTH occurrences' payloads.
+    // (c) total size sums BOTH occurrences' payloads. TAR declares every
+    // member's size, so the OI-0001-007 total is complete here and
+    // `exact()` is the assertion that would notice a dropped occurrence as
+    // a coverage change rather than only as a smaller sum.
     assert_eq!(
-        dup_total,
-        (first.len() + second.len()) as u64,
+        dup_total.exact(),
+        Some((first.len() + second.len()) as u64),
         "total size must sum both duplicate-path payloads"
     );
 }

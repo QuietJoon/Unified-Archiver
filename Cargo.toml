@@ -39,7 +39,7 @@ pkg-config = "0.3"
 cc = "1"
 
 [features]
-default = ["rar-support"]
+default = ["rar-support", "v2-api"]
 rar-support = []  # RAR/RAR5 support (requires UnRAR license compliance)
 external-rar-create = []  # RAR creation via external WinRAR CLI (Windows only)
 # D2 typed-handle split (ReadArchive / WriteArchive / ModifyArchive). Additive since v0.3 and
@@ -60,11 +60,22 @@ external-rar-create = []  # RAR creation via external WinRAR CLI (Windows only)
 # minimal profile was made clippy-clean in the same pass — eight test files had
 # dangling imports on it, because nobody had ever built it.
 #
-# Remaining before the flip: an owner decision on which release it rides, and
-# note that `v2-api` currently has in-crate tests only and no integration
-# coverage. Tracked as ticgit a0503f alongside AD 0058 Stage 1, which is
-# sequenced independently (the two are deliberately NOT tied — see AD-0058's
-# 2026-09-02 amendment).
+# FLIPPED ON BY DEFAULT 2026-09-03 (owner ruling, migration step 3). Both sides
+# stay covered: `--all-features` builds it, `--no-default-features` does not,
+# and both are release-gate lanes. Integration coverage was added in the same
+# pass — before the flip `v2-api` had in-crate tests only, which is thin for a
+# default.
+#
+# Migration step 4 — remove this flag and the legacy `Archive` facade — is NOT
+# a flag deletion and cannot be done from here. `ReadArchive`, `WriteArchive`
+# and `ModifyArchive` are implemented by WRAPPING `Archive` (`inner: Archive`,
+# and roughly thirty of ReadArchive's methods delegate straight to it), so
+# deleting the facade means giving them a real implementation first — the
+# `ReadArchiveBackend` / `WriteArchiveBackend` split that AD-0053's D2 planned
+# and that was never built. `Archive` also carries no `#[deprecated]` at all, so
+# a removal today would be a removal with no deprecation cycle behind it. The
+# good news is the public v2 surface is already clean: `Archive` leaks only
+# through two private helpers.
 v2-api = []
 
 [[example]]

@@ -21,7 +21,11 @@
 //! Pass `--digest` for `Archive::calculate_content_multiset_digest_and_size`,
 //! a content-identity hash that streams CRC-less entries to obtain a real
 //! CRC32 (AD 0047) and so stays comparable across formats. It is opt-in
-//! because on CRC-less formats it decompresses every entry.
+//! because on CRC-less formats it decompresses every entry. Its size term is
+//! a `SizedContentTotal`, not a `u64`, for the same reason the CRC sum above
+//! is ambiguous: raw `.gz`/`.bz2`/`.xz` members declare no uncompressed size
+//! and contribute nothing, so this example reports the coverage instead of
+//! printing a number that looks exact (OI-0001-007).
 //!
 //! Usage:
 //!   cargo run --example archive_crc -- <archive_file> [--digest]
@@ -141,11 +145,14 @@ fn main() {
                         match archive.calculate_content_multiset_digest_and_size() {
                             Ok((digest, total_size)) if digest.is_empty() => {
                                 println!("No file entries, so no content digest");
-                                println!("Total uncompressed size: {} bytes", total_size);
+                                // `SizedContentTotal`'s Display already spells
+                                // out an incomplete total, so no " bytes"
+                                // suffix here (OI-0001-007).
+                                println!("Total uncompressed size: {}", total_size);
                             }
                             Ok((digest, total_size)) => {
                                 println!("Content digest: {}", digest);
-                                println!("Total uncompressed size: {} bytes", total_size);
+                                println!("Total uncompressed size: {}", total_size);
                                 println!("\n📝 Notes:");
                                 println!(
                                     "  - Covers every file entry, including CRC-less formats (AD 0047),"
@@ -155,6 +162,28 @@ fn main() {
                                     "  - Content only: names, directory layout and timestamps are not hashed"
                                 );
                                 println!("  - Costs a full decompression pass on CRC-less formats");
+                                // The same "a bare number is ambiguous" point
+                                // this example makes about `calculate_archive_crc`,
+                                // now made about the size term: raw .gz/.bz2/.xz
+                                // members and unset-size libarchive entries
+                                // declare no size and contribute nothing
+                                // (OI-0001-007).
+                                if total_size.is_complete() {
+                                    println!(
+                                        "  - Every one of the {} file entries declared a size, so the total is exact",
+                                        total_size.file_entries()
+                                    );
+                                } else {
+                                    println!(
+                                        "  - INCOMPLETE total: {} of {} file entries declare no uncompressed size,",
+                                        total_size.unsized_entries(),
+                                        total_size.file_entries()
+                                    );
+                                    println!(
+                                        "    so {} bytes is a lower bound, not the archive's size",
+                                        total_size.sized_bytes()
+                                    );
+                                }
                             }
                             Err(e) => {
                                 eprintln!("Failed to calculate content digest: {:?}", e);

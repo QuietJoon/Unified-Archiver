@@ -63,7 +63,13 @@ fn load_many_small_entries_roundtrip() {
 
     let (digest, total_size) = archive.calculate_manifest_summary().unwrap();
     assert!(!digest.is_empty());
-    assert!(total_size > ENTRY_COUNT as u64);
+    // OI-0001-007: ZIP declares every entry's uncompressed size, so a
+    // complete total is part of what this lane asserts — an incomplete one
+    // at this scale would mean the listing lost sizes somewhere.
+    let total = total_size
+        .exact()
+        .expect("a ZIP listing declares every entry's size");
+    assert!(total > ENTRY_COUNT as u64);
 
     let report = archive.validate_integrity().unwrap();
     assert!(report.failed.is_empty());

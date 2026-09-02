@@ -32,7 +32,7 @@ use crate::archive::{Archive, ArchiveMode};
 use crate::entry::ArchiveEntry;
 use crate::error::{ArchiveWarning, Result, ResultWithWarnings};
 use crate::format::ArchiveFormat;
-use crate::inspection::{MultipartLayout, ValidationReport};
+use crate::inspection::{MultipartLayout, SizedContentTotal, ValidationReport};
 use crate::modification::ModificationOptions;
 use crate::options::{
     CompressionOptions, ExtractionOptions, LibarchiveCompressionOptions, SevenZCompressionOptions,
@@ -269,13 +269,24 @@ impl ReadArchive {
 
     /// Content-multiset digest plus total uncompressed size (mirrors
     /// [`Archive::calculate_content_multiset_digest_and_size`]).
-    pub fn calculate_content_multiset_digest_and_size(&self) -> Result<(String, u64)> {
+    ///
+    /// The size term is a [`SizedContentTotal`], not a `u64`: it may not
+    /// cover every entry, because raw `.gz`/`.bz2`/`.xz` members and
+    /// libarchive entries with an unset size field declare no size
+    /// (OI-0001-007). The typed handle mirrors the facade exactly rather
+    /// than flattening it — a `u64` here would reintroduce the silent
+    /// undercount on the very surface v2 callers are being pointed at.
+    pub fn calculate_content_multiset_digest_and_size(
+        &self,
+    ) -> Result<(String, SizedContentTotal)> {
         self.inner.calculate_content_multiset_digest_and_size()
     }
 
     /// Legacy manifest-summary shim (mirrors
-    /// [`Archive::calculate_manifest_summary`]).
-    pub fn calculate_manifest_summary(&self) -> Result<(String, u64)> {
+    /// [`Archive::calculate_manifest_summary`], including its 0.5.0 move
+    /// to [`SizedContentTotal`] — see that method for why the shim did
+    /// not keep its `u64` for source-compat).
+    pub fn calculate_manifest_summary(&self) -> Result<(String, SizedContentTotal)> {
         self.inner.calculate_manifest_summary()
     }
 

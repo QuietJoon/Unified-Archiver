@@ -136,9 +136,13 @@ fn ae2_duplicate_after_normalization_zip_digests_each_payload() {
         "the shadowed occurrence must not be re-hashed from the first one"
     );
 
+    // OI-0001-007: ZIP declares both occurrences' sizes, so the typed total
+    // is complete. Asserting `exact()` rather than `sized_bytes()` keeps the
+    // "sums both occurrences" claim honest — a dropped occurrence would show
+    // up as an incomplete total rather than only as a smaller number.
     assert_eq!(
-        total,
-        (first.len() + second.len()) as u64,
+        total.exact(),
+        Some((first.len() + second.len()) as u64),
         "total size sums both occurrences"
     );
 

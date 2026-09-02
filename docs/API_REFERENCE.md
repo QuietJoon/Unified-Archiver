@@ -408,7 +408,7 @@ List files, returning an owned `Vec` instead of a borrowed slice. Intended for u
 
 ---
 
-#### `Archive::calculate_manifest_summary(&self) -> Result<(String, u64)>`
+#### `Archive::calculate_manifest_summary(&self) -> Result<(String, SizedContentTotal)>`
 
 Calculate a manifest summary for the archive. Returns a tuple of `(manifest_digest, total_uncompressed_size)`.
 

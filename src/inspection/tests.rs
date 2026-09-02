@@ -436,7 +436,11 @@ fn test_content_digest_unique_paths_match_prefix_algorithm() {
     let expected = format!("{:08x}", hasher.finalize());
 
     assert_eq!(digest, expected, "unique-path digest must be unchanged");
-    assert_eq!(total_size, 15);
+    // OI-0001-007: every entry here declares a size, so the typed total is
+    // complete and `exact()` is the assertion to make. Reading
+    // `sized_bytes()` alone would pass just as happily on a listing that
+    // silently dropped an entry.
+    assert_eq!(total_size.exact(), Some(15));
 }
 
 /// Total-size accumulation must surface overflow instead of saturating

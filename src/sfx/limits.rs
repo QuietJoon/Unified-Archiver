@@ -72,4 +72,15 @@ pub(crate) const MAX_SFX_PAYLOAD_SIZE: u64 = crate::security::DEFAULT_MAX_SFX_PA
 /// by other means (e.g. probing the format header at the claimed
 /// offset directly), at which point this constant would become the
 /// binding ceiling again.
+///
+/// **Reviewed and deliberately retained** (ti-9909d449, 2026-09-03).
+/// The bound is on a number parsed out of an untrusted executable, and
+/// it is redundant only because of a property of a *different*
+/// function; that makes it a guard whose reachability can be restored
+/// by an edit elsewhere, not an invariant the type system enforces.
+/// It is a plain sanity range check rather than an `unreachable!()` for
+/// the same reason: if the redundancy ever lapses, an oversized stub
+/// should surface as a typed `Format` error to the caller, not as a
+/// panic. Do not delete it as dead code without first removing the
+/// `extract_stub` re-detection that makes it so.
 pub(crate) const MAX_STUB_SIZE: u64 = 50 * 1024 * 1024;

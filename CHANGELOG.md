@@ -47,6 +47,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **The exact-content-total APIs return a typed `SizedContentTotal`, not a bare `u64`**
+  (OI-0001-007). `Archive::calculate_content_multiset_digest_and_size`, its
+  `calculate_manifest_summary` shim, and both `ReadArchive` mirrors now return
+  `Result<(String, SizedContentTotal)>`.
+
+  The `u64` was never an exact total. It accumulated only from entries whose listing declares a
+  size, and an entry that declares none contributed **zero with nothing in the return to say so**.
+  Two real populations declare no size: raw single-file `.gz` / `.bz2` / `.xz` members, and
+  libarchive entries whose `archive_entry_size_is_set` is false. Digesting a raw `.gz` handle
+  therefore returned a confident `0` — indistinguishable from an empty archive's honest `0`.
+
+  `SizedContentTotal` carries the partial sum *and* its coverage: `sized_bytes()` is the old number
+  (unknown counted as zero, now something a caller asks for on purpose), `exact()` returns
+  `Some(total)` only when every file entry was sized, and `is_complete()` / `sized_entries()` /
+  `unsized_entries()` / `file_entries()` make "sized 3 of 5" expressible. A struct rather than
+  `Option<u64>` so the partial total survives — a caller who can size three of five entries can
+  still act on it — and rather than a tuple so the two numbers are named. `Display` spells out an
+  incomplete total, so printing one cannot pass it off as complete.
+
+  *Migration is mechanical and the compiler finds every site:* `.sized_bytes()` restores the
+  previous value byte for byte; `.exact()` is the one to reach for wherever the number was treated
+  as the archive's true uncompressed size. `calculate_manifest_summary` moved with the primary
+  rather than keeping `(String, u64)` for source-compat, and the reason is recorded on the shim: the
+  only `u64` it could return is the partial sum, so source-compat there would have preserved a
+  silently short number inside a method that promises a summary. A compile error is found once by a
+  developer; a wrong figure is found by a user.
+
+- **`Archive::modify()` on a RAR archive reports a different reason string.** Was
+  `"RAR archives are read-only"`; now the shared gate's `"Rar archives do not support
+  modification"`. The dedicated RAR arm was unreachable — `ArchiveFormat::can_modify()` refuses RAR
+  earlier — so the two messages could only ever disagree in wording. Callers matching the variant or
+  the `operation: "modify"` label are unaffected; only a match on the reason text breaks.
+
+### Removed
+
+- Two unreachable dispatch arms, deleted after a per-site review rather than a sweep (ticgit
+  9909d449): the RAR arm in `Archive::modify`'s backend selection, and the `Lzma` arm in the
+  internal `promote_to_compound_tar` helper — `detect_from_bytes` has no LZMA probe and cannot
+  return `Lzma`, while `.tar.lzma` / `.tlz` are resolved by the extension fallback and never routed
+  through that arm. No detection or extraction behaviour changes.
+
+  **Two other unreachable sites were deliberately KEPT**, which is the point of ruling per site: the
+  `MAX_STUB_SIZE` guard in `extract_stub` and the ZIP arms in the libarchive writer. Unreachable
+  code in an FFI wrapper is not automatically waste — deleting a defensive branch and deleting a
+  genuine invariant look identical from outside. Both now document why they stay and what would make
+  them reachable again. `unreachable!()` was rejected for the same reason: it trades a typed refusal
+  for a panic.
+
+
 - **`Archive::recovery_percentage()` returns `Option<u16>`, not `Option<u8>`.** The number does not
   fit a byte: RAR 6.10 raised the maximum recovery record from 99% to 1000% and changed the RAR5
   encoding to a vint, so `rar -rr256p` through `-rr1000p` produce ordinary, readable archives. What

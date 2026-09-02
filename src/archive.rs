@@ -1793,6 +1793,22 @@ impl Archive {
 
         // Guard against malicious/corrupted files with unreasonably large
         // stubs. The ceiling lives in `crate::sfx::limits`.
+        //
+        // **This check cannot fire today — keep it anyway** (ti-9909d449,
+        // 2026-09-03). `offset` now comes from the fresh `detect_sfx`
+        // probe above, whose signature scan never looks past
+        // `limits::MAX_SCAN_SIZE` (1 MiB), so the binding ceiling is
+        // already 1 MiB and this 50 MiB test is subsumed. It stays
+        // because the value it bounds is still parsed out of an
+        // untrusted executable, and only *one* upstream property makes
+        // it redundant: that `extract_stub` accepts no offset except a
+        // freshly-scanned one. The moment that changes — a caller offset
+        // verified some other way (e.g. probing the format header at the
+        // claimed offset), a widened scan window, or a detector that can
+        // report an offset it did not scan to — this becomes the binding
+        // ceiling again, with nothing else between an attacker-chosen
+        // length and the `Vec` allocated below. Deleting it as "dead"
+        // would remove the guard and leave no diagnostic behind.
         let max_stub = crate::sfx::limits::MAX_STUB_SIZE;
         if offset > max_stub {
             return Err(ArchiveError::format(

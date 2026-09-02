@@ -830,7 +830,11 @@ fn test_sevenz_crcless_duplicate_path_digests_through_the_facade() {
         digest,
         format!("{:08x}", crc32fast::hash(elements.join(",").as_bytes()))
     );
-    assert_eq!(total_size, b"seven content".len() as u64);
+    // OI-0001-007: 7z declares a size for every non-directory entry, so the
+    // typed total is complete here and `exact()` is the honest assertion —
+    // the empty no-stream occurrence contributes a declared `0`, not an
+    // unknown.
+    assert_eq!(total_size.exact(), Some(b"seven content".len() as u64));
 }
 
 // ── OI-0001-002: the handle is bound to the archive FILE ──

@@ -56,6 +56,138 @@ pub struct ValidationReport {
     pub failed: Vec<String>,
 }
 
+/// The uncompressed byte total returned beside a content-multiset digest,
+/// carrying how much of the listing it actually covers (OI-0001-007).
+///
+/// **Why this is not a `u64`.** The total is accumulated only from entries
+/// whose listing declares a size. Two populations do not: raw single-file
+/// `.gz` / `.bz2` / `.xz` members, whose readers set no uncompressed size
+/// at all, and any libarchive entry whose `archive_entry_size_is_set` is
+/// false (R0001-0014 — the reason `ArchiveEntry::size` is an `Option` in
+/// the first place). Those entries used to contribute zero to a bare `u64`
+/// and say nothing about it, so a caller comparing two archives, or
+/// pre-sizing a destination, worked from a number that looked exact and
+/// silently was not. The wrapper makes the shortfall part of the value:
+/// [`Self::exact`] refuses to hand back a total that is missing entries,
+/// and reaching for the old number is now a deliberate
+/// [`Self::sized_bytes`] call.
+///
+/// **Why not `Option<u64>`.** Collapsing to `None` throws away the partial
+/// total, which is the useful part — a caller that can size three of five
+/// entries can still act on it (progress denominators, "at least N bytes"
+/// checks, cheap inequality tests between two archives). Both the number
+/// and its coverage survive here.
+///
+/// **What this does NOT buy.** It does not make the missing sizes
+/// knowable: nothing here decompresses an unsized member to measure it,
+/// and no accessor estimates one. It does not say *which* entries were
+/// unsized — only how many — because the digest surface deliberately
+/// discards path and order information (DCR-012), so naming them would
+/// mean carrying data this call has no other reason to hold. And it says
+/// nothing about the digest, which is computed over every file entry
+/// including the unsized ones; an incomplete total does not weaken the
+/// digest beside it.
+///
+/// Fields are private and there is no public constructor: like
+/// [`ValidationReport`] this is an *output* type, produced only by
+/// [`Archive::calculate_content_multiset_digest_and_size`] and the shims
+/// over it, so the invariant `sized_entries + unsized_entries == the file
+/// entries walked` cannot be broken from outside. Private fields also mean
+/// a future counter can be added without a major bump, so no
+/// `#[non_exhaustive]` is needed to buy that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SizedContentTotal {
+    sized_bytes: u64,
+    sized_entries: usize,
+    unsized_entries: usize,
+}
+
+impl SizedContentTotal {
+    /// Sum of the declared uncompressed sizes of the file entries that
+    /// declared one — unknown-size entries counted as zero.
+    ///
+    /// This is the pre-0.5.0 `u64` verbatim. It is still the right answer
+    /// for a lower bound, a progress denominator, or a cheap "is this
+    /// archive bigger" test; it is the wrong answer for anything that
+    /// treats the number as the archive's true uncompressed size. Use
+    /// [`Self::exact`] when the caller cannot tolerate a shortfall, and
+    /// check [`Self::is_complete`] when it wants to degrade rather than
+    /// fail.
+    #[must_use]
+    pub const fn sized_bytes(self) -> u64 {
+        self.sized_bytes
+    }
+
+    /// The total, but only when every file entry declared a size.
+    ///
+    /// `None` means at least one entry contributed nothing and the number
+    /// would understate the archive. Prefer this constructor-of-last-resort
+    /// shape wherever the old `u64` was consumed as an exact figure —
+    /// allocating a destination, asserting an equality, reporting a size to
+    /// a user — since it turns a silent undercount into a case the caller
+    /// must handle.
+    #[must_use]
+    pub const fn exact(self) -> Option<u64> {
+        if self.is_complete() {
+            Some(self.sized_bytes)
+        } else {
+            None
+        }
+    }
+
+    /// True when no file entry was skipped, i.e. [`Self::sized_bytes`] is
+    /// the archive's full uncompressed size.
+    ///
+    /// An archive with no file entries at all is complete: the total is a
+    /// truthful zero, matching the empty digest the same call returns.
+    #[must_use]
+    pub const fn is_complete(self) -> bool {
+        self.unsized_entries == 0
+    }
+
+    /// Number of file entries that declared a size and are therefore
+    /// included in [`Self::sized_bytes`].
+    #[must_use]
+    pub const fn sized_entries(self) -> usize {
+        self.sized_entries
+    }
+
+    /// Number of file entries that declared no size and contributed
+    /// nothing. Zero exactly when [`Self::is_complete`].
+    #[must_use]
+    pub const fn unsized_entries(self) -> usize {
+        self.unsized_entries
+    }
+
+    /// Total file entries walked — the denominator for "sized `n` of `m`".
+    ///
+    /// Non-file entries (directories, symlinks, hard links) are not
+    /// counted, matching the digest's own population.
+    #[must_use]
+    pub const fn file_entries(self) -> usize {
+        self.sized_entries.saturating_add(self.unsized_entries)
+    }
+}
+
+impl std::fmt::Display for SizedContentTotal {
+    /// Renders the shortfall inline, so a caller that prints the value
+    /// cannot present a partial total as a complete one by accident — the
+    /// single most likely way the old bare `u64` misled a human reader.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_complete() {
+            write!(f, "{} bytes", self.sized_bytes)
+        } else {
+            write!(
+                f,
+                "at least {} bytes ({} of {} file entries declare no size)",
+                self.sized_bytes,
+                self.unsized_entries,
+                self.file_entries()
+            )
+        }
+    }
+}
+
 impl Archive {
     /// List all files in the archive
     ///
@@ -710,7 +842,30 @@ impl Archive {
     /// an ordinary EOF. An entry whose listing *does* carry a CRC32 never
     /// streams here at all — which is most ZIP, 7z and RAR5 entries, but
     /// not the AE-2 AES ZIP or kCRC-less 7z exceptions named above.
-    pub fn calculate_content_multiset_digest_and_size(&self) -> Result<(String, u64)> {
+    ///
+    /// # The size term is typed, and may be incomplete (OI-0001-007)
+    ///
+    /// **Breaking change in 0.5.0.** The second element was a bare `u64`
+    /// and is now a [`SizedContentTotal`]. It always was a partial sum —
+    /// an entry whose listing declares no size contributed nothing, and
+    /// the `u64` had no way to say so. The two populations that hit this
+    /// are named in the section above: raw single-file `.gz`/`.bz2`/`.xz`
+    /// members, and libarchive entries with an unset size field
+    /// (R0001-0014). An all-`.gz` handle therefore returned a confident
+    /// `0`.
+    ///
+    /// Migration is mechanical and the compiler finds every site:
+    /// `total.sized_bytes()` restores the old number exactly, and
+    /// `total.exact()` is the one to reach for when the caller was
+    /// treating it as the archive's true size. See
+    /// [`SizedContentTotal`] for why this is a struct rather than an
+    /// `Option<u64>` (which would discard the partial sum) or a tuple.
+    ///
+    /// The digest is unaffected: unsized entries are hashed like any
+    /// other, so an incomplete total sits beside a complete digest.
+    pub fn calculate_content_multiset_digest_and_size(
+        &self,
+    ) -> Result<(String, SizedContentTotal)> {
         let entries = self.list_files()?;
         // OI-0001-009: resolve every CRC-less entry in one traversal where
         // the backend supports it. `resolved` is keyed on the stable
@@ -732,6 +887,21 @@ impl Archive {
     /// Thin shim over [`Self::calculate_content_multiset_digest_and_size`]
     /// kept for source-compat. New callers should prefer the typed
     /// helper directly (R0070-0088 / R0070-0089).
+    ///
+    /// # Why this shim moved with the primary (OI-0001-007)
+    ///
+    /// The shim exists for source-compat, so keeping its historical
+    /// `(String, u64)` shape was the obvious call and is the wrong one.
+    /// The only `u64` it could return is `SizedContentTotal::sized_bytes`
+    /// — the partial sum — which means source-compat here would preserve
+    /// a number that is silently short on raw `.gz`/`.bz2`/`.xz` handles
+    /// and on libarchive entries with an unset size field, in a method
+    /// whose own name promises a *summary*. Compatibility that keeps code
+    /// compiling while it keeps producing the wrong figure is worse than
+    /// the compile error: the error is found once, the figure is found by
+    /// a user. So the shim returns [`SizedContentTotal`] too, and the
+    /// 0.5.0 breaking window pays for it. Callers that genuinely want the
+    /// old number say `.sized_bytes()` and have said so on purpose.
     ///
     /// # Performance
     ///
@@ -761,7 +931,7 @@ impl Archive {
     /// does not match its declared size returns
     /// [`ArchiveError::Corruption`]
     /// instead of a summary computed over the short payload.
-    pub fn calculate_manifest_summary(&self) -> Result<(String, u64)> {
+    pub fn calculate_manifest_summary(&self) -> Result<(String, SizedContentTotal)> {
         self.calculate_content_multiset_digest_and_size()
     }
 
@@ -1134,29 +1304,48 @@ fn sibling_scan_dir(path: &Path) -> &Path {
 /// function of the resolved CRC32 multiset alone — see
 /// [`content_digest_element`] for why the encoding is injective over
 /// that multiset (DCR-012).
+///
+/// The size term is a [`SizedContentTotal`] rather than a `u64` because
+/// the accumulation is conditional on `entry.size` being declared: this
+/// is the one place that knows how many entries were skipped, so it is
+/// the one place that can report it (OI-0001-007).
 fn content_multiset_digest_and_size<F>(
     entries: &[ArchiveEntry],
     mut crc32_for: F,
-) -> Result<(String, u64)>
+) -> Result<(String, SizedContentTotal)>
 where
     F: FnMut(&ArchiveEntry) -> Result<u32>,
 {
     let mut hashes: Vec<String> = Vec::new();
-    let mut total_size: u64 = 0;
+    let mut total = SizedContentTotal {
+        sized_bytes: 0,
+        sized_entries: 0,
+        unsized_entries: 0,
+    };
     for entry in entries {
         if entry.entry_type != EntryType::File {
             continue;
         }
-        if let Some(size) = entry.size {
-            // Keep the "exact total" contract honest: a saturating add would
-            // silently report `u64::MAX` as if precise. Surface the overflow
-            // instead (R0081-0081).
-            total_size = total_size.checked_add(size).ok_or_else(|| {
-                ArchiveError::operation_blocked(
-                    "calculate_content_multiset_digest",
-                    "total uncompressed size exceeds u64::MAX",
-                )
-            })?;
+        // OI-0001-007: the two arms are counted, not just the first. The
+        // `None` arm used to fall through silently, so an archive of raw
+        // `.gz` members returned a confident 0 — the accumulator and the
+        // coverage counters are updated in the same place precisely so a
+        // future edit cannot reintroduce that gap by touching one and not
+        // the other.
+        match entry.size {
+            Some(size) => {
+                // Keep the "exact total" contract honest: a saturating add
+                // would silently report `u64::MAX` as if precise. Surface the
+                // overflow instead (R0081-0081).
+                total.sized_bytes = total.sized_bytes.checked_add(size).ok_or_else(|| {
+                    ArchiveError::operation_blocked(
+                        "calculate_content_multiset_digest",
+                        "total uncompressed size exceeds u64::MAX",
+                    )
+                })?;
+                total.sized_entries += 1;
+            }
+            None => total.unsized_entries += 1,
         }
         // One element per file entry, with no occurrence suffix:
         // multiplicity is carried by *repetition* in this vector, so `n`
@@ -1176,7 +1365,7 @@ where
         format!("{:08x}", hasher.finalize())
     };
 
-    Ok((digest, total_size))
+    Ok((digest, total))
 }
 
 #[cfg(test)]
@@ -1398,6 +1587,162 @@ mod content_digest_encoding_tests {
         assert_eq!(
             forward_digest, swapped_digest,
             "re-listing one archive in a different order must not move its digest"
+        );
+    }
+}
+
+/// OI-0001-007 cover for [`SizedContentTotal`], the typed size term.
+///
+/// Lives inline for the same reason the encoding module above does: the
+/// accumulation and its coverage counters are private to
+/// [`content_multiset_digest_and_size`], and the defect being pinned is
+/// in that accumulation rather than at the facade. The real-backend
+/// half — a raw `.gz` handle whose listing declares no size — is pinned
+/// at the facade in `tests/digest_exactness_test.rs`, because only a
+/// real backend proves the `None` branch is reachable in production and
+/// not merely constructible in a test.
+#[cfg(test)]
+mod content_size_total_tests {
+    use super::{ArchiveEntry, Result, content_multiset_digest_and_size};
+
+    fn sized(path: &str, id: usize, size: u64) -> ArchiveEntry {
+        ArchiveEntry::file(path, id).size(size).build()
+    }
+
+    /// The builder leaves `size` unset, which is exactly the shape the
+    /// raw gzip/bzip2/xz readers and `archive_entry_size_is_set`-false
+    /// libarchive entries produce (R0001-0014).
+    fn unsized_file(path: &str, id: usize) -> ArchiveEntry {
+        ArchiveEntry::file(path, id).build()
+    }
+
+    fn constant_crc(_: &ArchiveEntry) -> Result<u32> {
+        Ok(0xDEAD_BEEF)
+    }
+
+    /// The defect itself. Two of three entries declare a size; the total
+    /// must report the partial sum *and* say it is partial, with the
+    /// unknown count exact. Before OI-0001-007 this returned a bare `9`
+    /// that a caller had no way to distinguish from a complete total.
+    #[test]
+    fn unknown_size_entry_makes_the_total_incomplete() {
+        let entries = vec![
+            sized("a.txt", 0, 4),
+            unsized_file("b.gz", 1),
+            sized("c.txt", 2, 5),
+        ];
+
+        let (_, total) = content_multiset_digest_and_size(&entries, constant_crc).unwrap();
+
+        assert!(!total.is_complete(), "one entry declared no size");
+        assert_eq!(total.exact(), None, "an incomplete total is not exact");
+        assert_eq!(total.sized_bytes(), 9, "the partial sum survives");
+        assert_eq!(total.unsized_entries(), 1);
+        assert_eq!(total.sized_entries(), 2);
+        assert_eq!(total.file_entries(), 3, "sized 2 of 3");
+    }
+
+    /// Every file entry unsized: the total is `0` bytes, which is
+    /// precisely the number the old `u64` returned while claiming to be
+    /// a summary. Here the `0` is unmistakably a non-answer.
+    #[test]
+    fn all_entries_unsized_reports_zero_and_says_so() {
+        let entries = vec![unsized_file("a.gz", 0), unsized_file("b.gz", 1)];
+
+        let (digest, total) = content_multiset_digest_and_size(&entries, constant_crc).unwrap();
+
+        assert_eq!(total.sized_bytes(), 0);
+        assert_eq!(total.exact(), None);
+        assert_eq!(total.unsized_entries(), 2);
+        assert_eq!(total.sized_entries(), 0);
+        assert!(
+            !digest.is_empty(),
+            "an unsized entry still participates in the digest"
+        );
+    }
+
+    /// The complement, so the incompleteness flag cannot be stuck on: an
+    /// all-declared listing reports complete and hands back the sum.
+    #[test]
+    fn all_sized_entries_report_a_complete_exact_total() {
+        let entries = vec![sized("a.txt", 0, 4), sized("b.txt", 1, 5)];
+
+        let (_, total) = content_multiset_digest_and_size(&entries, constant_crc).unwrap();
+
+        assert!(total.is_complete());
+        assert_eq!(total.exact(), Some(9));
+        assert_eq!(total.sized_bytes(), 9);
+        assert_eq!(total.unsized_entries(), 0);
+        assert_eq!(total.file_entries(), 2);
+    }
+
+    /// Non-file entries are outside the digest's population, so they must
+    /// stay outside the coverage counters too — otherwise a directory
+    /// entry (always `size: None`) would report a spurious shortfall on
+    /// an archive whose every *file* is sized.
+    #[test]
+    fn directories_do_not_count_as_unsized_entries() {
+        let entries = vec![
+            ArchiveEntry::dir_at("sub/", 0).build(),
+            sized("sub/a.txt", 1, 7),
+        ];
+
+        let (_, total) = content_multiset_digest_and_size(&entries, constant_crc).unwrap();
+
+        assert!(total.is_complete(), "a directory is not a missing size");
+        assert_eq!(total.exact(), Some(7));
+        assert_eq!(total.file_entries(), 1);
+    }
+
+    /// An archive with no file entries returns the empty digest; the
+    /// total beside it is a truthful zero, not an unknown.
+    #[test]
+    fn empty_listing_is_a_complete_zero() {
+        let (digest, total) = content_multiset_digest_and_size(&[], constant_crc).unwrap();
+
+        assert!(digest.is_empty());
+        assert!(total.is_complete());
+        assert_eq!(total.exact(), Some(0));
+        assert_eq!(total.file_entries(), 0);
+    }
+
+    /// `Display` is the accessor a human reads, so pin that it never
+    /// renders a partial total as a plain byte count.
+    #[test]
+    fn display_names_the_shortfall() {
+        let (_, complete) =
+            content_multiset_digest_and_size(&[sized("a.txt", 0, 9)], constant_crc).unwrap();
+        assert_eq!(complete.to_string(), "9 bytes");
+
+        let (_, partial) = content_multiset_digest_and_size(
+            &[sized("a.txt", 0, 9), unsized_file("b.gz", 1)],
+            constant_crc,
+        )
+        .unwrap();
+        assert_eq!(
+            partial.to_string(),
+            "at least 9 bytes (1 of 2 file entries declare no size)"
+        );
+    }
+
+    /// Equality is over the whole value, not just the byte count: two
+    /// totals that agree on `sized_bytes` but disagree on coverage must
+    /// not compare equal, or a caller diffing two archives would call an
+    /// incomplete total a match.
+    #[test]
+    fn coverage_participates_in_equality() {
+        let (_, complete) =
+            content_multiset_digest_and_size(&[sized("a.txt", 0, 9)], constant_crc).unwrap();
+        let (_, partial) = content_multiset_digest_and_size(
+            &[sized("a.txt", 0, 9), unsized_file("b.gz", 1)],
+            constant_crc,
+        )
+        .unwrap();
+
+        assert_eq!(complete.sized_bytes(), partial.sized_bytes());
+        assert_ne!(
+            complete, partial,
+            "same byte count, different coverage — not the same total"
         );
     }
 }

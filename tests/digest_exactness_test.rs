@@ -15,7 +15,8 @@
 //! 2. a healthy TAR digests to the **same value** it did before the change
 //!    (exactness must not move the digest);
 //! 3. an entry with no declared size (raw gzip) still digests, its early EOF
-//!    tolerated — no declaration is invented;
+//!    tolerated — no declaration is invented, and (OI-0001-007) the typed
+//!    size term says out loud that its total omits that entry;
 //! 4. a sparse TAR member digests and streams to a clean EOF, guarding the
 //!    assumption that libarchive delivers the full logical extent.
 
@@ -125,15 +126,26 @@ fn healthy_tar_digest_value_is_unchanged() {
         digest, HEALTHY_TAR_DIGEST,
         "the exactness bound must not move the digest value"
     );
-    assert_eq!(total, HEALTHY_TAR_TOTAL);
+    // OI-0001-007: TAR declares a size for every member, so this total is
+    // complete and `exact()` — not `sized_bytes()` — is what pins the
+    // pre-change value. Asserting on the partial sum would keep passing if
+    // a member's size stopped being declared.
+    assert_eq!(total.exact(), Some(HEALTHY_TAR_TOTAL));
+    assert_eq!(total.unsized_entries(), 0);
 }
 
 /// R6 property 3 / hard constraint 3: the raw gzip reader leaves the size
 /// field unset, so there is no declaration to hold the stream to. The
 /// entry keeps a ceiling-only bound and its natural EOF stays an ordinary
 /// EOF.
+///
+/// OI-0001-007 extends the same fixture to the *size* term. This is the
+/// real-backend proof that the `None` branch is reachable in production —
+/// `src/inspection.rs`'s inline module only proves it is constructible.
+/// Before the typed return this call handed back a bare `0` that looked
+/// exactly like a genuinely empty archive's total.
 #[test]
-fn unknown_size_entry_still_digests() {
+fn unknown_size_entry_still_digests_and_reports_an_incomplete_total() {
     let archive = Archive::open(common::fixture("test.gz")).expect("open gz");
     let entries = archive.list_files().expect("list");
     let declared = entries.iter().find(|e| e.is_file()).and_then(|e| e.size);
@@ -141,11 +153,45 @@ fn unknown_size_entry_still_digests() {
         declared, None,
         "the raw gzip reader declares no uncompressed size"
     );
+    let file_entries = entries.iter().filter(|e| e.is_file()).count();
 
-    let (digest, _) = archive
+    let (digest, total) = archive
         .calculate_content_multiset_digest_and_size()
         .expect("an unknown-size entry must still digest");
     assert!(!digest.is_empty());
+
+    assert!(
+        !total.is_complete(),
+        "a listing with an undeclared size cannot report a complete total"
+    );
+    assert_eq!(
+        total.exact(),
+        None,
+        "the number must not be handed back as exact"
+    );
+    assert_eq!(
+        total.unsized_entries(),
+        file_entries,
+        "every file entry in a raw gzip listing is unsized"
+    );
+    assert_eq!(total.sized_entries(), 0);
+    assert_eq!(
+        total.sized_bytes(),
+        0,
+        "the old u64 was this 0, indistinguishable from an empty archive"
+    );
+
+    // A TAR of the same shape is the contrast that makes the flag load-
+    // bearing: it must NOT be stuck on.
+    let tar = Archive::open(common::fixture("test.tar")).expect("open tar");
+    let (_, tar_total) = tar
+        .calculate_content_multiset_digest_and_size()
+        .expect("digest tar");
+    assert!(
+        tar_total.is_complete(),
+        "TAR declares every member's size, so its total is complete"
+    );
+    assert_eq!(tar_total.exact(), Some(tar_total.sized_bytes()));
 }
 
 /// R6 known-risk tripwire: exactness assumes libarchive delivers an entry's

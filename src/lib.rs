@@ -286,7 +286,13 @@ pub use entry::{ArchiveEntry, ArchiveEntryBuilder, EntryType, FileAttributes};
 // `unified_archive::error` to name types the curated facade produced.
 pub use error::{ArchiveError, ArchiveWarning, Operation, Result, ResultWithWarnings};
 pub use format::{ArchiveFormat, FormatCapabilities, Support};
-pub use inspection::{MultipartLayout, ValidationReport};
+// `SizedContentTotal` is the typed size term
+// `calculate_content_multiset_digest_and_size` (and its shims, and the
+// `ReadArchive` mirrors) returns, so it must be nameable here for the same
+// reason `ValidationReport` is: `inspection` itself is `pub(crate)`, and a
+// public method returning a type the caller cannot name is not a public
+// method (OI-0001-007).
+pub use inspection::{MultipartLayout, SizedContentTotal, ValidationReport};
 pub use modification::ModificationOptions; // Phase 6: Archive modification
 pub use options::{
     CompressionLevel, CompressionOptions, EntryFilter, ExtractionOptions,

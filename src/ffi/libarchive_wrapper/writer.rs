@@ -125,6 +125,21 @@ impl LibarchiveArchive {
             // surfaced as an opaque parse error from the first
             // `write_header` call.
             let format_result = match format {
+                // **Deliberately not the ZIP writer** (AD-0013 amendment
+                // 2026-09-03, ti-9909d449). `Archive::create` routes
+                // `ArchiveFormat::Zip` to `ZipWriter` (the `zip` crate) and
+                // sends only the remaining formats here, so the facade never
+                // reaches this arm. It is kept, not deleted, because
+                // `LibarchiveArchive::create` is reachable directly through
+                // the public `ffi` module: an external caller *can* hand it
+                // `Zip`, and a `_ => unsupported` fallthrough would answer
+                // that with a libarchive parse failure from the first
+                // `write_header` instead of a configured writer. Wiring the
+                // facade to this arm would silently drop everything the ZIP
+                // backend owns (MADR-0027 encryption policy, the namespace
+                // tracker, CRC handling) — if ZIP creation ever moves to
+                // libarchive, that is a decision record, not a one-line
+                // redirect in `creation.rs`.
                 crate::ArchiveFormat::Zip => archive_write_set_format_zip(archive),
                 crate::ArchiveFormat::SevenZip => archive_write_set_format_7zip(archive),
                 crate::ArchiveFormat::Tar => archive_write_set_format_pax_restricted(archive),
@@ -268,6 +283,18 @@ impl LibarchiveArchive {
                             None
                         }
                     }
+                    // 7z is live here; `Zip` is the same deliberately
+                    // unwired path as the format arm above (AD-0013
+                    // amendment 2026-09-03, ti-9909d449) — the facade's
+                    // ZIP levels are mapped by `ZipWriter`, and AD-0013's
+                    // "Libarchive ZIP" bullet describes this option call,
+                    // not the one users actually get. It shares 7z's arm
+                    // because the option is set the same way
+                    // (`archive_write_set_format_option`, a *format*
+                    // option, unlike the filter option the TAR.* arm
+                    // above uses), so keeping it costs nothing and keeps
+                    // a directly-constructed libarchive ZIP writer
+                    // honouring the caller's level.
                     crate::ArchiveFormat::Zip | crate::ArchiveFormat::SevenZip => {
                         if let (Ok(opt), Ok(val)) = (
                             CString::new("compression-level"),

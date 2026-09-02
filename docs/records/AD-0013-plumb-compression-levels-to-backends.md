@@ -56,3 +56,32 @@ The stale artifact was this record's own Consequences bullet ("if libarchive doe
 particular option string, it returns an error that we ignore … non-fatal"), which described
 pre-R0070-0041 behavior and was never updated. Treat that bullet as superseded: a refused
 compression-level option is a hard `Format` error, not ignored. I8 is closed as already-satisfied.
+
+## Amendment (2026-09-03, ti-9909d449 — the "Libarchive ZIP" bullet documents a path nobody takes)
+
+The Implementation bullet **"Libarchive ZIP: Uses `archive_write_set_format_option("zip",
+"compression-level", N)`"** describes code that exists but is not on any facade call path, and
+has not been since ZIP creation was given its own backend.
+
+`Archive::create` (`src/creation.rs`) matches `ArchiveFormat::Zip` to `ZipWriter` — the `zip`
+crate — and routes only the remaining formats to `LibarchiveArchive::create`. So the ZIP arms in
+`src/ffi/libarchive_wrapper/writer.rs` (`archive_write_set_format_zip`, and the `Zip | SevenZip`
+compression-level option) are never reached from the public facade. The level mapping a caller
+actually gets for ZIP is the `ZipWriter` one in the first Implementation bullet
+(Store→Stored, Fastest→Deflated/1, Fast→3, Normal→6, Maximum→8, Ultra→9); the libarchive mapping
+in the second bullet is a parallel implementation of the same table that no `Archive::create` call
+exercises. Read that bullet as describing `LibarchiveArchive::create`'s own behaviour, not the
+library's ZIP behaviour.
+
+The decision itself is unchanged and stays `active`: levels *are* plumbed to both creation
+backends, and the 7z and TAR.* bullets are accurate. Only the ZIP row's implied reachability was
+wrong.
+
+Per the 2026-09-03 ruling the dead ZIP arms were **kept, not deleted**. They sit in an FFI wrapper
+whose `create` entry point is publicly reachable through the `ffi` module, so an external caller
+can still pass `ArchiveFormat::Zip` and get a correctly configured native writer rather than an
+opaque `write_header` failure. Both arms now carry comments saying the path is deliberately not
+wired, so a future reader does not connect `creation.rs` to it on the assumption that it is the
+library's ZIP writer — doing so would bypass everything the ZIP backend owns (the MADR-0027
+encrypted-creation refusal, the namespace tracker, CRC handling). Moving ZIP creation to
+libarchive would need its own record.

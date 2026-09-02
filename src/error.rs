@@ -124,11 +124,24 @@ pub enum ArchiveError {
 
     /// Feature not yet implemented (deferred to future phase).
     ///
-    /// No public call path returns this today: its only production
-    /// producer is the `ReadBackend::extract_to_stream_by_listing_id`
-    /// trait default, and the one caller
-    /// (`Archive::calculate_content_multiset_digest_and_size`) catches
-    /// it and falls back to the by-path stream. It stays in the enum as
+    /// **An internal signalling variant — no public call path returns
+    /// it** (verified 2026-09-03, ti-9909d449). Both producers are
+    /// `ReadBackend` trait defaults that mean "this backend has no fast
+    /// path", not "this failed":
+    /// `extract_to_stream_by_listing_id` and `visit_payloads_by_listing_id`.
+    /// Every one of their callers lives under
+    /// [`Archive::calculate_content_multiset_digest_and_size`](crate::Archive::calculate_content_multiset_digest_and_size)
+    /// and catches the variant to take a slower equivalent route — the
+    /// by-path stream, or the per-entry CRC resolver instead of the
+    /// single-pass walk. The digest is identical either way, so the
+    /// variant never escapes to a caller.
+    ///
+    /// Treat it as a control-flow token, not an error a user will meet:
+    /// do not add it to public API documentation as a possible outcome,
+    /// and do not construct it for a genuine refusal
+    /// ([`Unsupported`](Self::Unsupported) or
+    /// [`OperationBlocked`](Self::OperationBlocked) are the typed homes
+    /// for those). It stays in the enum both for these fallbacks and as
     /// the typed home for future deferrals.
     NotImplemented { operation: String, reason: String },
 
@@ -141,16 +154,30 @@ pub enum ArchiveError {
     /// Operation cancelled by a caller-supplied callback (R0075-0003).
     ///
     /// Returned when a long-running step is aborted via a progress hook
-    /// that signalled cancellation. Exactly three labels are emitted
-    /// today: SFX staging (`"sfx_staging"`), the backend extract-all
-    /// loops (`"extract_all"`), and creation writes (`"create"`).
-    /// `extract_files` / `extract_by_ids` / `extract_some` cancel
-    /// through those shared loops, so they also report `"extract_all"`;
-    /// single-entry `extract_file` passes no cancellation hook to
-    /// `write_entry_atomically` and therefore never yields this
-    /// variant. One typed variant covers every
-    /// cancellation surface so callers match on it instead of sniffing
-    /// `Format` / `OperationBlocked` message text
+    /// that signalled cancellation. Exactly four labels are emitted
+    /// today (verified against the tree 2026-09-03, ti-9909d449):
+    ///
+    /// - `"sfx_staging"` — the SFX payload copy in `stage_sfx_payload`.
+    /// - `"create"` — creation writes, via `notify_creation_progress`.
+    /// - `"extract_all"` — every backend's bulk extract loop, whether
+    ///   the vote lands between entries or mid-entry. `extract_files` /
+    ///   `extract_by_ids` / `extract_some` cancel through those same
+    ///   loops, so they report `"extract_all"` too, not their own names.
+    /// - `"extract_file"` — the single-entry disk path. The label comes
+    ///   from the *facade*, not a backend: the per-backend single-entry
+    ///   writers take no progress hook, so `Archive::extract_file`
+    ///   samples the callback itself at 0% and at 100% around the
+    ///   backend call (`notify_extract_file_progress`). A `Break` on
+    ///   the first sample cancels before any byte is written; a `Break`
+    ///   on the second still yields `Cancelled` even though the payload
+    ///   is already on disk, so a callback cannot swallow its own last
+    ///   vote.
+    ///
+    /// The labels are therefore about *which cancellation surface fired*,
+    /// not which public method the caller invoked — matching on
+    /// `operation` to identify the API is unreliable by design. One typed
+    /// variant covers every surface so callers match on the variant
+    /// instead of sniffing `Format` / `OperationBlocked` message text
     /// (R0076-0012 / R0076-0064 / R0076-0065).
     Cancelled { operation: &'static str },
 }

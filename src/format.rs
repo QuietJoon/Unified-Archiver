@@ -747,10 +747,27 @@ pub(crate) fn extension_suggests_executable(path: &Path) -> bool {
     extension_in(path, &["exe", "com", "scr", "app", "run", "sh", "bash"])
 }
 
-/// Promote a bare-codec detection (Gzip / Bzip2 / Xz) to its
+/// Promote a bare-codec detection (Gzip / Bzip2 / Xz / Zst / Lz4) to its
 /// compound-tar variant when the path's filename ends with the
 /// matching `.tar.gz` / `.tar.bz2` / `.tar.xz` family of suffixes.
 /// Other formats pass through unchanged.
+///
+/// **Only codecs that [`ArchiveFormat::detect_from_bytes`] can return
+/// get an arm here** (ti-9909d449, 2026-09-03). Both callers — the
+/// magic-first branch of [`ArchiveFormat::detect`] and `modify()`'s
+/// locked-handle mirror — feed this function nothing but a
+/// `detect_from_bytes` result, so an arm for a format that probe never
+/// yields is dead dispatch. That is why there is no `Lzma` arm: raw
+/// LZMA has no stable short magic (see
+/// [`ArchiveFormat::is_extension_fallback`]), so it is classified by
+/// extension, and `format_from_extension` already answers `.tar.lzma` /
+/// `.tlz` with [`ArchiveFormat::TarLzma`] directly without passing
+/// through here.
+///
+/// The corollary, since nothing enforces it at compile time: adding an
+/// LZMA magic probe to `detect_from_bytes` **must** come with an `Lzma`
+/// arm here, or a magic-detected `foo.tar.lzma` would silently open as a
+/// bare LZMA stream.
 pub(crate) fn promote_to_compound_tar(detected: ArchiveFormat, path: &Path) -> ArchiveFormat {
     let Some(name) = path.file_name() else {
         return detected;
@@ -772,9 +789,6 @@ pub(crate) fn promote_to_compound_tar(detected: ArchiveFormat, path: &Path) -> A
             ArchiveFormat::TarZst
         }
         ArchiveFormat::Lz4 if name.ends_with(".tar.lz4") => ArchiveFormat::TarLz4,
-        ArchiveFormat::Lzma if name.ends_with(".tar.lzma") || name.ends_with(".tlz") => {
-            ArchiveFormat::TarLzma
-        }
         _ => detected,
     }
 }

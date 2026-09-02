@@ -371,8 +371,18 @@ impl Archive {
     /// # Supported Formats
     /// - ZIP ✅
     /// - 7z ✅
-    /// - TAR variants ❌ (not yet implemented)
-    /// - RAR ❌ (read-only)
+    /// - TAR variants ❌
+    /// - RAR ❌
+    ///
+    /// This list is a summary, not a second source of truth. Every ❌
+    /// above is refused by the one shared gate below —
+    /// [`ArchiveFormat::can_modify`](crate::ArchiveFormat::can_modify) —
+    /// which reports `OperationBlocked(modify, "<Format> archives do not
+    /// support modification")`. A separate RAR arm that restated "RAR
+    /// archives are read-only" *after* that gate was deleted as
+    /// unreachable (ti-9909d449, 2026-09-03): it was pure dispatch with
+    /// no C contract behind it, so it could only ever disagree with the
+    /// gate's wording, never with its verdict.
     pub fn modify(path: impl AsRef<Path>) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
 
@@ -465,22 +475,22 @@ impl Archive {
             Err(err) => return Err(err),
         }
 
-        // Open for reading to validate
-        let backend = match format {
-            ArchiveFormat::Rar | ArchiveFormat::Rar5 => {
-                return Err(ArchiveError::operation_blocked(
-                    ops::MODIFY,
-                    "RAR archives are read-only",
-                ));
-            }
-            _ => {
-                use crate::ffi::libarchive_wrapper::LibarchiveArchive;
-                // R0080-0042: the read backend reopens the pathname;
-                // revalidate it still names the locked inode before binding.
-                revalidate_locked_identity(ops::MODIFY, &path_buf, locked_identity)?;
-                let archive = LibarchiveArchive::open(&path_buf)?;
-                ArchiveBackend::Libarchive(Box::new(archive))
-            }
+        // Open for reading to validate. Deliberately not a per-format
+        // match (ti-9909d449, 2026-09-03): the `can_modify()` gate above
+        // is the sole authority on which formats reach this line, and it
+        // already refused RAR. The `Rar | Rar5` arm that used to sit here
+        // returning "RAR archives are read-only" was unreachable dispatch
+        // — no backend contract stood behind it — so deleting it removes
+        // a duplicate policy statement rather than a defence. Widening
+        // the modify set therefore means editing `FormatCapabilities`,
+        // not adding an arm here.
+        let backend = {
+            use crate::ffi::libarchive_wrapper::LibarchiveArchive;
+            // R0080-0042: the read backend reopens the pathname;
+            // revalidate it still names the locked inode before binding.
+            revalidate_locked_identity(ops::MODIFY, &path_buf, locked_identity)?;
+            let archive = LibarchiveArchive::open(&path_buf)?;
+            ArchiveBackend::Libarchive(Box::new(archive))
         };
 
         Ok(Self {
