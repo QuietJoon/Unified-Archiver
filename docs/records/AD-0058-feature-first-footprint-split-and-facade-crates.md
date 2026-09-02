@@ -97,3 +97,44 @@ Migration steps:
    reuses archive decoding and backend traversal.
 4. Keep the full facade as the compatibility path; optimize the read-only path
    through feature selection first, package layout second.
+
+## Amendment (2026-09-02, owner ruling — Stage 1 accepted, Stage 2 parked until measured)
+
+This record has said "Status: Planned" since it was written, and nothing in the tree has moved:
+`[features]` still holds only `default = ["rar-support"]`, `rar-support`, `external-rar-create` and
+`v2-api`; none of Stage 1's operation features (`read`, `integrity`, `create`, `modify`, `full`) or
+format features (`zip-read`, `zip-write`, `zip-crypto`, `sevenzip`, `rar`, `libarchive`, `sfx`)
+exists; no dependency is marked `optional = true`; there is no workspace and no facade crate.
+
+The 2026-07-19 decision review recommended re-scoping this — "commit Stage 1 features before the
+v0.4 v2-api default-flip; downgrade Stage 2 facade crates to *revisit only if measurement proves
+features insufficient*" — and that recommendation was never ruled on. **The owner has now accepted
+it.**
+
+**Stage 1 is accepted and becomes ordinary queued work.** Its payoff is concrete and nameable rather
+than architectural taste: a consumer that only reads archives currently compiles the vendored UnRAR
+C++ tree, because `rar-support` is a default feature and nothing is optional. Feature-gating is what
+lets that consumer stop paying for it.
+
+**Stage 2 — the facade crates — is parked, not retired.** The distinction matters: the record is not
+wrong, it is unmeasured. Splitting the package costs a multi-crate layout, a release process for
+each, and a compatibility surface between them, against a benefit nobody has quantified. It is
+revisited only if measurement shows feature selection alone leaves the footprint unacceptable. If
+that measurement never happens, Stage 2 never happens, and that is an acceptable outcome rather than
+an oversight.
+
+**One thing this ruling deliberately does not do.** It does not schedule Stage 1 against the
+`v2-api` default flip, which is how the 2026-07-19 wording framed it ("before the v0.4 flip"). That
+flip is its own open question and is itself gated on CI existing — Cargo.toml's own comment records
+the constraint: "AD 0058 ordering constraint 2 forbids flipping default features until the
+read-minimal and full profiles have CI coverage, and this repository has no CI". Tying Stage 1 to a
+flip that is blocked on CI would inherit that block for no reason. Stage 1 is independently useful
+and is sequenced on its own.
+
+Scale, stated so nobody starts it expecting a small change: Stage 1 touches optional dependencies,
+`#[cfg(feature)]` gating across the backend enum, `ArchiveFormat` routing, the build.rs probes,
+examples and tests, and it needs a test profile per feature combination that matters. It is
+multi-week work, and the six-profile test matrix it implies is the part most likely to be
+underestimated — which is also the part that runs headlong into the absent CI.
+
+This record stays **active** and remains the governing baseline for Stage 1.

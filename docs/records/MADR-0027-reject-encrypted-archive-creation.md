@@ -70,3 +70,30 @@ Why the original premise no longer holds:
 Honest counter-cost (why opt-in, not default): the real objection is **AE-2 tool-compatibility and the resulting support burden** — encrypted archives we emit may interoperate poorly with some third-party tools, generating support load. That cost justifies gating the feature behind an explicit opt-in; it does not justify a permanent ban. Encrypted creation therefore stays **off by default** and unavailable until the opt-in lands.
 
 A tracking Open Issue and a TicGit ticket for the opt-in feature are being filed by the coordinator — do not create them from this record.
+
+## Amendment (2026-09-02, owner ruling — the opt-in work is PAUSED, not merely unscheduled)
+
+The 2026-07-20 amendment reversed a permanent rejection into "deferred behind an explicit opt-in".
+It did not say when, and nothing since said the work had stopped. On 2026-09-01 the owner put the
+opt-in explicitly **on hold** (TicGit `2c54e5`), and that ruling lived only in conversation until
+now. Recording it here because three separate live items were reading as though they were waiting
+for work that is scheduled:
+
+- **OI-0081-002's Required Action 2**, the 7z password setter, is written as following the opt-in.
+- A `#[deprecated]` in the tree whose lift is described as "explicitly scheduled to lift when
+  OI-0081-006's opt-in ships".
+- **DEF-005's** encrypted-ZIP re-encryption caveat, which the ZIP-modify entry treats as a caveat
+  awaiting the same work.
+
+None of those is wrong about the dependency; all three are wrong about its state. A reader planning
+around them would schedule work behind something that is not moving.
+
+**What stands and what does not.** The 2026-07-20 reversal stands: encrypted creation is not
+permanently rejected, and the reasoning for the opt-in shape — AE-2 tool-compatibility and the
+support burden it implies — is unchanged. What is added is that the opt-in has no date and is not
+being worked. Encrypted creation therefore remains **off by default and unavailable**, which is the
+same observable behaviour the 2026-07-20 amendment described; only the expectation about when that
+changes is corrected.
+
+This is a pause, not a second reversal. If the hold lifts, this record needs no further amendment —
+the 2026-07-20 decision is still the governing one.

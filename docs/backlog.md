@@ -243,6 +243,14 @@ on this defect. Nothing in `5a0c035` touches the listing shape.
   `v2-api` default flip, and downgrade Stage 2 facade crates to "revisit only if measurement
   proves features insufficient." Three months stale with zero progress. Cross-referenced by
   OI-0069-002.
+- **Owner ruling 2026-09-02 — Stage 1 accepted, Stage 2 parked.** The 2026-07-19 re-scope is
+  accepted: the operation and format features become ordinary queued work, and the facade crates are
+  revisited only if measurement proves feature selection insufficient. AD-0058 carries the
+  amendment; ticket `a0503f35` is unblocked and carries a recommended first increment (format
+  features only, which is where the UnRAR payoff lives and is mechanically checkable). Deliberately
+  NOT tied to the `v2-api` default flip, which the 2026-07-19 wording implied — that flip is gated
+  on CI existing, and inheriting that block for Stage 1 would buy nothing. **This entry stays in
+  Type 2 only until someone re-files it: the decision is made, so it is Type 1 work now.**
 
 ### Windows libarchive discovery (vcpkg) (OI-0065-001)
 - **Type:** 2
@@ -372,6 +380,13 @@ on this defect. Nothing in `5a0c035` touches the listing shape.
   reconciled it end to end (MADR-0007 and MADR-0022 are now `superseded` by MADR-0027-as-amended,
   and git archaeology established that MADR-0007's "Implemented" claim never shipped — so the
   opt-in is greenfield work, not a regression repair).
+- **Hold recorded 2026-09-02.** The owner put this on hold on 2026-09-01 and the ruling lived only
+  in conversation. MADR-0027 now carries a dated amendment and ticket `2c54e5` carries a comment and
+  is state `blocked`. This matters beyond bookkeeping: three live items — OI-0081-002's Required
+  Action 2 (the 7z password setter), a `#[deprecated]` whose lift is "explicitly scheduled to lift
+  when OI-0081-006's opt-in ships", and DEF-005's encrypted-ZIP caveat — all read as waiting for
+  *scheduled* work when they are waiting for *paused* work. None was wrong about the dependency; all
+  three were wrong about its state.
 
 ### Residual ZIP-modify caveats (DEF-005)
 - **Type:** 2
@@ -491,6 +506,13 @@ on this defect. Nothing in `5a0c035` touches the listing shape.
   costs nothing to implement. What makes it worth deciding now is that the deferral has outlived
   the architecture it was written against, and a plan nobody has committed to reads as a
   commitment.
+- **Owner ruling 2026-09-02 — accepted as permanent; libarchive stays the ZIP rewriter.** The
+  mvp-scope row said "Planned: use zip crate for ZIP modification", which nobody had committed to,
+  and a plan nobody owns is worse than a documented split because a reader cannot tell whether the
+  current shape is a stopgap or the answer. It is the answer. The row is restated. What this does
+  NOT settle is DEF-005's three caveats (ZIP64 above 4 GiB, encrypted-ZIP re-encryption,
+  crash-recovery journaling); they become a standing caveat list against the libarchive rewriter
+  rather than questions awaiting a migration that is now not coming.
 
 ### In-place `open_at_offset` without a tempfile copy is still an unbuilt deferral
 - **Type:** 2
@@ -910,6 +932,15 @@ All nine are described in `CHANGELOG.md`'s `[Unreleased]` section, which is the 
 account of what changed and in which direction.
 
 ## Closed since the previous run
+- **Resolved 2026-09-02 — the owner installed GNU tar, and the fixture is committed.** gtar 1.35 is
+  now on the host, so the sparse archive was generated once and checked in as
+  `tests/fixtures/sparse.tar` (10240 bytes, member typeflag `S`, 1 MiB logical) by the new
+  `scripts/generate-tar-fixtures.sh`. The test no longer shells out to `tar` at all and the
+  `#[ignore]` is gone: `digest_exactness_test` went from 16 passed / 1 ignored to **17 passed / 0
+  ignored**. It keeps both sparseness checks — physical size under a megabyte AND typeflag `S` —
+  because either alone can pass on a dense archive, and it now fails with an instruction to
+  regenerate rather than silently degrading to "a mostly-zero member digests exactly". This entry is
+  discharged; it stays here until the next reconciliation moves it.
 
 ### Discharged 2026-09-02 — nine finished entries and one stale premise, from Type 2 and Type 3
 

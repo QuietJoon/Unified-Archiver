@@ -76,7 +76,7 @@ status: active
 | Integration | Reason for Deferral |
 |---|---|
 | External WinRAR CLI (`rar.exe`) | RAR creation. Windows-only, requires licensed WinRAR. Behind `external-rar-create` feature flag. |
-| ZIP-native modify pipeline | Current modify-mode uses libarchive for ZIP reads; some scenarios remain unreliable. Planned: use zip crate for ZIP modification. |
+| ZIP-native modify pipeline | **Accepted as permanent, owner ruling 2026-09-02 (was: "Planned: use zip crate for ZIP modification").** Modify mode reads ZIP through libarchive and will keep doing so. The row described a plan nobody had committed to, which is worse than a documented split: a reader could not tell whether the current shape was a stopgap or the answer. It is the answer. The split is ugly rather than harmful — every other ZIP path in the crate goes through the `zip` crate — and migrating means rewriting the commit path for no user-visible gain on its own. What the ruling does NOT do is settle DEF-005's three caveats (ZIP64 above 4 GiB, encrypted-ZIP re-encryption, crash-recovery journaling); those stay a standing caveat list against the libarchive rewriter rather than questions awaiting a migration that is now not coming. |
 
 ## Allowed DEFERRED Placeholders
 
