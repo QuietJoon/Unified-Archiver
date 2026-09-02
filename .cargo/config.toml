@@ -1,4 +1,0 @@
-# Cargo configuration for 7zip-RBinding project
-
-[build]
-target-dir = "/Volumes/Common/QJoon/Unified-Archiver/target"

@@ -224,9 +224,17 @@ mod tests {
         assert_eq!(parse_config_toml(content), None);
     }
 
-    /// R0001-0087: the shipped `.unified-archive.toml` shape must keep
-    /// parsing — the comment block above the setting included lines that
-    /// mention the key by name.
+    /// R0001-0087: the config-file shape must keep parsing — the comment
+    /// block above the setting includes lines that mention the key by name,
+    /// which a naive scanner picks up as a second definition.
+    ///
+    /// The literal below is the shape, not a read of any file. As of
+    /// 2026-09-02 `.unified-archive.toml` is machine-local and untracked
+    /// (`.unified-archive.toml.example` is what ships), so there is no
+    /// checked-in file to compare against — and that is fine, because this
+    /// test was always about the PARSER, never about the repository's own
+    /// copy. A test that read the file would pass or fail on whether the
+    /// developer happened to have one.
     #[test]
     fn test_parse_config_toml_matches_shipped_layout() {
         let content = concat!(

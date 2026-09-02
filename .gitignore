@@ -64,3 +64,26 @@ unrar-src.tar.gz
 
 # Review/issue indexer pipeline output
 issues_blocks.json
+
+# Machine-local configuration, untracked by owner ruling 2026-09-02.
+# Both pin absolute paths that are meaningful on exactly one machine, and a
+# tracked absolute path is a trap for anyone else who clones. `.example`
+# siblings are tracked in their place.
+#
+# `.cargo/config.toml` is NOT inert: it redirects `target-dir`, and
+# CARGO_TARGET_DIR is unset on the owner's machine, so that file is what
+# actually directs every build there. Untracking leaves it on disk; it must
+# not be deleted.
+/.unified-archive.toml
+
+# The entire `.cargo/` directory is a cargo HOME that materialised inside the
+# repository (registry cache, git checkouts, installed binaries — gigabytes of
+# it). Only `config.toml` was ever meant to be here, and it is machine-local
+# too. Ignore the directory's contents wholesale and re-admit just the example,
+# so a stray `git add -A` can never sweep the cache in again.
+#
+# `.cargo/config.toml` is NOT inert: it redirects `target-dir`, and
+# CARGO_TARGET_DIR is unset on the owner's machine, so that file is what
+# actually directs every build there. It stays on disk; it must not be deleted.
+/.cargo/*
+!/.cargo/config.toml.example

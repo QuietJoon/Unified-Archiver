@@ -1,0 +1,16 @@
+# Cargo configuration — MACHINE-LOCAL, deliberately not tracked.
+#
+# The real `.cargo/config.toml` is gitignored because it pins an absolute
+# `target-dir` that is meaningful only on one machine. Copy this file to
+# `.cargo/config.toml` and edit the path if you want the same arrangement.
+#
+# You do NOT need this file. Without it cargo builds into `./target` inside
+# the repository, which is correct and is what a fresh clone should do. The
+# pin exists only to share one build directory across sibling checkouts and
+# to keep a large target tree off the repository's volume.
+#
+# If you set it, note that the `CARGO_TARGET_DIR` environment variable takes
+# precedence over this file.
+
+[build]
+target-dir = "/absolute/path/to/a/shared/target/dir"

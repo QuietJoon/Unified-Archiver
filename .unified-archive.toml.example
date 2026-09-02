@@ -1,0 +1,16 @@
+# Test configuration — MACHINE-LOCAL, deliberately not tracked.
+#
+# ONLY the test suite reads this. The library itself always uses
+# `std::env::temp_dir()` and has no configuration file of any kind.
+#
+# Copy to `.unified-archive.toml` and edit if you want the tests to stage
+# their scratch files somewhere other than the system temp directory. You do
+# not need it: without it the tests fall back to the system default, which is
+# the intended behaviour on a fresh clone.
+#
+# Resolution order, highest first:
+#   1. UNIFIED_ARCHIVE_TEMP_DIR environment variable
+#   2. this file
+#   3. the system temp directory
+
+temp_dir = "/absolute/path/to/a/scratch/dir"
