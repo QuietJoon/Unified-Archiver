@@ -1285,11 +1285,12 @@ impl Archive {
             return Self::open(path_ref);
         }
 
-        // Ticket 1ddc37ec: before committing to a copy, ask whether a
-        // backend can read the payload where it already lies. Only the
-        // ZIP reader can today (see `try_open_in_place`), and only for
-        // an SFX-shaped input; everything else falls through to staging
-        // with the AD 0040 ceiling in force.
+        // Tickets 1ddc37ec and 5858e17b: before committing to a copy,
+        // ask whether a backend can read the payload where it already
+        // lies. ZIP, RAR and 7z can (see `try_open_in_place`), and only
+        // for an SFX-shaped input; the libarchive family and every
+        // gate-declined open fall through to staging with the AD 0040
+        // ceiling in force.
         if let Some(archive) = Self::try_open_in_place(path_ref, offset, format_hint)? {
             // OI-0081-001: the in-place backend reopened `path_ref` by
             // name, exactly as `Archive::open` does after detection, so

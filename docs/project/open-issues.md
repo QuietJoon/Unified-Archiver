@@ -29,6 +29,25 @@ ticked below carries an HTML comment saying what was read to tick it, and every 
 carries a dated reason — a box whose criterion is only half-satisfied is left unticked with the
 half named, because a tick that overstates is worse than an open box.
 
+**2026-09-02 reconciliation follow-up.** Another pass against the tree, prompted by a backlog triage
+that found ten of the 34 live `docs/backlog.md` entries describing work that is finished. The
+2026-08-21 preamble above is left exactly as written — it was true when written — and this paragraph
+records what has since become false in it, because falsifying a dated finding is worse than
+appending to it. All three of the claims it says "did not survive the check" have now moved:
+OI-0001-002's exposure is closed by binding a read handle to the archive **file's** identity rather
+than by the per-entry fingerprint its Required Actions ask for — a deliberate substitution recorded
+in `docs/records/DCR-014-read-handle-bound-to-archive-file-identity.md`, already reflected in that
+entry on 2026-09-01; OI-0001-010's ZIP half landed, so both writers now emit directory metadata;
+and OI-0076-006's two design holes are open by an owner deferral ruling rather than by oversight. A
+fourth entry moved the same way without being named there: OI-0080-005's Required Action 4 is done.
+OI-0080-006 and OI-0001-006 are resolved outright. Six entries below therefore gain a dated
+`### Update (2026-09-02)` section and, where a criterion is genuinely satisfied, a newly ticked box
+whose comment says what was read to tick it. Every 2026-08-21 comment that a tick now contradicts is
+kept **beneath** the tick rather than replaced. Saying plainly what this pass found: this register
+was the stale document this time, in four coordinated places, and all four were accurate on the day
+they were written. Leaving them is how the next reconciliation re-derives conclusions the tree has
+already refuted.
+
 ---
 
 ## OI-0058-001: Feature-first footprint split and facade crates
@@ -1395,6 +1414,34 @@ three separate floors in `tests/manual_snippets.rs`, and two reference pages sta
 what the code now does. That is a `write-diataxis-manual` sync job, not a hand-edit — editing a page
 body invalidates its `synced_hash`.
 
+### Update (2026-09-02) — the residual is re-homed to ticgit `c1296744`; nothing is owed by the owner
+
+Recorded because `docs/backlog.md`'s copy of this entry was discharged on 2026-09-02 as a stale
+premise, and an entry that stays OPEN here while leaving the backlog needs to say where its work
+went. This entry's own status is unchanged in substance: the `#[non_exhaustive]` half is complete and
+the field-demotion half is not.
+
+What changed is that the demotion half is no longer waiting on a decision from this register. Ticket
+`c1296744`, filed 2026-09-01, owns it and is the fuller record — it carries acceptance criteria,
+scope, out-of-scope and verification commands this entry does not, and it fixes the accessor shape
+that Required Action 3 was written to collect: bare name for `Copy` values, `_ref` for references,
+`has_` for boxed callbacks. The ordering constraint that made demotion impossible is stated there
+too and is real in the tree: `CompressionOptions` has read accessors (`format`, `level`,
+`split_size`, `password_ref`, `has_progress`) but **no** `level` or `progress` setter, so demoting
+the fields today would strand both. The setters come first; the demotion follows.
+
+One half of this entry is not API work at all and is filed where it can actually be done. Seven
+English manual pages still hold `ExtractionOptions { … }` struct literals, and two reference pages
+are false rather than merely stale against the tree — `options-and-defaults.md` states "All fields
+are public and the struct is not `#[non_exhaustive]`", and `public-api-surface.md` states "Nine
+public types are marked `#[non_exhaustive]`" against 30-plus. `manual/` is a one-way generated
+bundle, so those corrections must ride a `write-diataxis-manual` sync run rather than be
+hand-patched. Worth knowing before that sync is scheduled: the snippet lane has headroom but not
+much — `tests/fixtures/manual/unmarked_fragments.txt` holds 32 entries against a
+`MAX_UNMARKED_FRAGMENTS` of 34, so absorbing six more red fences would breach it, and the
+allowlisted-block and minimum-checked-snippet ceilings close the other two escapes. The sync has to
+fix the pages, not silence the lane.
+
 ### Related
 
 - R0075-0078 / R0075-0081 (builder + format-specific options shipped)
@@ -1892,7 +1939,12 @@ Review 0080 anchored-parser fixes, but the parser remains string-heuristic).
 - **Source:** R0080-0034 (Review 0080)
 - **Date:** 2026-07-17
 - **Decision:** ACCEPT (tracked)
-- **Status:** RESOLVED 2026-08-21 (ticgit `330f3851`, closed) for Required Actions 1–3; **Action 4
+- **Status:** RESOLVED 2026-09-02 — all four Required Actions. Actions 1–3 landed 2026-08-21
+  (ticgit `330f3851`, closed); Action 4 landed 2026-08-26 in `2832f40`, verified in the tree and
+  written up in the Update of 2026-09-02 below. The 2026-08-21 status text is kept verbatim from
+  here on, because everything in it except its Action-4 clause still describes the design correctly,
+  and that clause is superseded rather than deleted. *(2026-08-21, as written:)* RESOLVED
+  2026-08-21 (ticgit `330f3851`, closed) for Required Actions 1–3; **Action 4
   (root-preservation semantics, R0081-0046) is untouched and restated below.** `src/creation/manifest.rs`
   holds a `SourceManifest` built by one walk — path, kind, size, mtime, unix mode and, on Unix,
   inode identity per entry — which reserves every entry in the write-mode namespace as it records
@@ -1947,6 +1999,27 @@ root (`/`, `C:\`) the relative path strips to empty and the root entry is skippe
 `src/creation.rs` or `src/creation/manifest.rs` mentions R0081-0046 or a root case, so the manifest
 model inherited the behaviour without ruling on it. The choice the action asks for — synthesize a
 stable archive name, or document the drop — is unmade.
+
+### Update (2026-09-02) — Required Action 4 landed; the Residual above is discharged
+
+Root-preservation semantics were decided the first of the two ways the action offered — synthesize a
+stable archive name — and the decision lives in the shared walk rather than in either writer, which
+is why it did not show up where the 2026-08-21 check looked. `src/ffi/common.rs` defines
+`archive_base_for_root()` and `compose_archive_path()` alongside
+`DEFAULT_ROOT_ARCHIVE_NAME = "rootfs"`, called from `walk_directory_tree()`, which
+`SourceManifest::build` uses; both writer backends inherit it because both replay the manifest
+rather than walking themselves. Five unit tests in the same file pin the behaviour, including the
+`/rootfs` → `rootfs/rootfs` collision case that a synthesized name has to survive. Landed in
+`2832f40` (2026-08-26) and recorded in `CHANGELOG.md` as a behaviour change.
+
+The Residual section above is left exactly as it was written on 2026-08-21 and is discharged by this
+update rather than by an edit to it.
+
+One thing this update deliberately does not claim: the ruling has no record under `docs/records/`.
+Grepping that tree and `docs/project/` for `rootfs` returns nothing, so `add_directory_recursive`
+on a filesystem root changed the shape of its output backed only by code comments and a
+`CHANGELOG.md` line — unlike the comparable creation-output change of the same week, which got
+`DCR-013`. That gap is reported to the record owner rather than filled here.
 
 ### Related
 
@@ -2236,7 +2309,13 @@ would create an AE-2 tool-compatibility / support burden.
 - **Date:** 2026-08-07
 - **Decision:** ACCEPT (recovered by the `/indy-review-cleanup` triage of Review 0080, which had
   no single closure record; this finding was never routed)
-- **Status:** OPEN
+- **Status:** RESOLVED 2026-09-02 (ticgit `12d4310b`, closed) — all four Required Actions. The
+  policy is accept-`ARCHIVE_WARN` everywhere, it is implemented once rather than at eight call
+  sites, a source-shape test stops it re-diverging, and the warning text that used to be discarded
+  now reaches callers. Required Action 3 — the one genuinely outstanding piece as of 2026-09-02 —
+  was completed in the same pass that wrote this line; see the Update below. Note for a later
+  reader: the Problem section that follows describes the state on 2026-08-07 and is kept as the
+  record of what was found, not as a description of the tree.
 
 ### Problem
 
@@ -2271,11 +2350,60 @@ of the six sites implement, so the documented contract is itself wrong today.
 4. Add a regression test on a WARN-producing fixture asserting that integrity, listing and both
    extraction paths agree.
 
+### Update (2026-09-02) — resolved; what was read to say so
+
+Checked against the tree rather than against the closing ticket comment.
+
+* **One policy, one call site.** `unsafe fn next_header_status(archive, archive_path, entry_ptr)`
+  in `src/ffi/libarchive_wrapper/reader.rs` is the only place production code calls
+  `archive_read_next_header`, and all eight read walks route through it. It maps `ARCHIVE_EOF` to
+  `HeaderStatus::Eof`, `ARCHIVE_OK` to `HeaderStatus::Ok`, `ARCHIVE_WARN` to
+  `HeaderStatus::Warned(text)` and everything else through `classify_libarchive_error_at`. The only
+  other occurrence of the symbol in `src/` is inside `src/ffi/libarchive_wrapper.rs`'s
+  `#[cfg(test)] mod tests`, which is test code, not a read walk.
+* **The ruling Action 1 asked for was taken explicitly, not inherited.** Accepting `ARCHIVE_WARN` is
+  argued in the helper's own rustdoc: libarchive returns `ARCHIVE_WARN` when it *recovered* and the
+  header is usable, so refusing it makes this crate stricter than the library it wraps, in a way no
+  caller asked for.
+* **The discarded half was fixed too, and it is the part a status-only fix would have missed.** The
+  text libarchive attaches was previously dropped at every accepting site, so a caller was told the
+  archive was fine with no way to learn what the library had objected to. It now returns inside
+  `HeaderStatus::Warned`, is wrapped by `libarchive_advisory` as
+  `ArchiveWarning::BackendAdvisory { backend, operation, message }` (`src/error.rs`), and drains to
+  the facade through `Archive::take_backend_warnings`.
+* **Action 4's regression test exists and it guards the shape as well as the behaviour.**
+  `tests/libarchive_header_policy_test.rs`: `every_header_read_goes_through_the_single_policy_helper`
+  asserts exactly one call site *and* that it sits inside the helper — the divergence class a
+  behavioural test cannot catch, because a ninth site added tomorrow would still pass every
+  behavioural assertion on today's fixtures — and `no_read_walk_compares_the_warn_status_on_its_own`
+  bounds the stray comparisons. Beside them,
+  `listing_and_integrity_agree_on_an_archive_libarchive_warns_about` pins the contradiction this
+  entry was filed for, and `the_warning_text_reaches_the_caller_instead_of_being_discarded` and
+  `a_listing_caller_can_still_reach_what_the_backend_said` pin the advisory route.
+* **Action 3 is done as of this update.** `docs/investigation/codebase/ffi-libarchive.md` still
+  asserted the old split as current — that `test_integrity` and the stream readers accept
+  `ARCHIVE_WARN` while listing and extraction reject it, so "one warning-producing archive can
+  therefore pass integrity/streaming and fail ordinary listing or disk extraction". That sentence
+  was false against the tree, which made it the one place in this slice where a document
+  *contradicted* the code rather than merely lagged it. Both the "FFI Return-Code Discipline" bullet
+  and the `OK`/`WARN` contract line in its Key Data Structures section were rewritten to the
+  implemented contract on 2026-09-02.
+
+One caveat carried forward rather than hidden: `docs/investigation/` is a **regenerated** tree —
+`tests/record_citations_test.rs` excludes it for exactly that reason, calling it "regenerated
+snapshots; a hand-fix is churn the next generation undoes", and the page's own frontmatter carries a
+`generated:` block. The hand-fix is correct today and the next generation may re-stale it. If it
+does, that is a generator-input problem, and this box should be re-opened with a dated reason rather
+than the page hand-patched a second time.
+
 ### Verification
 
-- [ ] All six `archive_read_next_header` sites share one documented policy
-- [ ] A WARN-producing fixture yields consistent verdicts across integrity/list/extract/stream
-- [ ] `ffi-libarchive.md` matches the implemented contract
+- [x] All six `archive_read_next_header` sites share one documented policy
+  <!-- Ticked 2026-09-02: eight sites, not six - the 2026-08-21 recount stands - and all eight now go through unsafe fn next_header_status in src/ffi/libarchive_wrapper/reader.rs, which is the only production caller of archive_read_next_header in src/. Verified by grepping src/ for the symbol: three hits, one being the extern declaration in src/ffi/libarchive.rs, one being the helper, and one inside src/ffi/libarchive_wrapper.rs's #[cfg(test)] mod tests. The policy is documented in the helper's rustdoc, which states why WARN is accepted rather than leaving it inherited from checked_data_skip. -->
+- [x] A WARN-producing fixture yields consistent verdicts across integrity/list/extract/stream
+  <!-- Ticked 2026-09-02: tests/libarchive_header_policy_test.rs stages a malformed PAX tar built in the test itself (no committed fixture needed) and asserts listing and integrity agree on it, that the advisory text survives to the caller rather than being discarded, that a listing caller can reach what the backend said, and that a backend with no advisories returns an empty list. Read the test source first-hand for the assertions rather than inferring them from the names. -->
+- [x] `ffi-libarchive.md` matches the implemented contract
+  <!-- Ticked 2026-09-02, and this is the box that was genuinely outstanding: the page had asserted the OLD split as current, which is a document contradicting the tree rather than lagging it. Both affected passages were rewritten in this pass - the "FFI Return-Code Discipline" bullet and the OK/WARN sentence under Key Data Structures. Caveat recorded in the Update above and repeated here because it is the reason this tick could go stale without anyone touching the policy: docs/investigation/ is a regenerated tree, excluded from tests/record_citations_test.rs on exactly that ground, so a future generation may reintroduce the old sentence. If it does, re-open this box with a dated reason. -->
 
 ### Related
 
@@ -2687,7 +2815,16 @@ common accidental cases. What remains uncovered is deliberate same-name substitu
 - **Source:** R0001-0026, R0001-0030 (Review 0001)
 - **Date:** 2026-08-09
 - **Decision:** ACCEPT (user-routed `track`, Phase 2)
-- **Status:** PARTIALLY LANDED 2026-08-21 (ticgit `25285d67`, closed) — both **code** defects are
+- **Status:** RESOLVED 2026-09-02 — the record half landed after all, so all three Required Actions
+  are met. `docs/records/DCR-009-collapse-dual-zip-to-single-zip-crate-backend.md` carries a
+  **second** dated amendment, "Amendment (2026-08-21, OI-0001-003 landed — the scope question is
+  closed, and this record predicted the mechanism correctly)", committed in `33712ee`; grepping that
+  record for its `## Amendment` headings returns two, not the one the 2026-08-21 check found. The
+  amendment is dated the same day as the check that reported it absent, so the two notes disagree
+  about a single day; the checkable fact today is that the amendment is present, and the earlier
+  note stays as written because it records how that conclusion was reached. The 2026-08-21 status
+  text follows verbatim, superseded only in its final clause. *(2026-08-21, as written:)* PARTIALLY
+  LANDED 2026-08-21 (ticgit `25285d67`, closed) — both **code** defects are
   closed exactly the way Required Action 1 prescribed, by one index rather than more guard calls;
   the **record** half (Action 3) is not. `ZipArchive` now memoises a single
   `RawCentralDirectory` — every physically stored record with its raw name bytes, the crate-side
@@ -2740,8 +2877,9 @@ method never learns the archive is ambiguous.
   <!-- Ticked 2026-08-21: verified by reading src/ffi/zip_wrapper.rs, not from the closing report. `reject_if_collapsed` covers the whole-view routes and `reject_if_unlocalizable` covers listing and the counts derived from it; both consult the same memoised index as `reject_if_duplicate`. Note the scope the code chose and documents: a *localizable* ambiguity still lists (every read of the ambiguous names is refused instead), so "refused by listing" holds only for the unattributable case — which is the honest reading of "refused OR reported ambiguous". -->
 - [x] The duplicate scan and the extraction read the same source
   <!-- Ticked 2026-08-21: `scan_raw_central_directory` reads through `ZipArchive::with_cached_file`, i.e. the descriptor the cached `RawZipArchive` already owns, and performs no `File::open` of its own — read first-hand in src/ffi/zip_wrapper.rs. The second open R0001-0026 named is gone. -->
-- [ ] DCR-009 amended
+- [x] DCR-009 amended
   <!-- Unticked 2026-08-21: verified absent. docs/records/DCR-009-collapse-dual-zip-to-single-zip-crate-backend.md carries exactly one amendment, dated 2026-08-12 for R0001-0027/0028/0029, and its closing paragraph still says this residual "is untouched by any of the above and is tracked as OI-0001-003" — a sentence the code has now falsified. The scope Required Action 3 asked for is unrecorded. docs/records/ is outside this pass's file ownership. -->
+  <!-- Ticked 2026-09-02: the 2026-08-21 comment above is kept verbatim and the file now contradicts it. docs/records/DCR-009-collapse-dual-zip-to-single-zip-crate-backend.md carries two dated amendment headings, not one: the 2026-08-12 one for R0001-0027/0028/0029, and "## Amendment (2026-08-21, OI-0001-003 landed - the scope question is closed, and this record predicted the mechanism correctly)", committed in 33712ee. Read first-hand by grepping the record for "## Amendment". The two code boxes above were already ticked on 2026-08-21 and were re-checked in the same pass: RawCentralDirectory with its any_undetected flag is in src/ffi/zip_wrapper/raw_directory.rs and reads through ZipArchive::with_cached_file rather than a second File::open, and reject_if_duplicate / reject_if_collapsed / reject_if_unlocalizable in src/ffi/zip_wrapper.rs are wired to list_files, extract_all, validate_integrity, extract_file and extract_to_stream. -->
 
 ### Related
 
@@ -2869,11 +3007,47 @@ contradiction by a caller who did nothing unusual.
    "land the demotion together", not "land the attribute together". -->
 3. Public API change: v0.4.
 
+### Update (2026-09-02) — the blocker is dead, most of the work landed additively, one invariant is missing
+
+Three separate things, kept apart because they have different consequences.
+
+**The blocker no longer exists.** Required Action 3 says "Public API change: v0.4", and the
+corresponding `docs/backlog.md` entry recorded "the v0.4 breaking-change window" as its blocker.
+That window closed: 0.4.0 released 2026-08-17. The 0.5.0 window is open and in use — `CHANGELOG.md`'s
+`[Unreleased]` section opens "This will be 0.5.0, and the bump is forced", `Cargo.toml` is still at
+0.4.0, and five breaking commits landed into that window on 2026-09-01/02. This item was waiting for
+a window that had closed while missing one that is open.
+
+**Required Action 2 can no longer be followed, and by events rather than by argument.** Its
+2026-09-01 comment already recorded half of this. The other half: OI-0081-002 / ticgit `165103b8`
+closed 2026-08-21 and OI-0076-005 / ticgit `479aa5b8` closed 2026-09-01, both without the builder.
+"Land it with its two siblings" is not a plan that can still be executed; the live question is
+whether the remainder folds into ticket `c1296744`, which is already scheduled to take a breaking
+pass over `src/entry.rs`, or takes a pass of its own — which would be the third separate pass over
+this surface, the exact outcome Action 2 was written to prevent.
+
+**Most of Required Action 1 landed additively.** `src/entry.rs` defines `build_checked()` backed by
+`entry_kind_violation`, enforcing: no empty path; a `Directory` carries no size, compressed size or
+link target; `Symlink` and `HardLink` must carry a link target; a `File` carries none. The
+kind-specific entry points the action's first option describes exist too — `file`, `dir_at`,
+`symlink_at`, `hardlink_at`, each with a fallible `try_*` form — and `CHANGELOG.md` already
+advertises `.build_checked()` as the migration. Five unit tests pin the rejections.
+
+The Verification boxes below stay **unticked**, and the reason is the difference between "rejected"
+and "unconstructible". Plain `build()` is still infallible and still unchecked behind roughly 101
+call sites, so a directory with a payload size remains constructible by the default path; and
+`entry_kind_violation` never inspects `crc32`, so `dir_at(..).crc32(x).build_checked()` succeeds
+today — the CRC half of Required Action 1 is genuinely missing, not merely unmigrated. A tick that
+overstates is worse than an open box.
+
 ### Verification
 
 - [ ] A directory with a payload size is unconstructible or rejected
+  <!-- Half-satisfied, and left unticked 2026-09-02 for the half that is missing. Rejected on the checked path: entry_kind_violation in src/entry.rs refuses a Directory carrying size or compressed_size, and build_checked() surfaces it. NOT satisfied on two counts: plain build() is still infallible and unchecked, so the default construction path still admits it; and crc32 is never inspected, so dir_at(..).crc32(x).build_checked() succeeds, which is exactly the "Directory carrying a payload size and a CRC32" case the Problem section names. Read src/entry.rs first-hand. -->
 - [ ] A file with a link target is unconstructible or rejected
+  <!-- Half-satisfied, and left unticked 2026-09-02 for the same reason as the box above: entry_kind_violation refuses a File carrying a link_target and build_checked() surfaces it, but plain build() does not, and build() is what roughly 101 call sites across src/, tests/ and examples/ use. Whether build() becomes fallible or is kept infallible forever is the open decision, not the rejection logic. -->
 - [ ] Existing `ArchiveEntryBuilder` call sites migrated
+  <!-- Unticked 2026-09-02: unchanged and not started. The kind-specific entry points and build_checked() were added alongside the existing API rather than replacing it, which is why nothing broke and also why nothing migrated. This box moves with whichever ticket takes the src/entry.rs breaking pass. -->
 
 ### Related
 
@@ -2890,7 +3064,14 @@ contradiction by a caller who did nothing unusual.
 - **Source:** R0001-0048 (Review 0001)
 - **Date:** 2026-08-09
 - **Decision:** ACCEPT (user-routed `track`, Phase 2)
-- **Status:** OPEN
+- **Status:** RESOLVED 2026-08-29, recorded here 2026-09-02 (ticgit `61660f`, closed) — absorbed by
+  OI-0080-004 exactly as the Required Actions directed, rather than fixed independently.
+  `src/format/multipart.rs` (commit `4a791fc`) is the typed parser those actions were waiting for:
+  `VolumeScheme::RarOldStyle` is documented as "base.rar, base.r00, base.r01 … rolling into
+  base.s00", and `parse_volume_name` derives the base stem from **any** member — there is no
+  `.rar`-only source predicate left anywhere, which is the asymmetry this entry described. Both
+  carried-across criteria are met; see the Update below for the test that pins the second one
+  literally.
 
 ### Problem
 
@@ -2917,14 +3098,35 @@ across:
    set includes the main `<stem>.rar` volume plus the whole continuation series.
 2. The reported set is identical whichever member of the set is opened.
 
+### Update (2026-09-02) — resolved, and the acceptance criterion is tested literally
+
+The reason this is recorded as resolved rather than as "the parser landed, so presumably this works"
+is that the second criterion — "the reported set is identical whichever member of the set is opened"
+— has a test written as that sentence rather than as a proxy for it.
+`src/inspection/tests.rs::test_detect_multipart_old_style_set_is_the_same_from_every_member` stages
+`archive.rar`, `archive.r00` and `archive.r01` as byte-copies of `tests/fixtures/test_rar5.rar`,
+then asserts the identical `MultipartLayout::Multi { parts: [main, r00, r01] }` from every one of
+the three entry points. Grepping `src/inspection.rs` for the old matcher's vocabulary —
+`parse_rar_part_suffix`, `MAX_VOL_DIGITS`, `is_ascii_digit`, `strip_suffix` — returns nothing, so
+the string-matching code the Required Actions warned against patching is gone rather than merely
+bypassed, and the crate holds one answer to "is this a volume name".
+
+Note what this does **not** resolve, since OI-0080-004 remains open for narrower reasons:
+`MultipartLayout` still cannot report a *defective* set (a hole, a duplicate number, a foreign
+sibling) even though `parse_volume_set` computes that information, and the 7z `.001` routing gate is
+untouched. Neither is this entry's subject.
+
 ### Verification
 
-- [ ] Opening `.rar`, `.r00` and `.r01` of one set yields the same `MultipartLayout`
+- [x] Opening `.rar`, `.r00` and `.r01` of one set yields the same `MultipartLayout`
+  <!-- Ticked 2026-09-02: test_detect_multipart_old_style_set_is_the_same_from_every_member in src/inspection/tests.rs, read first-hand rather than taken from ticgit 61660f's closure. It stages the three names as byte-copies of tests/fixtures/test_rar5.rar and asserts the same MultipartLayout::Multi { parts: [main, r00, r01] } from each entry point, which is this criterion stated as an assertion. Landed 2026-08-29 in the OI-0080-004 parser work (4a791fc); this box went unticked for four days only because nobody re-filed the entry. -->
 
 ### Related
 
-- OI-0080-004 (OPEN) — typed multipart volume parser; ticgit `513f99fc`. **This item should be
-  absorbed there, not resolved independently.**
+- OI-0080-004 (PARTIALLY LANDED) — typed multipart volume parser; ticgit `513f99fc`. **This item was
+  absorbed there, not resolved independently**, which is what the Required Actions asked for. What
+  keeps OI-0080-004 itself open is narrower and is not this entry's subject: the `MultipartLayout`
+  shape cannot report a defective volume set, and the 7z `.001` routing gate is unchanged.
 
 ---
 
@@ -2958,6 +3160,28 @@ equally invisible at this API.
    before being chosen.
 2. Public signature change: schedule with the v0.4 API pass rather than alone.
 3. Audit callers of the existing total for the same assumption.
+
+### Update (2026-09-02) — Required Action 2's schedule is gone; the defect is unchanged
+
+Required Action 2 says "schedule with the v0.4 API pass rather than alone", and the corresponding
+`docs/backlog.md` entry recorded "the v0.4 breaking-change window" as its blocker. That window
+closed with the 0.4.0 release of 2026-08-17. The window that is open is 0.5.0 — `CHANGELOG.md`'s
+`[Unreleased]` section opens "This will be 0.5.0, and the bump is forced", `Cargo.toml` is still at
+0.4.0, and five breaking commits landed into it on 2026-09-01/02. Read Action 2 as "schedule with
+the 0.5.0 API pass"; the reason it was written — do not spend a signature break alone — is
+unaffected, only the release it names.
+
+The defect itself is unchanged and live, re-verified in the tree rather than assumed:
+`content_multiset_digest_and_size` in `src/inspection.rs` accumulates inside `if let Some(size)` and
+returns a plain `Result<(String, u64)>`, so an entry whose size the format never declared
+contributes zero with nothing in the return to say so. It is reached from the public
+`calculate_content_multiset_digest_and_size` and its `calculate_manifest_summary` shim, across 18
+real call sites in `src/`, `tests/` and `examples/`.
+
+What is now owed is the return-shape choice Required Action 1 lists, not a wait: `Option<u64>`,
+a `(total, complete: bool)` pair, or a typed newtype in the style the crate has otherwise used for
+this "is this number trustworthy" question. Recorded so the next reader does not re-derive the
+blocker from a release that has already shipped.
 
 ### Verification
 
@@ -3232,8 +3456,16 @@ Additional verification performed for the resolution, beyond the criteria above:
 - **Source:** R0001-0074 (Review 0001)
 - **Date:** 2026-08-09
 - **Decision:** ACCEPT (user-routed `track`, Phase 2)
-- **Status:** PARTIALLY LANDED 2026-08-21 (ticgit `9cc3d714`, closed) — the **libarchive** half is
-  done and the **ZIP** half is not. Required Action 1 landed by way of the single-walk manifest
+- **Status:** RESOLVED 2026-09-02 — the ZIP half landed, so both writers now emit directory
+  metadata, and Required Action 3's record exists. `src/ffi/zip_writer.rs` defines
+  `add_directory_entry_with_metadata(archive_path, mtime, mode)`, applying
+  `FileOptions::last_modified_time` from `system_time_to_zip_datetime` and, under `#[cfg(unix)]`,
+  `unix_permissions(mode)`; the metadata-free `add_directory_entry` now delegates to it with
+  `None, None`, and `src/creation/manifest.rs`'s `write_into` passes `entry.mtime` and `entry.mode`
+  on the ZIP arm exactly as it does on the libarchive arm. `DCR-013` is written and registered. The
+  2026-08-21 status text follows verbatim, superseded in the clause that says otherwise.
+  *(2026-08-21, as written:)* PARTIALLY LANDED 2026-08-21 (ticgit `9cc3d714`, closed) — the
+  **libarchive** half is done and the **ZIP** half is not. Required Action 1 landed by way of the single-walk manifest
   (OI-0080-005): `Archive::add_directory_recursive` now emits every recorded directory from the
   manifest, in walk order, carrying the mtime and unix mode the one walk observed, so a non-empty
   directory contributes an entry instead of vanishing and the namespace reservation still fires
@@ -3273,12 +3505,14 @@ mode; general archive creation has no covering decision.
 
 ### Verification
 
-- [ ] A created tree round-trips directory modes and times on both writers
+- [x] A created tree round-trips directory modes and times on both writers
   <!-- Deliberately unticked 2026-08-21: load-bearing, not bookkeeping — one writer, not both. Verified first-hand by reading src/creation.rs: test_add_directory_recursive_preserves_nonempty_directory_metadata builds a TAR (libarchive) and asserts the non-empty directory's mtime within a one-second tolerance and its 0o750 mode on Unix, while the sibling lane test_add_directory_recursive_emits_nonleaf_zip_directory asserts only that ZIP *emits* the directory entry, and its own doc comment states why: "ZIP is still metadata-less for directories: ZipWriter has no add_directory_entry_with_metadata counterpart ... so its directory entries land with the default FileOptions". src/ffi/zip_writer.rs is outside this pass's file ownership, so the gap is reported rather than closed. The closing report on ticgit 9cc3d714 reads as if both writers were covered; against the tree it is the libarchive writer only. -->
+  <!-- Ticked 2026-09-02: the 2026-08-21 comment above is kept verbatim and no longer describes the tree. It is now both writers, and the test is one shared assertion driven twice rather than two lanes asserting different things. src/creation.rs defines assert_nonempty_directory_metadata_survives(format, extension, mtime_tolerance_secs), which builds a tree with a non-empty directory at 0o750, creates the archive through the public facade, reopens it, finds the directory entry, asserts the stored mtime against the source within the tolerance and asserts permissions == Some(0o750) under cfg(unix). It is driven by test_add_directory_recursive_preserves_nonempty_directory_metadata (Tar, 1s) and test_add_directory_recursive_preserves_nonempty_zip_directory_metadata (Zip, 2s - the DOS timestamp in a ZIP record has 2-second granularity, so the wider tolerance is format accuracy, not slack). The gap the 2026-08-21 comment reported to src/ffi/zip_writer.rs's owner was closed there: add_directory_entry_with_metadata now exists and Manifest::write_into's ZIP arm hands it the recorded mtime and mode. -->
 - [x] Namespace suppression still prevents duplicate directory entries
   <!-- Ticked 2026-08-21: verified by reading src/creation/manifest.rs and its tests child. The manifest reserves each recorded entry through the write-mode namespace tracker during the single walk, `build_reserves_every_recorded_entry_exactly_once` pins the once-per-entry property, and `build_stops_at_the_first_rejected_reservation` pins that a conflict aborts before any byte is written. -->
-- [ ] DCR written; affected record updated
+- [x] DCR written; affected record updated
   <!-- Unticked 2026-08-21: no DCR was written and no creation record was amended for this change, though it alters the entry count and byte content of every recursively created archive — exactly the class Required Action 3 wanted a record for. docs/records/ is outside this pass's file ownership, so this is filed for the record owner. -->
+  <!-- Ticked 2026-09-02: the record owner acted. docs/records/DCR-013-recursive-creation-emits-directory-metadata.md exists and is registered in docs/records/index.yaml, which is the authoritative catalogue - both checked first-hand rather than taken from a closing report. The 2026-08-21 comment above is kept as written; it was accurate on its date. Half of this box is deliberately read narrowly: a DCR was written, which is what Required Action 3 asked for first; whether a separate pre-existing creation record also needed amending was not re-litigated here, and if the record owner judges that one did, this box should be re-opened with a dated reason rather than argued about in place. -->
 
 ### Related
 

@@ -333,3 +333,30 @@ New coverage sits at **two altitudes, and deliberately not at a third**:
    before this change.
 6. **libarchive's constituency keeps paying.** Until TicGit `05e2dea4` lands, multi-GB makeself
    installers stage in full under the AD-0040 ceiling. The deferral is honest but it is not free.
+
+## Amendment (2026-09-02, backlog re-triage — the multi-volume claim is untested)
+
+The "Gained" paragraph above states that multi-volume RAR SFX chains now resolve, and calls it a
+capability the copy could not have had. **The reasoning holds; the claim is not tested, and it was
+written as though it were.** Correcting that here rather than leaving it, because this repository
+has a specific history of exactly this failure — a 2026-08-21 reconciliation found three closed
+tickets whose described fixes were not in the tree — and a record asserting an unverified capability
+is how that history repeats.
+
+What is actually established: staging copies only the first volume into an otherwise empty temporary
+directory, so the SDK's volume-change callback has no sibling to find and the chain dead-ends. That
+is verifiable from `stage_sfx_payload`, which copies a single byte range, and it is why the failure
+is structural rather than a tuning problem. An in-place open leaves UnRAR reading the outer file,
+which sits wherever the caller's volumes sit. Both halves are sound.
+
+What is NOT established: that an actual multi-volume RAR SFX opens and extracts end to end. No test
+pairs a multi-volume set with an SFX stub — `tests/rar_multivolume_test.rs` covers multi-volume sets
+without a stub, and `tests/integration/sfx_in_place_open.rs` covers stubs without a multi-volume set.
+Two things would have to be true beyond the offset arithmetic, and neither is checked: that the
+volume-naming derivation still finds the siblings when the *outer* filename carries an executable
+extension (`installer.exe` rather than `archive.part1.rar`), and that this interacts correctly with
+the executable-extension gate every in-place arm requires.
+
+Treat the paragraph above as a plausible consequence of the design, not as a shipped guarantee, until
+a test pins it. It is not a reason to doubt the RAR arm itself, which is tested at both the backend
+and the facade.
