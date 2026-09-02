@@ -229,6 +229,14 @@ on this defect. Nothing in `5a0c035` touches the listing shape.
 - **Background:** The ambiguity in item 1 is real (7z AES has no auth tag) — the decision is how to
   *express* it, typed or documented. Item 2 needs one upstream fact first: whether
   `sevenz-rust2::for_each_entries` re-syncs the solid cursor after a short callback read.
+- **Ruling 1, 2026-09-03 — item 1 is documented, not typed.** The wrong-password / damaged-media
+  ambiguity on encrypted 7z is a property of the format (AES-256 with no authentication tag and no
+  password-verification value), not a defect in this API, so a typed marker would advertise a
+  distinction the format cannot supply. `ArchiveError::Password` now states it, scoped per backend
+  because RAR5 and ZIP genuinely do separate the two. `ArchiveError` is `#[non_exhaustive]`, so a
+  typed shape stays available later at no cost. **Item 2 is untouched** and still owes one fact, not
+  a decision: whether `sevenz_rust2::for_each_entries` re-syncs the solid cursor after a short
+  callback read.
 
 ### Feature-first footprint split and facade crates (OI-0058-001)
 - **Type:** 2
@@ -363,6 +371,16 @@ on this defect. Nothing in `5a0c035` touches the listing shape.
   flipping it inside a migration billed as behaviour-preserving would have changed 7z silently.
   The parser already understands `VolumeScheme::Numeric`, so when the decision is taken it is a
   capability flip plus its own fixtures, not another change to `detect_multipart`.
+- **Ruling 8, 2026-09-03 — a new `Archive::volume_set_report()`, and `MultipartLayout` left alone.**
+  The question was whether the public multipart surface should be able to report a DEFECTIVE set —
+  a hole, a duplicate number, a foreign sibling — or keep answering only "is it multipart, and which
+  files". Answer: add a method, do not widen the existing types. `MultipartLayout` is matched on by
+  callers and is not `#[non_exhaustive]`, so widening it is a break for people who do not need it;
+  the report was already being computed on every `detect_multipart` call and thrown away, so
+  exposing it costs nothing and recomputes nothing. `ReadArchive` mirrors it. Pinned by a test that
+  stages a set with its middle volume absent and asserts the report carries a defect while
+  `detect_multipart` reports two files and cannot say a third is missing — the older shape's
+  limitation, asserted rather than described.
 
 ### Encrypted-archive creation behind an explicit opt-in (OI-0081-006)
 - **Type:** 2
@@ -480,6 +498,15 @@ on this defect. Nothing in `5a0c035` touches the listing shape.
 
 
 ---
+- **Ruling 10, 2026-09-03 — decided per site: two deleted, two kept, two documented.** The kept
+  ones are the point. Deleting a defensive branch and deleting a genuine invariant look identical
+  from outside, and `unreachable!()` trades a typed refusal for a panic in an FFI wrapper. Two
+  findings from doing it per site rather than sweeping: the `Cancelled` triage was INVERTED —
+  `"extract_file"` is emitted today from the facade's own progress samples, and the old rustdoc
+  asserted the negative in terms that were right when written and went stale when the facade gained
+  polling; and the libarchive ZIP arms are not unreachable from the crate's *public* surface at all,
+  since `pub mod ffi` lets an external caller hand `LibarchiveArchive::create` a `Zip` format
+  directly. That strengthens the KEEP beyond the ruling's own rationale.
 
 ### ZIP modification still routes through libarchive; the ZIP-native pipeline is unbuilt
 - **Type:** 2
@@ -579,6 +606,11 @@ on this defect. Nothing in `5a0c035` touches the listing shape.
   the answer.
 
 ## Type 3 — blocked
+- **Ruling 6, 2026-09-03 — widened to `Option<u16>`.** Landed. The old signature did not truncate
+  and did not error: `u8::try_from` failed and the caller got `Ok(None)` — "the record is there, its
+  percentage cannot be determined" — for a number in plain sight in the header. Bounded rather than
+  opened (past `u16::MAX` stays `None`), and RAR4 gains nothing because it stores no percentage
+  field at all.
 
 ### `src/external/rar.rs` is compiled by nothing on this host (ticgit `a5b31f`, residual)
 - **Type:** 3

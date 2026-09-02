@@ -169,6 +169,16 @@ impl ReadArchive {
         self.inner.multipart_layout()
     }
 
+    /// The typed volume-set report, including what is *wrong* with the set
+    /// (mirrors [`Archive::volume_set_report`]).
+    ///
+    /// [`Self::multipart_layout`] answers "which files", this answers "which
+    /// files, and what is missing or duplicated among them". Reach for it when
+    /// a shorter-than-expected part list needs explaining.
+    pub fn volume_set_report(&self) -> Result<crate::format::multipart::VolumeSetReport> {
+        self.inner.volume_set_report()
+    }
+
     /// Compute the archive's content-multiset digest.
     pub fn calculate_manifest_digest(&self) -> Result<String> {
         self.inner.calculate_manifest_digest()

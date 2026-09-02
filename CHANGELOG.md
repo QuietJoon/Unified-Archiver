@@ -80,6 +80,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   earlier — so the two messages could only ever disagree in wording. Callers matching the variant or
   the `operation: "modify"` label are unaffected; only a match on the reason text breaks.
 
+### Added
+
+- **`Archive::volume_set_report()` and `ReadArchive::volume_set_report()`** — the typed volume-set
+  report, including what is *wrong* with the set (OI-0080-004). `detect_multipart` and
+  `multipart_layout` both reduce a set to a list of paths, and a list cannot express "and a fourth
+  volume is missing between these three": a hole arrives as a shorter list, indistinguishable from a
+  smaller set. Holes, duplicated volume numbers and foreign siblings arrive here as typed
+  `VolumeSetDefect`s.
+
+  Nothing is recomputed to provide it. The parser already produced a report on every
+  `detect_multipart` call and the tuple discarded it, which is why this is purely additive.
+  `MultipartLayout` is deliberately left alone — widening it would break a type callers match on,
+  and a caller who does not care about defects should not have to.
+
 ### Removed
 
 - Two unreachable dispatch arms, deleted after a per-site review rather than a sweep (ticgit

@@ -974,7 +974,60 @@ impl Archive {
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
     pub fn detect_multipart(&self) -> Result<(bool, Vec<PathBuf>)> {
+        // Adapt the typed report to the legacy tuple. An `Unvolumed` report
+        // is not a set, so it returns the same single-element shape as the
+        // non-multipart gate rather than the report's `paths`, which are
+        // every candidate in the directory. Defects — holes, duplicates,
+        // foreign siblings — are dropped here because this tuple has nowhere
+        // to put them; [`Self::volume_set_report`] is where they survive.
+        let report = self.volume_set_report()?;
+        let parts = match report.set() {
+            Some(set) => set.paths(),
+            None => vec![self.path.clone()],
+        };
+        Ok((parts.len() > 1, parts))
+    }
+
+    /// The typed volume-set report for this archive: which files form its
+    /// set, in what order, and **what is wrong with it**.
+    ///
+    /// This is the answer [`Self::detect_multipart`] and
+    /// [`Self::multipart_layout`] cannot give. Both reduce the set to a list
+    /// of paths, which can say "these three files" but not "and a fourth is
+    /// missing between them". A hole, a duplicated volume number and a
+    /// foreign sibling all arrive here as [`VolumeSetDefect`]s; through the
+    /// other two they arrive as a shorter list, or as no signal at all.
+    ///
+    /// Nothing is recomputed to provide this. The parser already produced a
+    /// report on every `detect_multipart` call and the tuple simply discarded
+    /// it — which is why this is an additive method rather than a change to
+    /// either existing shape. [`MultipartLayout`] is deliberately left alone:
+    /// widening it would be a breaking change to a type callers match on, and
+    /// a caller who does not care about defects should not have to.
+    ///
+    /// # Errors
+    ///
+    /// Write-mode handles are refused: multipart discovery would walk the
+    /// destination directory for siblings of an archive still being written
+    /// and report filesystem noise as a set. An unreadable parent directory
+    /// surfaces as [`ArchiveError::Io`] rather than as "not multipart", so a
+    /// permission problem is distinguishable from an honest single-volume
+    /// answer.
+    ///
+    /// # Formats that cannot be multi-volume
+    ///
+    /// A format whose `supports_multipart()` is false reports
+    /// [`VolumeSetReport::Unvolumed`] without scanning the directory at all.
+    /// That includes 7z numeric splits today: the parser understands
+    /// `VolumeScheme::Numeric`, but routing 7z through it is a capability
+    /// decision that has not been taken (R0080-0093).
+    pub fn volume_set_report(&self) -> Result<crate::format::multipart::VolumeSetReport> {
+        use crate::format::multipart::VolumeSetReport;
         use std::fs;
+
+        let unvolumed = || VolumeSetReport::Unvolumed {
+            paths: vec![self.path.clone()],
+        };
 
         // R0071-0014: write-mode handles describe an archive that is
         // still being assembled — multipart sibling discovery would
@@ -1015,7 +1068,7 @@ impl Archive {
         // that decision is taken it is a capability flip plus its own
         // fixtures, not a change to this body.
         if !self.format.supports_multipart() {
-            return Ok((false, vec![self.path.clone()]));
+            return Ok(unvolumed());
         }
 
         let file_name = self
@@ -1058,7 +1111,7 @@ impl Archive {
         // bind this handle to whichever *unrelated* set happens to be the
         // biggest in the same directory.
         if parse_volume_name(&file_name).is_none() {
-            return Ok((false, vec![self.path.clone()]));
+            return Ok(unvolumed());
         }
 
         // Everything below — which names are volumes, which of them belong
@@ -1074,20 +1127,7 @@ impl Archive {
         let mut candidates = Vec::with_capacity(dir_entries.len() + 1);
         candidates.push(self.path.clone());
         candidates.extend(dir_entries);
-        let report = parse_volume_set_for(&self.path, &candidates);
-
-        // Adapt the report to the legacy tuple. An `Unvolumed` report is
-        // not a set, so it returns the same single-element shape as the
-        // gate above rather than the report's `paths`, which are every
-        // candidate in the directory. Defects — holes, duplicates,
-        // foreign siblings — are deliberately dropped here: this tuple
-        // has nowhere to put them, and surfacing them is the
-        // `MultipartLayout` evolution deferred to v0.4 (OI-0080-004).
-        let parts = match report.set() {
-            Some(set) => set.paths(),
-            None => vec![self.path.clone()],
-        };
-        Ok((parts.len() > 1, parts))
+        Ok(parse_volume_set_for(&self.path, &candidates))
     }
 
     /// Detect this archive's multipart layout, returning a typed

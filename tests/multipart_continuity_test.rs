@@ -244,3 +244,57 @@ mod on_disk {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Ruling 8 (OI-0080-004): the facade can report a *defective* set, not only
+/// which files are in it.
+///
+/// This is the gap the ruling closes. `detect_multipart` and
+/// `multipart_layout` both reduce a set to a list of paths, and a list cannot
+/// express "and a fourth volume is missing between these three" — a hole
+/// arrives as a shorter list, indistinguishable from a smaller set. The report
+/// was already being computed on every call and discarded; now it is reachable.
+///
+/// Non-vacuity: the assertion is not merely that the report exists. It is that
+/// `multipart_layout` reports the same three parts for the SAME archive, so the
+/// defect is information the older shape provably cannot carry.
+#[test]
+#[cfg(feature = "rar-support")]
+#[serial_test::file_serial(rar)]
+fn the_facade_reports_a_hole_that_the_layout_cannot_express() {
+    // This suite does not pull in tests/common, so use tempfile directly.
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let temp = temp_dir.path();
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+
+    // A set with its middle volume absent: part1 and part3, no part2.
+    for part in ["test_multivol.part1.rar", "test_multivol.part3.rar"] {
+        std::fs::copy(fixtures.join(part), temp.join(part)).expect("stage a volume");
+    }
+
+    let archive = unified_archive::Archive::open(temp.join("test_multivol.part1.rar"))
+        .expect("open the first volume");
+
+    let report = archive
+        .volume_set_report()
+        .expect("a readable directory yields a report");
+    assert!(
+        !report.is_complete(),
+        "a set missing its middle volume is not complete"
+    );
+    assert!(
+        !report.defects().is_empty(),
+        "the hole must arrive as a defect, which is the whole point of this method"
+    );
+
+    // The control: the older shape sees two files and has nowhere to say that
+    // a third belongs between them.
+    let (is_multi, parts) = archive
+        .detect_multipart()
+        .expect("legacy shape still works");
+    assert!(is_multi, "two volumes of one set are still a set");
+    assert_eq!(
+        parts.len(),
+        2,
+        "the legacy tuple reports the files present and cannot report the one that is not"
+    );
+}
