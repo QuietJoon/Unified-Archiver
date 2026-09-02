@@ -573,6 +573,125 @@ fn rar5_recovery_valid_header_crc_end_of_archive() {
     assert_eq!(pct, None);
 }
 
+/// Encode a RAR5 vint (7 data bits per byte, high bit = "one more byte").
+/// The percentage is one of these since RAR 6.10, so the tests below have to
+/// speak the same encoding the parser reads.
+fn rar5_vint(mut value: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let byte = (value & 0x7F) as u8;
+        value >>= 7;
+        if value == 0 {
+            out.push(byte);
+            return out;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+/// A complete RAR5 archive holding exactly one block: the `"RR"` service
+/// header carrying `percent` in the `FHEXTRA_SUBDATA` (0x07) extra-area
+/// record, laid out the way the vendored UnRAR writes it.
+///
+/// Built here rather than taken from a fixture because the fixtures stop at
+/// `-rr5p`: percentages above 255 need `rar -rr256p`..`-rr1000p`, and RAR
+/// creation is not permitted anywhere in this suite.
+fn rar5_archive_with_recovery_percent(percent: u64) -> Vec<u8> {
+    // Extra-area record: size vint, then (type 0x07, subdata = percent vint).
+    let mut record = rar5_vint(RAR5_FHEXTRA_SUBDATA);
+    record.extend_from_slice(&rar5_vint(percent));
+    let mut extra = rar5_vint(record.len() as u64);
+    extra.extend_from_slice(&record);
+
+    // Service header body from FileFlags onward. FileFlags 0 keeps the
+    // optional fixed-width mtime and data CRC32 out of the layout.
+    let mut tail = Vec::new();
+    tail.extend_from_slice(&rar5_vint(0)); // FileFlags
+    tail.extend_from_slice(&rar5_vint(0)); // UnpackedSize
+    tail.extend_from_slice(&rar5_vint(0)); // Attributes
+    tail.extend_from_slice(&rar5_vint(0)); // CompressionInfo
+    tail.extend_from_slice(&rar5_vint(0)); // HostOS
+    tail.extend_from_slice(&rar5_vint(2)); // NameSize
+    tail.extend_from_slice(b"RR"); // the name that makes this a recovery record
+    tail.extend_from_slice(&extra); // the extra area is the header's suffix
+
+    let mut body = Vec::new();
+    body.extend_from_slice(&rar5_vint(3)); // HeaderType: service
+    body.extend_from_slice(&rar5_vint(0x0001)); // HeaderFlags: extra area present
+    body.extend_from_slice(&rar5_vint(extra.len() as u64)); // ExtraAreaSize
+    body.extend_from_slice(&tail);
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"Rar!\x1A\x07\x01\x00"); // RAR5 signature
+    buf.extend_from_slice(&rar5_block(&body));
+    buf
+}
+
+/// The ordinary case, and the control for the one below: a `-rr5p` archive
+/// reads back as 5 through the structural extra-area parse.
+#[test]
+fn rar5_recovery_reads_the_subdata_percentage() {
+    let mut cursor = Cursor::new(rar5_archive_with_recovery_percent(5));
+    let pct = parse_rar5_recovery(Path::new("synthetic.rar"), &mut cursor)
+        .expect("a well-formed RR service header is not an error");
+    assert_eq!(pct, Some(5));
+}
+
+/// ticgit 7ca208: the percentages that did not fit the old `Option<u8>`.
+///
+/// RAR 6.10 stores this value as a vint and raised the ceiling from 99% to
+/// 1000%, so `rar -rr256p` and `rar -rr1000p` are ordinary archives. Against
+/// the old signature the `u8::try_from` in the RAR5 walk failed for every one
+/// of them and the caller was told `None` — "percentage cannot be
+/// determined" — for a number sitting in plain sight in the header. 256 is
+/// the first value that behaved that way; 1000 is the format's own maximum.
+#[test]
+fn rar5_recovery_carries_percentages_above_a_byte() {
+    for percent in [256u64, 300, 999, 1000] {
+        let mut cursor = Cursor::new(rar5_archive_with_recovery_percent(percent));
+        let pct = parse_rar5_recovery(Path::new("synthetic.rar"), &mut cursor)
+            .unwrap_or_else(|e| panic!("-rr{percent}p is a valid archive, not damage: {e}"));
+        assert_eq!(
+            pct,
+            Some(percent as u16),
+            "-rr{percent}p must report {percent}, not a truncation and not the \
+             `None` the `u8` return type used to force"
+        );
+    }
+}
+
+/// The `u16` is a widening, not an "anything goes": the subdata vint is a
+/// `u64` with no ceiling of its own, so a value an order of magnitude past
+/// what RAR can emit is a malformed record rather than a percentage. It stays
+/// on the documented `None` branch — the same place `u8` used to put 256.
+#[test]
+fn rar5_recovery_still_rejects_a_percentage_past_u16() {
+    let mut cursor = Cursor::new(rar5_archive_with_recovery_percent(u64::from(u16::MAX) + 1));
+    let pct = parse_rar5_recovery(Path::new("synthetic.rar"), &mut cursor)
+        .expect("an out-of-range percentage is not damage either");
+    assert_eq!(pct, None);
+}
+
+/// The RAR4 walk keeps its own bound. It stores no percentage field — the
+/// number is `recovery_blocks / total_blocks * 100`, capped at 100 — so the
+/// widened return type buys representation only here. A record claiming more
+/// recovery blocks than total blocks still reports 100, not 200.
+#[test]
+fn rar4_recovery_is_still_capped_at_one_hundred() {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"Rar!\x1A\x07\x00"); // RAR4 signature
+
+    let mut rec_body = Vec::new();
+    rec_body.extend_from_slice(&10u32.to_le_bytes()); // total blocks
+    rec_body.extend_from_slice(&20u32.to_le_bytes()); // recovery blocks -> 200%
+    buf.extend_from_slice(&rar4_block(0x78, 0, &rec_body, &[]));
+
+    let mut cursor = Cursor::new(buf);
+    let pct =
+        parse_rar4_recovery(Path::new("synthetic.rar"), &mut cursor).expect("synthetic RAR4 walk");
+    assert_eq!(pct, Some(100));
+}
+
 /// R0081-0071: a RAR5 block whose HEAD_CRC does not match the header is
 /// rejected as corruption before the header is treated as authoritative.
 #[test]

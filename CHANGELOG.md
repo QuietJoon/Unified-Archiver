@@ -32,12 +32,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > what produced the phantom versions the header above has to apologise for, and one item is still
 > owed before 0.5.0 can honestly be cut — see **Still owed**.
 >
-> **How to read the Breaking list.** Nothing here changes a signature: code that compiled against
-> 0.4.0 still compiles, except for the three `#[non_exhaustive]` items. The rest are *behavioural* —
-> calls that returned `Ok` now return `Err`, or return a different `ArchiveError` variant, so a
-> caller matching on variants is the one who has to act.
+> **How to read the Breaking list.** Three kinds of break, and they cost a caller different amounts
+> of work. **One signature change:** `recovery_percentage()` returns `Option<u16>` where it returned
+> `Option<u8>`, so a `u8` binding has to widen. **Construction breaks:** the `#[non_exhaustive]`
+> types can no longer be built with a struct literal from outside the crate — including the
+> `..Default::default()` form, which is not an escape hatch. **The rest are behavioural** — calls
+> that returned `Ok` now return `Err`, or return a different `ArchiveError` variant, so a caller
+> matching on variants is the one who has to act.
+>
+> *(This paragraph used to claim "nothing here changes a signature". That was true when written and
+> stopped being true as the window filled; it is corrected rather than quietly dropped, because a
+> reader who trusted it would have skipped the one break that does not announce itself at the call
+> site.)*
 
 ### Breaking
+
+- **`Archive::recovery_percentage()` returns `Option<u16>`, not `Option<u8>`.** The number does not
+  fit a byte: RAR 6.10 raised the maximum recovery record from 99% to 1000% and changed the RAR5
+  encoding to a vint, so `rar -rr256p` through `-rr1000p` produce ordinary, readable archives. What
+  the old signature did with them was neither truncate nor error — the `u8::try_from` failed and the
+  caller was handed `Ok(None)`, *"the record is there, its percentage cannot be determined"*, for a
+  value sitting in plain sight in the header. Returning an `Err` above 255 was considered and
+  rejected for the same reason: it turns a sound archive into a damage report and still does not
+  tell you the number. Taken now because the 0.5.0 window is open and the alternative is a major
+  bump of its own later. *Migration:* widen the binding — `let pct: u8 = …` becomes `u16`; a `match`
+  on `Some(pct)` that only prints it needs nothing. `ReadArchive::recovery_percentage` moves with
+  it.
+
+  *What it does not buy.* Nothing on the RAR4 path: RAR4 stores no percentage field at all — the
+  value is derived from recovery/total block counts and capped at 100 — so a RAR4 archive still
+  cannot report more than 100, and the wider type is representational there. And the range is
+  bounded rather than open: the extra-area value is a `u64` vint, so anything past `u16::MAX` is a
+  malformed record and stays on the `None` branch, exactly where 256 used to sit. The
+  header-encrypted case is unchanged and is now stated in the contract rather than only in a
+  comment: a `-hp` archive still answers `has_recovery_record() == true` with
+  `recovery_percentage() == None`, because the password-less byte walk may not read the block the
+  percentage lives in.
+
+- **`ArchiveError::Password` now says what it cannot tell you.** Not a code change — a contract that
+  was always true and never written down. On an encrypted **7z** entry the variant means *wrong
+  password **or** damaged payload*: the backend rewrites a decoder read error or a CRC/size mismatch
+  to `Password` whenever the entry is encrypted and a password was supplied, so matching on the
+  typed error cannot separate a bad passphrase from bad media. That is 7z AES-256's doing rather
+  than the crate's — the format carries neither an authentication tag nor a password-verification
+  value, so a wrong key decrypts to plausible garbage that fails the downstream LZMA/CRC checks
+  exactly as damaged ciphertext does. Nothing is being withheld; at that point the distinction does
+  not exist.
+
+  The documentation now scopes it per backend rather than crate-wide, which matters because the
+  answer differs: RAR5's per-file password check value and ZIP's AES/ZipCrypto verification bytes do
+  keep the two apart, with legacy RAR3 called out as the format that does not. It also says what a
+  caller can actually do — retry with the password believed correct and treat a second failure as
+  most likely damage — and warns that `validate_integrity` is **not** a tiebreaker: it decodes the
+  same ciphertext with the same key, so it tells you *scope* (unencrypted entries validate
+  regardless of the password) and nothing more, and on an all-encrypted archive not even that.
+
+  **There is deliberately no typed ambiguity marker** (OI-0080-007 item 1). No `PasswordOrCorruption`
+  variant, no `Password { ambiguous: true }`: either would advertise a distinction the format cannot
+  supply, implying the backend could do better with more work. `ArchiveError` is `#[non_exhaustive]`,
+  so adding such a shape later is not a breaking change if a format-level signal ever makes the
+  distinction real — which is exactly why documenting it first costs nothing.
 
 - **`ArchiveEntry` is `#[non_exhaustive]`.** External code can no longer build it with a struct
   literal or destructure/match it exhaustively; both now fail to compile. The fields stay `pub`

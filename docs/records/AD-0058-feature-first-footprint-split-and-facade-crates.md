@@ -138,3 +138,45 @@ multi-week work, and the six-profile test matrix it implies is the part most lik
 underestimated — which is also the part that runs headlong into the absent CI.
 
 This record stays **active** and remains the governing baseline for Stage 1.
+
+## Amendment (2026-09-03, AD-0070 — what ordering constraint 2 actually requires)
+
+Ordering constraint 2 reads *"Do not flip default features until `read-minimal`
+and `full` profiles have CI coverage"*, and Stage 1's Required Action 4 asks for
+"targeted CI/test profiles". Both were written when "CI" meant an unexamined
+hosted service. AD-0070 has since defined it as recorded per-platform
+verification, and the two clauses need restating against that definition rather
+than deleting — the property they protect is real and unchanged.
+
+**Constraint 2 is restated as:** do not flip default features until
+`read-minimal` and `full` are test lanes of `scripts/release-gate.sh`, the
+remaining Stage 1 profiles (`read-zip`, `read-all-formats`, `create`, `modify`)
+are at least check lanes, and one `docs/verification/` record shows them green
+on the fingerprint being flipped. **Required Action 4 is restated as:** add the
+six profiles as release-gate lanes.
+
+**Two things this changes in practice.**
+
+First, the constraint is now satisfiable on the dev host. Every Stage 1 profile
+compiles and tests on macOS; the one genuinely host-dependent sub-property —
+libarchive discovery differing per OS — belongs to OI-0065-001 and is not
+Stage 1's to carry. So constraint 2 never needed a service, only a recipe and a
+record.
+
+Second, the shape is priced rather than assumed, because the naive reading is
+expensive. A warm full `--all-features` test run on this host is roughly
+seventeen minutes across 41 test binaries; six *test* profiles would be two to
+three hours serial, and considerably worse under the four-to-six foreign cargo
+runs this machine routinely carries. The recommended shape is therefore
+**tests for the two profiles the constraint actually names, and `cargo check`
+for the other four** — check lanes link no executables, so they also cannot hit
+the macOS first-exec admission stall that cost this project a 66-minute
+abandoned gate. That protects the same property at about a quarter of the cost,
+and the record must say which lanes were check-only so nobody reads them as
+test coverage.
+
+**Not a blocker for `v2-api`.** The `Cargo.toml` comment on that feature used to
+cite this constraint. It was borrowing a constraint written about *footprint*
+features for a flag that gates a module, two `cfg` sites and some in-crate
+tests, and no platform-specific code at all. That comment is corrected; the two
+are sequenced independently, consistent with the 2026-09-02 ruling above.

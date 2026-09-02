@@ -710,15 +710,29 @@ impl UnrarArchive {
     /// Extracts the recovery percentage from RAR recovery record blocks.
     /// Common values are 2%, 3%, 5%, 10%, etc.
     ///
+    /// # Range
+    /// `u16`, not `u8` (ticgit 7ca208). RAR 6.10 stores the RAR5 recovery
+    /// percentage as a vint instead of a single byte and raised its ceiling
+    /// from 99% to 1000%, so `rar -rr1000p` produces a perfectly readable
+    /// archive whose percentage `u8` cannot carry. The RAR4 walk is a
+    /// different story: it *computes* the percentage from block counts and
+    /// caps it at 100, so on that path the wider type buys representation
+    /// only — a RAR4 archive can never report more than 100 here.
+    ///
     /// # Returns
     /// * `Ok(Some(percentage))` - Recovery records present with known percentage
     /// * `Ok(None)` - No recovery records or percentage cannot be determined
     /// * `Err(...)` - I/O error during parsing
     ///
+    /// `Ok(None)` also covers the header-encrypted archive: the walk below
+    /// reads raw bytes with no password, so for a `-hp` archive the record
+    /// is known to exist ([`Self::has_recovery_record`] reads the decrypted
+    /// main header) while its size is not knowable here (ticgit 3f8790).
+    ///
     /// # Implementation
     /// Parses the RAR file directly to locate and extract recovery record block headers,
     /// which contain the recovery percentage value.
-    pub fn recovery_percentage(&self) -> Result<Option<u8>> {
+    pub fn recovery_percentage(&self) -> Result<Option<u16>> {
         // Quick check: if no recovery flag, return None immediately
         if (self.flags & ROADF_RECOVERY) == 0 {
             return Ok(None);
@@ -773,7 +787,7 @@ impl UnrarArchive {
     ///
     /// RAR recovery records are stored as special blocks: type 0x78 in RAR4,
     /// service header (type 3, name "RR") in RAR5.
-    fn parse_recovery_percentage(&self) -> Result<Option<u8>> {
+    fn parse_recovery_percentage(&self) -> Result<Option<u16>> {
         use std::fs::File;
         use std::io::Read;
 
@@ -2641,10 +2655,17 @@ fn fill_or_eof<R: std::io::Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Res
 /// any value in 1..=15" pattern (R0075-0062) to scan only the bytes
 /// *after* the verified `"RR"` name, which rejects accidental matches in
 /// unrelated fields.
+///
+/// The value is a vint, not a byte: RAR 6.10 changed the encoding when it
+/// raised the maximum recovery record from 99% to 1000% (see
+/// [`rar5_service_recovery_percent`], which quotes the vendored UnRAR
+/// comment). The range this can legitimately return is therefore `1..=1000`,
+/// which is why the signature is `Option<u16>` (ticgit 7ca208) and not the
+/// `Option<u8>` it carried until 0.5.0.
 fn parse_rar5_recovery<R: std::io::Read + std::io::Seek>(
     archive_path: &Path,
     file: &mut R,
-) -> Result<Option<u8>> {
+) -> Result<Option<u16>> {
     use std::io::SeekFrom;
 
     // Archive length, used to reject block offsets that run past the end
@@ -2788,12 +2809,19 @@ fn parse_rar5_recovery<R: std::io::Read + std::io::Seek>(
                 .map_err(|e| ArchiveError::io("read", archive_path, e))?;
 
             if let Some(raw) = rar5_service_recovery_percent(&tail, extra_area_size) {
-                // RAR 6.10 raised the maximum recovery record from 99% to
-                // 1000%, which `Option<u8>` cannot carry. Report the
-                // documented "percentage cannot be determined" rather than
-                // a truncated number (ticgit 7ca208: widen the return
-                // type).
-                return Ok(u8::try_from(raw).ok().filter(|pct| *pct > 0));
+                // ticgit 7ca208: this used to be a `u8::try_from`, so every
+                // archive built with `rar -rr256p` or above — legal since
+                // RAR 6.10 raised the ceiling from 99% to 1000% — fell into
+                // the documented "percentage cannot be determined" branch
+                // and reported `None`. It never truncated; it discarded.
+                // `u16` carries the whole 1..=1000 range the format defines.
+                //
+                // The `try_from` stays because the source is a `u64` vint
+                // with no upper bound of its own: a value past `u16::MAX` is
+                // an order of magnitude beyond anything RAR can produce, so
+                // it is a malformed extra-area record rather than a number
+                // to report, and `None` remains the honest answer for it.
+                return Ok(u16::try_from(raw).ok().filter(|pct| *pct > 0));
             }
             return Ok(None);
         }
@@ -2837,10 +2865,17 @@ fn parse_rar5_recovery<R: std::io::Read + std::io::Seek>(
 /// Recovery records have block type 0x78. Generic over `Read + Seek`
 /// so unit tests can drive the walk with synthetic block sequences;
 /// `archive_path` is only used for error context.
+///
+/// Returns `Option<u16>` to match [`parse_rar5_recovery`] and the public
+/// signature above it (ticgit 7ca208), but the widening buys nothing on
+/// this path: RAR4 stores no percentage field at all — the number is
+/// derived from the recovery/total block counts below and capped at 100,
+/// which fit a `u8` and always did. Only the RAR 6.10 vint in the RAR5
+/// walk needs the extra range.
 fn parse_rar4_recovery<R: std::io::Read + std::io::Seek>(
     archive_path: &Path,
     file: &mut R,
-) -> Result<Option<u8>> {
+) -> Result<Option<u16>> {
     use std::io::SeekFrom;
 
     // RAR4 signature is 7 bytes: "Rar!\x1A\x07\x00"
@@ -2935,9 +2970,13 @@ fn parse_rar4_recovery<R: std::io::Read + std::io::Seek>(
                 ]);
 
                 if total_blocks > 0 {
-                    // Prevent integer overflow - cap at 100%
+                    // Prevent integer overflow - cap at 100%. The cap, not
+                    // the return type, is what bounds this path: it stayed
+                    // at 100 when the type widened to `u16` (ticgit 7ca208)
+                    // because RAR4 predates the RAR 6.10 extended range and
+                    // a ratio of blocks cannot mean 1000% in any case.
                     let percentage =
-                        ((recovery_blocks as u64 * 100) / total_blocks as u64).min(100) as u8;
+                        ((recovery_blocks as u64 * 100) / total_blocks as u64).min(100) as u16;
                     return Ok(Some(percentage));
                 }
             }

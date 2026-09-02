@@ -253,6 +253,89 @@ fn test_sevenz_content_encrypted_password_classification() {
     );
 }
 
+/// OI-0080-007 item 1: pin the ambiguity `ArchiveError::Password`
+/// documents, as behaviour rather than as prose.
+///
+/// A payload damaged on disk and decoded with the **correct** password
+/// classifies as `Password`, exactly like the wrong-password case above
+/// — 7z AES-256 has no authentication tag, so the backend cannot tell
+/// the two apart and does not pretend to. The identical damage in an
+/// unencrypted entry keeps its media classification, which is what makes
+/// `classify_decode_error` scoped rather than a blanket rewrite.
+#[test]
+fn test_sevenz_damaged_encrypted_entry_classifies_as_password() {
+    // Incompressible payload, so LZMA2 stores it near-verbatim and the
+    // packed stream is comfortably longer than the byte we flip.
+    let mut state: u32 = 0x1234_5678;
+    let payload: Vec<u8> = (0..4096)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    // Past the 32-byte signature header and far short of the trailing
+    // TOC: the flip lands in the entry's packed stream.
+    const FLIP_AT: usize = 32 + 1024;
+
+    let temp = tempfile::tempdir().unwrap();
+    let build = |name: &str, encrypted: bool| -> PathBuf {
+        let path = temp.path().join(name);
+        let mut writer = sevenz_rust2::ArchiveWriter::create(&path).unwrap();
+        if encrypted {
+            writer.set_encrypt_header(false);
+            writer.set_content_methods(vec![
+                sevenz_rust2::encoder_options::AesEncoderOptions::new(Password::from("correct"))
+                    .into(),
+                sevenz_rust2::EncoderMethod::LZMA2.into(),
+            ]);
+        }
+        writer
+            .push_archive_entry(
+                sevenz_rust2::ArchiveEntry::new_file("payload.bin"),
+                Some(&payload[..]),
+            )
+            .unwrap();
+        writer.finish().unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        assert!(
+            bytes.len() > FLIP_AT + 64,
+            "{name}: archive too short ({}) to damage its packed stream at {FLIP_AT}",
+            bytes.len()
+        );
+        bytes[FLIP_AT] ^= 0xFF;
+        std::fs::write(&path, &bytes).unwrap();
+        path
+    };
+
+    let encrypted = build("damaged_encrypted.7z", true);
+    let err = SevenZArchive::open_with_password(&encrypted, "correct")
+        .unwrap()
+        .extract_to_memory("payload.bin")
+        .unwrap_err();
+    assert!(
+        matches!(err, ArchiveError::Password { .. }),
+        "damaged ciphertext read with the correct password must still \
+         classify as Password (the documented ambiguity), got {err:?}"
+    );
+
+    let plain = build("damaged_plain.7z", false);
+    let err = SevenZArchive::open(&plain)
+        .unwrap()
+        .extract_to_memory("payload.bin")
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ArchiveError::Corruption { .. } | ArchiveError::Io { .. }
+        ),
+        "the same damage in an unencrypted entry must keep its media \
+         classification, got {err:?}"
+    );
+}
+
 /// R0079-0019: `preserve_permissions` / `preserve_times` must be
 /// honoured by the 7z extract path — an entry carrying Unix mode
 /// 0o755 (p7zip attribute convention) and an NT-time mtime keeps

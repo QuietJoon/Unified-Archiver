@@ -396,7 +396,7 @@ Check if archive has recovery records for repairing corruption. Currently suppor
 
 ---
 
-#### `Archive::recovery_percentage(&self) -> Result<Option<u8>>`
+#### `Archive::recovery_percentage(&self) -> Result<Option<u16>>`
 
 Get recovery record percentage. Returns `Some(percentage)` when recovery records are present (RAR/RAR5), `None` otherwise.
 

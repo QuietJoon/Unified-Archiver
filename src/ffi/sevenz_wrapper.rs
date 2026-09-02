@@ -675,6 +675,25 @@ impl SevenZArchive {
     /// stash-and-`Ok(false)` pattern never does. Write-side `Io`
     /// errors and all errors on unencrypted entries keep their
     /// original classification.
+    ///
+    /// **This mapping is lossy, and deliberately so (OI-0080-007 item
+    /// 1).** A genuinely damaged payload decoded with the *correct*
+    /// password fails identically and is reported as `Password` too, so
+    /// the typed error cannot tell a wrong passphrase from damaged
+    /// media. That is a property of 7z AES-256, which carries no
+    /// authentication tag and no password-verification value — unlike
+    /// RAR5's per-file check value or ZIP's AES/ZipCrypto verification
+    /// bytes, both of which let their backends keep the two apart. There
+    /// is nothing better to compute here: at this point the information
+    /// does not exist.
+    ///
+    /// The ruling was to document the ambiguity rather than invent a
+    /// typed shape for it (no `PasswordOrCorruption`, no `ambiguous`
+    /// flag) — a typed marker would advertise a distinction the format
+    /// cannot supply. The caller-facing statement, including what a
+    /// caller can do instead, lives on [`ArchiveError::Password`];
+    /// `ArchiveError` is `#[non_exhaustive]`, so adding a shape later
+    /// stays non-breaking.
     fn classify_decode_error(&self, error: ArchiveError, entry_encrypted: bool) -> ArchiveError {
         if !entry_encrypted || self.password.is_none() {
             return error;

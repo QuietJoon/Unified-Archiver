@@ -2041,9 +2041,27 @@ impl Archive {
     /// - ZIP: ❌ Not supported (no recovery records)
     /// - TAR: ❌ Not supported (no recovery records)
     ///
+    /// # Range
+    /// `1..=1000` for RAR5. The percentage is stored as a vint since RAR
+    /// 6.10, which raised the maximum recovery record from 99% to 1000%, so
+    /// `rar -rr1000p` produces an ordinary readable archive whose percentage
+    /// does not fit a byte. This returned `Option<u8>` until 0.5.0 and
+    /// answered `None` for every such archive; widening it to `Option<u16>`
+    /// (ticgit 7ca208) is a breaking change taken inside the 0.5.0 window
+    /// rather than a major bump of its own.
+    ///
+    /// A RAR4 archive still cannot report more than 100: that format stores
+    /// no percentage field, so the value is derived from the recovery/total
+    /// block counts and capped. On the RAR4 path the wider type is
+    /// representational only.
+    ///
     /// # Returns
     /// - `Ok(Some(percentage))` - Recovery records present with known percentage
-    /// - `Ok(None)` - No recovery records present
+    /// - `Ok(None)` - No recovery records present, *or* the record is present
+    ///   but its size is not readable here — which is the answer for a
+    ///   header-encrypted (`rar -hp`) archive, whose percentage lives in a
+    ///   block this password-less byte walk is not permitted to decrypt
+    ///   (ticgit 3f8790). `has_recovery_record()` still reports `true` for it.
     /// - `Err(...)` - I/O error or parse error
     ///
     /// # Examples
@@ -2058,7 +2076,7 @@ impl Archive {
     /// }
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
-    pub fn recovery_percentage(&self) -> Result<Option<u8>> {
+    pub fn recovery_percentage(&self) -> Result<Option<u16>> {
         // R0071-0012: same write-mode rejection as
         // `has_recovery_record` so a write handle never silently
         // answers `None`.

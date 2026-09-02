@@ -227,7 +227,13 @@ impl ReadArchive {
 
     /// Recovery-record percentage when present — RAR/RAR5 only
     /// (mirrors [`Archive::recovery_percentage`]).
-    pub fn recovery_percentage(&self) -> Result<Option<u8>> {
+    ///
+    /// `u16` rather than `u8` since 0.5.0: RAR 6.10 raised the ceiling to
+    /// 1000% and encodes it as a vint, so anything above 255 used to come
+    /// back as `None` — the record present, its percentage "undeterminable"
+    /// — for a number sitting in plain sight in the header. See
+    /// [`Archive::recovery_percentage`] for the range and the RAR4 caveat.
+    pub fn recovery_percentage(&self) -> Result<Option<u16>> {
         self.inner.recovery_percentage()
     }
 

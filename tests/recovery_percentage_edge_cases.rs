@@ -34,7 +34,7 @@ use unified_archive::Archive;
 /// Regenerate a fixture and this table in the same commit — the assertions
 /// below are what force that.
 #[cfg(feature = "rar-support")]
-const FIXTURE_RECOVERY: &[(&str, bool, Option<u8>)] = &[
+const FIXTURE_RECOVERY: &[(&str, bool, Option<u16>)] = &[
     // Produced without `rar -rr`: archive-flags vint is 0, so
     // `MHFL_RECOVERY` is clear and the percentage must short-circuit.
     ("tests/fixtures/test.rar", false, None),
@@ -62,7 +62,7 @@ const FIXTURE_RECOVERY: &[(&str, bool, Option<u8>)] = &[
 /// `test_recovery.rar` sat in the tree for months named after a recovery
 /// record it did not have.
 #[cfg(feature = "rar-support")]
-fn expected_recovery(path: &str) -> (bool, Option<u8>) {
+fn expected_recovery(path: &str) -> (bool, Option<u16>) {
     FIXTURE_RECOVERY
         .iter()
         .find(|(fixture, _, _)| *fixture == path)
@@ -84,21 +84,31 @@ fn expected_recovery(path: &str) -> (bool, Option<u8>) {
 ///   present but its percentage could not be read) or a positive value —
 ///   never 0.
 ///
-/// The upper bound is the return type, not the format: RAR 6.10 raised the
-/// maximum recovery record from 99% to 1000%, so `1..=100` would now reject
-/// archives `rar -rr200p` produces. `recovery_percentage()` returns
-/// `Option<u8>` and reports `None` for anything it cannot carry, so what is
-/// assertable here is `1..=u8::MAX`.
+/// The upper bound is the format's, not the return type's: RAR 6.10 raised
+/// the maximum recovery record from 99% to 1000% and stores the value as a
+/// vint, so `1..=100` would reject the archives `rar -rr200p` produces. Until
+/// 0.5.0 the accessor returned `Option<u8>` and reported `None` for
+/// everything above 255, which put the whole 256..=1000 band on the "cannot
+/// be determined" branch; ticgit 7ca208 widened it to `Option<u16>`, so the
+/// assertable range is now the format's own `1..=1000`.
+///
+/// No committed fixture exercises the widened band — that would take
+/// `rar -rr256p` and RAR creation is not permitted in this suite. The
+/// above-255 case is asserted against synthetic RAR5 blocks in
+/// `src/ffi/wrapper/tests.rs`
+/// (`rar5_recovery_carries_percentages_above_a_byte`); what this bound does
+/// is stop the *fixture* path from silently re-narrowing.
 #[cfg(feature = "rar-support")]
-fn assert_recovery_contract(label: &str, has_recovery: bool, percentage: Option<u8>) {
+fn assert_recovery_contract(label: &str, has_recovery: bool, percentage: Option<u16>) {
     match (has_recovery, percentage) {
         (false, None) => {}
         (false, Some(pct)) => panic!(
             "{label}: has_recovery_record() is false but recovery_percentage() reported {pct}%"
         ),
         (true, Some(pct)) => assert!(
-            pct > 0,
-            "{label}: a recovery percentage of 0 is not a percentage"
+            (1..=1000).contains(&pct),
+            "{label}: {pct}% is outside the 1..=1000 a RAR recovery record can \
+             declare (RAR 6.10 ceiling); 0 is not a percentage at all"
         ),
         (true, None) => {}
     }
@@ -596,6 +606,27 @@ fn test_recovery_percentage_read_only_operation() {
 // ============================================================================
 // REGRESSION TESTS
 // ============================================================================
+
+/// ticgit 7ca208: the public accessor's payload is `u16`, and this test is
+/// here to make that a compile error to undo rather than a silent narrowing.
+///
+/// The type is the whole change. RAR 6.10 stores the RAR5 recovery percentage
+/// as a vint and allows up to 1000%, so a `u8` cannot represent the archives
+/// `rar -rr256p` and above produce — the old signature answered `None` for
+/// every one of them. Narrow it back and the walk starts discarding readable
+/// numbers again, which no assertion over the committed fixtures would catch:
+/// all of them were built with `-rr5p` or no record at all.
+///
+/// A ZIP is used deliberately — the binding, not the value, is under test, so
+/// this must hold on a build without `rar-support`.
+#[test]
+fn recovery_percentage_is_typed_wide_enough_for_rar_6_10() {
+    let archive = Archive::open("tests/fixtures/test.zip").expect("Failed to open ZIP archive");
+    let pct: Option<u16> = archive
+        .recovery_percentage()
+        .expect("recovery_percentage() should succeed");
+    assert_eq!(pct, None, "ZIP archives carry no recovery record");
+}
 
 /// R0001-0090: `recovery_percentage()` must answer the same before and
 /// after `list_files()` has walked (and memoised) the entry list — the

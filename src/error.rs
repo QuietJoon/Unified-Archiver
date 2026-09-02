@@ -31,7 +31,75 @@ pub enum ArchiveError {
     /// of the two it is (R0001-0069).
     Corruption { path: String, details: String },
 
-    /// Password authentication error
+    /// Password authentication error: a password was required and not
+    /// supplied, or the one supplied did not open the payload.
+    ///
+    /// # Ambiguity on encrypted 7z entries
+    ///
+    /// **7z backend only.** When a 7z entry is encrypted *and* the handle
+    /// carries a password, a failed decode — a decoder read error, or a
+    /// CRC/size mismatch — is reported as `Password` rather than as
+    /// [`Corruption`](Self::Corruption) (the 7z backend's
+    /// `classify_decode_error`, R0079-0006). On that one path the variant
+    /// therefore means **wrong password *or* damaged payload**, and no
+    /// amount of matching on the typed error will separate the two.
+    ///
+    /// The cause is the format, not a shortcut in this crate: 7z AES-256
+    /// carries neither an authentication tag nor a password-verification
+    /// value, so a wrong key decrypts to plausible-looking garbage that
+    /// fails the downstream LZMA/CRC checks in exactly the way damaged
+    /// ciphertext does. The backend is not withholding a distinction it
+    /// holds — at the point of classification the distinction does not
+    /// exist. (Unencrypted 7z entries, and write-side I/O failures on
+    /// encrypted ones, keep their own class and are unaffected.)
+    ///
+    /// **Do not generalise that to the crate.** The other encrypted
+    /// backends carry integrity information 7z AES lacks:
+    ///
+    /// - **RAR5** stores a per-file password check value, so UnRAR
+    ///   reports `ERAR_BAD_PASSWORD` for a wrong password and
+    ///   `ERAR_BAD_DATA` for damaged data — the crate keeps them apart
+    ///   (`Password` versus a recorded integrity failure or `Format`),
+    ///   and no corruption is ever rewritten to `Password`. Legacy
+    ///   RAR3 encryption has no such check value, so on RAR3 archives a
+    ///   wrong password can surface as damaged data instead.
+    /// - **ZIP** checks the password before the payload: WinZip AES
+    ///   entries carry a 2-byte password-verification value (plus an
+    ///   HMAC authentication tag over the ciphertext, which is why AE-2
+    ///   entries store no CRC32 — see `zip_wrapper::aes`), and legacy
+    ///   ZipCrypto a 1-byte check. The `zip` crate raises
+    ///   `InvalidPassword`, which maps straight to `Password`, so no
+    ///   corruption error is ever reclassified. The check is
+    ///   probabilistic — roughly 1 wrong password in 65 536 (AES) or in
+    ///   256 (ZipCrypto) passes it — but what fails after a false accept
+    ///   is an authenticated payload, not a coin flip.
+    ///
+    /// ## What a caller can do
+    ///
+    /// - Retry the entry with the password believed correct (re-prompt,
+    ///   or re-open via `open_with_password`). A second failure with a
+    ///   password the user is confident in is most likely damage, and
+    ///   that retry is the only cheap evidence available.
+    /// - [`Archive::validate_integrity`](crate::Archive::validate_integrity)
+    ///   is **not** a tiebreaker: it decodes the same ciphertext with the
+    ///   same key, so a wrong password fails there too. What it adds is
+    ///   scope — entries the archive stores unencrypted are validated
+    ///   independently of the password, so damage that stops exactly at
+    ///   the encryption boundary is consistent with a wrong key, while
+    ///   failures that also hit plaintext entries point at the media.
+    ///   Evidence, not proof, and worthless on an archive whose entries
+    ///   are all encrypted.
+    ///
+    /// ## What this crate does not do
+    ///
+    /// There is no typed ambiguity marker — no `PasswordOrCorruption`
+    /// variant, no `Password { ambiguous: true }` field. Both were
+    /// considered and rejected (OI-0080-007 item 1): a typed marker would
+    /// imply the backend could do better with more work, which is false
+    /// for 7z AES. This enum is `#[non_exhaustive]` (R0076-0076), so
+    /// introducing such a shape later is not a breaking change if a
+    /// format-level signal ever makes the distinction real — which is
+    /// precisely why documenting it first costs nothing.
     Password { message: String },
 
     /// Operation not supported

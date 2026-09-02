@@ -169,6 +169,33 @@ Without proper Windows libarchive discovery, all libarchive-backed formats
 link on Windows. End users see an opaque linker error rather than a clean
 diagnostic.
 
+### Update (2026-09-03) — the blocker is a missing Windows HOST, not a missing CI service
+
+AD-0070 defines CI-coverage as recorded per-platform verification: a committed
+recipe, run on a host that can observe the property, native exit status
+recorded last, bound to a fingerprint. Applied here, this issue splits into
+three sub-properties with different blockers, and only one of them was ever
+blocked on anything resembling CI:
+
+- **Choosing the discovery mechanism** (vcpkg autodetect / explicit env vars /
+  vendoring) is a design decision. Host-independent, and owed by nobody but the
+  owner. `build.rs` already reads `LIBARCHIVE_LIB_DIR`, so explicit env vars are
+  the smallest step from what ships.
+- **The `cfg(windows)` arms compiling** is checkable on the dev host today via
+  `cargo check --target x86_64-pc-windows-msvc --no-default-features --features
+  external-rar-create`, which skips the vendored UnRAR C++ build. It is lane L6
+  of `scripts/release-gate.sh`, **defaults off**, and is owner-invoked only
+  under the 2026-09-01 hold. An agent must not enable it.
+- **libarchive actually linking, and the Windows tests actually running**, is
+  the genuine block. No script on a macOS host can observe it.
+
+So the recorded blocker changes from "this repository has no CI configuration"
+to "this project has no Windows host to run on". The owner's own Windows
+machine is the intended host and the run is pending as of this update. That is
+a smaller and more honest statement: the first phrasing implied that adopting a
+CI service would unblock the issue, and under AD-0070 no service will be
+adopted.
+
 ### Required Actions
 
 1. Implement vcpkg-based libarchive discovery in `build.rs` — either:
@@ -180,7 +207,12 @@ diagnostic.
    CMake-based build, or an explicitly-documented manual path).
 3. Update the README / docs to describe the chosen mechanism and remove the
    panic-with-OI-pointer fallback.
-4. Add a Windows CI job that compiles the crate with default features.
+4. Run the release gate on a Windows host and record it under
+   `docs/verification/`: `cargo build` with default features, `cargo build
+   --no-default-features`, and `cargo test --all-features -- --test-threads=4`.
+   **Restated 2026-09-03 (AD-0070).** This used to read "Add a Windows CI job
+   that compiles the crate with default features", which named a mechanism the
+   project has ruled out rather than the property it needs.
 
 ### Verification
 
@@ -1783,11 +1815,35 @@ Native builds (host == target) are unaffected. Cross-compilation is not currentl
 documented, or tested; the owner has ruled it out of scope before v2 (native Windows/macOS/Linux
 builds are the support matrix — see Review 0080 gate, 2026-07-17).
 
+### Update (2026-09-03) — blocked on the scope ruling, and it always was
+
+This issue has been carried as though "no CI" were part of its blocker. Under
+AD-0070 that phrasing is retired, and removing it makes the real position
+clearer rather than weaker: **cross-compilation is out of scope pre-v2 by a
+standing owner ruling**, and that ruling is what blocks this, on its own, with
+or without any CI arrangement.
+
+Worth recording so the lane is not re-derived when it is unparked: the check
+half is already reachable here. `x86_64-unknown-linux-musl` std is installed on
+the dev host, and with `rar-support` disabled the build compiles no vendored
+C++ — so `cargo check --target x86_64-unknown-linux-musl --no-default-features`
+runs today and is exactly what would expose Required Action 1's defect, since
+the libarchive discovery block would still branch on the *host* `cfg` rather
+than on `--target`. What is not reachable is linking and running a Linux
+binary, which needs a Linux host or container; OrbStack is installed on this
+machine and its use is deferred by owner ruling 2026-09-03.
+
 ### Required Actions
 
 1. Branch `build.rs` on `env::var("CARGO_CFG_TARGET_OS")` (plus `rerun-if-env-changed`) instead of host `cfg`.
 2. Drive the vendored UnRAR build from Cargo target variables (`cc` crate or explicit `CC`/`CXX`/`AR`/flags plumbing into the makefile), preserving the current native macOS/Linux static build behaviour exactly.
-3. Add at least one cross-compile smoke job (e.g. `aarch64-unknown-linux-gnu` from macOS) when this lands.
+3. When this is unparked, enable release-gate lane L7
+   (`cargo check --target x86_64-unknown-linux-musl --no-default-features`),
+   which is runnable on the dev host today — that target's std is installed and
+   with `rar-support` off there is no vendored C++ to build. The link-and-run
+   half needs a Linux sysroot or a container and is an environment need rather
+   than a CI need. **Restated 2026-09-03 (AD-0070)**, which was previously
+   "Add at least one cross-compile smoke job … when this lands".
 
 ### Verification
 
