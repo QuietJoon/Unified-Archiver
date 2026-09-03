@@ -584,6 +584,13 @@ impl Archive {
         // `extract_files`/`extract_by_ids`/`extract_some`/`extract_file`
         // paths *do* defer their mkdir because their own validation is
         // in-memory.
+        //
+        // This caveat is about mkdir *ordering* only. The separate
+        // R0076-0005 gap — that per-entry containment was decided before
+        // `create_dir_all` and never rechecked afterwards — is closed:
+        // every backend now creates entry parents through
+        // `security::create_parent_dirs_verified`, which re-canonicalises
+        // and re-checks containment after the directories exist.
         ensure_destination(&options.destination)?;
         let mut warnings = check_overwrite_conflicts(
             &entries,
