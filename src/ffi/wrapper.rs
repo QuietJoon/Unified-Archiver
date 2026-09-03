@@ -1079,18 +1079,15 @@ impl UnrarArchive {
             } else {
                 // Directories — let UnRAR create them (via RAR_EXTRACT to the
                 // path). No payload, so no callback / cap accounting is needed.
-                let safe_path_str = safe_path.to_string_lossy();
-                let dest_name_cstr = CString::new(safe_path_str.as_bytes()).map_err(|_| {
-                    ArchiveError::invalid_path(safe_path_str.as_ref(), "Contains null byte")
-                })?;
+                // AD 0064 Option A: this is a real filesystem destination, so
+                // it must carry the destination's raw bytes (Unix) / UTF-16
+                // code units (Windows). `to_string_lossy` had UnRAR create a
+                // *different* directory than the file branch above extracts
+                // that directory's entries into.
+                let dest_name = UnrarDestName::new(&safe_path)?;
                 unsafe {
                     let _guard = unrar_lock()?;
-                    let result = RARProcessFile(
-                        fresh.handle,
-                        RAR_EXTRACT,
-                        std::ptr::null(),
-                        dest_name_cstr.as_ptr(),
-                    );
+                    let result = dest_name.process(fresh.handle, RAR_EXTRACT);
                     if result != ERAR_SUCCESS {
                         return Err(self.unrar_error(result));
                     }
@@ -2440,6 +2437,75 @@ fn finalize_staged_file(
     Ok(())
 }
 
+/// Destination path handed to the UnRAR SDK for a `RAR_EXTRACT`, held in
+/// the platform's own path encoding (AD 0064 Option A).
+///
+/// Unix keeps the raw `OsStr` bytes in a `CString` and drives the narrow
+/// `RARProcessFile`: `dll.cpp`'s `ProcessFile` runs `DestName` through
+/// `CharToWide`, which maps bytes it cannot decode into the private-use
+/// area, and `WideToCharMap` restores them verbatim when the file is
+/// created, so the bytes survive the round trip.
+///
+/// Windows keeps the UTF-16 code units — including the unpaired
+/// surrogates a Win32 path may legally carry — and drives
+/// `RARProcessFileW`. The narrow entry point is lossy on Windows even for
+/// paths Rust can render: the same `ProcessFile` pushes `DestName`
+/// through `OemToExt` and then `MultiByteToWideChar(CP_ACP, ...)`, so
+/// anything outside the active ANSI code page is destroyed before the SDK
+/// ever opens the file. The wide destination is stored verbatim into
+/// `Cmd.DllDestName`, so the two entry points are otherwise identical.
+struct UnrarDestName {
+    #[cfg(not(windows))]
+    narrow: CString,
+    #[cfg(windows)]
+    wide: Vec<RarWchar>,
+}
+
+impl UnrarDestName {
+    /// Encode `path` for the SDK, rejecting an interior NUL: the C side
+    /// stops at the first zero code unit, so it would silently operate on
+    /// a *prefix* of the path — a different file — rather than fail.
+    fn new(path: &Path) -> Result<Self> {
+        #[cfg(not(windows))]
+        {
+            Ok(Self {
+                narrow: crate::ffi::common::path_to_cstring_checked(path)?,
+            })
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+
+            let mut wide: Vec<RarWchar> = path.as_os_str().encode_wide().collect();
+            if wide.contains(&0) {
+                return Err(ArchiveError::invalid_path(
+                    path.display().to_string(),
+                    "Contains null byte",
+                ));
+            }
+            wide.push(0);
+            Ok(Self { wide })
+        }
+    }
+
+    /// Run `operation` on `handle`'s current entry with this destination.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be a live UnRAR handle positioned on an entry header
+    /// and the caller must hold [`UNRAR_LOCK`] (see [`unrar_lock`]).
+    unsafe fn process(&self, handle: RARHandle, operation: c_int) -> c_int {
+        #[cfg(not(windows))]
+        {
+            unsafe { RARProcessFile(handle, operation, std::ptr::null(), self.narrow.as_ptr()) }
+        }
+        #[cfg(windows)]
+        {
+            unsafe { RARProcessFileW(handle, operation, std::ptr::null(), self.wide.as_ptr()) }
+        }
+    }
+}
+
 /// Atomically extract a single RAR file entry to `safe_path`.
 ///
 /// UnRAR writes the file directly via `RARProcessFile`, so we cannot share
@@ -2494,9 +2560,13 @@ fn unrar_extract_atomic(
         .map_err(|e| ArchiveError::io("create_temp", parent.to_path_buf(), e))?;
     let temp_path = temp.into_temp_path();
 
-    let temp_path_str = temp_path.to_string_lossy();
-    let dest_name_cstr = CString::new(temp_path_str.as_bytes())
-        .map_err(|_| ArchiveError::invalid_path(temp_path_str.as_ref(), "Contains null byte"))?;
+    // AD 0064 Option A: hand the SDK the staging path in the platform's own
+    // encoding. `to_string_lossy` replaced every non-UTF-8 byte of the
+    // destination's parent directory with U+FFFD, so UnRAR was pointed at a
+    // path that is not this tempfile — usually `ERAR_ECREATE`, and where the
+    // mangled directory happens to exist, a silent zero-byte extraction
+    // (nothing between here and `persist`/`rename` checks the staged length).
+    let dest_name = UnrarDestName::new(&temp_path)?;
 
     let result = unsafe {
         let _guard = unrar_lock()?;
@@ -2511,12 +2581,7 @@ fn unrar_extract_atomic(
                 ctx as *mut UnrarExtractContext<'_> as isize,
             );
         }
-        let r = RARProcessFile(
-            handle,
-            RAR_EXTRACT,
-            std::ptr::null(),
-            dest_name_cstr.as_ptr(),
-        );
+        let r = dest_name.process(handle, RAR_EXTRACT);
         // Restore the handle-lifetime callback rather than clearing to
         // `None`. Clearing used to be right when nothing else needed one;
         // it is not now, because the walks *between* extractions have to

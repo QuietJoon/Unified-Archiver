@@ -271,9 +271,12 @@ unsafe extern "C" {
         dest_name: *const c_char,
     ) -> c_int;
 
-    /// Process with Unicode paths. Currently uncalled; retained for
-    /// header fidelity. Wide params use the target-correct `RarWchar`
-    /// (`wchar_t *` on the C side), not Windows-only UTF-16 (R0080-0002).
+    /// Process with Unicode paths. Called on Windows only, by
+    /// `wrapper::UnrarDestName::process`, so the extraction destination
+    /// reaches the SDK as UTF-16 instead of the ANSI code page; retained
+    /// on other targets for header fidelity. Wide params use the
+    /// target-correct `RarWchar` (`wchar_t *` on the C side), not
+    /// Windows-only UTF-16 (R0080-0002).
     pub fn RARProcessFileW(
         handle: RARHandle,
         operation: c_int,
