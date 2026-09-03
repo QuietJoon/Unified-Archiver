@@ -1041,9 +1041,24 @@ but persists across these 12 sites.
    (R0076-0041) and compound tar extension detection (R0076-0042).
 4. Migrate UnRAR destination + atomic tempfile paths to raw bytes on
    Unix and wide on Windows (R0076-0066, R0076-0067).
-5. Add raw-name or entry-id extraction surface (e.g.
+5. ~~Add raw-name or entry-id extraction surface (e.g.
    `extract_by_id(entry_id)` accepting `ArchiveEntry::id`); audit
-   `mode_split.rs::ReadArchive` to expose it (R0076-0083).
+   `mode_split.rs::ReadArchive` to expose it (R0076-0083).~~
+   **SATISFIED 2026-09-03 (owner ruling; AD 0064 amendment).** The surface
+   already existed: `Archive::extract_by_ids` selects positionally and never
+   consults the name, and `ReadArchive::extract_by_ids` already exposes it —
+   the `mode_split.rs` audit this action asked for finds it present. A
+   by-raw-bytes key is **rejected on its merits**: archive names are not
+   unique, so `&[u8]` carries the same ambiguity as `&str` with a smaller
+   collision set, while an id is unique by construction. Both routes are now
+   documented for this use and pinned by
+   `tests/integration/non_utf8_entry_names.rs`. **Residual, tracked
+   separately (ticgit `81f344`): no in-memory route to one of two entries
+   whose names collide** — a uniquely named non-UTF-8 entry round-trips
+   through its lossy `path`, but a colliding one is directed to
+   `extract_by_ids`, which writes to disk.
+   `ReadBackend::extract_to_stream_by_listing_id` already implements it
+   `pub(crate)`.
 6. Migrate `detect_multipart` matching to `OsStr` bytes
    (R0076-0092) and the format extension helpers to byte-level
    comparisons (R0076-0094).
@@ -1053,11 +1068,15 @@ but persists across these 12 sites.
 - [ ] One shared archive-path helper covers create/recursive-add/zip-writer paths
 - [ ] libarchive write + UnRAR + ZIP writers use `path_to_cstring` / wide handoff
 - [ ] `tests/integration/non_utf8_paths.rs` extends to write + extract paths
-- [ ] Public extract-by-id (or extract-by-raw-bytes) API lands and is documented
+- [x] Public extract-by-id (or extract-by-raw-bytes) API lands and is documented
+      — 2026-09-03: it had already landed; the ruling documents it and pins it.
+      Note the id route selects the right *entry*, not a byte-faithful
+      destination *name* — that remains Required Actions 2 and 4.
 
 ### Related
 
-- AD 0064 (Non-UTF-8 path policy — Option A; established `raw_path` field on `ArchiveEntry`)
+- AD 0064 (Non-UTF-8 path policy — Option A; established `raw_path` field on `ArchiveEntry`;
+  amended 2026-09-03 with the Required Action 5 ruling)
 - OI-0075-001 (RESOLVED — closed read-side and add_file_from_path)
 - OI-0065-001 (Windows libarchive build — partial overlap with wide-path support)
 

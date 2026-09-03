@@ -19,6 +19,7 @@ pub mod link_skip_single_file;
 pub mod manifest_digest_perf;
 pub mod modification;
 pub mod multipart_typed;
+pub mod non_utf8_entry_names;
 pub mod non_utf8_paths;
 pub mod performance_baseline;
 pub mod permissions_contract;

@@ -813,6 +813,14 @@ impl Archive {
     /// The compression-ratio guard is applied **per entry**, so an archive with
     /// many moderately-bloating entries can still exhaust caller memory if the
     /// entries are fetched serially without a running total on the caller side.
+    ///
+    /// # Ambiguous names
+    ///
+    /// `file_path` is a `&str`, so entries sharing a name — including two
+    /// non-UTF-8 names that lossy-decode to the same string — cannot be told
+    /// apart here. This refuses rather than picking one, and directs the
+    /// caller to [`Archive::extract_by_ids`]. There is no by-ID form of this
+    /// method today: resolving such a collision means extracting to disk.
     pub fn extract_to_memory(&self, file_path: &str) -> Result<Vec<u8>> {
         let limits = ExtractionLimits::default();
         // R0070-0001 precedent: gate on the handle's *mode*, not on a
@@ -1413,6 +1421,39 @@ impl Archive {
     /// Validates every ID, then delegates to [`Archive::extract_some`] — the
     /// archive is traversed once per AD 0029 regardless of how many IDs are
     /// selected.
+    ///
+    /// # Reaching an entry whose name is not valid UTF-8
+    ///
+    /// This is the supported route, and it is why no by-raw-bytes selector
+    /// exists (AD 0064, amended 2026-09-03). Selection here is positional:
+    /// an ID indexes the listing and no name string participates, so an
+    /// entry is reachable even when its archived name cannot be spelled as
+    /// a `&str`. Pair it with [`ArchiveEntry::raw_path`](crate::ArchiveEntry::raw_path),
+    /// which carries the exact stored bytes — find by bytes, act by ID:
+    ///
+    /// ```no_run
+    /// # use unified_archive::{Archive, ExtractionOptions};
+    /// # let archive = Archive::open("names.tar")?;
+    /// let entries = archive.list_files()?;
+    /// let wanted = entries
+    ///     .iter()
+    ///     .find(|e| e.raw_path() == Some(&b"caf\xFF.txt"[..]))
+    ///     .expect("the entry is listed");
+    /// archive.extract_by_ids(&[wanted.id], ExtractionOptions::new("./out"))?;
+    /// # Ok::<(), unified_archive::ArchiveError>(())
+    /// ```
+    ///
+    /// The `&str`-keyed routes cannot always do this: two distinct raw
+    /// names can lossy-decode to the same string, and those routes refuse
+    /// the ambiguity rather than guess — pointing here. An ID is unique by
+    /// construction, so a raw-bytes key would be no less ambiguous than the
+    /// lossy one it replaced, only less often.
+    ///
+    /// **What this does not promise: a byte-faithful destination name.**
+    /// The right entry is selected and its exact bytes are written, but the
+    /// file lands under the lossy name, because the destination hand-off is
+    /// still lossy (OI-0076-001 Required Actions 2 and 4). Two entries whose
+    /// names collide therefore also collide on disk.
     ///
     /// # Arguments
     ///

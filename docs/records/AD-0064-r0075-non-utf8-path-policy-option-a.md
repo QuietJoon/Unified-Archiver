@@ -1,7 +1,7 @@
 ---
 type: ADR
 title: "AD 0064: Non-UTF-8 path policy — preserve raw bytes (Option A)"
-description: "Option A (preserve raw bytes) remains the policy; the closure claim is narrowed to its shipped scope (amended 2026-08-05, §B): listing raw_path plus PathBuf backend path fields landed, add_file_from_path rejects non-UTF-8 instead of preserving it, detect_multipart is still lossy, and 12 write/extract-path sites plus the missing by-id read surface stay open as OI-0076-001."
+description: "Option A (preserve raw bytes) remains the policy; the closure claim is narrowed to its shipped scope (amended 2026-08-05, §B): listing raw_path plus PathBuf backend path fields landed, add_file_from_path rejects non-UTF-8 instead of preserving it, detect_multipart is still lossy, and 12 write/extract-path sites stay open as OI-0076-001. Amended 2026-09-03 (owner ruling): the existing id-addressed `extract_by_ids` is the supported answer to R0076-0083 and no by-raw-bytes surface will be added; the residual is narrowed to in-memory access to one of two colliding names."
 tags: [decision, ADR-0064, R0075-0007, R0075-0023, R0075-0055, R0075-0082, R0070-0025, OI-0075-001, OI-0065-001]
 timestamp: 2026-04-29T00:00:00Z
 status: active
@@ -155,3 +155,50 @@ the open remainder to OI-0076-001. Cross-references: OI-0075-001 (RESOLVED 2026-
 this record actually delivered); OI-0076-001 (OPEN — the 12-site remainder and the read-surface
 gap); OI-0075-004 / R0075-0083 (`detect_multipart` typed return shape); AD 0042 (non-UTF-8 password
 policy, the sibling reject-loudly ruling).
+
+## Amendment (2026-09-03, owner ruling — the id route is the answer to R0076-0083)
+
+The 2026-08-05 amendment left one question explicitly unsettled: *"whether `extract_by_ids` already
+satisfies OI-0076-001's Required Action 5 … is an owner call, not settled here."* The owner made
+that call on 2026-09-03. **It does.** No by-raw-bytes extraction surface will be added.
+
+The ruling rests on facts now pinned by `tests/integration/non_utf8_entry_names.rs` rather than on
+reading alone. Measured against a ustar fixture carrying `caf\xFF.txt` and `caf\xFE.txt`:
+
+* `ArchiveEntry::raw_path` carries the exact stored bytes for both (`Some([… 0xFF …])`,
+  `Some([… 0xFE …])`), while `path` renders both as the same `caf\u{FFFD}.txt`. The listing already
+  lets a caller *identify* an entry the string cannot distinguish.
+* `extract_by_ids` selects positionally. The id indexes the listing, `extract_selected` reduces the
+  selection to a `HashSet<usize>` of `ArchiveEntry::id`, and `ExtractionPlan::selection` carries
+  that to the backend. **No name string participates in selection at any point.**
+* The `&str`-keyed single-entry routes already refuse the collision instead of guessing, and the
+  refusal already names the answer: *"Multiple entries match 'caf\u{FFFD}.txt'; refuse to pick one
+  for single-entry extraction. Use `Archive::extract_by_ids()` with the desired entry ID from
+  `list_files()` instead."* The policy this ruling adopts is the one the code already implements;
+  what was missing was the record and the rustdoc, not the behaviour.
+
+**Why a raw-bytes key is rejected on its merits, not merely as scope control.** Archive names are
+not unique — the crate's selective-extraction machinery exists precisely because duplicate paths
+occur, and `digest_duplicate_path` fixes a bug that arose from it. A `&[u8]` key therefore carries
+the *same* ambiguity as the `&str` key, only with a smaller collision set; it would be a second
+addressing scheme, strictly weaker than the one already shipped, competing with it in every
+doc example. The id is unique by construction.
+
+**What the ruling does not close, asserted rather than assumed.** The id route selects the right
+entry and writes its exact bytes, but the destination *name* is still lossy: the extracted file
+lands as `caf` + `EF BF BD` + `.txt`, not `caf\xFF.txt`. Two colliding entries therefore also
+collide on disk. That hand-off is OI-0076-001 Required Actions 2 and 4, which stay open, and
+`the_destination_name_is_still_lossy_which_this_ruling_does_not_close` fails the day it changes.
+
+**The genuine residual, narrower than the 2026-08-05 amendment implied.** That amendment recorded
+"no public by-id or raw-bytes **read** surface" as absent. Measurement narrows it: a *uniquely*
+named non-UTF-8 entry round-trips through its lossy `path` and `extract_to_memory` returns its
+bytes. Only the *colliding* case has no in-memory route, because the refusal directs to
+`extract_by_ids`, which writes to disk. So the residual is exactly: **obtaining the bytes of one of
+two entries whose names collide, without touching the filesystem.** `ValidatedSource::extract_to_stream_by_id`
+and `ReadBackend::extract_to_stream_by_listing_id` already implement it internally and are
+`pub(crate)`. Promoting either is adding public surface, which this ruling forbids, so it is tracked
+separately rather than folded in here or dropped.
+
+**Disposition: this record stays ACTIVE.** Option A remains the policy; this amendment settles the
+question the previous one deferred and records what remains.

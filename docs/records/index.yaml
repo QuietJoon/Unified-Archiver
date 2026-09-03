@@ -354,8 +354,8 @@ records:
     title: "AD 0064: Non-UTF-8 path policy — preserve raw bytes (Option A)"
     status: active
     file: AD-0064-r0075-non-utf8-path-policy-option-a.md
-    reviews: [R0070-0025, R0075-0007, R0075-0023, R0075-0055, R0075-0082]
-    ois: [OI-0065-001, OI-0075-001]
+    reviews: [R0070-0025, R0075-0007, R0075-0023, R0075-0055, R0075-0082, R0076-0083]
+    ois: [OI-0065-001, OI-0075-001, OI-0076-001]
   - id: AD-0065
     type: AD
     title: "AD 0065: Backend caching baseline — frozen-view at first use (Option A)"

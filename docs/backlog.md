@@ -284,11 +284,16 @@ on this defect. Nothing in `5a0c035` touches the listing shape.
 - **First seen:** 2026-08-04
 - **Last seen:** 2026-08-17
 - **Description:** Convert the 12 remaining lossy `to_string_lossy` sites in write/extract paths
-  (AD 0064 Option A) and resolve the extract-by-raw-bytes public-API gap.
+  (AD 0064 Option A). The API-design half is decided.
 - **Background:** OI-0075-001 closed the listing-side + `add_file_from_path` sites; Review 0076
   found 12 more (recursive ZIP/libarchive create, extract destinations, raw pseudo-entries,
-  UnRAR path conversions). The site conversions are mechanical, but the missing
-  extract-by-raw-bytes public surface needs an API design decision.
+  UnRAR path conversions). The site conversions are mechanical.
+- **Decided 2026-09-03 (owner ruling, AD 0064 amendment):** the extract-by-raw-bytes "gap" was not
+  one. `Archive::extract_by_ids` / `ReadArchive::extract_by_ids` select positionally and never
+  consult the name, so Required Action 5 is satisfied; a `&[u8]` key is rejected because archive
+  names are not unique and it would be a second, weaker addressing scheme. Documented and pinned by
+  `tests/integration/non_utf8_entry_names.rs`. What remains here is the mechanical site work — plus
+  ticgit `81f344`, the one measured residual (no in-memory route to one of two colliding names).
 
 ### External RAR creator design hardening (OI-0076-006)
 - **Type:** 2

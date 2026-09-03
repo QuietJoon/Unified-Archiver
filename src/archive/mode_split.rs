@@ -332,6 +332,10 @@ impl ReadArchive {
     /// Extract an id-selected subset to disk, preserving entry
     /// identity across duplicate paths (mirrors
     /// [`Archive::extract_by_ids`]).
+    ///
+    /// This is also the typed handle's route to an entry whose archived
+    /// name is not valid UTF-8; see [`Archive::extract_by_ids`] for why
+    /// that is the supported answer and what it does not promise.
     pub fn extract_by_ids(
         &self,
         ids: &[usize],

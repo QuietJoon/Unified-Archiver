@@ -692,6 +692,11 @@ impl ArchiveEntry {
     /// Raw (possibly non-UTF-8) entry name bytes. Accessor for
     /// [`Self::raw_path`](field@Self::raw_path); `None` means [`Self::path`](field@Self::path) is byte-exact or
     /// the backend does not surface raw names.
+    ///
+    /// These bytes identify an entry that [`Self::path`] may not: distinct
+    /// raw names can lossy-decode to the same string. To act on one, match
+    /// here and extract by [`Self::id`] — `Archive::extract_by_ids` selects
+    /// positionally and never consults the name (AD 0064).
     pub fn raw_path(&self) -> Option<&[u8]> {
         self.raw_path.as_deref()
     }

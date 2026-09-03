@@ -290,7 +290,10 @@ fn is_executable_file(path: &Path) -> bool {
 /// and is only meaningful for the two link types.
 #[allow(dead_code)]
 pub struct TarMember<'a> {
-    pub name: &'a str,
+    /// Raw `name` field bytes. Not `&str`: tar stores the member name as
+    /// 100 raw bytes with no encoding attached, so a fixture has to be
+    /// able to carry a name that is not valid UTF-8 (AD 0064).
+    pub name: &'a [u8],
     pub typeflag: u8,
     pub link: &'a str,
     pub data: &'a [u8],
@@ -300,6 +303,14 @@ pub struct TarMember<'a> {
 #[allow(dead_code)]
 impl<'a> TarMember<'a> {
     pub fn file(name: &'a str, data: &'a [u8]) -> Self {
+        Self::file_raw(name.as_bytes(), data)
+    }
+
+    /// A regular file whose stored name is arbitrary bytes.
+    ///
+    /// The only way to build an entry whose archived name is not valid
+    /// UTF-8 without a host `tar` that would refuse to make one.
+    pub fn file_raw(name: &'a [u8], data: &'a [u8]) -> Self {
         Self {
             name,
             typeflag: b'0',
@@ -311,7 +322,7 @@ impl<'a> TarMember<'a> {
 
     pub fn dir(name: &'a str) -> Self {
         Self {
-            name,
+            name: name.as_bytes(),
             typeflag: b'5',
             link: "",
             data: &[],
@@ -321,7 +332,7 @@ impl<'a> TarMember<'a> {
 
     pub fn symlink(name: &'a str, target: &'a str) -> Self {
         Self {
-            name,
+            name: name.as_bytes(),
             typeflag: b'2',
             link: target,
             data: &[],
@@ -331,7 +342,7 @@ impl<'a> TarMember<'a> {
 
     pub fn hardlink(name: &'a str, target: &'a str) -> Self {
         Self {
-            name,
+            name: name.as_bytes(),
             typeflag: b'1',
             link: target,
             data: &[],
@@ -363,11 +374,15 @@ pub fn write_tar(path: &Path, members: &[TarMember<'_>]) {
 
     let mut out: Vec<u8> = Vec::new();
     for m in members {
-        assert!(m.name.len() < 100, "fixture name too long: {}", m.name);
+        assert!(
+            m.name.len() < 100,
+            "fixture name too long: {}",
+            String::from_utf8_lossy(m.name)
+        );
         assert!(m.link.len() < 100, "fixture link too long: {}", m.link);
 
         let mut header = [0u8; 512];
-        header[..m.name.len()].copy_from_slice(m.name.as_bytes());
+        header[..m.name.len()].copy_from_slice(m.name);
         octal(&mut header[100..108], m.mode as u64);
         octal(&mut header[108..116], 0); // uid
         octal(&mut header[116..124], 0); // gid
