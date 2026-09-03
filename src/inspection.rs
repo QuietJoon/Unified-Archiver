@@ -1039,17 +1039,18 @@ impl Archive {
             return Err(ArchiveError::write_mode_only("detect_multipart"));
         }
 
-        // Non-UTF-8 path note (AD 0064 / R0075-0082): the source name and
-        // every candidate name flow through to_string_lossy() before the
-        // parser sees them — the anchor in `parse_volume_set_for`, the
-        // candidates in its `build_report`. Because the source path and
-        // its siblings undergo the *same* substitution (U+FFFD for
-        // invalid sequences), base-name matching still works correctly
-        // for the common multi-volume case where names share the same
-        // byte sequence except for volume-number suffixes. The edge case
-        // where two byte-different non-UTF-8 base names coalesce into the
-        // same lossy form is documented as a v0.4 follow-up
-        // (OI-0075-004 R0075-0083 typed multipart return shape).
+        // Non-UTF-8 path note (AD 0064 / R0075-0082, closed by R0076-0092):
+        // the source name and every candidate name still flow through
+        // to_string_lossy() before the parser sees them — the anchor in
+        // `parse_volume_set_for`, the candidates in its `build_report` —
+        // because `parse_volume_name` is a `&str` API and its `base` is
+        // human-readable output, which AD 0064 Option A permits. Set
+        // *membership* no longer depends on that rendering: the grouping
+        // key is the ASCII-lowercased raw `OsStr` base
+        // (`format::multipart::base_key`), so two byte-different non-UTF-8
+        // base names that render to the same U+FFFD form are no longer
+        // merged into one set. That coalescing edge case — previously
+        // deferred here to OI-0075-004 / R0075-0083 — is closed.
 
         // Documentation note (R0070-0090): for non-multipart formats
         // the result is `(false, [self.path])` rather than

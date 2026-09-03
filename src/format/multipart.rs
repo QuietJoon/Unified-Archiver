@@ -37,6 +37,7 @@
 //! password, unrelated file that happens to be named like a volume).
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -611,27 +612,58 @@ pub fn parse_volume_set(paths: &[PathBuf]) -> VolumeSetReport {
 /// Falls back to [`parse_volume_set`]'s largest-group rule when `source`
 /// itself parses as no volume name.
 pub fn parse_volume_set_for(source: &Path, paths: &[PathBuf]) -> VolumeSetReport {
-    let anchor = source
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .as_deref()
-        .and_then(parse_volume_name)
-        .map(|v| (v.scheme, v.base.to_ascii_lowercase()));
+    let anchor = source.file_name().and_then(|raw| {
+        let lossy = raw.to_string_lossy();
+        let parsed = parse_volume_name(&lossy)?;
+        Some((parsed.scheme, base_key(raw, &lossy, &parsed)))
+    });
     build_report(paths, anchor)
+}
+
+/// ASCII-lowercased **raw** base name — the set-identity key (R0076-0092).
+///
+/// [`VolumeName::base`] is a slice of the *lossy* rendering of the file name,
+/// so two byte-different non-UTF-8 names collapse to the same U+FFFD form and
+/// would be grouped as one set. Keying membership on this instead keeps the
+/// grouping decision byte-faithful while leaving the parser's `&str` API and
+/// the human-readable `base` fields untouched (AD 0064 Option A: lossy is for
+/// display).
+///
+/// Every volume suffix the parser recognises (`.rar`, `.zip`, `.partNN.rar`,
+/// `.rNN`, `.sNN`, `.zNN`, `.NNN`) is pure ASCII, and `base` is always a
+/// prefix of the name, so the suffix has the same length in the lossy string
+/// as in the platform-native encoding. Trimming that many trailing bytes off
+/// `OsStr::as_encoded_bytes` therefore cuts at an ASCII-determined boundary,
+/// which is well defined on both the Unix (bytes) and Windows (WTF-8)
+/// encodings; `to_ascii_lowercase` only rewrites `A`-`Z`, which can never be
+/// part of a multi-byte sequence, so the crate's ASCII-case-insensitive
+/// matching (R0080-0087) is preserved exactly.
+fn base_key(raw: &OsStr, lossy: &str, parsed: &VolumeName) -> Vec<u8> {
+    let suffix_len = lossy.len().saturating_sub(parsed.base.len());
+    let bytes = raw.as_encoded_bytes();
+    let cut = bytes.len().saturating_sub(suffix_len);
+    bytes[..cut].to_ascii_lowercase()
 }
 
 /// Parsed candidate: its volume name plus the path it came from.
 struct Candidate<'a> {
     path: &'a PathBuf,
     name: VolumeName,
+    /// Raw, ASCII-lowercased base name — the set-identity key. See
+    /// [`base_key`]: `name.base` is lossy and can coalesce two distinct
+    /// non-UTF-8 names, so it must not decide membership.
+    key: Vec<u8>,
 }
 
-fn build_report(paths: &[PathBuf], anchor: Option<(VolumeScheme, String)>) -> VolumeSetReport {
+fn build_report(paths: &[PathBuf], anchor: Option<(VolumeScheme, Vec<u8>)>) -> VolumeSetReport {
     let candidates: Vec<Candidate<'_>> = paths
         .iter()
         .filter_map(|path| {
-            let name = path.file_name()?.to_string_lossy();
-            parse_volume_name(&name).map(|name| Candidate { path, name })
+            let raw = path.file_name()?;
+            let lossy = raw.to_string_lossy();
+            let name = parse_volume_name(&lossy)?;
+            let key = base_key(raw, &lossy, &name);
+            Some(Candidate { path, name, key })
         })
         .collect();
 
@@ -655,11 +687,14 @@ fn build_report(paths: &[PathBuf], anchor: Option<(VolumeScheme, String)>) -> Vo
                 found: c.name.scheme,
                 expected: scheme,
             });
-        } else if c.name.base.to_ascii_lowercase() != base_lc {
+        } else if c.key != base_lc {
             foreign.push(VolumeSetDefect::UnrelatedBase {
                 path: c.path.clone(),
                 found: c.name.base.clone(),
-                expected: base_lc.clone(),
+                // Display text, not the key: AD 0064 Option A permits lossy
+                // here, and for a valid-UTF-8 base this is byte-identical to
+                // the `String` this field carried before.
+                expected: String::from_utf8_lossy(&base_lc).into_owned(),
             });
         } else {
             members.push(c);
@@ -725,11 +760,11 @@ fn defect_path(defect: &VolumeSetDefect) -> &Path {
 /// never outvotes a real numbered series — then total count, then
 /// [`VolumeScheme`] order, then base name, so the result never depends on the
 /// caller's iteration order.
-fn dominant_key(candidates: &[Candidate<'_>]) -> Option<(VolumeScheme, String)> {
-    let mut groups: BTreeMap<(VolumeScheme, String), (usize, usize)> = BTreeMap::new();
+fn dominant_key(candidates: &[Candidate<'_>]) -> Option<(VolumeScheme, Vec<u8>)> {
+    let mut groups: BTreeMap<(VolumeScheme, Vec<u8>), (usize, usize)> = BTreeMap::new();
     for c in candidates {
         let entry = groups
-            .entry((c.name.scheme, c.name.base.to_ascii_lowercase()))
+            .entry((c.name.scheme, c.key.clone()))
             .or_insert((0, 0));
         if c.name.numbered {
             entry.0 += 1;
