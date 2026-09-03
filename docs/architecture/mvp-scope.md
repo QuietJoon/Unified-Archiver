@@ -69,7 +69,7 @@ status: active
 
 | Platform | Status | Notes |
 |---|---|---|
-| macOS (aarch64/x86_64) | Primary target | All backends tested |
+| macOS (aarch64/x86_64) | First-class, verified | The one platform with a recorded release-gate run under `docs/verification/`; all backends exercised |
 | Linux (x86_64) | Unverified — no verification record | The UnRAR `wchar_t` layout issue (IG-020-003) was reopened and fixed in Review 0080 via the `RarWchar` alias. Per AD-0070 no record exists under `docs/verification/` for a Linux host yet. |
 | Windows | Unverified — no verification record | Build expected to work. Per AD-0070 a platform is release-verified only once a `docs/verification/` record produced on it exists; none does. libarchive is additionally not auto-discovered there (OI-0065-001). |
 

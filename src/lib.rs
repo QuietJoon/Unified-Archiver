@@ -260,7 +260,8 @@ pub mod external;
 pub use archive::Archive;
 
 /// D2 typed-handle split (R0068-0027 / AD 0053). Behind the
-/// `v2-api` cargo feature in v0.3; v0.4 will enable it by default.
+/// `v2-api` cargo feature, **enabled by default since 2026-09-03**. Consumers who
+/// want the legacy facade alone can build with `default-features = false`.
 ///
 /// External callers opt in by enabling `v2-api`:
 ///

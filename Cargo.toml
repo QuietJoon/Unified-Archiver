@@ -42,8 +42,8 @@ cc = "1"
 default = ["rar-support", "v2-api"]
 rar-support = []  # RAR/RAR5 support (requires UnRAR license compliance)
 external-rar-create = []  # RAR creation via external WinRAR CLI (Windows only)
-# D2 typed-handle split (ReadArchive / WriteArchive / ModifyArchive). Additive since v0.3 and
-# still opt-in.
+# D2 typed-handle split (ReadArchive / WriteArchive / ModifyArchive). Additive since v0.3;
+# on by default since 2026-09-03 (owner ruling). `--no-default-features` turns it off.
 #
 # The flip is NOT blocked on CI (AD-0070, 2026-09-03). This comment used to say
 # it was: "AD 0058 ordering constraint 2 forbids flipping default features until

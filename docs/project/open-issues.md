@@ -2318,7 +2318,7 @@ Windows-only, hard-link-only self-ingestion edge. The primary (Unix) platform is
 
 ### Verification
 
-- [ ] Windows hard-link alias to the output is rejected (tested on Windows)  <!-- Deliberately unticked 2026-08-12: load-bearing, not bookkeeping. This entry is RESOLVED on implementation only — its Status line says so — and the criterion waits on a Windows CI job existing at all (OI-0065-001 / ticgit 1340e934). Exclude it from any blanket tick-them-all pass. Reopen also noted the Unix half is testable today: `std::fs::hard_link` plus the (dev, ino) arm would pin the hard-link case on the dev host, where the three current tests pass identical paths and prove nothing about links. -->
+- [ ] Windows hard-link alias to the output is rejected (tested on Windows)  <!-- Deliberately unticked 2026-08-12: load-bearing, not bookkeeping. This entry is RESOLVED on implementation only — its Status line says so — and the criterion waits on an owner-invoked run of `scripts/release-gate.sh` on a Windows host, recorded under `docs/verification/` (OI-0065-001; no CI job exists or will, per AD-0070). Exclude it from any blanket tick-them-all pass. Reopen also noted the Unix half is testable today: `std::fs::hard_link` plus the (dev, ino) arm would pin the hard-link case on the dev host, where the three current tests pass identical paths and prove nothing about links. -->
 
 ### Related
 

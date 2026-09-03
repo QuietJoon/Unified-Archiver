@@ -149,7 +149,8 @@ println!("Embedded entries: {}", sfx_archive.entry_count()?);
 ```rust
 use unified_archive::{Archive, ExtractionOptions};
 
-// RAR/RAR5 split archives are supported end-to-end in v0.4.0
+// RAR/RAR5 split sets are detected and listed; extraction across volumes is
+// not implemented (multipart_read: Support::Partial)
 let archive = Archive::open("backup.part1.rar")?;
 let (is_multipart, parts) = archive.detect_multipart()?;
 if is_multipart {
@@ -245,7 +246,7 @@ See [Limitations.md](./Limitations.md) for the full catalog. Key caveats in v0.4
 
 - **Modification is rewrite-based and limited to ZIP/7z.** `commit_changes()` recreates the archive instead of editing in place. `modify_with_options()` preserves modified, accessed, and created timestamps plus Unix permissions on retained regular-file entries (where the backend supports the timestamp); directory metadata still uses backend defaults. ZIP rewrites preserve the archive comment plus stored/deflated method. Encrypted archives are refused up front by `Archive::modify`, the rewrite drops symlink, hardlink, and other special entries, and ZIP64 edge coverage remains a caveat.
 - **Streaming bounded-memory is libarchive-only.** `extract_to_stream()` reads TAR/ISO in chunks; ZIP, 7z, and RAR backends present the same `Read` API but buffer the entry in memory first.
-- **Split archives: RAR/RAR5 only.** ZIP and 7z split volumes are not supported end-to-end in v0.4.0.
+- **Split archives: detection only.** No format extracts across volumes in v0.4.0. RAR/RAR5 sets are detected and listed; ZIP split volumes are name-level detection only; 7z numeric split volumes are unsupported.
 - **Encrypted creation is rejected by the main facade.** `Archive::create()` returns `OperationBlocked` when `CompressionOptions.password` is set. Optional Windows-only RAR creation lives in `external::RarCreator`, not the `Archive` facade.
 - **Standalone `.gz` / `.bz2` / `.xz` / `.zst` / `.lz4` / `.lzma` are read-only.** Use the creatable `.tar.*` compound variants for compressed-archive creation.
 - **Encrypted-header archives** (RAR `-hp`, 7z `-mhe`) cannot be listed without the password — use `Archive::open_encrypted` up front. Encrypted ZIP entries still surface names without a password.
