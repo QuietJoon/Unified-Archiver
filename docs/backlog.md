@@ -698,16 +698,23 @@ on this defect. Nothing in `5a0c035` touches the listing shape.
   2026-08-21, and the convergence-versus-retirement choice for the token itself stays an open v0.4
   design question rather than a queued task.
 
-### Security & durability boundary refactors (OI-0076-003, items 1/2/5/6)
+### Security & durability boundary refactors (OI-0076-003, items 5/6)
 - **Type:** 3
 - **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
 - **Sources:** docs/project/open-issues.md#OI-0076-003, ticgit:3f7dfa37
 - **First seen:** 2026-08-04
 - **Last seen:** 2026-08-21
-- **Description:** Four remaining hardening items: parent-creation race re-canonicalise
-  (R0076-0005); `O_NOFOLLOW` no-follow open (R0076-0014); staging unlink→reopen-by-name race
+- **Description:** Two remaining hardening items: staging unlink→reopen-by-name race
   (R0076-0045); `commit_changes` phase split (R0076-0089).
-- **Background:** 2 of 6 landed (ZIP-creation durability, extract-file staging).
+- **Background:** 4 of 6 landed — ZIP-creation durability and extract-file staging (2026-06-06),
+  then items 1 and 2 on 2026-09-03.
+- **Items 1 and 2 landed 2026-09-03** (`8517e56`, `8d86fa5`; ticgit `5ebf46`, closed). Item 1's
+  recorded blocker had already dissolved, as the 2026-08-21 note below anticipated. Item 2's
+  recorded blocker ("needs a Unix `libc` dep") turned out to cover only the *evolution* to a
+  native `O_NOFOLLOW`, not the call-site wiring, which needed nothing new — the helper had sat
+  in `src/ffi/common.rs` with zero callers and an `#[expect(dead_code)]` since R0070-0021.
+  Item 1 narrows the TOCTOU window rather than closing it; closing it needs `openat`-relative
+  writes, which is not filed as work because nothing currently asks for it.
 - **Blocked by:** item 1 couples to the AD 0066 v0.4 strict-path flag; item 2 needs a Unix
   `libc` dependency; item 5 needs an owned-fd / libarchive-callback design (AD 0009) — and
   Innovation I6 established that `archive_read_open_fd` cannot deliver it, because libarchive's
