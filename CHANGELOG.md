@@ -280,6 +280,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   honoured, so a staging open that used to succeed can fail; set **above** 16 GiB it was silently
   capped and now is not.
 
+- **Multi-volume RAR sets list as one entry, and extract** (ticgit `3b4d15`).
+  `ArchiveFormat::Rar` / `Rar5` report `multipart_read: Support::Full` where they reported
+  `Partial`. A split file is stored once per volume, and the listing surfaced each of those headers
+  as a separate entry sharing one path — so a three-volume set listed as three files, the content
+  total counted the payload three times and called the answer *exact*, `validate_integrity`
+  reported three healthy entries, and every extraction route refused: `extract_all` on the
+  duplicate-output-path guard, `extract_file` and `extract_to_memory` on ambiguity, and
+  `extract_by_ids` — the call those two errors recommend — with listing drift.
+
+  The fix is in the listing. UnRAR already reports which headers are continuations
+  (`RHDF_SPLITBEFORE`); the wrapper was discarding the flag. Folding continuations into their
+  predecessor restored extraction as a side effect, with no volume-change callback: the SDK opens
+  the continuation volumes itself once it is asked for one logical entry. Verified byte-for-byte
+  against `unrar x`.
+
+  **Caller-visible consequences.** A split entry's `crc32` is now `None` — each volume carries a
+  checksum over its own fragment, never over the file, so any previous value was a checksum that
+  verified nothing. `compressed_size` is the sum across volumes; `size` is the file's real size
+  rather than that size once per volume. Code that counted entries to count files, or that treated
+  `multipart_read` as `Partial`, sees different answers. A set with a volume missing still fails at
+  listing with the bounded, named error rather than writing a truncated file.
+
 - **SFX and offset opens read the payload where it lies, for ZIP, RAR and 7z** (DCR-015).
   `open_sfx()` / `open_at_offset()` used to copy the payload out to a tempfile before opening it,
   always — that copy is what forced the 16 GiB ceiling and what consumed temp-volume space. They

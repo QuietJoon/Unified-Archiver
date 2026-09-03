@@ -149,8 +149,8 @@ println!("Embedded entries: {}", sfx_archive.entry_count()?);
 ```rust
 use unified_archive::{Archive, ExtractionOptions};
 
-// RAR/RAR5 split sets are detected and listed; extraction across volumes is
-// not implemented (multipart_read: Support::Partial)
+// RAR/RAR5 split sets extract end-to-end: open the first volume and the
+// split file lists as one entry (multipart_read: Support::Full)
 let archive = Archive::open("backup.part1.rar")?;
 let (is_multipart, parts) = archive.detect_multipart()?;
 if is_multipart {
@@ -220,7 +220,7 @@ See the [User Manual](./docs/USER_MANUAL.md) and [Getting Started guide](./docs/
 Additional notes:
 
 - **Compressed-tar codecs:** creating `TAR.ZST` / `TAR.LZ4` / `TAR.LZMA` uses libarchive's zstd / lz4 / lzma **write** filters, which the linked libarchive must have been built with. When a filter is missing, creation fails immediately at writer construction with `ArchiveError::CodecUnavailable { codec, format, install_instructions }`, which names the missing codec and carries per-platform install instructions — the library never silently falls back to an external compressor binary. Reading those formats has no such requirement beyond the matching read filter.
-- **Multi-part extraction:** RAR/RAR5 split sets are *detected and listed* end-to-end, but extraction across volumes is not implemented: a split file is listed once per volume with every copy sharing one path, so `extract_all` trips the duplicate-output-path guard, `extract_file` and `extract_to_memory` refuse to disambiguate, and `extract_by_ids` fails with a listing-drift error. Use `detect_multipart()` / `volume_set_report()` to inspect a set. ZIP split volumes (`.z01`, `.z02`, …) are name-level detection only. 7z numeric split volumes (`.001`, `.002`, …) are not supported.
+- **Multi-part extraction:** RAR/RAR5 split sets extract end-to-end. Open the first volume and a split file appears as one logical entry that every read route can reach; UnRAR follows the continuation volumes itself. Its `crc32` is `None`, because each volume carries a checksum over its own fragment rather than over the file. A set with a volume missing fails at listing with an error naming what to call to find it. ZIP split volumes (`.z01`, `.z02`, …) are name-level detection only — `detect_multipart` enumerates sibling names and never opens a volume. 7z numeric split volumes (`.001`, `.002`, …) are not supported.
 - **SFX workflows:** `detect_sfx()`, `open_sfx()`, `open_at_offset()`, and `extract_stub()` are available for embedded archive inspection.
 - **Streaming memory bounds:** Bounded-memory streaming currently applies to libarchive-backed formats (TAR family and ISO). ZIP, 7z, and RAR backends expose the same `Read` API but buffer entries first.
 
@@ -246,7 +246,7 @@ See [Limitations.md](./Limitations.md) for the full catalog. Key caveats in v0.4
 
 - **Modification is rewrite-based and limited to ZIP/7z.** `commit_changes()` recreates the archive instead of editing in place. `modify_with_options()` preserves modified, accessed, and created timestamps plus Unix permissions on retained regular-file entries (where the backend supports the timestamp); directory metadata still uses backend defaults. ZIP rewrites preserve the archive comment plus stored/deflated method. Encrypted archives are refused up front by `Archive::modify`, the rewrite drops symlink, hardlink, and other special entries, and ZIP64 edge coverage remains a caveat.
 - **Streaming bounded-memory is libarchive-only.** `extract_to_stream()` reads TAR/ISO in chunks; ZIP, 7z, and RAR backends present the same `Read` API but buffer the entry in memory first.
-- **Split archives: detection only.** No format extracts across volumes in v0.4.0. RAR/RAR5 sets are detected and listed; ZIP split volumes are name-level detection only; 7z numeric split volumes are unsupported.
+- **Split archives: RAR/RAR5 only.** RAR/RAR5 sets extract across volumes; ZIP split volumes are name-level detection only, and 7z numeric split volumes are unsupported.
 - **Encrypted creation is rejected by the main facade.** `Archive::create()` returns `OperationBlocked` when `CompressionOptions.password` is set. Optional Windows-only RAR creation lives in `external::RarCreator`, not the `Archive` facade.
 - **Standalone `.gz` / `.bz2` / `.xz` / `.zst` / `.lz4` / `.lzma` are read-only.** Use the creatable `.tar.*` compound variants for compressed-archive creation.
 - **Encrypted-header archives** (RAR `-hp`, 7z `-mhe`) cannot be listed without the password — use `Archive::open_encrypted` up front. Encrypted ZIP entries still surface names without a password.

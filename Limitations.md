@@ -57,26 +57,24 @@ Current caveats:
 
 RAR, TAR-family, standalone compressed formats, and ISO are read-only.
 
-## 3. Split-volume support is limited
+## 3. Split-volume support varies by format
 
 Split archives are **not** uniformly supported across formats.
 
-Detected and listed:
+Supported end-to-end:
 
-- RAR / RAR5 multi-part archives — `detect_multipart()` and `volume_set_report()` open the set, enumerate its
-  volumes, and name any that are missing.
+- **RAR / RAR5 multi-part archives.** Open the first volume: the split file lists as one logical entry and every
+  read route reaches it, with UnRAR following the continuation volumes itself
+  (`multipart_read: Support::Full`). `detect_multipart()` and `volume_set_report()` enumerate a set's volumes.
+  Two properties are worth knowing: the entry's `crc32` is `None`, because each volume carries a checksum over its
+  own fragment rather than over the file; and a set with a volume missing fails at *listing* with a bounded error
+  naming `parse_volume_set` as the way to find which one.
 
-Not extractable in `v0.4.0`:
+Not supported:
 
-- **No format extracts across volumes.** A RAR split entry is listed once *per volume*, with every copy sharing one
-  path, so `extract_all` trips the duplicate-output-path guard, `extract_file` and `extract_to_memory` refuse to
-  disambiguate, and `extract_by_ids` — the call those two errors recommend — fails with a listing-drift error.
-  `ArchiveFormat::Rar` / `Rar5` therefore report `multipart_read: Support::Partial`, not full support.
 - ZIP split volumes (`.z01`, `.z02`, ...) — name-level detection only; `detect_multipart` enumerates sibling file
   names and never opens a volume.
 - 7z numeric split volumes (`.001`, `.002`, ...) — not supported at all.
-
-Treat every split-volume *extraction* workflow as unsupported for this release; inspection of a RAR set is supported.
 
 ## 4. Streaming is not uniformly bounded-memory
 

@@ -393,15 +393,19 @@ Related methods:
 
 ### Split archives
 
-**No split/multi-volume archive can be extracted end-to-end in `v0.4.0`.**
+**RAR / RAR5 volume sets extract end-to-end. No other split format does.**
 
-RAR / RAR5 volume sets are *detected and listed*: `Archive::open` on the first volume works, and
-`detect_multipart()` / `volume_set_report()` enumerate the parts and name any that are missing. But
-every extraction path is closed, because a split file is listed once per volume with all copies
-sharing one path: `extract_all` trips the duplicate-output-path guard, `extract_file` and
-`extract_to_memory` refuse to disambiguate, and `extract_by_ids` — the call those two errors
-recommend — fails with a listing-drift error. `ArchiveFormat::Rar`/`Rar5` report
-`multipart_read: Support::Partial` accordingly.
+Open the **first** volume. A split file appears as one logical entry, and every read route reaches
+it — `extract_all`, `extract_file`, `extract_to_memory`, `extract_by_ids` — with UnRAR opening the
+continuation volumes itself. `ArchiveFormat::Rar`/`Rar5` report `multipart_read: Support::Full`.
+
+Two behaviours to know:
+
+- **The entry's `crc32` is `None`.** Each volume carries a checksum over its own fragment, not over
+  the file, so there is no per-file checksum to report. `validate_integrity()` still walks content.
+- **A set with a missing volume fails at *listing*,** not part-way through a write, with an error
+  naming `parse_volume_set` as the way to learn which volume is absent. You will not get a
+  truncated output file.
 
 ZIP split volumes (`.z01`, `.z02`, …) are name-level detection only — `detect_multipart` enumerates
 sibling file names and never opens a volume. 7z numeric split volumes (`.001`, `.002`, …) are not
