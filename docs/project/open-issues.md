@@ -757,7 +757,7 @@ non-`Send` type will fail compilation.
 - AD 0053 (Group D architectural pass)
 - AD 0065 (Backend caching baseline — Option A)
 - `src/archive.rs::Archive`
-- `src/ffi/libarchive_wrapper.rs`, `src/ffi/piz_wrapper.rs`
+- `src/ffi/libarchive_wrapper.rs` — (`src/ffi/piz_wrapper.rs` was deleted by DCR-009 on 2026-07-23; the ZIP half of this item now lives in `src/ffi/zip_wrapper.rs`)
 
 ---
 
@@ -982,7 +982,7 @@ cache plumbing can be redesigned in one pass instead of touching the legacy
 - AD 0053 (Group D architectural pass — D2 typed-handle split)
 - OI-0075-002 (the OI that AD 0065 closed; this entry tracks
   follow-up tightening)
-- `src/ffi/piz_wrapper.rs::PizArchive::cached_listing`
+- `src/ffi/zip_wrapper.rs` — (was `piz_wrapper.rs::PizArchive::cached_listing`, deleted by DCR-009)
 - `src/ffi/libarchive_wrapper.rs::LibarchiveArchive::cached_listing`
 - `src/archive.rs::Archive::entry_cache`
 - `src/backend.rs::ReadBackend::list_files`
@@ -2299,7 +2299,7 @@ Strict readers may misparse or ignore the central-directory UT record. Low.
 - **Source:** R0081-0032 (Review 0081)
 - **Date:** 2026-07-18
 - **Decision:** ACCEPT (tracked — Windows is a first-class target)
-- **Status:** RESOLVED 2026-07-19 (implementation; runtime verification pending Windows CI, OI-0065-001) — `same_file_as_output` now has a `cfg(windows)` arm comparing `dwVolumeSerialNumber` + `nFileIndexHigh/Low` via a function-local `GetFileInformationByHandle` extern block (mirrors the `rename_noclobber` pattern), closing the hard-link-alias gap; the fail-open contract (R0081-0033) is preserved and `cfg(not(any(unix, windows)))` keeps the canonical-path fallback. The Windows arm cannot be compiled on this macOS host — flagged for the Windows CI job. TicGit `a2a683` closed.
+- **Status:** RESOLVED 2026-07-19 (implementation; runtime verification pending a recorded run on a Windows host under `docs/verification/` — OI-0065-001, AD-0070) — `same_file_as_output` now has a `cfg(windows)` arm comparing `dwVolumeSerialNumber` + `nFileIndexHigh/Low` via a function-local `GetFileInformationByHandle` extern block (mirrors the `rename_noclobber` pattern), closing the hard-link-alias gap; the fail-open contract (R0081-0033) is preserved and `cfg(not(any(unix, windows)))` keeps the canonical-path fallback. The Windows arm cannot be compiled on this macOS host — flagged for a recorded Windows run (no CI job exists or will; AD-0070). TicGit `a2a683` closed.
 
 ### Problem
 
@@ -3134,7 +3134,7 @@ overstates is worse than an open box.
 - OI-0076-005 (OPEN) — encapsulate public-field structs, v0.4. Its `#[non_exhaustive]` half is
   complete as of 2026-09-01 (`ExtractionOptions` was the last), so what it still shares with this
   entry is the *field-demotion* half, not the attribute.
-- OI-0081-002 (OPEN) — typed compression-option builder invariants; ticgit `165103b8`
+- OI-0081-002 (RESOLVED 2026-08-21) — typed compression-option builder invariants; ticgit `165103b8`, closed without the entry-kind builder work this item still owns
 - R0075-0078 — the builder's introduction
 
 ---
@@ -3215,7 +3215,13 @@ untouched. Neither is this entry's subject.
 - **Source:** R0001-0049 (Review 0001)
 - **Date:** 2026-08-09
 - **Decision:** ACCEPT (user-routed `track`, Phase 2)
-- **Status:** OPEN
+- **Status:** RESOLVED 2026-09-03 (`62129b9`) — Required Action 1 was taken as a **typed newtype**,
+  the third of the options this entry listed, rather than `Option<u64>` or a `(total, complete)`
+  pair. `SizedContentTotal` (`src/inspection.rs`) carries the sized byte count alongside the sized
+  and unsized entry counts, with private fields and `sized_bytes()` / `exact()` / `is_complete()`
+  accessors, so a total that omitted unknown-size entries can no longer be mistaken for an exact
+  one. `calculate_content_multiset_digest_and_size`, its `calculate_manifest_summary` shim and both
+  `ReadArchive` mirrors return it; the change is listed under CHANGELOG's `[Unreleased]` Breaking.
 
 ### Problem
 
@@ -3597,6 +3603,6 @@ mode; general archive creation has no covering decision.
 ### Related
 
 - The accepted directory-metadata caveat (modification mode) — adjacent, does not cover creation
-- OI-0080-005 (OPEN) — manifest-based recursive creation with single-walk pinning; the same walk
+- OI-0080-005 (RESOLVED 2026-09-02) — manifest-based recursive creation with single-walk pinning; the same walk
 
 ---

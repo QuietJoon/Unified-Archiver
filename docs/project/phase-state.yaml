@@ -7,7 +7,7 @@ project:
   name: unified-archive
   local_run_target: cargo test
   active_scope_label: MVP v0.1.0
-  last_updated: 2026-04-13
+  last_updated: 2026-09-03
   notes: "Retroactive baseline BL-001 with gap remediation complete. DCR-001 closed Phases A.1/A.2/A.3/B.1/B.2 on 2026-04-13. OI-025-001 (compression settings) and OI-025-002 (metadata preservation) resolved 2026-04-14. No Phase C gaps remain."
 
 design:
@@ -16,7 +16,7 @@ design:
   active_baseline_id: BL-001-retroactive
   baseline_status: approved
   open_change_records: []
-  closed_change_records: [DCR-001]
+  closed_change_records: [DCR-001, DCR-002, DCR-003, DCR-004, DCR-005, DCR-006, DCR-007, DCR-008, DCR-009, DCR-010, DCR-011, DCR-012, DCR-013, DCR-014, DCR-015]
   rewind_required_to_phase: null
   status: approved_with_acknowledged_drift
 
@@ -36,7 +36,9 @@ artifacts:
   intake: docs/project/intake.md
   status: docs/project/status.md
   design_baseline: docs/project/design-baseline.md
-  design_change_records: docs/project/design-change-records/
+  # DCR records live in the unified store; catalogue at docs/records/index.yaml.
+  # Consolidated 2026-07-23 — the old path below is a redirect stub only.
+  design_change_records: docs/records/
   stub_manifest: docs/project/stub-manifest.md
   implementation_impact_report: docs/project/implementation-impact-report.md
   implementation_slice_checklists: docs/project/implementation-slice-checklists.md

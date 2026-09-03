@@ -284,6 +284,33 @@ on this defect. Nothing in `5a0c035` touches the listing shape.
   until a record under `docs/verification/` says otherwise (AD 0046 amendment, 2026-08-04), and
   OI-0081-005's Windows arm stays unverified for the same reason.
 
+### `docs/investigation/` snapshot is stale against four post-2026-08-20 changes
+- **Type:** 2
+- **Verified:** yes — read first-hand 2026-09-03 during the full documentation review
+- **Sources:** docs/investigation/architecture/*.md, docs/investigation/codebase/*.md
+- **Unfiled:** recorded here rather than ticketed — the fix is a regeneration run, not a code change
+- **First seen:** 2026-09-03
+- **Last seen:** 2026-09-03
+- **Description:** All 32 English files under `docs/investigation/` are one generated snapshot
+  (`generated.by: codex/gpt-5.6-sol`, `generated.at: 2026-08-20T16:59:47+09:00`). Four changes have
+  landed since that stamp, so the snapshot now describes a tree that no longer exists.
+- **Background:** The documentation review of 2026-09-03 raised 56 confirmed findings against these
+  files, clustering into exactly four claims that were true on 2026-08-20 and are false now:
+  (1) `v2-api` "remains opt-in" — it has been a default feature since 2026-09-03;
+  (2) SFX/offset opens are "tempfile-backed" — DCR-015 made ZIP, RAR and 7z open in place;
+  (3) `ExtractionLimits::reject_unsafe_paths` "is not consulted by the extractor" —
+      `src/security.rs` branches on it and blocks pre-extraction;
+  (4) `CompressionOptions` "remains the exhaustive exception" — it is `#[non_exhaustive]`, as are
+      `ExtractionOptions` and `ArchiveEntry`.
+- **Why this is not fixed inline:** the directory is **gitignored**, so hand edits are neither
+  shared nor durable, and the files carry a generator stamp — editing them by hand desynchronises
+  them from the tool that owns them and destroys the one honest thing about them, which is that
+  they say when they were true. They are correctly date-stamped point-in-time artifacts, not
+  documents lying about the present. The fix is a regeneration run by their owner.
+- **What to do:** re-run the investigation generator against the current tree, or, if that is not
+  planned soon, add a short "generated 2026-08-20; see CHANGELOG for changes since" banner so a
+  reader reaching one of these files directly is not misled by its `status`/description.
+
 ### Non-UTF-8 path fidelity round 2 (OI-0076-001)
 - **Type:** 2
 - **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
@@ -829,6 +856,16 @@ on this defect. Nothing in `5a0c035` touches the listing shape.
   call sites. What is left is a return-shape choice, not a wait: `Option<u64>`, a
   `(total, complete: bool)` pair, or a typed struct in the style of `Cap` / `CompressionRatio` /
   `WritableFormat`. Re-filing out of Type 3 is left to the owner rather than done here.
+- **LANDED 2026-09-03 (`62129b9`) — the third option was taken.** The return-shape choice is made:
+  a typed newtype, `SizedContentTotal` in `src/inspection.rs`, in the style of `Cap` /
+  `CompressionRatio` / `WritableFormat` as this entry suggested. It carries the sized byte total
+  alongside the sized and unsized entry counts behind private fields, with `sized_bytes()`,
+  `exact()`, `is_complete()`, `sized_entries()`, `unsized_entries()` and a `Display` impl, so a
+  total computed over incomplete size metadata can no longer be read as exact.
+  `calculate_content_multiset_digest_and_size`, the `calculate_manifest_summary` shim and both
+  `ReadArchive` mirrors return it. Recorded under CHANGELOG `[Unreleased]` → Breaking, and
+  OI-0001-007 is RESOLVED. The prose above is left as written: it is the record of an entry that
+  was blocked on a window that had already closed, which is why it was re-examined at all.
 - **Sources:** docs/project/open-issues.md#OI-0001-007, reviews/reviewed/0001.md#R0001-0049, ticgit:cc667f89
 - **First seen:** 2026-08-09
 - **Last seen:** 2026-08-17
