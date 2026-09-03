@@ -972,6 +972,64 @@ pub(crate) fn canonicalize_dest_base(dest: &Path) -> Result<PathBuf> {
         .map_err(|e| ArchiveError::io("canonicalize destination", dest.to_path_buf(), e))
 }
 
+/// Re-verify, **after** parent directories have been created, that they
+/// are still inside the destination (R0076-0005).
+///
+/// [`sanitize_entry_path_with_base`] canonicalises the deepest *existing*
+/// ancestor of an entry's path. That is the strongest statement available
+/// at that moment, and it is not enough on its own: the components below
+/// that ancestor do not exist yet, so `create_dir_all` brings them into
+/// being *after* the check has run. Anything that replaces one of those
+/// freshly-created directories with a symlink before the entry is written
+/// escapes containment, because nothing looked again.
+///
+/// This is the second look. Call it after `create_dir_all` and before the
+/// write, with the same `canonical_dest` the entry was sanitized against.
+/// It resolves the parent as it now exists and refuses if the answer is
+/// outside the destination.
+///
+/// **What this does not claim.** It narrows the window; it does not close
+/// it. A swap landing between this call and the write still wins, and
+/// closing that needs `openat`-relative writes rather than path-based
+/// ones. What it removes is the much larger window that spanned the whole
+/// of `create_dir_all` — which, for a deep entry path, is many
+/// directory-creating syscalls wide.
+pub(crate) fn verify_created_parent_contained(
+    parent: &Path,
+    canonical_dest: &Path,
+    entry_path: &str,
+) -> Result<()> {
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|e| ArchiveError::io("canonicalize created parent", parent.to_path_buf(), e))?;
+    if !canonical_parent.starts_with(canonical_dest) {
+        return Err(ArchiveError::InvalidPath {
+            path: entry_path.to_string(),
+            reason: "Path traversal attempt detected".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Create an entry's parent directories and immediately re-verify that
+/// they are still inside the destination (R0076-0005).
+///
+/// Prefer this over a bare `create_dir_all` on any extraction path. The
+/// two steps belong together: creating directories is exactly what
+/// invalidates the containment answer [`sanitize_entry_path_with_base`]
+/// computed, so a call site that creates without re-checking has silently
+/// widened its own TOCTOU window. Keeping them in one function means a
+/// site cannot do the first and forget the second.
+pub(crate) fn create_parent_dirs_verified(
+    parent: &Path,
+    canonical_dest: &Path,
+    entry_path: &str,
+) -> Result<()> {
+    std::fs::create_dir_all(parent)
+        .map_err(|e| ArchiveError::io("create_dir", parent.to_path_buf(), e))?;
+    verify_created_parent_contained(parent, canonical_dest, entry_path)
+}
+
 /// Per-entry half of [`sanitize_entry_path`]: component normalization,
 /// symlink-ancestor escape rejection against the pre-canonicalized
 /// base, and the destination-symlink stat. We deliberately do NOT
@@ -2390,5 +2448,76 @@ mod tests {
             crate::error::ops::EXTRACT_TO_MEMORY,
         )
         .expect("within both caps should pass");
+    }
+
+    /// R0076-0005: the re-verification refuses a parent that has become a
+    /// symlink pointing out of the destination.
+    ///
+    /// This is a unit test on the mechanism rather than an end-to-end race,
+    /// deliberately. The window it closes opens between `create_dir_all` and
+    /// the entry write, and nothing in-process can interpose there
+    /// deterministically — a threaded attempt would be flaky, and a flaky
+    /// security test is worse than none. So the swap is performed directly:
+    /// a real directory is created, then replaced by a real symlink, exactly
+    /// as an attacker winning the race would leave the filesystem.
+    #[cfg(unix)]
+    #[test]
+    fn verify_created_parent_contained_refuses_an_escaped_parent() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let dest = root.path().join("dest");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&dest).expect("dest");
+        std::fs::create_dir_all(&outside).expect("outside");
+        let canonical_dest = super::canonicalize_dest_base(&dest).expect("canonical dest");
+
+        // The state an attacker leaves behind: what create_dir_all made is
+        // now a symlink out of the destination.
+        let parent = dest.join("sub");
+        std::fs::create_dir_all(&parent).expect("create the real dir first");
+        std::fs::remove_dir(&parent).expect("remove it");
+        std::os::unix::fs::symlink(&outside, &parent).expect("swap in a symlink");
+
+        let err = super::verify_created_parent_contained(&parent, &canonical_dest, "sub/file.txt")
+            .expect_err("a parent resolving outside the destination must be refused");
+        assert!(
+            matches!(err, ArchiveError::InvalidPath { .. }),
+            "expected InvalidPath, got {err:?}"
+        );
+    }
+
+    /// The control: an ordinary created directory passes. Without it the
+    /// test above would still pass if the helper refused everything.
+    #[cfg(unix)]
+    #[test]
+    fn verify_created_parent_contained_accepts_a_normal_parent() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let dest = root.path().join("dest");
+        std::fs::create_dir_all(&dest).expect("dest");
+        let canonical_dest = super::canonicalize_dest_base(&dest).expect("canonical dest");
+
+        let parent = dest.join("sub").join("deeper");
+        std::fs::create_dir_all(&parent).expect("create parents");
+
+        super::verify_created_parent_contained(&parent, &canonical_dest, "sub/deeper/file.txt")
+            .expect("a parent inside the destination must be accepted");
+    }
+
+    /// A symlink that stays *inside* the destination is fine — the check is
+    /// containment, not a blanket symlink ban, and conflating the two would
+    /// break legitimate layouts.
+    #[cfg(unix)]
+    #[test]
+    fn verify_created_parent_contained_allows_an_internal_symlink() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let dest = root.path().join("dest");
+        let real = dest.join("real");
+        std::fs::create_dir_all(&real).expect("real dir inside dest");
+        let canonical_dest = super::canonicalize_dest_base(&dest).expect("canonical dest");
+
+        let parent = dest.join("alias");
+        std::os::unix::fs::symlink(&real, &parent).expect("internal symlink");
+
+        super::verify_created_parent_contained(&parent, &canonical_dest, "alias/file.txt")
+            .expect("a symlink resolving inside the destination is contained");
     }
 }

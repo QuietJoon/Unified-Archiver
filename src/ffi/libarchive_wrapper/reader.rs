@@ -1721,8 +1721,12 @@ impl LibarchiveArchive {
                     // when an entry lives below directories
                     // that libarchive would normally create.
                     if let Some(parent) = resolved.parent() {
-                        std::fs::create_dir_all(parent)
-                            .map_err(|e| ArchiveError::io("create_dir", parent.to_path_buf(), e))?;
+                        // R0076-0005: create *and* re-verify containment.
+                        crate::security::create_parent_dirs_verified(
+                            parent,
+                            &canonical_dest,
+                            &entry_archive_path,
+                        )?;
                     }
 
                     let stage = build_staging_path(&resolved)?;
@@ -2077,8 +2081,13 @@ impl LibarchiveArchive {
                 // under directories libarchive would otherwise
                 // create itself.
                 if let Some(parent) = full_path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| ArchiveError::io("create_dir", parent.to_path_buf(), e))?;
+                    // R0076-0005: create *and* re-verify containment.
+                    let canonical_dest = crate::security::canonicalize_dest_base(dest_path)?;
+                    crate::security::create_parent_dirs_verified(
+                        parent,
+                        &canonical_dest,
+                        &validated_path,
+                    )?;
                 }
 
                 let stage = build_staging_path(&full_path)?;

@@ -1007,12 +1007,12 @@ impl UnrarArchive {
                 &canonical_dest,
             )?;
 
-            // Create parent directories if needed
+            // R0076-0005: create *and* re-verify containment. The
+            // `!parent.exists()` guard this replaced also skipped the
+            // verification whenever the directory was already there, which
+            // is precisely the case a swap produces.
             if let Some(parent) = safe_path.parent() {
-                if !parent.exists() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| ArchiveError::io("create_dir_all", parent, e))?;
-                }
+                crate::security::create_parent_dirs_verified(parent, &canonical_dest, &entry.path)?;
             }
 
             if entry.is_file() {
@@ -1230,12 +1230,14 @@ impl UnrarArchive {
                     // path actually written (OI-0069-003).
                     let safe_path = sanitize_entry_path(&validated_path, &abs_dest)?;
 
-                    // Create parent directories if needed
+                    // R0076-0005: create *and* re-verify containment.
                     if let Some(parent) = safe_path.parent() {
-                        if !parent.exists() {
-                            std::fs::create_dir_all(parent)
-                                .map_err(|e| ArchiveError::io("create_dir_all", parent, e))?;
-                        }
+                        let canonical_dest = crate::security::canonicalize_dest_base(&abs_dest)?;
+                        crate::security::create_parent_dirs_verified(
+                            parent,
+                            &canonical_dest,
+                            &validated_path,
+                        )?;
                     }
 
                     unrar_extract_atomic(

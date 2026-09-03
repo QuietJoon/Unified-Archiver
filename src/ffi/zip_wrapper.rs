@@ -1206,8 +1206,14 @@ impl ZipArchive {
                     sanitize_entry_path_with_base(&normalized_name, dest_path, &canonical_dest)?;
 
                 if let Some(parent) = entry_path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| ArchiveError::io("create_dir", parent.to_path_buf(), e))?;
+                    // R0076-0005: create *and* re-verify — the containment
+                    // answer computed above is stale the moment these
+                    // directories exist.
+                    crate::security::create_parent_dirs_verified(
+                        parent,
+                        &canonical_dest,
+                        &normalized_name,
+                    )?;
                 }
 
                 if entry_type == EntryType::Directory {
@@ -1334,8 +1340,14 @@ impl ZipArchive {
             let output_path = sanitize_entry_path(validated_path, dest_path)?;
 
             if let Some(parent) = output_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| ArchiveError::io("create_dir", parent.to_path_buf(), e))?;
+                // R0076-0005: single-entry path, so canonicalising the
+                // destination here costs one stat rather than one per entry.
+                let canonical_dest = crate::security::canonicalize_dest_base(dest_path)?;
+                crate::security::create_parent_dirs_verified(
+                    parent,
+                    &canonical_dest,
+                    validated_path,
+                )?;
             }
 
             // Capture metadata up front — the staged write below borrows

@@ -1031,9 +1031,13 @@ impl SevenZArchive {
 
             // Create parent directories
             if let Some(parent) = entry_path.parent() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
-                    extraction_error =
-                        Some(ArchiveError::io("create_dir", parent.to_path_buf(), e));
+                // R0076-0005: create *and* re-verify containment.
+                if let Err(e) = crate::security::create_parent_dirs_verified(
+                    parent,
+                    &canonical_dest,
+                    &normalized_path,
+                ) {
+                    extraction_error = Some(e);
                     return Ok(false);
                 }
             }
@@ -1266,8 +1270,18 @@ impl SevenZArchive {
 
             // Create parent directories
             if let Some(parent) = output_path.parent() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
-                    extraction_error = Some(ArchiveError::io("create_dir", parent.to_path_buf(), e));
+                // R0076-0005: create *and* re-verify containment.
+                let verified = crate::security::canonicalize_dest_base(dest_path).and_then(
+                    |canonical_dest| {
+                        crate::security::create_parent_dirs_verified(
+                            parent,
+                            &canonical_dest,
+                            &validated_path,
+                        )
+                    },
+                );
+                if let Err(e) = verified {
+                    extraction_error = Some(e);
                     return Ok(false);
                 }
             }
