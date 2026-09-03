@@ -1027,6 +1027,7 @@ impl Archive {
 
         let unvolumed = || VolumeSetReport::Unvolumed {
             paths: vec![self.path.clone()],
+            unrelated: Vec::new(),
         };
 
         // R0071-0014: write-mode handles describe an archive that is

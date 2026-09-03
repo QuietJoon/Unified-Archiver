@@ -474,9 +474,13 @@ pub enum VolumeSetReport {
     /// No candidate carries an explicit volume number, so the list does not
     /// describe a multipart set. A lone `archive.rar` or `archive.zip` lands
     /// here.
+    #[non_exhaustive]
     Unvolumed {
         /// The candidates, as supplied.
         paths: Vec<PathBuf>,
+        /// Candidates that parsed as volume names but belong to a different
+        /// set. See [`Self::unrelated`].
+        unrelated: Vec<VolumeSetDefect>,
     },
     /// A single-convention set numbered 1..=n with no gaps and no duplicates.
     ///
@@ -485,21 +489,31 @@ pub enum VolumeSetReport {
     /// convention records the total. A set truncated at the end (`part1` and
     /// `part2` of three) is indistinguishable from a complete two-volume set
     /// by name alone and reports as `Complete`.
+    #[non_exhaustive]
     Complete {
         /// The validated set.
         set: VolumeSet,
+        /// Files alongside the set that are not part of it. See
+        /// [`Self::unrelated`] — these do **not** make the set incomplete.
+        unrelated: Vec<VolumeSetDefect>,
     },
     /// A recognised set with at least one continuity defect.
+    #[non_exhaustive]
     Incomplete {
         /// The set as parsed — members that triggered
         /// [`VolumeSetDefect::MixedScheme`] or
         /// [`VolumeSetDefect::UnrelatedBase`] are excluded, duplicates are
         /// retained.
         set: VolumeSet,
-        /// Every defect found, in a deterministic order: leading gap,
-        /// interior gaps ascending, duplicates ascending, then foreign
-        /// members by path.
+        /// The **continuity** defects only, in a deterministic order:
+        /// leading gap, interior gaps ascending, then duplicates ascending.
+        ///
+        /// Files that merely share the directory are not here — they are in
+        /// [`Self::unrelated`] and never affect the verdict.
         defects: Vec<VolumeSetDefect>,
+        /// Files alongside the set that are not part of it. See
+        /// [`Self::unrelated`].
+        unrelated: Vec<VolumeSetDefect>,
     },
 }
 
@@ -508,15 +522,36 @@ impl VolumeSetReport {
     pub fn set(&self) -> Option<&VolumeSet> {
         match self {
             Self::Unvolumed { .. } => None,
-            Self::Complete { set } | Self::Incomplete { set, .. } => Some(set),
+            Self::Complete { set, .. } | Self::Incomplete { set, .. } => Some(set),
         }
     }
 
-    /// Defects found, empty unless [`Self::Incomplete`].
+    /// **Continuity** defects — a missing or duplicated volume. Empty unless
+    /// [`Self::Incomplete`], and these are exactly what decides the verdict.
+    ///
+    /// A file that merely shares the directory is not a defect of this set
+    /// and is not reported here; see [`Self::unrelated`].
     pub fn defects(&self) -> &[VolumeSetDefect] {
         match self {
             Self::Unvolumed { .. } | Self::Complete { .. } => &[],
             Self::Incomplete { defects, .. } => defects,
+        }
+    }
+
+    /// Files that parsed as volume names but belong to a *different* set —
+    /// a different naming scheme, or a different base name.
+    ///
+    /// Reported because "this file is not part of your set" is worth
+    /// knowing, and **never** counted against completeness: a set whose
+    /// volumes are all present is [`Self::Complete`] no matter what else
+    /// shares the directory. Reading these as defects is what made a
+    /// complete set report as incomplete in any directory holding a second
+    /// archive, which is the normal case rather than an edge one.
+    pub fn unrelated(&self) -> &[VolumeSetDefect] {
+        match self {
+            Self::Unvolumed { unrelated, .. }
+            | Self::Complete { unrelated, .. }
+            | Self::Incomplete { unrelated, .. } => unrelated,
         }
     }
 
@@ -603,6 +638,7 @@ fn build_report(paths: &[PathBuf], anchor: Option<(VolumeScheme, String)>) -> Vo
     let Some(key) = anchor.or_else(|| dominant_key(&candidates)) else {
         return VolumeSetReport::Unvolumed {
             paths: paths.to_vec(),
+            unrelated: Vec::new(),
         };
     };
     let (scheme, base_lc) = key;
@@ -630,43 +666,46 @@ fn build_report(paths: &[PathBuf], anchor: Option<(VolumeScheme, String)>) -> Vo
         }
     }
 
+    // Deterministic order for the unrelated list, which several callers print.
+    foreign.sort_by(|a, b| defect_path(a).cmp(defect_path(b)));
+
     // An anchored call can select a group whose only member is the anchor's
     // unnumbered main volume (a lone `base.rar`). That is a single-volume
-    // archive, not a set — but a mixed-scheme sibling still deserves a
-    // report, so keep the defects.
+    // archive, not a set. It used to be reported as `Incomplete` whenever a
+    // foreign sibling existed, which said "volumes are missing" about an
+    // archive that has no volumes at all; the siblings now ride along on
+    // `Unvolumed` instead, where they inform without misclassifying.
     if !members.iter().any(|c| c.name.numbered) {
-        if foreign.is_empty() {
-            return VolumeSetReport::Unvolumed {
-                paths: paths.to_vec(),
-            };
-        }
-        let set = assemble_set(scheme, &members);
-        return match set {
-            Some(set) => VolumeSetReport::Incomplete {
-                set,
-                defects: foreign,
-            },
-            None => VolumeSetReport::Unvolumed {
-                paths: paths.to_vec(),
-            },
+        return VolumeSetReport::Unvolumed {
+            paths: paths.to_vec(),
+            unrelated: foreign,
         };
     }
 
     let Some(set) = assemble_set(scheme, &members) else {
         return VolumeSetReport::Unvolumed {
             paths: paths.to_vec(),
+            unrelated: foreign,
         };
     };
 
-    let mut defects = continuity_defects(&set);
-    // Foreign members sort last, by path, for a deterministic order.
-    foreign.sort_by(|a, b| defect_path(a).cmp(defect_path(b)));
-    defects.extend(foreign);
+    // Completeness is decided by continuity ALONE (ticgit cf5109). `foreign`
+    // answers a different question — "what else is in this directory" — and
+    // merging the two made a complete set report as incomplete whenever a
+    // second archive shared the directory, which is the normal case.
+    let defects = continuity_defects(&set);
 
     if defects.is_empty() {
-        VolumeSetReport::Complete { set }
+        VolumeSetReport::Complete {
+            set,
+            unrelated: foreign,
+        }
     } else {
-        VolumeSetReport::Incomplete { set, defects }
+        VolumeSetReport::Incomplete {
+            set,
+            defects,
+            unrelated: foreign,
+        }
     }
 }
 
