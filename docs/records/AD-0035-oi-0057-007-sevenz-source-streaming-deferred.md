@@ -67,3 +67,13 @@ Re-open this decision when **any** of the following is true:
 * sevenz-rust2 (or a maintained fork) exposes an owned entry-level `Read` implementation.
 * A real-world usage report shows RSS pressure from the per-entry buffer that `ExtractionLimits` cannot mitigate.
 * The library migrates away from sevenz-rust2 for an unrelated reason; streaming should be reconsidered as part of that migration.
+
+## Amendment (2026-09-03, pointer refresh and a field misnaming)
+
+**Pointer.** OI-0057-007 no longer lives in `docs/project/open-issues.md`. It was closed and moved
+to `docs/project/open-issues-resolved.md`; look for it there.
+
+**Misnaming.** Both mentions of `ExtractionLimits::max_per_file_size` above name a field that does
+not exist and never did. The field and its accessor are `ExtractionLimits::max_file_size`
+(`src/security.rs`). The reasoning is unchanged — a per-entry ceiling does bound peak RSS per commit
+— only the identifier was wrong.

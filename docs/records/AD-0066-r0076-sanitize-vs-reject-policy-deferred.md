@@ -239,3 +239,15 @@ set a default at all — rejected as a worse trade.
 `src/security.rs` tests cover scope-and-restore, nesting, restore-on-panic,
 non-propagation to spawned threads, and scope-wins-over-process-default.
 All are `#[serial_test::serial]` because they touch the global slot.
+
+## Amendment (2026-09-03, two claims corrected)
+
+**The "warning surface, not silent" mitigation is not met.** The Decision section offers, as partial
+mitigation for R0076-0004, that a repaired path surfaces a warning. It does not: `src/security.rs`
+constructs no `ArchiveWarning` at all, and no warning variant covers path repair. A lossy repair is
+therefore silent to the caller today, which is exactly the concern R0076-0004 raised. The deferral
+stands on its other grounds; this particular mitigation should not be relied on when re-deciding.
+
+**`reject_unsafe_paths` is enforced.** Any surviving description of the flag as "recorded but not
+consulted" is stale — `src/security.rs` branches on `limits.reject_unsafe_paths` and blocks
+pre-extraction when it is set. The default (`false`) repairs, as this record intends.

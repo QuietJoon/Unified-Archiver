@@ -929,12 +929,14 @@ impl Archive {
     ///
     /// # In place, or staged
     ///
-    /// A ZIP payload behind an SFX-shaped path (one with an executable
-    /// extension — `.exe`, `.sh`, ...) is read **in place**: the backend
-    /// opens the file you named and starts at the detected offset, so
-    /// nothing is copied and no ceiling applies. Everything else — every
-    /// other payload format, and a ZIP payload behind a path that does
-    /// not look executable — is copied ("staged") into a temporary file
+    /// A ZIP, RAR or 7z payload behind an SFX-shaped path (one with an
+    /// executable extension — `.exe`, `.sh`, ...) is read **in place**:
+    /// the backend opens the file you named and starts at the detected
+    /// offset, so nothing is copied and no ceiling applies (DCR-015; the
+    /// RAR arm needs the `rar-support` feature). Everything else — the
+    /// libarchive-backed formats (TAR family, ISO), and any payload
+    /// behind a path that does not look executable — is copied
+    /// ("staged") into a temporary file
     /// first, which is then opened through the normal archive pipeline
     /// and deleted when the returned handle drops.
     /// [`Archive::payload_access`] reports which one you got, and
@@ -974,7 +976,7 @@ impl Archive {
     /// extraction call made against the returned handle.
     ///
     /// A ceiling bounds a copy, so it has nothing to say about a payload
-    /// that is never copied: a ZIP payload opened in place is admitted
+    /// that is never copied: a ZIP, RAR or 7z payload opened in place is admitted
     /// whatever this value is. Check [`Archive::payload_access`] if that
     /// distinction matters to you.
     ///
@@ -1009,9 +1011,10 @@ impl Archive {
     ///
     /// # The hook is silent when there is no copy
     ///
-    /// When the payload is read in place — a ZIP payload behind a path
-    /// with an executable extension, per [`Archive::open_at_offset`]
-    /// (ticket `1ddc37ec`) — no bytes move, so the callback is **never
+    /// When the payload is read in place — a ZIP, RAR or 7z payload
+    /// behind a path with an executable extension, per
+    /// [`Archive::open_at_offset`] (tickets `1ddc37ec`, `5858e17b`;
+    /// DCR-015) — no bytes move, so the callback is **never
     /// invoked** (not even once with a zero total) and there is nothing
     /// for it to cancel. That is the intended outcome: the copy this
     /// hook exists to watch did not happen. Callers driving a progress
@@ -1141,15 +1144,19 @@ impl Archive {
     ///
     /// * **In place** — the backend opens `path` and starts reading at
     ///   `offset`. Nothing is copied and no ceiling applies. Requires
-    ///   all three of: a ZIP payload (the only backend that can do this
-    ///   today), an SFX-shaped `path` (executable extension), and
-    ///   agreement between `offset` and where the ZIP's own
-    ///   end-of-central-directory record says the archive starts.
+    ///   an SFX-shaped `path` (executable extension) and a ZIP, RAR or
+    ///   7z payload whose signature is found at `offset`. ZIP
+    ///   additionally requires `offset` to agree with where the ZIP's
+    ///   own end-of-central-directory record says the archive starts;
+    ///   RAR relocates itself by scanning for its signature; 7z is
+    ///   handed a window that makes `offset` look like byte 0. Each arm
+    ///   declines to staging rather than failing if its constructor
+    ///   does not accept the payload (DCR-015).
     /// * **Staged** — otherwise, `file_len - offset` bytes are copied
     ///   into a temporary file that is removed when the returned
     ///   [`Archive`] is dropped, and the AD 0040 ceiling bounds that
-    ///   copy. This is the path for the TAR family, ISO, 7z and RAR
-    ///   payloads, and for any input the in-place gates decline.
+    ///   copy. This is the path for the libarchive-backed formats (TAR
+    ///   family, ISO) and for any input the in-place gates decline.
     ///
     /// The observable archive is the same either way — the same
     /// entries, the same [`Archive::path`], the same

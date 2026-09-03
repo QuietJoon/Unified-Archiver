@@ -366,7 +366,7 @@ records:
     mentions: [DCR-005, DCR-009]
   - id: AD-0066
     type: AD
-    title: "AD 0066: Path sanitization policy — preserve current \\\"lossy repair\\\" baseline, queue strict-reject opt-in"
+    title: "AD 0066: Path sanitization policy — preserve current \"lossy repair\" baseline, queue strict-reject opt-in"
     status: active
     file: AD-0066-r0076-sanitize-vs-reject-policy-deferred.md
     reviews: [R0070-0057, R0070-0058, R0076-0004, R0076-0005, R0081]
@@ -530,7 +530,7 @@ records:
     reviews: [R0045-0004, R0045-0076]
   - id: MADR-0004
     type: MADR
-    title: "AD: Reject the 39 \\\"missing source file\\\" issues — reviewer false positives"
+    title: "AD: Reject the 39 \"missing source file\" issues — reviewer false positives"
     status: active
     file: MADR-0004-r045-reject-src-prefix-false-positives.md
     reviews: [R0045-0077, R0045-0115]
@@ -575,7 +575,7 @@ records:
     reviews: [R0052-0006, R0052-0007]
   - id: MADR-0011
     type: MADR
-    title: "AD: UnsupportedOperation display text — \\\"cannot be performed\\\" replaces \\\"not implemented\\"
+    title: "AD: UnsupportedOperation display text — \"cannot be performed\" replaces \"not implemented\""
     status: superseded
     file: MADR-0011-r0001-unsupported-operation-display-text.md
     reviews: [R0001-0003]

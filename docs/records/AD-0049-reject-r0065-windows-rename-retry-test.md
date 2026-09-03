@@ -93,3 +93,18 @@ Restated trigger: **revisit this record when the OI-0065-001 Windows CI job land
 supply — or persistently fail to supply — the concrete regression scenario the record asks for.
 Until then the rejection stands and the record stays ACTIVE. Whether a retry loop is ever
 warranted remains an open question for the owner; this amendment does not decide it.
+
+## Amendment (2026-09-03, AD-0070 — the trigger is a recorded Windows run, not a CI job)
+
+This record's restated trigger — *"revisit this record when the OI-0065-001 Windows CI job lands"* —
+names something that will never land. AD-0070 rules that this project adopts no hosted CI of any
+kind; verification is a committed recipe run by the owner on a host that can observe the property,
+with the native exit status recorded under `docs/verification/`.
+
+**The rejection itself is unaffected**, and so is its reasoning: a retry test that cannot observe the
+Windows rename behaviour it is about is still not worth writing on a host that cannot observe it.
+
+Restated trigger: revisit when a **recorded Windows run** exists — a `docs/verification/` record
+produced on a Windows host — and that run either supplies the sharing-violation evidence the
+rejected test was meant to produce, or persistently fails to. Windows verification is currently on
+hold and owner-invoked, so this trigger is not expected to fire soon.

@@ -69,3 +69,23 @@ Re-open if:
 
 * A public API knob for specifying the temp parent becomes necessary (e.g. users on Windows needing a specific non-default temp volume).
 * The `tempfile` crate's behaviour around `TMPDIR` changes in a way that affects our RAII assumptions.
+
+## Amendment (2026-09-03, no Makefile, no hosted CI, and staging is now conditional)
+
+Three premises in the body have expired.
+
+**"This is already in place for the project's Makefile/CI recipes."** There is no Makefile in the
+repository and no hosted CI, and under AD-0070 there never will be — "CI" here means a committed
+recipe (`scripts/release-gate.sh`) run on an observing host with its native exit status recorded.
+The `TMPDIR` discipline is real but it lives in that recipe and in the contributor docs, not in a
+Makefile or a CI job.
+
+**"The project's test suite sets `TMPDIR=/Volumes/Temp/claude` before running tests."** That
+overstates it: the path is an owner-machine convention documented for contributors, not something
+the suite sets for itself. Tests must not hardcode it, which is the actual ruling of this record and
+is unaffected.
+
+**"`open_at_offset()` uses `tempfile::Builder::new().tempfile()` unconditionally."** True as of
+2026-04-18, not today. DCR-015 made ZIP, RAR and 7z payloads open in place, so the tempfile is
+created only on the staging fallback. Where a tempfile is still created it still respects `TMPDIR`,
+which is what this record required.

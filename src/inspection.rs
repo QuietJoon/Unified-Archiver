@@ -995,7 +995,7 @@ impl Archive {
     /// [`Self::multipart_layout`] cannot give. Both reduce the set to a list
     /// of paths, which can say "these three files" but not "and a fourth is
     /// missing between them". A hole, a duplicated volume number and a
-    /// foreign sibling all arrive here as [`VolumeSetDefect`]s; through the
+    /// foreign sibling all arrive here as [`crate::format::multipart::VolumeSetDefect`]s; through the
     /// other two they arrive as a shorter list, or as no signal at all.
     ///
     /// Nothing is recomputed to provide this. The parser already produced a
@@ -1017,7 +1017,7 @@ impl Archive {
     /// # Formats that cannot be multi-volume
     ///
     /// A format whose `supports_multipart()` is false reports
-    /// [`VolumeSetReport::Unvolumed`] without scanning the directory at all.
+    /// [`crate::format::multipart::VolumeSetReport::Unvolumed`] without scanning the directory at all.
     /// That includes 7z numeric splits today: the parser understands
     /// `VolumeScheme::Numeric`, but routing 7z through it is a capability
     /// decision that has not been taken (R0080-0093).

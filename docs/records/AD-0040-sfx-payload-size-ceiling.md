@@ -172,3 +172,20 @@ obsolete)" has now fired for exactly one backend. This decision becomes
 obsolete when the last staging path is gone; until then it governs the
 staged paths listed above, and the table is the authoritative statement
 of where that is.
+
+## Amendment (2026-09-03, DCR-015 — RAR and 7z joined ZIP on the in-place path)
+
+The 2026-08-21 table is superseded for two rows. It recorded `7z, RAR | staged | yes`, and called
+itself "the authoritative statement of where that is". DCR-015 moved both onto the in-place path:
+`Archive::try_open_in_place` now has a ZIP arm, a RAR arm (UnRAR relocates itself by scanning for
+its signature from byte 7, bounded by `UNRAR_MAX_SFX_SCAN`) and a 7z arm (handed a `PayloadWindow`
+that makes the payload offset look like byte 0). Each arm declines to `Ok(None)` — falling back to
+staging — rather than failing, if its constructor does not accept the payload.
+
+The **ruling of this record is untouched**: the ceiling still bounds a *copy*, and a payload that is
+never copied is admitted whatever the ceiling says. What changes is only how often the copy happens.
+The current answer to "which path did I get" is not this table but
+`Archive::payload_access() -> PayloadAccess`, which reports it per handle.
+
+Still staged: the libarchive-backed payloads (TAR family, ISO), and any input whose in-place gates
+decline — a path without an executable extension, or a signature that does not agree at the offset.

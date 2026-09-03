@@ -66,3 +66,9 @@ No code or doc edits beyond this record. Reviewers should, going forward:
 
 - Review 0044: `reviews/reviewed/044.md`
 - Related: AD 0022 (reject documentation restructuring from Reviews 042/043)
+
+## Amendment (2026-09-03, dangling cross-references)
+
+The References section's record ids predate the 2026-07-23 consolidation into `docs/records/` and
+do not resolve as written. Resolve them through `docs/records/redirects.yaml`, which maps the old
+paths onto their current filenames. The rejection this record states is unaffected.

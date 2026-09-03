@@ -360,3 +360,15 @@ test:
   output directory if the overwrite-conflict gate fails — better
   than the original "any error leaves dir behind", but not the full
   no-side-effect contract the review asked for.
+
+## Amendment (2026-09-03, two "not landed" notes have since landed)
+
+**R0070-0024 (path storage as `PathBuf`) shipped.** Group B recorded it as "a doc note for now"
+because of the field cascade. Both backend path fields are `PathBuf` today —
+`LibarchiveArchive.path` and `UnrarArchive.path` — as AD 0064's 2026-08-05 amendment separately
+verifies against the tree.
+
+**`SfxDetectionResult` was sealed further than this record describes.** The Group-B note says
+"field access stays" alongside `#[non_exhaustive]`. The fields are now `pub(crate)`
+(`src/sfx/result.rs`) and are reached through accessors, so external field access is gone entirely
+rather than merely being un-constructible.

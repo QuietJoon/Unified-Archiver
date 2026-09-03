@@ -59,7 +59,7 @@ Generated view; the authoritative catalogue is [`index.yaml`](index.yaml). See [
 - [AD-0063](AD-0063-r0075-closure-and-design-positions.md) — AD 0063: Review 0075 — closure record + design positions
 - [AD-0064](AD-0064-r0075-non-utf8-path-policy-option-a.md) — AD 0064: Non-UTF-8 path policy — preserve raw bytes (Option A)
 - [AD-0065](AD-0065-backend-caching-baseline-option-a.md) — AD 0065: Backend caching baseline — frozen-view at first use (Option A)
-- [AD-0066](AD-0066-r0076-sanitize-vs-reject-policy-deferred.md) — AD 0066: Path sanitization policy — preserve current \"lossy repair\" baseline, queue strict-reject opt-in
+- [AD-0066](AD-0066-r0076-sanitize-vs-reject-policy-deferred.md) — AD 0066: Path sanitization policy — preserve current "lossy repair" baseline, queue strict-reject opt-in
 - [AD-0067](AD-0067-r0076-closure-and-routing-record.md) — AD 0067: Review 0076 closure and routing record
 - [AD-0068](AD-0068-reject-review-0067-duplicate-of-0066.md) — AD 0068: Reject Review 0067 as byte-identical duplicate of Review 0066 — _archived_
 - [AD-0069](AD-0069-focused-closure-records-replace-omnibus-routing-tables.md) — AD 0069: Review closure is recorded in focused records, not in one omnibus routing table
@@ -70,14 +70,14 @@ Generated view; the authoritative catalogue is [`index.yaml`](index.yaml). See [
 - [MADR-0001](MADR-0001-r045-list-files-skips-crc-walk.md) — AD: `Archive::list_files()` skips the libarchive CRC walk
 - [MADR-0002](MADR-0002-r045-rar-progress-prescan-isolation.md) — AD: RAR extraction progress pre-scan uses an isolated handle
 - [MADR-0003](MADR-0003-r045-reject-bulk-internal-type-doc-entries.md) — AD: Reject bulk per-wrapper documentation entries; document the boundary instead
-- [MADR-0004](MADR-0004-r045-reject-src-prefix-false-positives.md) — AD: Reject the 39 \"missing source file\" issues — reviewer false positives
+- [MADR-0004](MADR-0004-r045-reject-src-prefix-false-positives.md) — AD: Reject the 39 "missing source file" issues — reviewer false positives
 - [MADR-0005](MADR-0005-r051-early-link-rejection-in-modify.md) — AD: Early link rejection in modify pipeline — _archived_
 - [MADR-0006](MADR-0006-r051-manifest-digest-computes-crc32-from-content.md) — AD: Manifest digest computes CRC32 from entry content for CRC-less formats — _superseded_
 - [MADR-0007](MADR-0007-r051-zip-aes256-creation-encryption.md) — AD: ZIP AES-256 creation encryption — _superseded_
 - [MADR-0008](MADR-0008-r052-manifest-digest-error-propagation.md) — AD: Manifest Digest Error Propagation (R0052-0001) — _superseded_
 - [MADR-0009](MADR-0009-r052-advisory-file-locking-modify-mode.md) — AD: Advisory File Locking for Modify Mode (R0052-0004)
 - [MADR-0010](MADR-0010-r052-extraction-warnings-result-with-warnings.md) — AD: Wire ResultWithWarnings into extract_all (R0052-0006/R0052-0007)
-- [MADR-0011](MADR-0011-r0001-unsupported-operation-display-text.md) — AD: UnsupportedOperation display text — \"cannot be performed\" replaces \"not implemented\ — _superseded_
+- [MADR-0011](MADR-0011-r0001-unsupported-operation-display-text.md) — AD: UnsupportedOperation display text — "cannot be performed" replaces "not implemented" — _superseded_
 - [MADR-0012](MADR-0012-r0001-reject-non-zip-creation-password.md) — AD: Reject non-ZIP creation password at facade boundary — _superseded_
 - [MADR-0013](MADR-0013-r0001-multipart-detection-heuristic-tightening.md) — AD: Multipart detection heuristic tightening + ZIP sort fix
 - [MADR-0014](MADR-0014-r0001-sfx-probable-confidence-clamp.md) — AD: SfxDetectionResult probable() confidence clamped to [0.0, 0.99] — _superseded_

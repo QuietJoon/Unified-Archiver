@@ -437,3 +437,27 @@ named inside that impl before a split can make it clearer rather than merely sma
 **The unexecuted remainder this record governs is therefore now: D2 migration steps 3-4, the D3
 `&ReadArchive` re-homing, the D9 field-level split, and D10's large-file splits.** D1 is complete,
 including the hook. The record stays **active**.
+
+## Amendment (2026-09-03, the `v2-api` default flip landed — D2 migration step 3 is done)
+
+The 2026-09-01 amendment's closing remainder named "D2 migration steps 3-4" as unexecuted. **Step 3
+has since executed.** `Cargo.toml` now reads `default = ["rar-support", "v2-api"]` (owner ruling,
+2026-09-03), so a default build exports `unified_archive::v2::{ReadArchive, WriteArchive,
+ModifyArchive}`. The flip had been held on "CI coverage" borrowed from AD 0058's ordering constraint
+2; AD-0070 established that the constraint was about AD 0058's *footprint* features and had nothing
+to say about this flag, and that the real requirement — both sides actually run — is now met by two
+release-gate lanes.
+
+**Step 4 cannot be done as written, and that is now recorded rather than pending.** It asks to
+"remove the `Archive` enum" and clean up `ArchiveMode` dispatch. The typed handles wrap the facade
+(`ReadArchive { inner: Archive }`), so removing it requires the backend split this record's D2
+describes and nobody has built. Tracked separately (ticgit `9448d8`) rather than left as a step that
+reads schedulable.
+
+Step 4's *schedule* has also been passed rather than reached: it says "In 0.4.0", and 0.4.0 is both
+the current `Cargo.toml` version and a live git tag. The flag, the facade and `ArchiveMode` all
+survive into the tagged 0.4.0.
+
+**Correction to an inline-test claim.** For the record, `src/archive.rs` today contains **no** inline
+`#[cfg(test)]` blocks at all — the four `#[cfg(test)]` sites are `mod` declarations pointing at
+child files (`tests`, `in_place_payload_tests`, `sfx_fallback_error_tests`, `sfx_payload_cap_tests`).

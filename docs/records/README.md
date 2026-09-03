@@ -6,10 +6,10 @@ previously-separate stores (`docs/architecture/decisions/`, `docs/decisions/`,
 
 ## Types & prefixes
 
-- **AD-NNNN** — architecture decisions (58).
-- **MADR-NNNN** — review-gate decisions (30), formerly `docs/decisions/`.
+- **AD-NNNN** — architecture decisions.
+- **MADR-NNNN** — review-gate decisions, formerly `docs/decisions/`.
   The `MADR-` prefix resolves the old collision where e.g. `0013` named both an AD and a gate decision.
-- **DCR-NNN** — design change records (9), delta pointers paired with an AD amendment.
+- **DCR-NNN** — design change records, delta pointers paired with an AD amendment.
 - **DD-NNN-NNN** — legacy *accepted* review decisions (24), read-only.
 - **IG-NNN-NNN** — legacy *rejected* findings with their rejection reasoning (24), read-only.
 

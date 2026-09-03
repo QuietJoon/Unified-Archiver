@@ -377,3 +377,14 @@ child and names a private method besides. It is a code span now, saying "in the 
 
 `cargo check --all-features --all-targets` exit 0 with zero Rust warnings. `ffi::zip_wrapper` 34
 passed / 0 failed. Full-gate figures are in the commit that carries this amendment.
+
+## Amendment (2026-09-03, the `sfx_fallback_error_tests` "deliberately inline" verdict was overridden)
+
+The table above records `sfx_fallback_error_tests` as **"No — deliberately inline"**, quoting the
+module's own doc. That verdict no longer describes the tree: both it and `sfx_payload_cap_tests` were
+moved out of `src/archive.rs` into child files under `src/archive/`, taking the parent from 2560 to
+2369 lines with the test count unchanged (1941 passed before and after).
+
+`src/archive.rs` now contains no inline `#[cfg(test)]` block at all; every `#[cfg(test)]` site in it
+is a `mod` declaration. The deferral this record states — that the *large-file* refactor of
+`archive.rs` proper is not worth doing yet — is unaffected; only the inline-test row is superseded.

@@ -103,3 +103,10 @@ the libarchive-discovery half is unchanged and still open).
 
 Status: still active. The Implementation section above describes the superseded make-based staging
 mechanism and is retained for history.
+
+## Amendment (2026-09-03, record-store renumbering)
+
+The cross-reference in the 2026-07-22 amendment uses a bare pre-consolidation record id that no
+longer resolves as written. Resolve it through `docs/records/redirects.yaml`. The substance it
+cites — that the Windows `panic!` was removed — still holds: `build.rs`'s Windows arm emits a
+warning and no link directives rather than panicking.

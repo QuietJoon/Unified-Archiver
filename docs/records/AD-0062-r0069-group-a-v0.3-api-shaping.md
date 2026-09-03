@@ -451,3 +451,18 @@ unchanged — they are the mechanism `extract_to_stream_impl` drives. The memory
 public API (`extract_to_memory` / `extract_to_memory_with_options`) never had an
 `_unbounded` twin and is untouched; the internal `CopyByteBudget` descriptor
 (`src/ffi/common.rs`) remains the memory layer's typed bound.
+
+## Amendment (2026-09-03, plan executed; two naming notes)
+
+**Status.** The `Status: Planned (v0.3)` line predates implementation and is stale — the groups it
+plans landed. The plan body is left as written; this line is the correction.
+
+**§A.3's `Piz` arm no longer exists.** The piz backend was removed by DCR-009 (2026-07-23) together
+with the `memmap2` dependency. The ZIP arm is now the single native `zip`-crate reader, and it
+honours `verify_crc32` exactly as this section describes — only the two-backend framing is
+historical.
+
+**§A.5 / §A.6 name an entry point that does not exist.** They call it
+`ArchiveFormat::detect_from_file`; the actual (and only) from-file API is `ArchiveFormat::detect`
+in `src/format.rs`, whose own rustdoc cites this record's A.5. The behaviour described — extension
+walk choosing a magic-buffer size — is accurate.

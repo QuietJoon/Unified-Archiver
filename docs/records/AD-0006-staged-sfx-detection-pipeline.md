@@ -56,3 +56,19 @@ The "Bad" consequence above is stale: `Archive::open_at_offset` has been impleme
 2026-04-18 (DEF-001 closure — non-zero offsets stage the payload to a tempfile under the AD 0040
 16 GiB ceiling), so the full SFX open flow (`Archive::open_sfx` → `open_at_offset`) is complete;
 see the MADR-0023 supersession amendment of the same date.
+
+## Amendment (2026-09-03, DCR-015 — staging is now the fallback, not the mechanism)
+
+The 2026-08-04 amendment describes `Archive::open_at_offset` in the present tense as staging every
+non-zero offset into a tempfile. That is no longer how the common case works. Under DCR-015 a ZIP,
+RAR or 7z payload behind an SFX-shaped path (executable extension), whose signature agrees at the
+offset, is opened **in place** — the backend reads the file the caller named, starting at the
+offset, and nothing is copied.
+
+The staged pipeline this record designed still exists and still runs, for the libarchive-backed
+formats and for any input the in-place gates decline, so the record's reasoning about staging
+remains live. It is the fallback rather than the mechanism.
+
+**Record-store numbering.** The bare ids in the 2026-07-22 (R0081 I3) amendment predate the
+2026-07-23 consolidation and no longer resolve as written; resolve them through
+`docs/records/redirects.yaml`.
