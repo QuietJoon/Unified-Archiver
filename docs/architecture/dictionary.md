@@ -17,7 +17,7 @@ Project terminology for unified-archive. Started in Phase 0, updated throughout.
 |---|---|---|---|
 | Archive | Handle to an opened archive file providing inspection, extraction, creation, and modification operations via a format-agnostic API | A compressed file containing other files | `src/archive.rs` |
 | ArchiveEntry | Metadata for a single file or directory within an archive, normalized across all formats (path, size, compressed size, timestamps, CRC32, encryption status) | A file inside a compressed archive | `src/entry.rs` |
-| ArchiveFormat | Enumeration of 12 format variants with capability queries (compression, encryption, multipart, modification). Standalone `Gzip`/`Bzip2`/`Xz`/`Zst`/`Lz4`/`Lzma` are independently openable via `Archive::open()` per MADR-0019; only *creation* of standalone raw streams is out of scope per AD 0018. | The type of compression used | `src/format.rs` |
+| ArchiveFormat | Enumeration of the supported archive and stream format variants, with capability queries (compression, encryption, multipart, modification). Standalone `Gzip`/`Bzip2`/`Xz`/`Zst`/`Lz4`/`Lzma` are independently openable via `Archive::open()` per MADR-0019; only *creation* of standalone raw streams is out of scope per AD 0018. | The type of compression used | `src/format.rs` |
 | ArchiveBackend | Internal enum dispatching operations to the correct native library (UnRAR, SevenZ, Libarchive, ZipReader) | N/A | `src/archive.rs` |
 | ArchiveMode | Access mode of an archive handle: Read, Write, or Modify | N/A | `src/archive.rs` |
 | EntryType | Classification of archive entries: File, Directory, Symlink, HardLink, Other | N/A | `src/entry.rs` |
@@ -44,7 +44,7 @@ Project terminology for unified-archive. Started in Phase 0, updated throughout.
 | libarchive | BSD-licensed C library for multi-format archive read/write support | Multi-format archive library | `src/ffi/libarchive.rs`, `src/ffi/libarchive_wrapper.rs` |
 | sevenz-rust2 | Native Rust crate for 7z format reading with CRC32 metadata (maintained fork) | 7z reading library | `src/ffi/sevenz_wrapper.rs` |
 | zip crate | Native Rust crate for ZIP read/write with AES-crypto support for encrypted ZIPs | ZIP library | `src/ffi/zip_wrapper.rs`, `src/ffi/zip_writer.rs` |
-| goblin | Pure Rust binary parser for PE/ELF/Mach-O executables, used in SFX stub detection | Binary format parser | `src/sfx/stub_types.rs` |
+| Stub header-field classification | In-crate PE/ELF/Mach-O identification-header and shebang checks in `src/sfx/stub_types.rs`; no binary-parsing crate is linked | Binary format parser | `src/sfx/stub_types.rs` |
 | Magic bytes | Format-identifying byte sequences at the start of archive files (e.g., `PK\x03\x04` for ZIP, `7z\xbc\xaf\x27\x1c` for 7z) | File signature / magic number | `src/format.rs` |
 | AtomicOutputFile | RAII staging wrapper for a single extracted file: writes to a sibling `tempfile::NamedTempFile`, renames into place on `commit()`, unlinks on drop | N/A | `src/ffi/common.rs` |
 
@@ -57,4 +57,4 @@ Project terminology for unified-archive. Started in Phase 0, updated throughout.
 | OnceLock | `std::sync::OnceLock` used for one-time initialization of the SFX signature table (process-global, thread-safe) | Thread-safe lazy initialization | `src/sfx/signatures.rs` |
 | CRC32 | 32-bit cyclic redundancy check used for archive integrity validation, SIMD-accelerated via `crc32fast` | Error detection code | `src/security.rs`, `src/stream_crc.rs` |
 | Copy-on-write | Modification strategy: write new archive with changes, then atomically replace original | Delayed copy optimization | `src/modification.rs` |
-| Atomic rename | Platform-aware file replacement (`rename` on Unix, `rename` + retry on Windows) for safe archive modification commits | File system operation | `src/modification.rs` |
+| Atomic rename | Platform-aware file replacement (`std::fs::rename` on Unix; a single `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH` on Windows — no retry loop, so a transient sharing violation surfaces rather than being retried) for safe archive modification commits | File system operation | `src/modification.rs` |

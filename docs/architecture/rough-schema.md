@@ -13,10 +13,14 @@ In-memory entity structure for unified-archive. This library has no database —
 
 ## Archive
 
+> Selected fields. `Archive` also carries staging/locking state — the payload source backing an
+> SFX open, the advisory lock file, and the write-poisoned / finalized flags — whose contracts are
+> documented on the methods that own them rather than here.
+
 | Field | Type | Notes |
 |---|---|---|
-| backend | `ArchiveBackend` (enum) | UnRAR, SevenZ, Libarchive, ZipReader variants |
-| entry_cache | `OnceCell<Vec<ArchiveEntry>>` | Lazy cache, populated on first `list_files()` |
+| backend | `ArchiveBackend` (enum) | Unrar (behind `rar-support`), SevenZ, ZipReader, ZipWriter, Libarchive variants |
+| entry_cache | `OnceCell<Arc<Vec<ArchiveEntry>>>` | Lazy cache, populated on first `list_files()`; shares storage with the backend listing cache via `Arc` (OI-0065-003) |
 | format | `ArchiveFormat` | Eagerly detected from magic bytes at open time |
 | path | `PathBuf` | Path to archive file on disk |
 | mode | `ArchiveMode` | Read, Write, or Modify |
@@ -44,6 +48,7 @@ In-memory entity structure for unified-archive. This library has no database —
 | entry_type | `EntryType` | File, Directory, Symlink, HardLink, Other |
 | permissions | `Option<u32>` | Unix mode bits |
 | attributes | `Option<FileAttributes>` | Platform-specific (Windows flags, Unix xattr) |
+| raw_path | `Option<Vec<u8>>` | (pub) Raw on-wire entry name bytes when they do not round-trip through UTF-8 (AD 0064); `None` when `path` is already byte-exact or the backend surfaces no raw name |
 | id | `usize` | (pub) Position within archive |
 
 - **Owned by:** `entry.rs`
@@ -64,6 +69,9 @@ In-memory entity structure for unified-archive. This library has no database —
 | TarGzip | `\x1f\x8b` | Yes | No | No | No |
 | TarBzip2 | `BZ` | Yes | No | No | No |
 | TarXz | `\xfd7zXZ\x00` | Yes | No | No | No |
+| TarZst | zstd frame magic (after any skippable-frame prefix) | Yes | No | No | No |
+| TarLz4 | LZ4 frame magic | Yes | No | No | No |
+| TarLzma | LZMA alone-format header | Yes | No | No | No |
 | Iso | `CD001` at offset 32769 | No | No | No | No |
 
 **Raw compressed-stream variants (read/extract supported via libarchive per MADR-0019; standalone *creation* out of scope per AD 0018):**
@@ -128,6 +136,7 @@ Field order follows the declaration order in `src/options.rs`.
 | NotImplemented | operation, reason | Fatal |
 | OperationBlocked | operation, reason | Fatal |
 | InvalidPath | path, reason | Fatal (security) |
+| Cancelled | operation: `&'static str` | Recoverable (caller-initiated, via a progress callback returning `ControlFlow::Break`) |
 
 - **Owned by:** `error.rs`
 - **Implements:** `std::error::Error`, `Display`

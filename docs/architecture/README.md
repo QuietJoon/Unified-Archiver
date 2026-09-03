@@ -47,8 +47,8 @@ Single library crate (`unified-archive`). No bundled CLI or service. Consumers a
 | Domain / Policy | `src/entry.rs`, `src/error.rs`, `src/format.rs`, `src/options.rs`, `src/security.rs`, `src/streaming.rs`, `src/stream_crc.rs` | Data types, error types, configuration objects, path sanitization, extraction limits |
 | Backend Adapters | `src/ffi/wrapper.rs`, `src/ffi/libarchive_wrapper.rs`, `src/ffi/sevenz_wrapper.rs`, `src/ffi/zip_wrapper.rs`, `src/ffi/zip_writer.rs` | Safe wrappers translating backend-specific behavior into unified domain types |
 | Native Bindings | `src/ffi/unrar.rs`, `src/ffi/libarchive.rs`, `src/ffi/common.rs` | Raw C FFI declarations and shared backend utilities |
-| SFX Pipeline | `src/sfx.rs` (module root / re-exports), `src/sfx/detection.rs`, `src/sfx/signatures.rs`, `src/sfx/stub_types.rs` | 3-stage SFX detection (stub type -> signature scan -> plausibility screening; open validates payload) |
-| External Tools | `src/external/rar.rs` (feature-gated) | Optional RAR creation via external WinRAR CLI (`rar.exe`); the `external-rar-create` feature shells out to a system process, unlike all other backends which are in-process |
+| SFX Pipeline | `src/sfx.rs` (module root / re-exports), `src/sfx/detection.rs`, `src/sfx/signatures.rs`, `src/sfx/stub_types.rs`, `src/sfx/result.rs`, `src/sfx/limits.rs` | 3-stage SFX detection (stub type -> signature scan -> plausibility screening; open validates payload) |
+| External Tools | `src/external.rs`, `src/external/rar.rs` and `src/external/rar/*` — `argv`, `discovery`, `error`, `exit`, `runner`, `session`, `version` (feature-gated) | Optional RAR creation via external WinRAR CLI (`rar.exe`); the `external-rar-create` feature shells out to a system process, unlike all other backends which are in-process |
 | Build | `build.rs` | Native toolchain orchestration for libarchive and UnRAR SDK |
 
 ## Ownership Overview
@@ -82,7 +82,7 @@ Backup archive creation during modification: `create_backup` and `backup_suffix`
 
 - **Input:** Caller-provided archive files (read-only access)
 - **Output:** Extracted files to caller-specified destinations; newly created archive files
-- **Temp files:** Created during SFX offset opening (`tempfile::TempPath` owned by the returned `Archive`), the UnRAR extract-to-memory path (`tempfile::TempDir`, dropped when the call returns), per-file atomic extraction writes (`AtomicOutputFile` over `tempfile::NamedTempFile` — renamed into place on commit, unlinked on drop), and modification (self-named sibling temp archive, consumed by the atomic rename or explicitly removed on failure). `TempDirGuard` no longer exists — see the Persistence Overview table above and `docs/records/AD-0059-r0069-wide-modular-design-closure.md` (R0001-0094)
+- **Temp files:** Created when SFX offset opening has to *stage* — ZIP, RAR and 7z payloads open in place (DCR-015) and allocate nothing, while libarchive-backed payloads and any declined open stage into a `tempfile::TempPath` owned by the returned `Archive` — the UnRAR extract-to-memory path (`tempfile::TempDir`, dropped when the call returns), per-file atomic extraction writes (`AtomicOutputFile` over `tempfile::NamedTempFile` — renamed into place on commit, unlinked on drop), and modification (self-named sibling temp archive, consumed by the atomic rename or explicitly removed on failure). `TempDirGuard` no longer exists — see the Persistence Overview table above and `docs/records/AD-0059-r0069-wide-modular-design-closure.md` (R0001-0094)
 - **Streaming:** Native backends (ZIP, SevenZ, UnRAR) buffer full entries into memory for `extract_to_stream()`; only libarchive-backed formats provide true streaming reads
 - **Modification:** Copy-on-write rewrite with atomic rename
 

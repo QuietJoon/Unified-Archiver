@@ -1,7 +1,7 @@
 # Architecture Index
 
 * [Architecture: unified-archive](README.md) - Maintainer note: this directory is design and implementation material, not the release-facing contract.
-* [ADR / DCR corpus design review — revert, improve, innovate](adr-dcr-design-review-2026-07-19.md) - Full-corpus critique of all 93 decision records (55 architecture ADs, 30 review-gate MADRs, 8 DCRs) at small and big focus; revert candidates prioritized.
+* [ADR / DCR corpus design review — revert, improve, innovate (incomplete)](adr-dcr-design-review-2026-07-19.md) - Incomplete: only the scope and method preamble was preserved; the findings were never part of this file. Superseded in practice by decision-review-2026-07-19.md.
 * [Bootstrap Config](bootstrap-config.md) - This document describes how the project is run locally, how processes are started, and where environment / configuration is sourced from.
 * [Config Surface](config-surface.md) - Configuration categories, ownership, and usage.
 * [ADR / DCR design review — revert / improve / innovate](decision-review-2026-07-19.md) - Cross-cutting critique of all 93 decision records (57 architecture ADs + 30 review-gate MADRs + 8 DCRs), prioritising reversible decisions. Design-only; no code changes made.

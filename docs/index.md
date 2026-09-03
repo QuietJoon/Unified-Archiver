@@ -32,13 +32,13 @@ okf_version: "0.1"
 
 ## Architecture
 * [Architecture: unified-archive](architecture/README.md) - Maintainer note: this directory is design and implementation material, not the release-facing contract.
-* [ADR / DCR corpus design review — revert, improve, innovate](architecture/adr-dcr-design-review-2026-07-19.md) - Full-corpus critique of all 93 decision records (55 architecture ADs, 30 review-gate MADRs, 8 DCRs) at small and big focus; revert candidates prioritized.
+* [ADR / DCR corpus design review — revert, improve, innovate (incomplete)](architecture/adr-dcr-design-review-2026-07-19.md) - Incomplete: only the scope and method preamble was preserved; the findings were never part of this file. Superseded in practice by decision-review-2026-07-19.md.
 * [ADR / DCR design review — revert / improve / innovate](architecture/decision-review-2026-07-19.md) - Cross-cutting critique of all 93 decision records (57 architecture ADs + 30 review-gate MADRs + 8 DCRs), prioritising reversible decisions. Design-only; no code changes made.
 * [Bootstrap Config](architecture/bootstrap-config.md) - This document describes how the project is run locally, how processes are started, and where environment / configuration is sourced from.
 * [Config Surface](architecture/config-surface.md) - Configuration categories, ownership, and usage.
 * [Dictionary](architecture/dictionary.md) - Project terminology for unified-archive.
 * [Effort and Risk](architecture/effort-and-risk.md) - Dependency-ordered implementation slices with risk notes.
-* [MVP Scope: unified-archive v0.1.0](architecture/mvp-scope.md) - List archive contents with metadata via unified API (ZIP, RAR/RAR5, 7z, TAR variants, ISO)
+* [MVP Scope: unified-archive](architecture/mvp-scope.md) - List archive contents with metadata via unified API (ZIP, RAR/RAR5, 7z, TAR variants, ISO)
 * [Persistence and Files](architecture/persistence-and-files.md) - State persistence and file lifecycle design for unified-archive.
 * [Rough Schema](architecture/rough-schema.md) - In-memory entity structure for unified-archive.
 * [Scenario Matrix](architecture/scenario-matrix.md) - Scenario-to-system mapping for all mandatory MVP scenarios.

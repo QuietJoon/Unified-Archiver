@@ -1,13 +1,15 @@
 ---
 type: MVP Scope
-title: "MVP Scope: unified-archive v0.1.0"
+title: "MVP Scope: unified-archive"
 description: "List archive contents with metadata via unified API (ZIP, RAR/RAR5, 7z, TAR variants, ISO)"
 tags: [architecture, ADR-0021, ADR-0040, ADR-0053, R0071-0020, R0070-0001, R0070-0002, OI-0057-003]
 timestamp: 2026-04-30T00:00:00Z
 status: active
 ---
 
-# MVP Scope: unified-archive v0.1.0
+# MVP Scope: unified-archive
+
+> Baselined for v0.1.0 and kept current through v0.4.0.
 
 ## In-Scope Scenarios
 
@@ -47,7 +49,7 @@ status: active
 - Detect ScriptInterpreter SFX (shebang-based self-extractors)
 - Reject standard archives (not SFX) correctly
 - Reject non-archive executables correctly
-- Detect SFX with unknown/custom stubs via heuristic scan — resolved (OI-027-001)
+- Reject SFX with unknown/custom stubs at Stage 1 — a `StubType::Unknown` header returns `not_sfx()` before the signature scan (R0070-0076, AD-0060), superseding the earlier heuristic-scan resolution under OI-027-001
 
 ## Out-of-Scope (Explicit Non-Goals)
 
@@ -56,7 +58,7 @@ status: active
 | ISO format creation | Read-only via libarchive; no write support in scope |
 | In-place `open_at_offset` for every backend | **Mostly shipped.** ZIP landed 2026-08-21 (ticket `1ddc37ec`); RAR and 7z landed 2026-09-01 (ticket `5858e17b`). For all three, a payload behind an SFX stub is opened where it lies — no tempfile copy, and the AD 0040 ceiling does not apply. Each arrives differently: ZIP and RAR relocate themselves (the `zip` crate resolves prepended data from the end-of-central-directory record; UnRAR's own `IsArchive` scans for the first marker), while 7z is reached through `crate::payload_window::PayloadWindow`, a `Read + Seek` view that makes the payload offset look like byte 0. **libarchive (TAR family, ISO, raw streams) still stages**, and that is a decision rather than an omission: its formats carry no strong magic at the payload offset — plain tar's `ustar` sits at +257, gzip's is two bytes — so a gate cheap enough to run would admit garbage, and committing to an open that then failed format bidding would need a fall-back-after-failed-open path `try_open_in_place` deliberately does not have. Tracked as ticket `05e2dea4`, which carries the design; the constituency it costs is makeself `.run` installers, which are stub + tar.gz and routinely multi-GB. `Archive::payload_access()` reports which path a handle took. |
 | ~~SecStr migration for all password fields~~ | **Resolved 2026-04-17** (OI-0057-003): `ExtractionOptions.password` and `CompressionOptions.password` are `Option<SecStr>` with zeroize-on-drop; decoded only at the FFI boundary. |
-| Split archive creation | `split_size` field exists but ignored; multi-part creation remains deferred (originally targeted v0.2.0; the v0.2.0 release shipped without it — R0071-0020). |
+| Split archive creation | `split_size` exists but is **rejected, not ignored** — `Some(_)` returns `OperationBlocked` for every format (DEF-002); multi-part creation remains deferred (originally targeted v0.2.0; the v0.2.0 release shipped without it — R0071-0020). |
 | True streaming extraction | Native backends (ZipReader, SevenZ, UnRAR) buffer full entries; true streaming limited to libarchive. Current non-libarchive path: extract-to-memory + Cursor wrapper. ZipReader is the sole ZIP backend (DCR-009) and provides buffered decryption for encrypted ZIP. |
 | ~~Backend trait abstraction~~ | **Landed in v0.2.0**: `src/backend.rs` provides `ReadBackend` plus mode-aware `dispatch_read_archive` / `dispatch_read_backend` helpers (R0070-0001 / R0070-0002, R0071-0020). Further `WriteBackend` / `ModifyBackend` traits remain deferred — see AD 0053. |
 | Interactive password prompts | Password must be provided programmatically before extraction |
@@ -68,8 +70,8 @@ status: active
 | Platform | Status | Notes |
 |---|---|---|
 | macOS (aarch64/x86_64) | Primary target | All backends tested |
-| Linux (x86_64) | Partial | UnRAR `wchar_t` layout issue pending (IG-020-003) |
-| Windows | Not yet tested on Windows | Build expected to work; no CI coverage |
+| Linux (x86_64) | Unverified — no verification record | The UnRAR `wchar_t` layout issue (IG-020-003) was reopened and fixed in Review 0080 via the `RarWchar` alias. Per AD-0070 no record exists under `docs/verification/` for a Linux host yet. |
+| Windows | Unverified — no verification record | Build expected to work. Per AD-0070 a platform is release-verified only once a `docs/verification/` record produced on it exists; none does. libarchive is additionally not auto-discovered there (OI-0065-001). |
 
 ## Deferred Integrations
 

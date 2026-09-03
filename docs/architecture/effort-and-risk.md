@@ -20,7 +20,7 @@ Dependency-ordered implementation slices with risk notes. Retrospective — all 
 **Risk notes:**
 - UnRAR static linking required platform-conditional `wchar_t` handling (macOS UTF-32 vs Windows UTF-16)
 - libarchive linking via `pkg-config` required system-level library installation
-- Linux `wchar_t` layout issue remains (IG-020-003) — macOS is primary target
+- UnRAR `wchar_t` width differs by platform (UTF-16 on Windows, UTF-32 elsewhere); handled by the `RarWchar` alias in `src/ffi/unrar.rs` with compile-time layout locks (IG-020-003, reopened and fixed in Review 0080). Linux remains *unverified* for want of a recorded run, not for want of a fix.
 
 ### Slice 2: Inspection (Phase 3)
 **Dependencies:** Slice 1
@@ -36,7 +36,7 @@ Dependency-ordered implementation slices with risk notes. Retrospective — all 
 **Scope:** `extract_all`, `extract_file`, `extract_to_memory`, `extract_filtered`, `extract_to_stream`, parallel extraction, progress callbacks, password handling, CRC verification
 **Status:** Complete
 **Risk notes:**
-- Per-entry reopen strategy for parallel extraction adds I/O overhead — AD 0005
+- Internal parallel extraction was never adopted (AD 0005, as amended, and superseded in part by AD 0029): `rayon` is not a dependency and selective extraction is a single traversal, so the per-entry reopen this row warned about no longer exists
 - `extract_to_memory` uses temp files for UnRAR backend; libarchive reads directly into buffer — IG-011-004. ZipReader provides buffered decryption for encrypted ZIP entries.
 - Non-libarchive streaming wraps buffer in Cursor (ZipReader, SevenZ, UnRAR); libarchive backends truly stream — IG-004-01
 - Rate-limited progress callbacks prevent UI flooding at ~60 Hz
@@ -61,13 +61,13 @@ Dependency-ordered implementation slices with risk notes. Retrospective — all 
 - `commit_changes()` performs a full copy-on-write rewrite: libarchive reads the source side while the write side is the format-specific creation backend (`ZipWriter` for ZIP; libarchive for the rest). The result is atomic-renamed over the original. This is a public `Archive` workflow, not a libarchive-internal detail.
 - Copy-on-write rewrite requires full archive read + write — significant temp disk usage for large archives
 - ZIP modification using libarchive on the read side is unreliable — some test scenarios ignore-gated
-- Platform-specific atomic rename: Unix `rename` vs Windows retry logic
+- Platform-specific atomic rename: `std::fs::rename` on Unix vs a single `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH` on Windows — there is no retry loop, so a transient sharing violation surfaces to the caller
 - Backup creation during modification: `create_backup` and `backup_suffix` are honored via `modify_with_options()` (AD 0020); `preserve_metadata` preserves modified, accessed, and created timestamps plus Unix permissions on retained regular-file entries (OI-0065-002 resolved); `ModificationOptions::compression` overrides archive recreation settings (OI-025-001 resolved 2026-04-14)
 
 ### Slice 6: SFX Detection (Phase 7)
 **Dependencies:** Slice 1
 **Scope:** `detect_sfx`, `open_sfx`, `extract_stub`, stub type detection (PE/ELF/Mach-O/Script), signature scanning, 3-stage pipeline
-**Status:** Shipped: detection complete; `Archive::open_at_offset()` is implemented via a tempfile slice of the payload with a 16 GiB ceiling (AD 0040). Remaining caveats: limited real-world corpus coverage.
+**Status:** Shipped: detection complete; `Archive::open_at_offset()` opens ZIP, RAR and 7z payloads **in place** (DCR-015 — ZIP and RAR relocate themselves, 7z is reached through a `PayloadWindow`). The tempfile slice with the 16 GiB ceiling (AD 0040) is now the fallback, used for libarchive-backed payloads and any input the in-place gates decline. Remaining caveats: limited real-world corpus coverage.
 **Risk notes:**
 - 1MB scan limit is a design trade-off: covers known synthetic SFX stubs but misses custom stubs >1MB. Coverage validated against synthetic fixtures only (no real-world corpus); SFX tests are synthetic-suite-only evidence.
 - `open_at_offset` currently copies the payload tail to a tempfile before handing off to the backend; true in-place offset-aware opening remains the architectural target — IG-005-01
@@ -79,7 +79,7 @@ Dependency-ordered implementation slices with risk notes. Retrospective — all 
 |---|---|---|
 | Streaming APIs memory-backed for most backends | Memory diverges from true streaming expectations | Implement handle-backed streaming readers |
 | UnRAR handle lifecycle causes reopen-heavy flows | Additional I/O overhead | Introduce internal handle manager/pool |
-| `open_at_offset` copies the payload tail to a tempfile | Cost scales with payload size (capped at 16 GiB); no true in-place offset-aware opening | Add backend offset support to avoid the tempfile copy |
+| libarchive-backed `open_at_offset` still stages a tempfile copy | Cost scales with payload size (capped at 16 GiB); ZIP, RAR and 7z already open in place per DCR-015 | Add an offset-aware open for the libarchive backend, the one remaining staging path |
 | Modify-mode comment/xattr propagation | Comments and extended attributes still not carried through modify-mode commits on non-ZIP backends | Extend `commit_changes()` metadata pass to comments/xattrs |
 | ZIP modification partially reliable | Some scenarios ignore-gated | Use ZIP-native read/write pipeline |
 | `ZipReader::list_files_for_limits` lacks optimization | Full CRC32 computed unnecessarily | Add metadata-only listing method |

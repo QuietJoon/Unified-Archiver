@@ -265,5 +265,3 @@ owner should commission next.
 - R0081-0076 / R0081-0077 — special-type mapping, fixed by the shared `classify_zip_entry_type`.
 - OI-0076-002 — the doubled single-entry defense surface a single backend collapses.
 - decision-review-2026-07-19.md §A/R4 — the revert candidate this analysis expands.
-</content>
-</invoke>

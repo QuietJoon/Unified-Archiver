@@ -61,7 +61,7 @@ See `docs/architecture/config-surface.md` for the complete configuration catalog
 |---|---|---|
 | `rar-support` | enabled | Links the UnRAR C/C++ SDK and compiles the UnRAR backend. |
 | `external-rar-create` | disabled | Enables the out-of-process WinRAR CLI bridge for RAR creation (`src/external/rar.rs`, `RarCreator`). Windows-only; requires a licensed `rar.exe`. |
-| `v2-api` | disabled | Exposes the D2 typed-handle split as `unified_archive::v2::{ReadArchive, WriteArchive, ModifyArchive}`. Additive in v0.3; enabled by default in v0.4. |
+| `v2-api` | enabled (default since 2026-09-03) | Exposes the D2 typed-handle split as `unified_archive::v2::{ReadArchive, WriteArchive, ModifyArchive}`. Additive in v0.3; enabled by default in v0.4. |
 
 ## Temp/scratch storage
 
