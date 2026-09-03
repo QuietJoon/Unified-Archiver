@@ -1785,18 +1785,21 @@ impl LibarchiveArchive {
                     }
 
                     let stage = build_staging_path(&resolved)?;
-                    let stage_str = stage.to_string_lossy();
-                    let stage_cstr = CString::new(stage_str.as_bytes()).map_err(|_| {
-                        ArchiveError::invalid_path(stage_str.as_ref(), "Contains null byte")
-                    })?;
+                    // AD 0064 / R0076-0039: this CString *is* the
+                    // filesystem destination libarchive writes to, so it
+                    // must carry the destination's raw bytes.
+                    // `to_string_lossy` substituted U+FFFD for every
+                    // non-UTF-8 byte in `dest_path`, so libarchive built a
+                    // second, replacement-char directory tree and the
+                    // raw-byte rename below then failed with ENOENT.
+                    // Windows still takes the lossy fallback inside
+                    // `path_to_cstring` (OI-0065-001).
+                    let stage_cstr = path_to_cstring_checked(&stage)?;
                     archive_entry_set_pathname(entry_ptr, stage_cstr.as_ptr());
                     staged_path = Some(stage);
                     _entry_path_cstring = stage_cstr;
                 } else {
-                    let final_str = resolved.to_string_lossy();
-                    let final_cstr = CString::new(final_str.as_bytes()).map_err(|_| {
-                        ArchiveError::invalid_path(final_str.as_ref(), "Contains null byte")
-                    })?;
+                    let final_cstr = path_to_cstring_checked(&resolved)?;
                     archive_entry_set_pathname(entry_ptr, final_cstr.as_ptr());
                     _entry_path_cstring = final_cstr;
                 }
@@ -2146,15 +2149,19 @@ impl LibarchiveArchive {
                 }
 
                 let stage = build_staging_path(&full_path)?;
-                let stage_str = stage.to_string_lossy();
-                let stage_cstr = match CString::new(stage_str.as_bytes()) {
+                // AD 0064 / R0076-0040: same destination-fidelity rule as
+                // the extract-all path — the CString handed to
+                // `archive_entry_set_pathname` is where libarchive puts
+                // the bytes, so it must be the destination's raw bytes,
+                // not a lossy rendering of them. The staging cleanup on
+                // the NUL-rejection arm is preserved. Windows still takes
+                // the lossy fallback inside `path_to_cstring`
+                // (OI-0065-001).
+                let stage_cstr = match path_to_cstring_checked(&stage) {
                     Ok(cstr) => cstr,
-                    Err(_) => {
+                    Err(e) => {
                         let _ = std::fs::remove_file(&stage);
-                        return Err(ArchiveError::invalid_path(
-                            stage_str.as_ref(),
-                            "Contains null byte",
-                        ));
+                        return Err(e);
                     }
                 };
 

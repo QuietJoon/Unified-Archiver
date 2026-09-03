@@ -92,13 +92,22 @@ impl LibarchiveArchive {
             ));
         }
 
-        let path_str = path.as_ref().to_string_lossy().to_string();
+        // AD 0064 / R0076-0021: keep the caller's raw path bytes. This
+        // used to be `to_string_lossy().to_string()`, and that lossy
+        // result became `self.path` — so a non-UTF-8 archive path was
+        // silently substituted for every later use of the field:
+        // `sync_parent_dir` at the durability boundary, the `path`
+        // carried by `ArchiveError::Io`, and the read-side
+        // `path_to_cstring_checked(&self.path)` reopen that
+        // `Archive::list_files` reaches even on a write-mode handle.
+        //
         // Reject NULs early so the path can be safely surfaced in error
         // messages; libarchive itself never sees a `*const c_char` from
-        // this path now that `archive_write_open_fd` carries the fd.
-        if path_str.as_bytes().contains(&0) {
-            return Err(ArchiveError::invalid_path(&path_str, "Contains null byte"));
-        }
+        // this path now that `archive_write_open_fd` carries the fd, so
+        // the CString built here is validation only and is dropped
+        // immediately.
+        let output_path: &Path = path.as_ref();
+        crate::ffi::common::path_to_cstring_checked(output_path)?;
 
         unsafe {
             let archive = archive_write_new();
@@ -340,7 +349,7 @@ impl LibarchiveArchive {
                 Ok(f) => f,
                 Err(e) => {
                     archive_write_free(archive);
-                    return Err(ArchiveError::io("write_open", path_str.clone(), e));
+                    return Err(ArchiveError::io("write_open", output_path.to_path_buf(), e));
                 }
             };
 
@@ -389,7 +398,7 @@ impl LibarchiveArchive {
                     archive_write_free(archive);
                     return Err(ArchiveError::io(
                         "write_open",
-                        path_str.clone(),
+                        output_path.to_path_buf(),
                         std::io::Error::other("_open_osfhandle failed"),
                     ));
                 }
@@ -410,13 +419,13 @@ impl LibarchiveArchive {
                 }
                 return Err(ArchiveError::io(
                     "write_open",
-                    path_str.clone(),
+                    output_path.to_path_buf(),
                     std::io::Error::other(error_msg),
                 ));
             }
 
             Ok(Self {
-                path: PathBuf::from(path_str),
+                path: output_path.to_path_buf(),
                 write_handle: Some(archive),
                 #[cfg(unix)]
                 write_output: Some(output_file),
