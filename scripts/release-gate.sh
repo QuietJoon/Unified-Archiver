@@ -74,6 +74,12 @@ artifacts="${artifacts:-/Volumes/Temp/claude/gate/release-${today}-${short_sha}}
 mkdir -p "${artifacts}"
 summary="${artifacts}/SUMMARY.md"
 
+# Where cargo will actually build. Read, never set — that setting is
+# machine-critical here. Used by the contention audit below to tell a build
+# that would serialise against this one from a build that merely shares a CPU.
+target_dir="$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
+    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+
 # --- Preamble: the fingerprint. Condition 4. -------------------------------
 dirty="$(git status --porcelain 2>/dev/null)"
 dirty_digest="clean"
@@ -91,7 +97,7 @@ fi
     echo "- host: \`$(uname -srm)\`$( [[ "$(uname -s)" == Darwin ]] && echo " / macOS $(sw_vers -productVersion 2>/dev/null)" )"
     echo "- rustc: \`$(rustc -V 2>/dev/null)\`"
     echo "- cargo: \`$(cargo -V 2>/dev/null)\`"
-    echo "- target dir (as cargo reports it, never set by this script): \`$(cargo metadata --format-version 1 --no-deps 2>/dev/null | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')\`"
+    echo "- target dir (as cargo reports it, never set by this script): \`${target_dir:-unknown}\`"
     echo "- TMPDIR: \`${TMPDIR:-<unset>}\`"
     echo "- temp volume free: \`$(df -h "${TMPDIR:-/tmp}" 2>/dev/null | tail -1 | awk '{print $4" of "$2}')\`"
     echo "- started: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -104,16 +110,46 @@ if [[ -n "${dirty}" ]]; then
 fi
 
 # --- Contention audit. Never kills anything. -------------------------------
-foreign="$(pgrep -x cargo 2>/dev/null | wc -l | tr -d ' ')"
-foreign_rustc="$(pgrep -x rustc 2>/dev/null | wc -l | tr -d ' ')"
-if [[ "${foreign}" -gt 0 || "${foreign_rustc}" -gt 0 ]]; then
-    echo "contention: ${foreign} cargo, ${foreign_rustc} rustc already running." >&2
+#
+# What actually serialises against this gate is another build using the SAME
+# target directory: cargo takes a lock on it, so such a build does not slow
+# this one down, it blocks it. A build in a different project uses a different
+# target directory (this machine gives each project its own) and can only
+# compete for CPU.
+#
+# This audit used to refuse on ANY cargo or rustc process anywhere on the
+# host. On a machine that builds several projects at once that is almost
+# always true, so the gate was refusing on evidence of nothing — measured
+# 2026-09-03, it refused while the only other cargo was in an unrelated
+# project and this project's target directory was untouched.
+#
+# The signal used instead: does the process hold any file under our target
+# directory? Verified to separate the two cases cleanly.
+same_target=()
+other_builds=0
+for pid in $(pgrep -x cargo 2>/dev/null; pgrep -x rustc 2>/dev/null); do
+    if [[ -n "${target_dir}" ]] && lsof -p "${pid}" 2>/dev/null | grep -qF -- "${target_dir}"; then
+        same_target+=("${pid}")
+    else
+        other_builds=$((other_builds + 1))
+    fi
+done
+
+if [[ "${#same_target[@]}" -gt 0 ]]; then
+    echo "contention: ${#same_target[@]} process(es) are building into ${target_dir}" >&2
+    echo "  pids: ${same_target[*]}" >&2
     if [[ "${allow_contention}" -ne 1 ]]; then
-        echo "Refusing to start. These may belong to someone else — DO NOT kill them." >&2
-        echo "Wait, or re-run with --allow-contention and expect a much slower gate." >&2
+        echo "Refusing to start: cargo locks the target directory, so this gate would" >&2
+        echo "block rather than run. These may belong to someone else — DO NOT kill them." >&2
+        echo "Wait for them, or re-run with --allow-contention." >&2
         exit 3
     fi
     echo "proceeding anyway (--allow-contention)." >&2
+elif [[ "${other_builds}" -gt 0 ]]; then
+    # Worth saying, not worth refusing over: these cost wall-clock, not
+    # correctness, and a slow gate is still a valid gate.
+    echo "note: ${other_builds} unrelated cargo/rustc process(es) running in other" >&2
+    echo "      target directories. They compete for CPU only; proceeding." >&2
 fi
 
 # --- Lane runner. Condition 3: native status, written last. ----------------
