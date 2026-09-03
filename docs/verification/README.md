@@ -1,6 +1,6 @@
 # Verification records
 
-Each file here is one run of `scripts/release-gate.sh`, recorded. Together they
+Each file here records one run of the release gate — normally `scripts/release-gate.sh`, whose `SUMMARY.md` is the intended body. A hand-assembled record is acceptable when the lanes were run individually, provided each lane's own exit status is captured. Together they
 are what this project has instead of a hosted CI service — see **AD-0070**,
 which defines "CI-covered" as a property of evidence rather than of a vendor.
 
@@ -42,7 +42,8 @@ must not be confused:
 
 ## Naming
 
-`YYYY-MM-DD-<short-sha>.md`, plus the platform when it is not the macOS dev
-host — for example `2026-09-10-abc1234-windows.md`. One file per run; do not
+`YYYY-MM-DD-<short-sha>-<platform>.md` — **always** name the platform,
+including the macOS dev host, so a filename never has to be read as "macOS by
+omission". For example `2026-09-10-abc1234-windows.md`. One file per run; do not
 edit a record after the fact. If a run was wrong, take another and say so in
 the new one.

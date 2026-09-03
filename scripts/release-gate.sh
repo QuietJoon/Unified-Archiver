@@ -141,6 +141,12 @@ run_lane() {
 run_lane fmt    cargo fmt --all -- --check
 run_lane clippy cargo clippy --all-targets --all-features -- -D warnings
 
+# L2b: clippy on the minimal profile. Added 2026-09-03: this lane was being run
+# by hand at every gate but was never in the recipe, so the recipe did not
+# reproduce the gate — AD-0070 condition 1. The minimal profile is exactly where
+# dangling items hide, because nothing else builds it.
+run_lane clippy-no-default-features cargo clippy --all-targets --no-default-features -- -D warnings
+
 # L3: the full profile. This is the lane the project has historically run.
 run_lane test-all-features cargo test --all-features -- --test-threads=4
 

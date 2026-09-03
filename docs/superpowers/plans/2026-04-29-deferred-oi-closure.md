@@ -22,7 +22,10 @@ status: archived
 > construction order, v0.4), tracked in the open-issues ledger — not this plan. Kept for audit
 > only.
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers: do NOT execute this plan.** It is RETIRED (see the banner above) and is
+> kept only as a record of what was done. Its unchecked `- [ ]` boxes are stale, not open work —
+> an agent that treats them as a task list will redo landed work. If you arrived here looking for
+> live work, use `docs/backlog.md` and the TicGit backlog instead.
 
 **Goal:** Close every "fix-now" route the user assigned during Review-0075 Phase 2 (OI-0069-002 residual, OI-0075-001, OI-0075-003, OI-0075-004) and write standalone design notes (cons/pros) for the three OIs the user wants surfaced for later decision (OI-0058-001, OI-0065-002, OI-0075-002). OI-0065-001 is skipped entirely — Windows CI is not on this host.
 

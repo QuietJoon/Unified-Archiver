@@ -74,3 +74,18 @@ return `NotImplemented`, never an `Unsupported` carrying a forged format — was
 remains good guidance for future deferrals, but it has no remaining call site. AD 0006's stale
 "`open_at_offset` … remains unimplemented" consequence is corrected by a same-date amendment
 there.
+
+## Amendment (2026-09-03, the "no-copy `open_at_offset` is out of scope" clause was overtaken by DCR-015)
+
+The body records that "the shipped API is tempfile-backed, not in-place; a true no-copy
+`open_at_offset` remains explicitly out of scope", and the 2026-08-04 amendment adds that "ZIP
+payloads stage through the same tempfile path as every other format". Both are now historical.
+
+DCR-015 shipped in-place offset opens for ZIP, RAR and 7z: `Archive::try_open_in_place` gates on an
+executable-extension path plus a format signature at the offset, and each arm declines to staging
+rather than failing when its constructor does not accept the payload. Staging remains for the
+libarchive-backed formats and for declined opens. `Archive::payload_access()` reports which path a
+handle took.
+
+**The ruling of this record is unaffected** — the format-agnostic error shape for a bad offset is
+what it decided, and that is unchanged. Only the scope note about no-copy opens expired.

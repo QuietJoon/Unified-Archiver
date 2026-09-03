@@ -79,3 +79,15 @@ The gap is tracked as a TicGit follow-up (`ArchiveWarning::SkippedUnsupportedEnt
 three backends). Until it lands, treat this record's guarantee as: *every skipped **link** is
 reported*; a skipped special entry is not. The record stays **active** — the decision is unchanged,
 its coverage is incomplete.
+
+## Amendment (2026-09-03, the `SkippedUnsupportedEntry` gap is closed on libarchive only)
+
+The 2026-08-09 amendment records that the new special-entry skips "emit no warning" because
+`ArchiveWarning` carried only `SkippedSymlink` and `SkippedHardLink`. `SkippedUnsupportedEntry` has
+since landed in `src/error.rs`.
+
+Emission, however, is partial: only `src/ffi/libarchive_wrapper/reader.rs` and
+`src/modification.rs` construct it. The 2026-08-09 amendment's claim that the ZIP backend has
+skipped `EntryType::Other` silently is therefore still true of ZIP, 7z and RAR, and false of
+libarchive — the backends diverge, and this record should not be read as saying the class is
+uniformly reported.

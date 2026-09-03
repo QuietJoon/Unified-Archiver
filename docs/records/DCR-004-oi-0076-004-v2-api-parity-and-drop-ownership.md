@@ -93,3 +93,19 @@ archive, OR document the legacy delegation").
 - The legacy `Archive` facade's own best-effort `Drop`-finalize remains
   for v0.3 source-compat and is slated for removal with the facade in
   v0.4.
+
+## Amendment (2026-09-03, `v2-api` is on by default, and the v0.4 facade removal did not happen)
+
+Two premises have expired.
+
+**"All additions are behind the off-by-default `v2-api` feature."** `v2-api` has been a **default**
+feature since 2026-09-03 (`default = ["rar-support", "v2-api"]`). The additions are still additive,
+but they now compile in a default build rather than only for opt-in callers, so the "nobody sees
+this unless they ask" framing no longer holds. `--no-default-features` still turns it off.
+
+**"The legacy `Archive` facade's `Drop`-finalize remains for v0.3 source-compat and is slated for
+removal in v0.4."** v0.4.0 shipped — it is the current `Cargo.toml` version and a live git tag —
+with the facade and its best-effort `Drop`-finalize intact. The removal was not done and is not
+schedulable as written: the typed handles are implemented by *wrapping* `Archive`
+(`ReadArchive { inner: Archive }`), so removing the facade needs the backend split AD 0053's D2
+describes and nobody has built. Tracked as ticgit `9448d8`.

@@ -40,7 +40,10 @@ Ownership and placement of key structural pieces.
 | library | `src/ffi/libarchive_wrapper.rs` | Safe libarchive adapter | `LibarchiveArchive` |
 | library | `src/ffi/libarchive.rs` | Raw libarchive C FFI bindings | Raw C struct declarations, extern functions |
 | library | `src/ffi/sevenz_wrapper.rs` | Native Rust 7z read/extract | `SevenZArchive` |
-| library | `src/ffi/zip_wrapper.rs` | Native Rust ZIP read/extract (encrypted) | `ZipArchive` (ZipReader backend) |
+| library | `src/ffi/zip_wrapper.rs` | Native Rust ZIP read/extract — the sole ZIP reader, encrypted and unencrypted (DCR-009 retired the second backend) | `ZipArchive` (ZipReader backend) |
+| library | `src/archive/mode_split.rs` | D2 typed-handle split, re-exported as `crate::v2`; in the default build since `default = ["rar-support", "v2-api"]` (2026-09-03) | `ReadArchive`, `WriteArchive`, `ModifyArchive` |
+| library | `src/payload_window.rs` | `Read + Seek` window over a byte range, for in-place SFX opens (DCR-015) | `PayloadWindow` |
+| library | `src/fs_identity.rs` | Read-handle file-identity capture and revalidation (DCR-014) | `FileIdentity` |
 | library | `src/ffi/zip_writer.rs` | Native Rust ZIP creation | `ZipWriter` |
 | library | `src/sfx.rs` | SFX module root | Public submodules `detection`, `result`, `stub_types`; `limits` and `signatures` are `pub(crate)`. Re-exports four items, not submodules: `detect_sfx`, `SfxConfidence`, `SfxDetectionResult`, `StubType` |
 | library | `src/sfx/detection.rs` | SFX detection pipeline | (no owned types — orchestrates detection) |

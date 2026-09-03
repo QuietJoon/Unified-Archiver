@@ -86,3 +86,10 @@ macOS host. The Windows/MSVC and cross-compile paths cannot be run on the macOS 
 unverified at authoring time; `cc` selecting MSVC is the standard cross-platform mechanism.
 
 Status: still active — the `rar-support` feature gate stands; the Windows-panic drift is retired.
+
+## Amendment (2026-09-03, a variant name in the 2026-07-22 amendment is stale)
+
+The feature-gate ruling is unchanged. The 2026-07-22 amendment describes a RAR open without
+`rar-support` as returning `ArchiveError::UnsupportedOperation`; check the current variant list in
+`src/error.rs` before quoting that name, as the error enum has been reshaped since. The behaviour —
+a RAR open fails cleanly rather than linking UnRAR — is what the record decided and still holds.

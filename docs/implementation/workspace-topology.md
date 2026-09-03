@@ -29,27 +29,32 @@ unified-archive/
 │   ├── modification.rs             # Archive::modify, commit_changes
 │   ├── streaming.rs                # StreamingExtractor (Read trait wrapper)
 │   ├── stream_crc.rs               # GZIP/BZIP2/XZ checksum parsing
+│   ├── password.rs                 # Password newtype over secstr::SecStr
+│   ├── fs_identity.rs              # Read-handle file-identity binding (DCR-014)
+│   ├── payload_window.rs           # In-place SFX payload window (DCR-015)
+│   ├── archive/
+│   │   └── mode_split.rs           # v2 typed handles (ReadArchive/WriteArchive/ModifyArchive)
+│   ├── ffi.rs                      # FFI / native-backend module root (file-as-module: no mod.rs)
 │   ├── ffi/
-│   │   ├── mod.rs                  # FFI module root
 │   │   ├── common.rs               # AtomicOutputFile, path normalization, CRC helpers
 │   │   ├── unrar.rs                # Raw UnRAR C FFI bindings
 │   │   ├── wrapper.rs              # Safe UnRAR adapter
 │   │   ├── libarchive.rs           # Raw libarchive C FFI bindings
-│   │   ├── libarchive_wrapper.rs   # Safe libarchive adapter
-│   │   ├── piz_wrapper.rs          # Native Rust ZIP backend (mmap)
+│   │   ├── libarchive_wrapper.rs   # Safe libarchive adapter (root; reader.rs / writer.rs children)
 │   │   ├── sevenz_wrapper.rs       # Native Rust 7z backend
-│   │   ├── zip_wrapper.rs          # Native Rust ZIP backend (encrypted)
+│   │   ├── zip_wrapper.rs          # Native Rust ZIP backend — the sole ZIP reader, encrypted and unencrypted (DCR-009 retired the second backend)
 │   │   └── zip_writer.rs           # Native Rust ZIP creation
 │   ├── sfx.rs                     # SFX module root (re-exports submodules)
 │   ├── sfx/
 │   │   ├── detection.rs            # SFX detection pipeline
 │   │   ├── result.rs               # SfxDetectionResult
 │   │   ├── signatures.rs           # Archive signature tables
-│   │   └── stub_types.rs           # WindowsPE, LinuxELF, MacOSMachO, ScriptInterpreter, Unknown
+│   │   ├── stub_types.rs           # WindowsPE, LinuxELF, MacOSMachO, ScriptInterpreter, Unknown
+│   │   └── limits.rs               # SFX scan/payload constants
 │   ├── test_utils.rs               # Shared test utilities (#[cfg(test)] only)
+│   ├── external.rs                 # External tools module root (file-as-module: no mod.rs)
 │   └── external/
-│       ├── mod.rs                  # External tools module root
-│       └── rar.rs                  # Optional WinRAR CLI (feature-gated)
+│       └── rar.rs                  # Optional WinRAR CLI (feature-gated); `rar/` children: argv, discovery, error, exit, runner, session, version
 ├── tests/
 │   ├── integration/                # Integration test modules
 │   │   ├── concurrency.rs

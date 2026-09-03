@@ -360,3 +360,23 @@ the executable-extension gate every in-place arm requires.
 Treat the paragraph above as a plausible consequence of the design, not as a shipped guarantee, until
 a test pins it. It is not a reason to doubt the RAR arm itself, which is tested at both the backend
 and the facade.
+
+## Amendment (2026-09-03, the "Not added: facade-level integration coverage" bullet is discharged)
+
+The Test-impact section names a real hole — that `tests/integration/sfx_in_place_open.rs`
+"still exercises `payload_access()` end to end for ZIP only", leaving the RAR and 7z gates argued in
+prose. **That hole is now closed**, and the record is amended rather than edited so the sequence
+stays visible.
+
+The file carries facade-level coverage for both new arms:
+
+- `sevenz_sfx_opens_above_the_staging_ceiling` and `open_sfx_reads_a_sevenz_payload_in_place` —
+  the 7z arm, which is the one that needed the `PayloadWindow` adapter, observed through
+  `Archive::payload_access()` rather than through its parts.
+- `rar_sfx_opens_above_the_staging_ceiling` and `an_earlier_rar_marker_in_the_stub_declines_to_staging`
+  — the RAR arm, including the decline path, gated on `rar-support` and serialised on the
+  process-wide UnRAR lock.
+
+The second RAR test is the load-bearing one: it pins the *decline*, so an over-eager signature scan
+that latched onto a marker inside the stub would fail the suite rather than silently open the wrong
+bytes. The ZIP decoy case (`decoy_header_at_the_offset_declines_in_place`) does the same for ZIP.

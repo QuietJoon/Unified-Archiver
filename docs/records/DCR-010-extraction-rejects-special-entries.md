@@ -69,3 +69,15 @@ Also note the knock-on to progress accounting: because skipped entries contribut
 the denominator but no decoded bytes to the numerator, a successful extraction could finish below
 100%. That is fixed in the same batch (R0001-0055) by building the denominator from extractable
 regular-file payloads only and emitting a final completion callback.
+
+## Amendment (2026-09-03, the warning variant landed; emission is libarchive-only)
+
+This record states that the new skip class is **silent** because `ArchiveWarning` had no variant for
+it. That is half-corrected: `ArchiveWarning::SkippedUnsupportedEntry` now exists in `src/error.rs`.
+
+The gap that remains is narrower and worth stating precisely, because "the variant exists" is easy
+to mistake for "the warning is emitted": it is constructed in `src/ffi/libarchive_wrapper/reader.rs`
+and in `src/modification.rs`, and nowhere else. The ZIP, 7z and RAR read backends still skip special
+entries without reporting one, so the backends now **diverge** — a libarchive-backed extraction
+tells the caller, the other three do not. Callers must not read the absence of the warning as the
+absence of a skip.
