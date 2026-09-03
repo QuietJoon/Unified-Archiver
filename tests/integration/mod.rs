@@ -31,4 +31,5 @@ pub mod sfx_in_place_open;
 pub mod sfx_staging_progress;
 pub mod single_entry_defense_parity;
 pub mod streaming_memory;
+pub mod symlink_source_refusal;
 pub mod zip_extended_timestamps;

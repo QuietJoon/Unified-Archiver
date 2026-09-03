@@ -770,16 +770,12 @@ impl LibarchiveArchive {
         fs_path: impl AsRef<Path>,
         archive_path: &str,
     ) -> Result<()> {
-        use std::fs;
-
-        crate::ffi::common::reject_symlink_path(fs_path.as_ref(), "add_file_from_path")?;
-
-        let mut file = fs::File::open(fs_path.as_ref())
-            .map_err(|e| ArchiveError::io("open", fs_path.as_ref(), e))?;
-
-        let metadata = file
-            .metadata()
-            .map_err(|e| ArchiveError::io("metadata", fs_path.as_ref(), e))?;
+        // R0076-0014: see the ZIP writer's twin call site — open and
+        // re-verify in one helper instead of check-then-open.
+        let (mut file, metadata) = crate::ffi::common::open_file_no_follow_symlinks(
+            fs_path.as_ref(),
+            "add_file_from_path",
+        )?;
 
         let size = metadata.len();
         // R0081-0060: `modified()`, `accessed()`, and `created()` are all

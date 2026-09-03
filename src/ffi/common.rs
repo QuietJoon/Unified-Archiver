@@ -87,10 +87,6 @@ pub(crate) fn reject_symlink_path(path: &Path, op: &'static str) -> Result<()> {
 /// (`O_NOFOLLOW` on Unix, `FILE_FLAG_OPEN_REPARSE_POINT` on Windows).
 /// Adding `libc` for that primitive sat outside the inline-fix scope
 /// of this review pass.
-#[expect(
-    dead_code,
-    reason = "TOCTOU-hardening helper awaiting its caller under OI-0070-002 / R0070-0021 (atomic no-follow open)"
-)]
 pub(crate) fn open_file_no_follow_symlinks(
     path: &Path,
     op: &'static str,
@@ -1573,5 +1569,44 @@ mod tests {
             map_entry_read_error(read_err, Path::new("probe.bin")),
             ArchiveError::Corruption { .. }
         ));
+    }
+
+    /// R0076-0014: the helper both writers now reach the filesystem
+    /// through must itself refuse a symlink.
+    ///
+    /// This is a unit test rather than an integration one on purpose. The
+    /// public `add_file_from_path` never reaches this code for a plain
+    /// symlink — `creation::validate_file_path` refuses at the facade
+    /// first — so an integration test cannot tell whether this layer works
+    /// at all. It is defence in depth, and defence in depth that nothing
+    /// exercises is indistinguishable from defence that was deleted.
+    #[cfg(unix)]
+    #[test]
+    fn open_file_no_follow_symlinks_refuses_a_symlink() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("real.txt");
+        std::fs::write(&target, b"target bytes").expect("write target");
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let err = super::open_file_no_follow_symlinks(&link, "add_file_from_path")
+            .expect_err("a symlink must be refused at this layer too");
+        assert!(
+            err.to_string().contains("symlink"),
+            "the refusal must name the reason; got: {err}"
+        );
+    }
+
+    /// The control: a regular file opens, and reports its real length.
+    #[cfg(unix)]
+    #[test]
+    fn open_file_no_follow_symlinks_accepts_a_regular_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("real.txt");
+        std::fs::write(&target, b"target bytes").expect("write target");
+
+        let (_file, metadata) = super::open_file_no_follow_symlinks(&target, "add_file_from_path")
+            .expect("a regular file must open");
+        assert_eq!(metadata.len(), b"target bytes".len() as u64);
     }
 }

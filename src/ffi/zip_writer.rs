@@ -487,14 +487,12 @@ impl ZipWriter {
         archive_path: &str,
     ) -> Result<()> {
         let fs_path = fs_path.as_ref();
-        super::common::reject_symlink_path(fs_path, "add_file_from_path")?;
-
-        let mut file =
-            File::open(fs_path).map_err(|e| ArchiveError::io("open", fs_path.to_path_buf(), e))?;
-
-        let metadata = file
-            .metadata()
-            .map_err(|e| ArchiveError::io("metadata", fs_path.to_path_buf(), e))?;
+        // R0076-0014: one call that opens and then re-verifies, rather than a
+        // metadata check followed by a separate `File::open` an attacker can
+        // race. The helper still cannot be fully atomic without `O_NOFOLLOW`,
+        // but it closes the window this call site used to leave wide open.
+        let (mut file, metadata) =
+            super::common::open_file_no_follow_symlinks(fs_path, "add_file_from_path")?;
 
         let expected_len = metadata.len();
         self.with_writer("add_file_from_path", |writer, path, options, notify| {
