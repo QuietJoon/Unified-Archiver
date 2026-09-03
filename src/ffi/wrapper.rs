@@ -579,6 +579,16 @@ impl UnrarArchive {
 
     /// Read next entry header with CRC32 and metadata
     pub fn read_header(&self) -> Result<Option<ArchiveEntry>> {
+        Ok(self.read_header_with_flags()?.map(|(entry, _)| entry))
+    }
+
+    /// [`Self::read_header`] plus the raw `RARHeaderDataEx::flags` word.
+    ///
+    /// The listing walk needs `RHDF_SPLITBEFORE` / `RHDF_SPLITAFTER`, which
+    /// [`parse_header`] deliberately does not carry onto `ArchiveEntry`:
+    /// they describe the *header's* relationship to its neighbours in the
+    /// volume set, not a property of the file the entry names.
+    fn read_header_with_flags(&self) -> Result<Option<(ArchiveEntry, c_uint)>> {
         unsafe {
             let mut header = RARHeaderDataEx::default();
             let _guard = unrar_lock()?;
@@ -586,7 +596,7 @@ impl UnrarArchive {
             drop(_guard);
 
             match result {
-                ERAR_SUCCESS => Ok(Some(parse_header(&header)?)),
+                ERAR_SUCCESS => Ok(Some((parse_header(&header)?, header.flags))),
                 ERAR_END_ARCHIVE => Ok(None),
                 ERAR_BAD_PASSWORD => Err(ArchiveError::password("Wrong password")),
                 ERAR_MISSING_PASSWORD => Err(ArchiveError::password("Password required")),
@@ -643,19 +653,56 @@ impl UnrarArchive {
     /// listing. Exhausts the handle — callers must hold a fresh one
     /// (see [`Self::fresh_handle`]).
     fn walk_entries(&self, budget: Option<usize>) -> Result<Vec<ArchiveEntry>> {
-        let mut entries = Vec::new();
+        let mut entries: Vec<ArchiveEntry> = Vec::new();
         let mut index = 0;
+        let mut headers_seen = 0usize;
 
-        while let Some(mut entry) = self.read_header()? {
+        while let Some((mut entry, flags)) = self.read_header_with_flags()? {
             // OI-0080-003: true streaming early abort — once we already hold
             // `budget` entries and another header is present, stop before
             // pushing/skipping the rest so UnRAR never reads past the
             // budget-th record.
+            //
+            // The budget is checked against *headers read*, not only against
+            // entries kept. Coalescing (below) folds continuation headers into
+            // their predecessor without growing `entries`, so bounding entries
+            // alone would let an archive of a million `SPLITBEFORE` headers
+            // walk forever under any budget.
+            headers_seen += 1;
             if let Some(budget) = budget {
-                if entries.len() >= budget {
+                if entries.len() >= budget || headers_seen > budget.saturating_add(1) {
                     return Err(crate::security::too_many_entries_parsed(budget));
                 }
             }
+
+            // 3b4d15: a split file is stored once per volume, each part
+            // carrying the same name and the *whole* file's unpacked size.
+            // Left as separate entries they read as N distinct files sharing
+            // one path, which triples a content total and makes every
+            // extraction guard reject the archive. UnRAR already says which
+            // headers are continuations; the listing just has to honour it.
+            if flags & RHDF_SPLITBEFORE != 0 {
+                if let Some(prev) = entries.last_mut() {
+                    // Packed bytes accumulate across parts; unpacked size is
+                    // the same full-file value in every part, so it is kept
+                    // from the first rather than summed.
+                    prev.compressed_size = match (prev.compressed_size, entry.compressed_size) {
+                        (Some(a), Some(b)) => Some(a.saturating_add(b)),
+                        (a, b) => a.or(b),
+                    };
+                    // Each part carries a CRC over its own chunk, not over the
+                    // file. Surfacing one of them as the entry's CRC would be a
+                    // checksum that verifies nothing, so the coalesced entry
+                    // reports none — `None` already means "not available here".
+                    prev.crc32 = None;
+                    self.skip_entry()?;
+                    continue;
+                }
+                // A continuation with nothing before it: the caller opened a
+                // middle volume directly. There is no predecessor to fold
+                // into, so it stands alone.
+            }
+
             entry.id = index;
             entries.push(entry);
             self.skip_entry()?;
