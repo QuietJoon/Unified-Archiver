@@ -994,7 +994,35 @@ cache plumbing can be redesigned in one pass instead of touching the legacy
 - **Source:** R0076-0019, 0020, 0021, 0039, 0040, 0041, 0042, 0066, 0067, 0083, 0092, 0094 (Review 0076)
 - **Date:** 2026-05-01
 - **Decision:** ACCEPT (Phase 2 routing — auto mode default, batch route for the lossy-path family that AD 0064 left in the write/extract paths)
-- **Status:** OPEN
+- **Status:** MOSTLY RESOLVED 2026-09-03 — Required Actions 1, 2, 3, 5 and 6 are
+  closed; Action 4 landed on compile evidence only (see below). A structured pass
+  classified all 49 `to_string_lossy` sites in the affected files: 19 load-bearing,
+  **16 display-only** (AD 0064 permits those and converting them would be churn),
+  7 already fixed by earlier work, and **7 escalated as needing an owner decision**.
+  Every conversion was adversarially verified against the tree before it was applied.
+  * **RA1** (`c9e78f0`) — the duplicate root-name derivation is gone from both
+    recursive-add backends. It also closed a data-loss bug the lossy framing hid:
+    `Path::new("/").file_name()` is `None`, so an empty filesystem root archived to
+    **zero entries**.
+  * **RA2** (`45e9211`) — the libarchive writer carries a `PathBuf`, not a lossy
+    `String`; that field drives real reopens and an `fsync`, and the two extract
+    destinations now reach `archive_write_disk` as the path's own bytes.
+  * **RA3** (`0b94a14`) — decided: `raw_format_name` stays lossy by design (its
+    output is `ArchiveEntry::path`, which AD 0064 defines as display), and the
+    bytes go to `raw_path` instead. This fixed a false claim: a non-UTF-8-named
+    `.gz` reported `raw_path == None`, which means "`path` is byte-exact".
+  * **RA4** (`607c949`) — UnRAR destinations reach the SDK as bytes on Unix and
+    UTF-16 on Windows. **Compile-verified only**: untestable on macOS, which
+    rejects non-UTF-8 filenames with `EILSEQ`. Needs a recorded Linux or Windows
+    run to close (AD-0070).
+  * **RA5** — satisfied 2026-09-03 by owner ruling; see below.
+  * **RA6** (`bf430c2`) — set membership keys on raw bytes. This closed a
+    limitation AD 0064 had **accepted**: two byte-different non-UTF-8 base names
+    merged into one set, so two unrelated archives were reported as one broken
+    four-volume set.
+  **Still open:** the 7 escalated sites, chiefly `compose_archive_path` /
+  `DirWalkEntry::archive_path` (changing its type is an owner call) and
+  `path_to_cstring`'s `cfg(not(unix))` arm.
 
 ### Problem
 
