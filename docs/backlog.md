@@ -266,16 +266,23 @@ on this defect. Nothing in `5a0c035` touches the listing shape.
 - **Sources:** docs/project/open-issues.md#OI-0065-001, ticgit:1340e934
 - **First seen:** 2026-08-04
 - **Last seen:** 2026-08-17
-- **Description:** Implement Windows libarchive discovery in `build.rs` and add a Windows CI job
-  that builds with default features.
+- **Description:** Implement Windows libarchive discovery in `build.rs`, and verify it on a
+  Windows host.
 - **Background:** libarchive-backed formats (TAR family, ISO) and the ZIP source-read side of
   `commit_changes()` cannot link on Windows: the discovery block is a warning-only no-op there.
   Needs an approach decision — vcpkg-root autodetect (`VCPKG_ROOT`) vs explicit
-  `LIBARCHIVE_LIB_DIR` / `_INCLUDE_DIR` env vars vs vendoring — plus a Windows CI environment.
-  High priority given the first-class Windows directive (2026-07-17): the repository still
-  contains no CI configuration at all, which is what keeps README's "present but not
-  release-verified" wording accurate (AD 0046 amendment, 2026-08-04) and OI-0081-005's Windows
-  arm unverified. The UnRAR half is done (Innovation I4).
+  `LIBARCHIVE_LIB_DIR` / `_INCLUDE_DIR` env vars vs vendoring. High priority given the
+  first-class Windows directive (2026-07-17). The UnRAR half is done (Innovation I4).
+- **Restated 2026-09-03 (AD-0070).** This entry used to demand "a Windows CI job" and cite "the
+  repository still contains no CI configuration at all" as what kept the issue open. AD-0070
+  retires that framing: no hosted CI will ever exist here, so worded that way the item could never
+  close. Under AD-0070's four conditions the approach decision is host-independent and the
+  `cfg(windows)` arms compile here (owner-invoked only, per the 2026-09-01 hold) — what genuinely
+  needs a different machine is libarchive *linking* and the Windows tests *running*. **This is the
+  one blocker of the four that is really blocked**, and on a host, not a service. The owner's
+  Windows machine is that host; README's "present but not release-verified" wording stays accurate
+  until a record under `docs/verification/` says otherwise (AD 0046 amendment, 2026-08-04), and
+  OI-0081-005's Windows arm stays unverified for the same reason.
 
 ### Non-UTF-8 path fidelity round 2 (OI-0076-001)
 - **Type:** 2
@@ -840,8 +847,9 @@ on this defect. Nothing in `5a0c035` touches the listing shape.
 - **Type:** 3
 - **Verified:** yes — reopen verified 2026-08-13; a reviewer reproduced bsdtar 3.5.3 writing a
   dense 1,052,160-byte archive from `tar -cSf`, and the test now skips on it
-- **Blocked by:** either a committed sparse-TAR fixture (so no `tar` CLI is involved) or a CI job
-  on a GNU-tar host; the repository has no CI configuration at all, which is ticgit:1340e934
+- **Blocked by:** nothing — **CLOSED 2026-09-03** by the committed-fixture route (see the closing
+  note at the end of this entry). Formerly: a committed sparse-TAR fixture or a CI job on a
+  GNU-tar host.
 - **Sources:** docs/records/DCR-011-digest-exactness-for-crc-less-entries.md,
   tests/digest_exactness_test.rs, ticgit:1340e934
 - **Unfiled:** recorded here rather than ticketed — it is a coverage gap in an already-landed
@@ -888,6 +896,16 @@ on this defect. Nothing in `5a0c035` touches the listing shape.
   entry. The RAR-fixtures entry discharged on 2026-09-02 asserted the `rar` CLI "is not installed
   and cannot be vendored" while it had been at `/opt/homebrew/bin/rar` for a week and the fixtures
   it called impossible were already committed.
+- **CLOSED 2026-09-03 — the fixture route was taken, and the lane now runs.**
+  `scripts/generate-tar-fixtures.sh` and `tests/fixtures/sparse.tar` (10,240 bytes, typeflag `S`,
+  1 MiB logical) are committed, and `sparse_tar_entry_digests_and_streams_to_clean_eof` is a plain
+  `#[test]` — no `tar` CLI, no skip, no `#[ignore]`. It ran green in the 2026-09-03 gate
+  (`test sparse_tar_entry_digests_and_streams_to_clean_eof ... ok`), so DCR-011's hole-
+  materialisation tripwire is armed on every host for the first time. The lane hard-fails if the
+  fixture is ever dense or loses its `S` typeflag, so it cannot silently decay back into "a
+  mostly-zero member digests exactly". The prose above is left as written — it is the record of a
+  blocker that was re-verified rather than re-read, and its generalisable rule is what produced
+  this close.
 
 ---
 
@@ -2362,6 +2380,9 @@ Completed 2026-08-04/05 (details in `docs/log.md` and `CHANGELOG.md`):
 - **OI-0065-001 stale premise after Innovation I4** — done: the issue is narrowed to its still-open
   half (libarchive discovery host-`cfg` branching, the README half of Required Action 3, and the
   Windows CI job) with a dated update note; the Windows `panic!` and `make lib` premises are gone.
+  *(The "Windows CI job" third of that narrowing was itself retired by AD-0070 on 2026-09-03: it is
+  a Windows host running the committed gate, not a job. The entry is left as written because it
+  records what was done on 2026-08-04.)*
 - **SFX coverage measurement close-out** — done: measured with `cargo-llvm-cov` 0.8.7 instead of
   argued from test counts — `src/sfx/` sits at ≈99.4 % lines (detection 99.06, result 100,
   signatures 100, stub_types 98.99; crate total 82.43). Four new tests closed the real gaps; the
@@ -2389,5 +2410,6 @@ Carried over from the 2026-07-19 → 2026-08-04 closure list:
 - The five 2026-07-19 Type 1 items (entry-count parse budget OI-0080-003, read-side identity
   revalidation OI-0081-001, V7 tar content detection OI-0081-003, Windows self-ingestion
   identity OI-0081-005, id-based digest streaming TicGit `2a6e3153`) — all resolved
-  2026-07-19; OI-0081-005's runtime verification still rides on the Windows CI job in
-  OI-0065-001.
+  2026-07-19; OI-0081-005's runtime verification still rides on OI-0065-001. **Restated 2026-09-03
+  (AD-0070):** on the owner running the committed gate on their Windows machine and recording the
+  result, not on a "Windows CI job" — no such job will exist.

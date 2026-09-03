@@ -145,3 +145,37 @@ Verified by execution on 2026-08-17, not by reading a changelog:
 The sparse-entry Known Risk and its 2026-08-13 amendment are untouched by any of this: the one-pass
 walk reads the same payload bytes libarchive would have produced on a re-open, so whether holes
 materialise as zeros is still libarchive's behaviour and still unmitigated on bsdtar hosts.
+
+## Amendment (2026-09-03, the sparse tripwire is now armed on every host — fixture committed)
+
+The 2026-08-13 amendment's host table is no longer accurate, and this is the good direction. It
+reads:
+
+- **GNU-tar hosts:** armed, and it is a real tripwire.
+- **bsdtar hosts (macOS default):** skips with an explicit message, and this risk is **unmitigated
+  there**.
+
+**Both bullets are now obsolete: the tripwire is armed everywhere, unconditionally.** That
+amendment closed by naming two exits — "a committed sparse-TAR fixture (so no `tar` CLI is involved
+at all) or a CI job on a GNU-tar host — the latter is `1340e934`'s territory, since the repository
+has no CI configuration at all." The first exit was taken on 2026-09-03, which also makes the
+second moot twice over: AD-0070 has since ruled that no hosted CI will ever exist here, so a lane
+waiting on one would have waited forever.
+
+What landed: `scripts/generate-tar-fixtures.sh` produces the archive once on a GNU-tar host, and
+`tests/fixtures/sparse.tar` — 10,240 bytes on disk, typeflag `S`, 1 MiB logical — is committed
+beside it. `sparse_tar_entry_digests_and_streams_to_clean_eof` in `tests/digest_exactness_test.rs`
+is now a plain `#[test]`: no `tar` CLI, no runtime skip, no `#[ignore]`. It ran green in the
+2026-09-03 gate.
+
+The lane also defends its own meaning, which matters because the failure mode here was never a red
+test — it was a green one that proved nothing. It asserts the fixture is smaller than the logical
+member size and that the member's typeflag is `S`, and fails loudly naming
+`scripts/generate-tar-fixtures.sh --force` if either breaks. A dense or re-generated-on-bsdtar
+fixture therefore cannot quietly degrade this back into "a mostly-zero member digests exactly",
+which is true, trivially passes, and is not the Known Risk.
+
+**The Known Risk section itself is unchanged and still governs**: if hole-materialisation ever does
+differ, the recorded response is to gate exactness on non-sparse entries and file a follow-up,
+never to ship a false `Corruption`. What changed is only that the risk is now actually exercised
+rather than declared unexercised.
