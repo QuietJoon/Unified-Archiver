@@ -280,6 +280,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   honoured, so a staging open that used to succeed can fail; set **above** 16 GiB it was silently
   capped and now is not.
 
+- **`VolumeSetReport` decides completeness by continuity alone** (ticgit `cf5109`).
+  `volume_set_report()` returned `Incomplete` for a set whose volumes were all present and
+  contiguous, whenever another archive shared the directory — measured on the committed fixture:
+  three RAR volumes, no gap, verdict `Incomplete`, and all 14 "defects" were unrelated archives
+  sitting in the same folder. `Incomplete` means "volumes are missing", so that was a false
+  negative on the one question the type answers, in the normal case rather than an edge one.
+
+  Two kinds of fact had been merged into one list. `defects` is now continuity only; a new
+  `unrelated` field on every variant carries the foreign siblings, reachable through
+  `VolumeSetReport::unrelated()`. Nothing is dropped — "this file is not part of your set" is still
+  reported — it just no longer decides the verdict. A lone `set.rar` with a foreign sibling is now
+  `Unvolumed` rather than `Incomplete`, which had claimed volumes were missing from an archive that
+  has none.
+
+  All three variants also became individually `#[non_exhaustive]`, so this is the last time adding
+  a field to one breaks a caller.
+
 - **Multi-volume RAR sets list as one entry, and extract** (ticgit `3b4d15`).
   `ArchiveFormat::Rar` / `Rar5` report `multipart_read: Support::Full` where they reported
   `Partial`. A split file is stored once per volume, and the listing surfaced each of those headers
