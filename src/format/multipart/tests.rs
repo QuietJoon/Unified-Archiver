@@ -251,7 +251,7 @@ fn lone_unnumbered_archive_is_unvolumed() {
 #[test]
 fn empty_candidate_list_is_unvolumed() {
     let report = parse_volume_set(&[]);
-    assert!(matches!(report, VolumeSetReport::Unvolumed { paths } if paths.is_empty()));
+    assert!(matches!(report, VolumeSetReport::Unvolumed { paths, .. } if paths.is_empty()));
 }
 
 // ── continuity failure 1: a missing middle volume ──
@@ -451,9 +451,13 @@ fn detects_mixed_naming_scheme_within_one_set() {
         "/vol",
         &["set.part1.rar", "set.part2.rar", "set.r00"],
     ));
-    assert!(!report.is_complete());
+    // cf5109: part1+part2 are contiguous, so the set is complete. The `.r00`
+    // is a different scheme and belongs to no set here — reported, but not a
+    // continuity defect.
+    assert!(report.is_complete());
+    assert!(report.defects().is_empty());
     assert_eq!(
-        report.defects(),
+        report.unrelated(),
         [VolumeSetDefect::MixedScheme {
             path: Path::new("/vol/set.r00").to_path_buf(),
             found: VolumeScheme::RarOldStyle,
@@ -470,8 +474,9 @@ fn detects_mixed_naming_scheme_within_one_set() {
 #[test]
 fn detects_mixed_numeric_volume_in_a_rar_set() {
     let report = parse_volume_set(&paths(&["set.part1.rar", "set.part2.rar", "set.001"]));
+    assert!(report.is_complete(), "cf5109: part1+part2 are contiguous");
     assert_eq!(
-        report.defects(),
+        report.unrelated(),
         [VolumeSetDefect::MixedScheme {
             path: PathBuf::from("set.001"),
             found: VolumeScheme::Numeric,
@@ -486,7 +491,7 @@ fn mixed_scheme_picks_the_convention_with_more_numbered_volumes() {
     let report = parse_volume_set(&paths(&["set.rar", "set.r00", "set.r01", "set.part1.rar"]));
     assert_eq!(expect_set(&report).scheme, VolumeScheme::RarOldStyle);
     assert_eq!(
-        report.defects(),
+        report.unrelated(),
         [VolumeSetDefect::MixedScheme {
             path: PathBuf::from("set.part1.rar"),
             found: VolumeScheme::RarPart,
@@ -510,8 +515,11 @@ fn mixed_scheme_defects_are_ordered_deterministically() {
         "set.part2.rar",
         "set.part1.rar",
     ]));
-    assert_eq!(forward.defects(), reversed.defects());
-    assert_eq!(forward.defects().len(), 2);
+    // cf5109: the determinism this pins is about the *unrelated* list now —
+    // the foreign siblings — since neither report has a continuity defect.
+    assert_eq!(forward.unrelated(), reversed.unrelated());
+    assert_eq!(forward.unrelated().len(), 2);
+    assert!(forward.defects().is_empty() && reversed.defects().is_empty());
 }
 
 // ── set grouping ──
@@ -523,8 +531,9 @@ fn detects_unrelated_base_name_in_the_candidate_list() {
         "set.part2.rar",
         "other.part1.rar",
     ]));
+    assert!(report.is_complete(), "cf5109: part1+part2 are contiguous");
     assert_eq!(
-        report.defects(),
+        report.unrelated(),
         [VolumeSetDefect::UnrelatedBase {
             path: PathBuf::from("other.part1.rar"),
             found: "other".to_string(),
@@ -594,11 +603,16 @@ fn anchored_parse_follows_the_anchor_not_the_majority() {
     let candidates = paths(&["set.part1.rar", "set.001", "set.002", "set.003"]);
     let report = parse_volume_set_for(Path::new("set.part1.rar"), &candidates);
     assert_eq!(expect_set(&report).scheme, VolumeScheme::RarPart);
+    assert!(
+        report.defects().is_empty(),
+        "cf5109: a foreign sibling is not a continuity defect: {:?}",
+        report.defects()
+    );
     assert_eq!(
-        report.defects().len(),
+        report.unrelated().len(),
         3,
         "the three numeric siblings are foreign to the anchored set: {:?}",
-        report.defects()
+        report.unrelated()
     );
 }
 
@@ -615,8 +629,16 @@ fn anchored_parse_on_a_main_volume_still_reports_a_foreign_sibling() {
     // is still worth reporting rather than dropping.
     let candidates = paths(&["set.rar", "set.001"]);
     let report = parse_volume_set_for(Path::new("set.rar"), &candidates);
+    // cf5109: `set.rar` has no volumes, so it cannot be *missing* any. It is
+    // `Unvolumed`, and the sibling rides along as unrelated rather than being
+    // reported as a defect of a set that does not exist.
+    assert!(
+        matches!(report, VolumeSetReport::Unvolumed { .. }),
+        "a lone main volume describes no set: {report:?}"
+    );
+    assert!(report.defects().is_empty());
     assert_eq!(
-        report.defects(),
+        report.unrelated(),
         [VolumeSetDefect::MixedScheme {
             path: PathBuf::from("set.001"),
             found: VolumeScheme::Numeric,
@@ -782,4 +804,67 @@ fn scheme_display_matches_its_label() {
     ] {
         assert_eq!(scheme.to_string(), scheme.label());
     }
+}
+
+// ---------------------------------------------------------------------------
+// ticgit cf5109: an unrelated neighbour must not make a complete set
+// incomplete. `continuity_defects` answers "is a volume missing"; the foreign
+// list answers "what else is in this directory". Only the first bears on the
+// verdict, and merging them made the normal case — a directory holding more
+// than one archive — report a false negative on the one question this API
+// exists to answer.
+// ---------------------------------------------------------------------------
+
+/// The reported bug, at its smallest.
+#[test]
+fn a_complete_set_stays_complete_when_a_foreign_archive_shares_the_directory() {
+    let paths = vec![
+        PathBuf::from("/d/show.part1.rar"),
+        PathBuf::from("/d/show.part2.rar"),
+        PathBuf::from("/d/show.part3.rar"),
+        // Neither a member nor a defect of the set above: a different base,
+        // and a different scheme.
+        PathBuf::from("/d/unrelated.z01"),
+        PathBuf::from("/d/other.part1.rar"),
+    ];
+    let report = parse_volume_set(&paths);
+
+    assert!(
+        report.is_complete(),
+        "three contiguous volumes are a complete set whatever else is nearby: {report:?}"
+    );
+    assert!(
+        report.defects().is_empty(),
+        "a neighbouring archive is not a continuity defect: {:?}",
+        report.defects()
+    );
+    assert_eq!(
+        report.unrelated().len(),
+        2,
+        "the neighbours are still reported, just not as defects: {:?}",
+        report.unrelated()
+    );
+    assert_eq!(report.set().expect("a set").volumes.len(), 3);
+}
+
+/// The control: a genuine gap still makes it incomplete, and the gap is the
+/// only thing in `defects()` even with neighbours present.
+#[test]
+fn a_missing_volume_still_reports_incomplete_with_only_the_gap_as_a_defect() {
+    let paths = vec![
+        PathBuf::from("/d/show.part1.rar"),
+        // part2 absent
+        PathBuf::from("/d/show.part3.rar"),
+        PathBuf::from("/d/unrelated.z01"),
+    ];
+    let report = parse_volume_set(&paths);
+
+    assert!(!report.is_complete(), "a gap must still be incomplete");
+    assert_eq!(
+        report.defects().len(),
+        1,
+        "exactly the gap, with the neighbour kept out of it: {:?}",
+        report.defects()
+    );
+    assert_eq!(report.unrelated().len(), 1);
 }

@@ -92,16 +92,22 @@ fn off_by_one_first_volume_is_reported_as_its_own_failure() {
     );
 }
 
-/// Failure mode 4 of 4 — two naming conventions in one candidate list.
+/// Two naming conventions in one candidate list.
+///
+/// Not a *failure* mode: cf5109 separated "a volume is missing" from "this
+/// neighbouring file is not part of your set". `backup.part1` + `part2` are
+/// contiguous, so the set is complete and the `.r00` is merely reported.
 #[test]
-fn mixed_naming_scheme_is_reported() {
+fn mixed_naming_scheme_is_reported_without_making_the_set_incomplete() {
     let report = parse_volume_set(&paths(&[
         "backup.part1.rar",
         "backup.part2.rar",
         "backup.r00",
     ]));
+    assert!(report.is_complete());
+    assert!(report.defects().is_empty());
     assert_eq!(
-        report.defects(),
+        report.unrelated(),
         [VolumeSetDefect::MixedScheme {
             path: PathBuf::from("backup.r00"),
             found: VolumeScheme::RarOldStyle,
@@ -110,10 +116,12 @@ fn mixed_naming_scheme_is_reported() {
     );
 }
 
-/// The four failure modes stay distinguishable when they occur together: a
-/// single "the set is broken" signal would collapse them.
+/// The three continuity failure modes stay distinguishable when they occur
+/// together: a single "the set is broken" signal would collapse them. The
+/// foreign sibling rides alongside in `unrelated()`, which cf5109 split out
+/// of `defects()` precisely so it cannot be mistaken for a missing volume.
 #[test]
-fn the_four_failure_modes_are_distinguishable_in_one_report() {
+fn the_three_continuity_failure_modes_are_distinguishable_in_one_report() {
     let report = parse_volume_set(&paths(&[
         "backup.part2.rar",
         "backup.part02.rar",
@@ -121,7 +129,7 @@ fn the_four_failure_modes_are_distinguishable_in_one_report() {
         "backup.r00",
     ]));
     let defects = report.defects();
-    assert_eq!(defects.len(), 4, "defects: {defects:?}");
+    assert_eq!(defects.len(), 3, "defects: {defects:?}");
     assert!(
         defects
             .iter()
@@ -141,10 +149,12 @@ fn the_four_failure_modes_are_distinguishable_in_one_report() {
         "{defects:?}"
     );
     assert!(
-        defects
+        report
+            .unrelated()
             .iter()
             .any(|d| matches!(d, VolumeSetDefect::MixedScheme { .. })),
-        "{defects:?}"
+        "the foreign sibling is reported, just not as a continuity defect: {:?}",
+        report.unrelated()
     );
 }
 
