@@ -452,6 +452,18 @@ fn install_staged_file(
 /// Restricted to raw single-file compressed archives via
 /// [`is_raw_compressed_archive`] so a TAR/ZIP/ISO entry literally named
 /// `data` is not rewritten (R0070-0023).
+///
+/// **The returned string stays lossy by design (R0076-0041 / AD 0064
+/// Option A, OI-0076-001 Required Action 3).** The name this synthesises
+/// becomes `ArchiveEntry::path`, which is a `String` and which AD 0064
+/// defines as the *display* rendering; the byte-exact form belongs in
+/// `ArchiveEntry::raw_path`. Five of this function's callers are
+/// OI-0076-002 drift guards that compare against the cached listing's
+/// `String` paths, so a byte-typed return would only move the same lossy
+/// conversion to their comparison sites. What AD 0064 does require is
+/// that the raw bytes stay *reachable*: see
+/// [`raw_pseudo_entry_raw_name`], which the listing walk pairs with this
+/// call so `raw_path` does not go on claiming `path` is byte-exact.
 fn raw_format_name<'a>(name: &'a str, archive_path: &Path) -> std::borrow::Cow<'a, str> {
     if name == "data" && is_raw_compressed_archive(archive_path) {
         archive_path
@@ -461,6 +473,37 @@ fn raw_format_name<'a>(name: &'a str, archive_path: &Path) -> std::borrow::Cow<'
     } else {
         std::borrow::Cow::Borrowed(name)
     }
+}
+
+/// Byte-exact form of the pseudo-entry name [`raw_format_name`]
+/// synthesises, for `ArchiveEntry::raw_path` (R0076-0041 / AD 0064
+/// Option A).
+///
+/// Returns `None` when the archive's file stem is already valid UTF-8 —
+/// `raw_path`'s contract reserves `None` for "`path` is byte-for-byte
+/// exact", which it then is — and `None` when there is no stem at all,
+/// which is the same case in which [`raw_format_name`] declines to
+/// remap.
+///
+/// Without this, a standalone `caf\xFF.gz` lists as `caf\u{FFFD}` with
+/// `raw_path == None`, asserting a byte-exactness it does not have:
+/// libarchive reported the pure-ASCII `"data"`, so `parse_entry` had
+/// nothing to preserve, and the lossy bytes were introduced afterwards.
+/// The "match on `raw_path`, act on `id`" route that the AD 0064
+/// amendment of 2026-09-03 makes the supported way to reach a non-UTF-8
+/// name is otherwise unavailable for exactly these archives.
+///
+/// `OsStr::as_encoded_bytes` is used rather than a `cfg` split: on Unix
+/// it is the raw filesystem bytes, on Windows the WTF-8 encoding of the
+/// UTF-16 name, and on both it round-trips through
+/// `OsStr::from_encoded_bytes_unchecked`. That is what makes it the
+/// *raw* name rather than a second lossy rendering.
+fn raw_pseudo_entry_raw_name(archive_path: &Path) -> Option<Vec<u8>> {
+    let stem = archive_path.file_stem()?;
+    if stem.to_str().is_some() {
+        return None;
+    }
+    Some(stem.as_encoded_bytes().to_vec())
 }
 
 /// EOF hit before the walk reached the gate-validated listing index
@@ -1363,6 +1406,18 @@ impl LibarchiveArchive {
                     let resolved = raw_format_name(&entry.path, &self.path);
                     if let std::borrow::Cow::Owned(s) = resolved {
                         entry.path = s;
+                        // R0076-0041 / AD 0064: `path` is now the *lossy*
+                        // rendering of the archive's file stem, but
+                        // `parse_entry` saw only the ASCII `"data"`
+                        // pseudo-name and so left `raw_path` as `None` —
+                        // which asserts `path` is byte-exact. Record the
+                        // stem's own bytes so the "match on `raw_path`, act
+                        // on `id`" route works for a non-UTF-8-named `.gz`
+                        // / `.xz` too. No-op (helper returns `None`) when
+                        // the stem is valid UTF-8, which is the norm.
+                        if let Some(raw) = raw_pseudo_entry_raw_name(&self.path) {
+                            entry.raw_path = Some(raw);
+                        }
                     }
 
                     // Metadata-only — skip payload unconditionally.
@@ -3310,6 +3365,55 @@ mod tests {
         assert_eq!(
             std::fs::read(dest.join("adir/file.txt")).expect("file entry extracted"),
             b"data"
+        );
+    }
+
+    /// R0076-0041: the pseudo-entry's byte-exact stem, for `raw_path`.
+    ///
+    /// A unit test rather than an end-to-end one, and the reason is
+    /// environmental rather than stylistic: this needs an archive whose
+    /// *filename* is not valid UTF-8, and macOS — the only platform with a
+    /// recorded verification run — rejects such a filename at `write` with
+    /// `EILSEQ`. The file cannot be created here, so the listing path cannot
+    /// be driven with one. `Path` needs no filesystem, so the derivation
+    /// itself is testable everywhere; that is what these pin.
+    #[cfg(unix)]
+    #[test]
+    fn raw_pseudo_entry_raw_name_returns_the_stem_bytes_when_lossy() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let name = std::ffi::OsStr::from_bytes(b"caf\xFF.gz");
+        let got = super::raw_pseudo_entry_raw_name(std::path::Path::new(name));
+        assert_eq!(
+            got.as_deref(),
+            Some(&b"caf\xFF"[..]),
+            "the stem's own bytes, not a second lossy rendering"
+        );
+    }
+
+    /// The control, and it is load-bearing: `raw_path == None` is defined as
+    /// "`path` is byte-exact". Returning `Some` for an ASCII stem would make
+    /// `None` stop meaning anything.
+    #[test]
+    fn raw_pseudo_entry_raw_name_is_none_for_a_utf8_stem() {
+        assert_eq!(
+            super::raw_pseudo_entry_raw_name(std::path::Path::new("plain.gz")),
+            None
+        );
+        assert_eq!(
+            super::raw_pseudo_entry_raw_name(std::path::Path::new("한글.gz")),
+            None,
+            "valid UTF-8 is byte-exact whether or not it is ASCII"
+        );
+    }
+
+    /// No stem at all is the same case in which `raw_format_name` declines to
+    /// remap, so it must not invent a raw name either.
+    #[test]
+    fn raw_pseudo_entry_raw_name_is_none_without_a_stem() {
+        assert_eq!(
+            super::raw_pseudo_entry_raw_name(std::path::Path::new("/")),
+            None
         );
     }
 }

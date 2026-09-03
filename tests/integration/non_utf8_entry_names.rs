@@ -200,3 +200,30 @@ fn the_destination_name_is_still_lossy_which_this_ruling_does_not_close() {
 
     common::cleanup(&tmp);
 }
+
+/// The control for the case that must NOT change: an ordinary ASCII-named
+/// `.gz` still reports `raw_path == None`, because `path` is byte-exact and
+/// `None` is what that means.
+#[test]
+fn an_ascii_named_raw_gz_still_reports_no_raw_path() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let payload = b"hello";
+    let mut gz: Vec<u8> = vec![0x1f, 0x8b, 0x08, 0, 0, 0, 0, 0, 0, 0xff];
+    gz.extend_from_slice(&[0x01, 0x05, 0x00, 0xfa, 0xff]);
+    gz.extend_from_slice(payload);
+    gz.extend_from_slice(&crc32fast::hash(payload).to_le_bytes());
+    gz.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+
+    let path = temp.path().join("plain.gz");
+    std::fs::write(&path, &gz).expect("write");
+
+    let archive = Archive::open(&path).expect("open");
+    let entries = archive.list_files().expect("list");
+    assert_eq!(entries[0].path, "plain");
+    assert_eq!(
+        entries[0].raw_path(),
+        None,
+        "an ASCII stem needs no raw form, and inventing one would make \
+         `raw_path == None` stop meaning anything"
+    );
+}
