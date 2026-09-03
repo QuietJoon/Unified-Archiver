@@ -1105,8 +1105,13 @@ impl LibarchiveArchive {
         let dir_path = dir_path.as_ref();
 
         let mut emitted_any = false;
+        // R0076-0019 (ZIP parity): remember the archive name this walk
+        // gave the source root, so the empty-tree fallback below reuses
+        // it instead of deriving a second, divergent one.
+        let mut root_archive_path: Option<String> = None;
         walk_directory_tree(dir_path, "walk", |item| {
             if item.is_root {
+                root_archive_path = Some(item.archive_path.clone());
                 return Ok(());
             }
             match item.kind {
@@ -1156,12 +1161,12 @@ impl LibarchiveArchive {
         // R0070-0047: empty source directory still produces a single
         // root entry (matches the ZIP backend).
         if !emitted_any {
-            let root_name = dir_path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            if !root_name.is_empty() {
+            // R0076-0019 (ZIP parity): reuse the archive name this walk
+            // gave the root. `Path::new("/").file_name()` is `None`, so
+            // the old `file_name()` derivation archived an empty
+            // filesystem root as zero entries instead of the synthesised
+            // name `archive_base_for_root` gives it.
+            if let Some(root_name) = root_archive_path.filter(|name| !name.is_empty()) {
                 self.add_directory_entry(&root_name)?;
             }
         }

@@ -590,12 +590,17 @@ impl ZipWriter {
         let dir_path = dir_path.as_ref();
 
         let mut emitted_any = false;
+        // R0076-0019: remember the archive name *this* walk gave the
+        // source root, so the empty-tree fallback below reuses it
+        // instead of deriving a second, divergent one.
+        let mut root_archive_path: Option<String> = None;
         walk_directory_tree(dir_path, "walk", |item| {
             // Skip the source directory itself — its name survives via
             // the children's relative paths under the parent-rooted
             // prefix. Libarchive's recursive add does the same so the
             // two backends emit equivalent layouts.
             if item.is_root {
+                root_archive_path = Some(super::common::normalize_path(&item.archive_path));
                 return Ok(());
             }
             let archive_path = super::common::normalize_path(&item.archive_path);
@@ -643,10 +648,14 @@ impl ZipWriter {
         // zero entries. Emit a single directory entry naming the
         // source root.
         if !emitted_any {
-            let root_name = super::common::normalize_path(
-                &dir_path.file_name().unwrap_or_default().to_string_lossy(),
-            );
-            if !root_name.is_empty() {
+            // R0076-0019: reuse the archive name this walk already gave
+            // the root instead of re-deriving one from
+            // `dir_path.file_name()`. The second derivation duplicated
+            // `compose_archive_path` and disagreed with it for a
+            // filesystem root: `Path::new("/").file_name()` is `None`, so
+            // an empty root archived to zero entries — the same silent
+            // drop `archive_base_for_root` exists to prevent.
+            if let Some(root_name) = root_archive_path.filter(|name| !name.is_empty()) {
                 self.add_directory_entry(&root_name)?;
             }
         }
