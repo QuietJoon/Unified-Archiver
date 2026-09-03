@@ -422,21 +422,28 @@ impl ArchiveFormat {
                 encryption_write: Support::None,
                 // Corrected 2026-08-26 from `Full`. RAR gets further than
                 // ZIP does — UnRAR opens the set and lists it, rather than
-                // ZIP's name-level enumeration — but extraction across
-                // volumes is not implemented end-to-end either, so the same
-                // `Partial` applies for the same reason.
+                // ZIP's name-level enumeration — and unlike ZIP, extraction
+                // across volumes works end to end, so this is `Full`.
                 //
-                // Measured against a real three-volume set
-                // (`tests/fixtures/test_multivol.part*.rar`, produced by
-                // `scripts/generate-rar-fixtures.sh`): a split file is
-                // listed as one entry *per volume*, all sharing one path, so
-                // `extract_all` trips the duplicate-output-path guard,
-                // `extract_file` and `extract_to_memory` refuse to
-                // disambiguate, and `extract_by_ids` — the call those two
-                // errors recommend — fails with a listing-drift error. Every
-                // extraction path is closed (ticgit 3b4d15).
-                // `tests/rar_multivolume_test.rs` pins each one.
-                multipart_read: Support::Partial,
+                // It was `Partial` until 2026-09-03, for a reason that turned
+                // out to be one layer lower than it looked: a split file is
+                // stored once per volume, and the listing surfaced each of
+                // those headers as a separate entry sharing one path. Three
+                // entries at one path closed every extraction route —
+                // `extract_all` tripped the duplicate-output-path guard,
+                // `extract_file` and `extract_to_memory` refused to
+                // disambiguate, and `extract_by_ids` (the call those errors
+                // recommend) failed with listing drift.
+                //
+                // `walk_entries` now folds continuation headers into their
+                // predecessor using `RHDF_SPLITBEFORE`, which UnRAR was
+                // already reporting and the wrapper was discarding. That
+                // alone restored extraction: the SDK opens the continuation
+                // volumes itself once it is asked for one logical entry, so
+                // no volume-change callback was needed. Verified byte-for-byte
+                // against `unrar x` on the committed three-volume fixture
+                // (ticgit 3b4d15); `tests/rar_multivolume_test.rs` pins it.
+                multipart_read: Support::Full,
                 multipart_write: Support::None,
                 modification: Support::None,
                 // RAR is read-only through the main facade. The optional
@@ -1986,7 +1993,11 @@ mod tests {
             // Not `Full`: UnRAR lists a volume set but no extraction
             // path can reassemble one. See the capability comment and
             // `tests/rar_multivolume_test.rs`.
-            assert_eq!(caps.multipart_read, Support::Partial);
+            // Full since 2026-09-03: a complete volume set lists as one
+            // logical entry and extracts through every public route
+            // (ticgit 3b4d15). `tests/rar_multivolume_test.rs` is the
+            // end-to-end proof; this is the matrix's own copy of the answer.
+            assert_eq!(caps.multipart_read, Support::Full);
             assert_eq!(caps.modification, Support::None);
             // R0070-0065: RAR is decode-only through the main facade.
             assert_eq!(caps.compression_read, Support::Full);

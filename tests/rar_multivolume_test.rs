@@ -59,10 +59,20 @@ fn subdir(dir: &Path, name: &str) -> PathBuf {
 /// different `crc32` (each volume's own fragment). That is UnRAR surfacing the
 /// per-volume file header rather than one logical entry, and it is the root of
 /// every extraction failure below — the duplicate path is what the extraction
-/// guards reject.
+/// A complete set lists as **one logical entry**, not one per volume.
+///
+/// UnRAR surfaces a per-volume file header for a split file: three headers
+/// sharing one name, each declaring the whole file's unpacked size and
+/// carrying its own fragment checksum. Left in that shape they read as three
+/// distinct files at one path, which is what closed every extraction route
+/// and made the content total count the file three times.
+///
+/// `walk_entries` now folds continuation headers (`RHDF_SPLITBEFORE`) into
+/// their predecessor, which is the information UnRAR was already handing us
+/// and the crate was discarding.
 #[test]
 #[serial_test::file_serial(rar)]
-fn complete_volume_set_lists_one_entry_per_volume() {
+fn complete_volume_set_lists_one_logical_entry() {
     let (dir, first) = stage_volumes(&PARTS);
 
     let archive = Archive::open(&first).expect("open the first volume of a complete set");
@@ -70,110 +80,114 @@ fn complete_volume_set_lists_one_entry_per_volume() {
 
     assert_eq!(
         entries.len(),
-        PARTS.len(),
-        "one entry per volume is today's shape, not one per logical file: {entries:?}"
+        1,
+        "three volume headers describe one file: {entries:?}"
     );
+    let entry = &entries[0];
+    assert_eq!(entry.path, "volume_payload.bin");
 
-    let declared = entries[0].size.expect("the entry declares a size");
+    let declared = entry.size.expect("the entry declares a size");
     assert!(
         declared > 20_480,
         "the payload must exceed one 20k volume or the set would not be split: {declared}"
     );
-    assert!(
-        entries
-            .iter()
-            .all(|entry| entry.path == entries[0].path && entry.size == Some(declared)),
-        "every per-volume entry describes the same logical file: {entries:?}"
+    assert_eq!(
+        entry.crc32, None,
+        "each volume carries a checksum over its own fragment, not over the \
+         file; surfacing one of them would verify nothing: {entry:?}"
     );
 
-    let mut checksums: Vec<_> = entries.iter().map(|entry| entry.crc32).collect();
-    let before = checksums.len();
-    checksums.sort_unstable();
-    checksums.dedup();
-    assert_eq!(
-        checksums.len(),
-        before,
-        "each volume carries its own fragment checksum, so they must differ: {entries:?}"
-    );
+    // The total that used to be three times the truth, and marked exact.
+    let (_digest, total) = archive
+        .calculate_content_multiset_digest_and_size()
+        .expect("digest a complete set");
+    assert_eq!(total.sized_bytes(), declared);
+    assert_eq!(total.sized_entries(), 1);
 
     common::cleanup(&dir);
 }
 
-/// Every public extraction path is closed for a volume set, including the one
-/// the other errors tell the caller to use.
+/// Every public read route reaches the payload, including the two that used
+/// to refuse by recommending a call which also failed.
 ///
-/// This is asserted as one test because the value is the *set* of outcomes: any
-/// single failure could be read as "use a different call", and the point is
-/// that there is no different call. If one of these starts succeeding, this
-/// test fails and the capability value in `src/format.rs` should be revisited
-/// in the same change.
+/// Asserted as one test because the value is the *set* of outcomes: the
+/// defect was that no route worked, so the fix is that every route does.
+/// Extraction across volumes needed no volume-change callback — UnRAR opens
+/// the continuation volumes itself once it is asked for one logical entry.
 #[test]
 #[serial_test::file_serial(rar)]
-fn complete_volume_set_cannot_be_extracted_by_any_path() {
+fn complete_volume_set_extracts_through_every_public_route() {
     let (dir, first) = stage_volumes(&PARTS);
     let archive = Archive::open(&first).expect("open the first volume of a complete set");
     let entry_path = "volume_payload.bin";
+    let size = archive.list_files().expect("list")[0]
+        .size
+        .expect("declared size");
 
-    // `extract_all`: the duplicate-output-path guard fires, because three
-    // entries name one output file.
-    let err = archive
-        .extract_all(common::default_extraction_options(subdir(&dir, "all")))
-        .expect_err("extract_all must not silently write one volume's fragment");
-    let text = err.to_string();
-    assert!(
-        text.contains("same output path") || text.contains("Multiple entries"),
-        "expected the duplicate-output-path refusal; got: {text}"
+    let all_dest = subdir(&dir, "all");
+    archive
+        .extract_all(common::default_extraction_options(all_dest.clone()))
+        .expect("extract_all used to trip the duplicate-output-path guard");
+    assert_eq!(
+        fs::metadata(all_dest.join(entry_path)).expect("stat").len(),
+        size,
+        "a short file here means the continuation volumes were not followed"
     );
 
-    // `extract_file` and `extract_to_memory`: both refuse to pick one of the
-    // three same-named entries, and both point at `extract_by_ids`.
-    for text in [
-        archive
-            .extract_file(
-                entry_path,
-                common::default_extraction_options(subdir(&dir, "file")),
-            )
-            .expect_err("extract_file must not disambiguate on its own")
-            .to_string(),
-        archive
-            .extract_to_memory(entry_path)
-            .expect_err("extract_to_memory must not disambiguate on its own")
-            .to_string(),
-    ] {
-        assert!(
-            text.contains("extract_by_ids"),
-            "the refusal must name the call it recommends; got: {text}"
-        );
-    }
-
-    // And that recommended call fails too — the listing holds three entries
-    // but the archive walk ends after one, so the crate's own drift guard
-    // rejects it. A caller following the advice in the two errors above
-    // arrives here.
-    let err = archive
-        .extract_by_ids(
-            &[0],
-            common::default_extraction_options(subdir(&dir, "ids")),
+    let file_dest = subdir(&dir, "file");
+    archive
+        .extract_file(
+            entry_path,
+            common::default_extraction_options(file_dest.clone()),
         )
-        .expect_err("extract_by_ids cannot reassemble a split entry either");
-    let text = err.to_string();
-    assert!(
-        text.contains("listing drift"),
-        "expected the listing-drift refusal from the recommended call; got: {text}"
+        .expect("extract_file used to refuse to disambiguate");
+    assert_eq!(
+        fs::metadata(file_dest.join(entry_path))
+            .expect("stat")
+            .len(),
+        size
+    );
+
+    let in_memory = archive
+        .extract_to_memory(entry_path)
+        .expect("extract_to_memory used to refuse to disambiguate");
+    assert_eq!(in_memory.len() as u64, size);
+
+    let ids_dest = subdir(&dir, "ids");
+    archive
+        .extract_by_ids(&[0], common::default_extraction_options(ids_dest.clone()))
+        .expect("extract_by_ids used to fail with a listing-drift error");
+    assert_eq!(
+        fs::metadata(ids_dest.join(entry_path)).expect("stat").len(),
+        size
+    );
+
+    let report = archive
+        .validate_integrity()
+        .expect("validate a complete set");
+    assert_eq!(
+        (report.total_entries, report.validated, report.failed.len()),
+        (1, 1, 0),
+        "it used to report three healthy entries for an archive nothing could read"
     );
 
     common::cleanup(&dir);
 }
 
-/// The capability report must not promise what the tests above disprove.
+/// The capability report must match what the tests above demonstrate.
+///
+/// This was `Support::Partial` while no extraction path could reassemble a
+/// set. The tests above now extract one end to end through four routes, so
+/// `Partial` understates the crate and this assertion moved with the
+/// behaviour rather than being deleted.
 #[test]
-fn rar_multipart_read_is_partial_not_full() {
+fn rar_multipart_read_is_full() {
     for format in [ArchiveFormat::Rar, ArchiveFormat::Rar5] {
         assert_eq!(
             format.capabilities().multipart_read,
-            Support::Partial,
-            "{format:?}: UnRAR lists a volume set but no extraction path can \
-             reassemble one, so this cannot be Full"
+            Support::Full,
+            "{format:?}: a complete volume set lists as one entry and extracts \
+             through every public route, so this is no longer Partial"
         );
     }
 }
