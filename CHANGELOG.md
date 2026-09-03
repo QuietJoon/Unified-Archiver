@@ -29,8 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > 0.5.0 as the next stop, and the three `#[deprecated(since = …)]` attributes below are set to it.
 >
 > `Cargo.toml` still reads `0.4.0` and is deliberately left alone. Bumping it before the tag is
-> what produced the phantom versions the header above has to apologise for, and one item is still
-> owed before 0.5.0 can honestly be cut — see **Still owed**.
+> what produced the phantom versions the header above has to apologise for. The last item that was
+> outstanding is now delivered — see **Nothing owed before 0.5.0 can be tagged** at the end of this
+> section.
 >
 > **How to read the Breaking list.** Three kinds of break, and they cost a caller different amounts
 > of work. **One signature change:** `recovery_percentage()` returns `Option<u16>` where it returned
@@ -279,6 +280,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   honoured, so a staging open that used to succeed can fail; set **above** 16 GiB it was silently
   capped and now is not.
 
+- **SFX and offset opens read the payload where it lies, for ZIP, RAR and 7z** (DCR-015).
+  `open_sfx()` / `open_at_offset()` used to copy the payload out to a tempfile before opening it,
+  always — that copy is what forced the 16 GiB ceiling and what consumed temp-volume space. They
+  now open **in place** when the outer file carries an executable extension *and* the payload magic
+  agrees at the offset: ZIP and RAR relocate themselves, and 7z is handed a `PayloadWindow` that
+  makes the payload's first byte look like byte 0. Every arm declines to the staging path rather
+  than failing if its constructor does not accept the payload, so no previously-working open
+  breaks. libarchive-backed payloads (TAR family, ISO) still stage. Listed as breaking because the
+  temp-space and size characteristics of an SFX open change underneath callers who budgeted for
+  them; read `Archive::payload_access()` to tell the two apart.
+
+- **A read handle is bound to the file it was opened on, not to the pathname alone** (DCR-014,
+  OI-0001-002). This crate resolves archives by name repeatedly — once at detection, again at every
+  backend re-open — so a different inode dropped at the same path between two resolutions passed
+  every name-based guard. The read backends now capture the file's identity at open (`(dev, ino)`
+  *and* length on Unix; length alone elsewhere) and re-check it at each by-pathname re-resolution.
+  A swap now fails with `ArchiveError::OperationBlocked` carrying "identity changed". Breaking
+  because calls that returned `Ok` against a swapped file now return `Err` — which is the point.
+
 - **That ceiling does not bind on an in-place open, by design.** It bounds a *copy*; where the
   backend reads the archive straight out of the file the caller named there is no copy and nothing
   for the ceiling to bound (AD 0040, amended). It is therefore not a file-size guard and must not
@@ -454,6 +474,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`v2-api` is a default feature.** `Cargo.toml` now reads `default = ["rar-support", "v2-api"]`
+  (owner ruling, 2026-09-03). A default build exports
+  `unified_archive::v2::{ReadArchive, WriteArchive, ModifyArchive}`; the module previously required
+  `--features v2-api`. Not a source break — the surface is purely additive — but it changes what a
+  default `cargo build` compiles, and `--no-default-features` still turns the module off. The flip
+  had been gated on "CI coverage" borrowed from AD 0058's footprint-feature ordering constraint;
+  AD-0070 established that the constraint was never about this flag and that the real requirement
+  was that both sides be *run*. Both are now release-gate lanes, and the minimal profile was made
+  clippy-clean in the same pass — eight test files had dangling imports on it, because nobody had
+  ever built it.
+
 - **`Archive::detect_multipart` no longer keeps its own idea of what a volume name is, and
   opening a continuation volume now finds the set.** The method carried ~270 lines of hand-rolled
   matching — four boundary closures, four hoisted source predicates and a bespoke numeric sort —
@@ -623,7 +654,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   missing reported success having tested nothing — worse than a failure, because it is invisible.
   Every such lane now either runs and can fail, or is `#[ignore]`d with the reason *and* the exact
   command to run it; lanes that iterate a fixture set gained vacuity floors, so an empty glob fails
-  rather than passes. The ignored count rose from 6 to 13, which is the honest direction: those are
+  rather than passes. Lanes that used to pass while skipping became either runnable-and-failable or
+  `#[ignore]`d with their exact command; several were then made runnable outright as their fixtures
+  landed in this same window — the sparse-TAR lane has a committed `tests/fixtures/sparse.tar` and
+  runs by default, and the perf sentinel went back into the default lane. What is left `#[ignore]`d
+  needs a licensed `rar`, a native archiver CLI, or a `rustc` spawn, and each says so. Formerly:
   lanes that used to pass while skipping. The perf sentinel went the other way and now runs in the
   default lane.
 
@@ -732,11 +767,14 @@ And the three that were mis-dated:
   `tests/recovery_percentage_edge_cases.rs` holds a per-fixture expected value that a
   regeneration has to update.
 
-  Two limits are recorded rather than fixed, each with a test that pins today's answer so a fix
-  breaks it: a record above 255% cannot be carried by the `Option<u8>` return type and reports
-  `None` (ticgit 7ca208), and a header-encrypted (`-hp`) archive reports no recovery record at all
-  because `UnrarArchive` captures its flags at `RAROpenArchiveEx` and calls `RARSetPassword`
-  afterwards (ticgit 3f8790).
+  Two limits were recorded here rather than fixed, and **both were closed later in this same
+  window**. The >255% ceiling is gone with the `Option<u16>` widening (see **Breaking**, ticgit
+  7ca208). And a header-encrypted (`-hp`) archive no longer reports *no* recovery record: the
+  password now reaches `RAROpenArchiveEx`, so the decrypted main header is read and
+  `has_recovery_record()` answers `true` (ticgit 3f8790). What survives is narrower, and is now
+  stated in the contract: on a `-hp` archive `recovery_percentage()` still returns `None`, because
+  the percentage lives in a header the password-less block walk cannot read. The tests that pinned
+  the two old answers moved with them.
 
 - **`cargo doc` is warning-free again.** Three rustdoc warnings shipped in `4f521e0` because that
   change's gate counted clippy warnings and never ran `cargo doc`. Two were public docs linking to
@@ -792,10 +830,11 @@ timeline did not have to slip. It is described under **Deprecated** above; the s
 48 entry constructions to `file(..).build()`), and `cargo clippy --all-targets --all-features -D
 warnings` is green with the attributes attached.
 
-Three `#[allow(deprecated)]` sites remain, all deliberate and all commented: two assert that
-`CompressionOptions::new` still accepts a non-creatable format and defers the rejection — which is
-the back-compat guarantee, and neither replacement can express a non-creatable format at all — and
-they are the reason `new` is deprecated rather than removed. `ArchiveEntry::new` needed none.
+Every remaining `#[allow(deprecated)]` is in a `#[cfg(test)]` module, is commented, and has the
+deprecated path as its subject rather than as an unmigrated call site: the `CompressionOptions::new`
+assertions that a non-creatable format is still accepted and rejected later — the back-compat
+guarantee neither replacement can express, and the reason `new` is deprecated rather than removed —
+plus one pinning `ArchiveEntry::symlink`. No production path carries one.
 
 ## [0.4.0] - 2026-08-17
 
@@ -1145,6 +1184,13 @@ in this pass.
   Public extract-with-options paths now also route through it. The
   legacy `_unchecked` methods stay during the migration window.
   (R0068-0039 / R0068-0040)
+- **Superseded later: the `piz` ZIP backend, and the `memmap2` mapping with it, were removed**
+  (DCR-009, 2026-07-23). The R4 benchmark settled that piz did not win — 0.9% on DEFLATE, 12.2% on
+  STORED, the latter recoverable without it — while costing roughly archive-size resident RSS and
+  carrying the OI-0080-002 mmap SIGBUS / silent-mutation hazard. `src/ffi/piz_wrapper.rs`, the
+  `ArchiveBackend::Piz` variant and every dispatch arm for it are gone; the `zip` crate is the sole
+  ZIP reader. The entry below is left as written because it records what landed at the time.
+
 - **D4 / Piz + ZIP handle caching landed** (AD 0054): each
   long-lived `Archive` now amortises file open + central-directory
   parse / mmap setup over the operation count instead of paying it

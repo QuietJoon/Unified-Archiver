@@ -37,8 +37,12 @@ native call means adding its declaration by hand.
 ### Running Tests
 
 ```bash
-# Run all tests
-cargo test
+# Default profile (rar-support + v2-api)
+cargo test -- --test-threads=4
+
+# The two profiles the release gate requires
+cargo test --all-features -- --test-threads=4
+cargo test --no-default-features -- --test-threads=4
 
 # Run one test binary
 cargo test --test integration_tests
@@ -89,6 +93,9 @@ src/
 ├── security.rs         # ExtractionLimits + crate-internal sanitize/verify helpers
 ├── streaming.rs        # StreamingExtractor (Read trait wrapper)
 ├── stream_crc.rs       # GZIP/BZIP2/XZ checksum parsing
+├── password.rs         # Password handling
+├── fs_identity.rs      # Read-handle file-identity binding (DCR-014)
+├── payload_window.rs   # In-place SFX payload window (DCR-015)
 ├── ffi/                # FFI bindings (unrar, libarchive, zip, sevenz)
 │   ├── unrar.rs       # UnRAR SDK bindings
 │   ├── libarchive.rs  # libarchive bindings
@@ -97,9 +104,13 @@ src/
 └── external/rar.rs     # Optional WinRAR CLI bridge (external-rar-create)
 
 tests/
-├── integration/        # Integration test modules
-├── fixtures/          # Test archives
-└── common/            # Shared test utilities
+├── integration_tests.rs  # Binary for the tests/integration/ module tree
+├── integration/          # Integration test modules
+├── contract_tests.rs     # Binary for the tests/contract/ module tree
+├── contract/             # Contract test modules
+├── *_test.rs             # Standalone integration binaries (run with --test <name>)
+├── fixtures/             # Test archives (committed, incl. sparse.tar)
+└── common/               # Shared test utilities
 
 examples/              # Usage demonstrations
 benches/              # Performance benchmarks
@@ -141,15 +152,17 @@ benches/              # Performance benchmarks
 
 ### Commit Message Guidelines
 
-- Use present tense ("Add feature" not "Added feature")
-- First line: brief summary (50 chars or less)
-- Blank line, then detailed description if needed
-- Reference issues and PRs where appropriate
+- Use Conventional Commits: `type(scope): summary`. Types in use here are `feat`, `fix`, `docs`, `refactor`,
+  `test`, `chore`, `build`, `security`.
+- Append `!` after the type/scope for a breaking change: `feat(api)!: widen recovery_percentage to u16`.
+- Use present tense. Subjects here are descriptive rather than terse — 60-95 characters is normal.
+- Blank line, then a body carrying the reasoning, the evidence, and the gate result.
+- Reference records (AD / MADR / DCR under `docs/records/`), open issues, and ticgit ids where relevant.
 
 Examples:
-- `Add multi-part archive creation support`
-- `Fix CRC32 validation for RAR5 archives`
-- `Update documentation for Archive::modify()`
+- `feat(create): add multi-part archive creation support`
+- `fix(unrar): validate CRC32 for RAR5 archives`
+- `docs(api): rule that the id route answers non-UTF-8 entry access`
 
 ## Coding Standards
 
@@ -225,11 +238,15 @@ All contributions must align with these principles.
 
 ## Pull Request Process
 
-1. **Ensure CI passes**
-   - All tests pass
-   - No clippy warnings
-   - Code is formatted
-   - Documentation builds
+1. **Run the gate and record it**
+   - This project has **no hosted CI** (AD-0070). "CI-covered" means a committed command was run on a host that can
+     observe the property, and its native exit status was recorded against a commit.
+   - Run `scripts/release-gate.sh` in the foreground of a terminal you own — not detached, not from a background
+     task. Its lanes are `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
+     `cargo test --all-features -- --test-threads=4`, `cargo test --no-default-features -- --test-threads=4`, and
+     `cargo check --all-targets`.
+   - Commit the resulting record under `docs/verification/`, naming the platform you ran on. A platform with no
+     record is unverified, not assumed-green.
 
 2. **Update documentation**
    - Update README.md if adding user-facing features

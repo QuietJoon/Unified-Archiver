@@ -61,16 +61,22 @@ RAR, TAR-family, standalone compressed formats, and ISO are read-only.
 
 Split archives are **not** uniformly supported across formats.
 
-Supported end-to-end:
+Detected and listed:
 
-- RAR / RAR5 multi-part archives
+- RAR / RAR5 multi-part archives — `detect_multipart()` and `volume_set_report()` open the set, enumerate its
+  volumes, and name any that are missing.
 
-Not supported end-to-end in `v0.4.0`:
+Not extractable in `v0.4.0`:
 
-- ZIP split volumes (`.z01`, `.z02`, ...)
-- 7z numeric split volumes (`.001`, `.002`, ...)
+- **No format extracts across volumes.** A RAR split entry is listed once *per volume*, with every copy sharing one
+  path, so `extract_all` trips the duplicate-output-path guard, `extract_file` and `extract_to_memory` refuse to
+  disambiguate, and `extract_by_ids` — the call those two errors recommend — fails with a listing-drift error.
+  `ArchiveFormat::Rar` / `Rar5` therefore report `multipart_read: Support::Partial`, not full support.
+- ZIP split volumes (`.z01`, `.z02`, ...) — name-level detection only; `detect_multipart` enumerates sibling file
+  names and never opens a volume.
+- 7z numeric split volumes (`.001`, `.002`, ...) — not supported at all.
 
-Some helper logic and naming heuristics exist in the codebase, but public users should treat ZIP and 7z split-volume workflows as unsupported for this release.
+Treat every split-volume *extraction* workflow as unsupported for this release; inspection of a RAR set is supported.
 
 ## 4. Streaming is not uniformly bounded-memory
 
@@ -115,20 +121,24 @@ If you need compressed archive creation, use:
 - `.tar.bz2`
 - `.tar.xz`
 
-## 6. Windows support is not release-verified yet
+## 6. Only macOS is release-verified
 
-The codebase includes Windows support paths, but `v0.4.0` is only tested on:
+The codebase includes Linux and Windows support paths, but the only recorded verification run for `v0.4.0` is on
+macOS (`docs/verification/`). Under AD-0070 this project's "CI" is recorded per-platform verification rather than a
+hosted service, and a platform counts as covered only once a run on it has been recorded.
 
-- macOS
-- Linux
-
-Treat Windows as experimental for now.
+No Linux or Windows record exists, so treat both as unverified. Windows verification is on hold and owner-invoked;
+the Linux cross-check lane is parked pre-v2.
 
 ## 7. Some operations use temporary files intentionally
 
 Current examples:
 
-- `open_at_offset()` copies the embedded payload to a temporary file before opening it
+- `open_at_offset()` / `open_sfx()` read the embedded payload **in place** for ZIP, RAR (with `rar-support`) and 7z
+  when the outer file has an executable extension and the payload magic matches at the offset — no copy, no temp
+  space (DCR-015). libarchive-backed payloads (TAR family, ISO), and any open that declines those gates, still stage
+  a copy into a tempfile bounded by `ExtractionLimits::max_sfx_payload_size`. Call `Archive::payload_access()` to
+  learn which path a handle took.
 - UnRAR-backed `extract_to_memory()` stages data through a temporary extraction path
 
 This is expected behavior in `v0.4.0`.
@@ -160,5 +170,7 @@ The stable public workflow centers on:
 - `CompressionOptions`
 - `ModificationOptions`
 - `StreamingExtractor`
+- `ReadArchive` / `WriteArchive` / `ModifyArchive` — the typed mode-split handles, gated by the `v2-api` feature,
+  which is **on by default** since 2026-09-03
 
 The `ffi` module and the optional `external` module expose lower-level or platform-specific integration points. They are useful, but they are not the primary public API for general library use.
