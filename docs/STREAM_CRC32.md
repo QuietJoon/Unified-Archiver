@@ -348,7 +348,7 @@ central-directory CRC32 field by specification, so that field is a placeholder
 rather than a content checksum. The question of how those entries should
 surface a CRC32 in the listing has been decided and implemented: **they list
 `crc32 = None`.** The gate is `crc32_check_exempt` in
-`src/ffi/zip_wrapper.rs`, and it is a **three-way** conjunction:
+`src/ffi/zip_wrapper/aes.rs`, and it is a **three-way** conjunction:
 
 ```text
 zip_file.encrypted()
@@ -368,7 +368,7 @@ one; exempting them would discard a checksum the archive actually carried and
 would force a needless decrypt-and-stream during the digest walk. With the
 vendor-version conjunct they keep `Some(0)`, as does any plaintext empty file.
 `test_zip_wrapper_encrypted_empty_file_without_aes_field_keeps_crc32` in
-`src/ffi/zip_wrapper.rs` exists solely to pin that seam.
+`src/ffi/zip_wrapper/tests.rs` exists solely to pin that seam.
 
 Extraction likewise skips the CRC comparison for exempt entries and relies on
 the AES authentication tag instead. There is no placeholder in the listing to
@@ -389,11 +389,11 @@ to streaming the entry's payload, which means decrypting it. Listing an
 encrypted ZIP still needs no password — only reading entry data does — so a
 digest call on a password-protected ZIP opened without a usable password
 **fails** where it previously returned a digest computed over the placeholder.
-Open such archives with `Archive::open_encrypted()`. The refusal currently
-arrives as `ArchiveError::Format` carrying `"… Password required to decrypt
-file"` rather than as `ArchiveError::Password`; that mis-classification is
-pre-existing and tracked separately (ti-9bdf2c), so match on it defensively
-rather than reading it as the intended classification.
+Open such archives with `Archive::open_encrypted()`. The refusal arrives as
+`ArchiveError::Password` — ticgit `9bdf2c` realigned the ZIP missing-credential
+case with the RAR (`ERAR_MISSING_PASSWORD`) and 7z (`PasswordRequired`)
+backends, so a missing password is variant-distinguishable on every backend and
+can be matched on directly.
 
 ### Future Enhancements
 

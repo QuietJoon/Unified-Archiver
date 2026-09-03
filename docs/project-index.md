@@ -30,7 +30,8 @@ Curated entry point for the `unified-archive` written record. This is the opinio
 ## Understanding the design
 
 - [architecture/README](./architecture/README.md) — architecture overview
-- [architecture/decisions/README](./architecture/decisions/README.md) — ADR index + conventions
+- [records/README](./records/README.md) — the single decision-record store (AD / MADR / DCR / DD / IG), consolidated 2026-07-23
+- [records/index.yaml](./records/index.yaml) — the authoritative catalogue
 - [design-notes/](./design-notes/) — parked design notes / research evaluations (not ADRs)
 
 ## Current work & tracking
@@ -38,8 +39,9 @@ Curated entry point for the `unified-archive` written record. This is the opinio
 - [project/status](./project/status.md) — current workstream status
 - [project/open-issues](./project/open-issues.md) — active accepted issues (`OI-####-###`)
 - [project/taxonomy](./project/taxonomy.md) — approved OKF v0.2 vocabulary and directory governance
-- [project/design-change-records/](./project/design-change-records/) — DCRs for in-flight design changes
-- [`reviews/`](../reviews/) — incoming review slots + archived reviews
+- [verification/](./verification/) — recorded per-platform verification runs (AD-0070)
+- [backlog](./backlog.md) — shared open-work register (ready / needs-decision / blocked)
+- [`reviews/`](../reviews/) — incoming review slots; completed reviews land in `reviews/reviewed/`. The historical archive was moved out of the repo to `../reviews-cold-archive-2026-08-07/` on 2026-08-07.
 
 ## Full documentation index
 

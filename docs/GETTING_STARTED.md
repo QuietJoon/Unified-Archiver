@@ -196,7 +196,7 @@ Opening: test.zip
 Format: Zip
 
 Contents:
-  test.txt - 14 bytes (CRC32: 0BF71E59)
+  test.txt - 14 bytes (CRC32: B4E89E84)
 
 Total files: 1
 ```

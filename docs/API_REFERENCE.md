@@ -20,9 +20,9 @@ is the `Archive` facade together with the domain types listed in the table of co
 below. The following items are `pub` only because their parent module is `pub mod`,
 not because they are part of the supported API:
 
-- `unified_archive::ffi::UnrarArchive`
-- `unified_archive::ffi::LibarchiveArchive`
-- `unified_archive::ffi::ZipArchive`
+- `unified_archive::ffi::wrapper::UnrarArchive` (only with `rar-support`)
+- `unified_archive::ffi::libarchive_wrapper::LibarchiveArchive`
+- `unified_archive::ffi::zip_wrapper::ZipArchive`
 - `unified_archive::ffi::SevenZArchive`
 - `unified_archive::ffi::ZipWriter`
 
@@ -46,7 +46,7 @@ Use the `Archive` facade for all archive operations; backend selection is automa
 - [ArchiveError](#archiveerror)
 - [ArchiveWarning](#archivewarning)
 - [StreamingExtractor](#streamingextractor)
-- [Typed Handle API (`v2-api` feature)](#typed-handle-api-v2-api-feature)
+- [Typed Handle API (`v2-api`, on by default)](#typed-handle-api-v2-api-on-by-default)
 - [Type Aliases](#type-aliases)
 - [Re-exports](#re-exports)
 - [Feature Flags](#feature-flags)
@@ -692,7 +692,9 @@ loop {
 
 Create a new archive for writing. The returned handle is in Write mode. Fails if the output file already exists.
 
-**Supported formats:** ZIP, 7z, TAR, TAR.GZ, TAR.BZ2, TAR.XZ.
+**Supported formats:** ZIP, 7z, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, TAR.ZST, TAR.LZ4, TAR.LZMA
+(`ArchiveFormat::can_create`). The zstd / lz4 / lzma variants additionally require a libarchive
+built with the matching write filter.
 
 **Important:** `CompressionOptions.password` is rejected by `Archive::create()` in the current main facade. The library reads encrypted archives, but the main creation facade does not produce encrypted archives.
 
@@ -722,9 +724,10 @@ at compile time. Functionally equivalent to
 #### `Archive::create_seven_zip(path: impl AsRef<Path>, opts: SevenZCompressionOptions) -> Result<Archive>`
 
 Typed entrypoint for 7-Zip creation. Pairs with `SevenZCompressionOptions`.
-The 7-Zip builder surfaces `password` because 7-Zip is the only
-currently-creatable format that will eventually accept it; today
-`password.is_some()` is rejected at this call per MADR-0027.
+The 7-Zip builder deliberately exposes **no** `password` field (R0081-0005): create-time
+encryption is deferred behind an opt-in that has not shipped (MADR-0027, amended 2026-07-20), so an
+encrypted 7-Zip is unrepresentable here rather than constructible into a state `create_seven_zip` is
+guaranteed to reject. The only setters are `level` and `progress`.
 
 ---
 
@@ -788,13 +791,16 @@ finish silently.
 pub struct CompressionOptions {
     pub format: ArchiveFormat,
     pub level: CompressionLevel,
-    pub password: Option<SecStr>,
+    pub password: Option<Password>,
     pub split_size: Option<u64>,
     pub progress: Option<Box<dyn ProgressCallback>>,
 }
 ```
 
-Construct with `CompressionOptions::new(format)`. Default level is `CompressionLevel::Normal`.
+Construct with `CompressionOptions::for_writable(WritableFormat::ZIP)` for a literal format, or
+`CompressionOptions::try_new(format)` for a computed one — both reject a non-creatable format at
+construction. `CompressionOptions::new(format)` is `#[deprecated]` since 0.5.0 and slated for
+removal in 0.6.0. Default level is `CompressionLevel::Normal`.
 
 **Field behavior note:** `password` exists on the type because the crate also supports encrypted-read flows and optional external integrations, but `Archive::create()` rejects password-based archive creation in the current main facade with `ArchiveError::OperationBlocked`.
 
@@ -957,13 +963,18 @@ Detect if a file is a self-extracting archive. Uses 3-stage detection: executabl
 
 Convenience method: detect SFX and open the embedded archive in one call. Equivalent to `detect_sfx()` + `open_at_offset()`.
 
-The embedded payload is materialized to a temporary file and opened through the normal archive pipeline.
+A ZIP, RAR or 7z payload behind an SFX-shaped path (executable extension) is read **in place** —
+the backend opens the named file and starts at the detected offset, so nothing is copied and the
+AD 0040 staging ceiling does not apply (DCR-015). Anything else is staged into a temporary file that
+is removed when the handle drops. Call `Archive::payload_access()` to learn which happened.
 
 ---
 
 #### `Archive::open_at_offset(path: impl AsRef<Path>, offset: u64) -> Result<Archive>`
 
-Open an archive that starts at a specific byte offset within a file. Primarily for SFX archives. `offset == 0` behaves like `Archive::open()`. Non-zero offsets materialize the payload to a temporary file and then open it.
+Open an archive that starts at a specific byte offset within a file. Primarily for SFX archives. `offset == 0` behaves like `Archive::open()`. Non-zero offsets read the payload in place where the backend supports it (ZIP, RAR, 7z behind an
+executable-extension path, with the payload magic agreeing at the offset), and otherwise stage it
+into a temporary file. `Archive::payload_access()` reports which.
 
 ---
 
@@ -1021,7 +1032,7 @@ pub enum StubType {
 
 ##### Methods
 
-**`StubType::detect(bytes: &[u8]) -> Result<StubType>`** -- Classify executable format from the leading bytes of a file. Returns `StubType::Unknown` (not an error) when the bytes don't match any recognized format, allowing callers to proceed with heuristic signature scanning.
+**`StubType::detect(bytes: &[u8]) -> StubType`** -- Classify executable format from the leading bytes of a file. Returns `StubType::Unknown` (not an error) when the bytes don't match any recognized format, allowing callers to proceed with heuristic signature scanning.
 
 **`StubType::description(&self) -> &'static str`** -- Human-readable description (e.g., `"Windows PE executable"`).
 
@@ -1038,6 +1049,7 @@ Metadata for a single file or directory within an archive.
 ### Fields
 
 ```rust
+#[non_exhaustive]
 pub struct ArchiveEntry {
     /// Full path within archive (UTF-8, forward slashes)
     pub path: String,
@@ -1100,11 +1112,15 @@ pub struct ArchiveEntry {
 Create a new `ArchiveEntry` with the given path and sequential ID. All
 optional fields default to `None`/`false`.
 
-> **Prefer the builder for new code.** `ArchiveEntry::new` is kept for
-> source-compat. New code should reach for the typed entry-points
-> below: they pre-set `entry_type` and route through the builder so
-> permission/path invariants (R0075-0078, R0075-0079) cannot be
-> violated by hand-rolled struct literals.
+> `ArchiveEntry` is `#[non_exhaustive]`: crates outside `unified-archive` cannot build one with a
+> struct literal, and `..Default::default()` is **not** an escape hatch — both are `E0639`. The
+> fields stay `pub`, so reads and field assignment on an owned value still work.
+>
+> **`ArchiveEntry::new` is `#[deprecated]` since 0.5.0 and slated for removal in 0.6.0** — use
+> `ArchiveEntry::file(path, id).build()`. `ArchiveEntry::directory` and `ArchiveEntry::symlink`
+> carry the same deprecation (use `dir_at` / `symlink_at`). The typed entry-points pre-set
+> `entry_type` and route through the builder so permission/path invariants (R0075-0078,
+> R0075-0079) cannot be violated by hand-rolled struct literals.
 
 #### `ArchiveEntry::file(path: impl Into<String>, id: usize) -> ArchiveEntryBuilder`
 
@@ -1363,8 +1379,8 @@ pub struct ExtractionOptions {
     /// Destination directory for extracted files
     pub destination: PathBuf,
 
-    /// Password for encrypted archives (stored zeroed via `secstr::SecStr`)
-    pub password: Option<SecStr>,
+    /// Password for encrypted archives (`Password` wraps a zeroing `secstr::SecStr`)
+    pub password: Option<Password>,
 
     /// Overwrite existing files (default: false, fails with error if files exist)
     pub overwrite: bool,
@@ -1485,7 +1501,8 @@ Read accessors (all `-> Cap` unless noted):
 
 Defaults: 10 GiB total, 1 GiB per file, `1000:1` ratio, 100,000 entries,
 16 GiB SFX payload staging ceiling (AD 0040),
-`reject_unsafe_paths = false` (AD 0066, behaviour deferred).
+`reject_unsafe_paths = false` (AD 0066 — the default *repairs* unsafe entry names; setting it
+`true` blocks the archive pre-extraction with `OperationBlocked` instead).
 
 ### Builder
 
@@ -1882,9 +1899,9 @@ Extract the check type from an XZ stream header (bytes 6-7). Reports the check a
 
 ---
 
-## Typed Handle API (`v2-api` feature)
+## Typed Handle API (`v2-api`, on by default)
 
-When the optional `v2-api` feature is enabled, the crate exposes
+The `v2-api` feature is **enabled by default** (flipped 2026-09-03), so a default build exposes
 `ReadArchive`, `WriteArchive`, and `ModifyArchive` (AD 0053). These
 typed wrappers narrow the operation surface to mode-appropriate
 methods at compile time, eliminating runtime "wrong-mode" rejections
@@ -1961,7 +1978,7 @@ The library re-exports commonly used types at the crate root:
 pub use crate::archive::Archive;
 pub use crate::format::{ArchiveFormat, FormatCapabilities, Support};
 pub use crate::entry::{ArchiveEntry, ArchiveEntryBuilder, EntryType, FileAttributes};
-pub use crate::error::{ArchiveError, Operation, Result};
+pub use crate::error::{ArchiveError, ArchiveWarning, Operation, Result, ResultWithWarnings};
 
 // Options and callbacks
 pub use crate::options::{
@@ -1976,8 +1993,9 @@ pub use crate::modification::ModificationOptions;
 pub use crate::security::{Cap, CompressionRatio, ExtractionLimits, ExtractionLimitsBuilder};
 
 // Inspection and streaming
-pub use crate::inspection::{MultipartLayout, ValidationReport};
-pub use crate::streaming::StreamingExtractor;
+pub use crate::inspection::{MultipartLayout, SizedContentTotal, ValidationReport};
+pub use crate::password::Password;
+pub use crate::streaming::{StreamBound, StreamingExtractor};
 
 // SFX detection
 pub use crate::sfx::{SfxConfidence, SfxDetectionResult, StubType};
@@ -2017,8 +2035,9 @@ Enables the Windows-only `unified_archive::external::RarCreator` helper for out-
 
 Use this only when you explicitly want the WinRAR CLI bridge. It is separate from `Archive::create()`.
 
-### `v2-api`
+### `v2-api` (default)
 
+Enabled by default since the 2026-09-03 flip; `--no-default-features` turns it off.
 Enables the additive typed-handle surface:
 `unified_archive::v2::{ReadArchive, WriteArchive, ModifyArchive}`.
 These wrappers narrow operations by mode at compile time while delegating
@@ -2038,7 +2057,10 @@ record.
 - UnRAR uses 4-byte wchar_t (UTF-32)
 
 ### Windows
-- Not yet tested on Windows; macOS is the primary platform, Linux secondary
+- Windows, macOS and Linux are all first-class native targets (owner directive, 2026-07-17);
+  cross-compilation is out of scope pre-v2.
+- Windows support is present in the codebase but **not release-verified**: no `docs/verification/`
+  record produced on a Windows host exists yet (AD-0046 amendment, 2026-09-03).
 - UnRAR uses 2-byte wchar_t (UTF-16)
 - May require adjustments for libarchive linkage and path handling
 
@@ -2106,5 +2128,4 @@ println!("{}", text);
 
 ---
 
-**Last Updated**: 2026-04-28
 **Version**: 0.4.0

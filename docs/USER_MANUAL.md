@@ -71,7 +71,8 @@ sudo dnf install libarchive-devel pkgconf-pkg-config gcc-c++
 Additional notes:
 
 - `libarchive` is required on macOS and Linux.
-- `pkg-config` and a C++ compiler are needed because the bundled UnRAR SDK is built as part of the crate: `build.rs` compiles its sources through the `cc` crate, so no `make` is involved.
+- `pkg-config` is needed so `build.rs` can locate and link `libarchive`. A C++ compiler is needed
+  because the bundled UnRAR SDK (default `rar-support` feature) is built as part of the crate: `build.rs` compiles its sources through the `cc` crate, so no `make` is involved.
 - Windows support exists in the codebase, but `v0.4.0` is not release-verified on Windows yet.
 
 ## 3. Supported Workflows
@@ -101,7 +102,9 @@ Supported:
 - TAR.GZ
 - TAR.BZ2
 - TAR.XZ
-- TAR.ZST / TAR.LZ4 / TAR.LZMA (requires a libarchive built with the matching codec; stock Homebrew/vcpkg builds are)
+- TAR.ZST / TAR.LZ4 / TAR.LZMA — requires a libarchive built with the matching zstd / lz4 / lzma
+  **write** filter; stock Homebrew and vcpkg builds normally carry all three. A missing filter fails
+  at writer construction rather than silently degrading to an uncompressed TAR.
 
 Not supported through `Archive::create` (read/extract only):
 
@@ -149,9 +152,10 @@ This is **not** part of the main `Archive::create` flow and should be treated as
 
 #### Locating `rar.exe`
 
-Discovery is intentionally narrow: `where rar.exe` against the current `PATH`,
-plus the two stock install paths (`C:\Program Files\WinRAR\rar.exe`,
-`C:\Program Files (x86)\WinRAR\rar.exe`). Custom or portable installs are not
+Discovery is intentionally narrow and runs entirely in-process — no `where.exe` is spawned, because
+`where` itself resolves against the current directory first and a planted `where.exe` would have
+been executed. `PATH` is walked directly (relative entries skipped, batch shims refused), then the
+stock WinRAR directories under `%ProgramFiles%` and `%ProgramFiles(x86)%` are probed. Custom or portable installs are not
 auto-detected — add the directory containing `rar.exe` to your `PATH` before
 constructing `RarCreator`.
 
@@ -284,7 +288,7 @@ loop {
 
 Important caveat:
 
-- bounded-memory streaming currently applies to **libarchive-backed** formats only, which in practice means the TAR family and ISO
+- bounded-memory streaming currently applies to **libarchive-backed** formats only, which means the TAR family, ISO, and the standalone compressed formats (`.gz`, `.bz2`, `.xz`, `.zst`, `.lz4`, `.lzma`)
 - ZIP, 7z, and RAR still expose the same `Read` interface, but they buffer the full entry before handing it to `StreamingExtractor`
 - propagate read errors instead of treating them as end-of-stream: under a hard cap (`StreamBound::DeclaredSize` or `StreamBound::Cap(n)`) an archive that emits more bytes than its header declared surfaces an `io::ErrorKind::InvalidData` read error rather than a silent EOF, and under `StreamBound::DeclaredSize` one that ends *early* surfaces an `io::ErrorKind::UnexpectedEof` error rather than a short read; a `while let Ok(n) = stream.read(..)` loop would swallow either and hand you truncated data
 
@@ -307,9 +311,9 @@ Notes:
 ### 5.7 Create a new archive
 
 ```rust
-use unified_archive::{Archive, ArchiveFormat, CompressionOptions};
+use unified_archive::{Archive, CompressionOptions, WritableFormat};
 
-let options = CompressionOptions::new(ArchiveFormat::Zip);
+let options = CompressionOptions::for_writable(WritableFormat::ZIP);
 let mut archive = Archive::create("release.zip", options)?;
 
 archive.add_file_from_data("README.txt", b"hello")?;
@@ -389,9 +393,19 @@ Related methods:
 
 ### Split archives
 
-Only RAR / RAR5 split archives are supported end-to-end.
+**No split/multi-volume archive can be extracted end-to-end in `v0.4.0`.**
 
-Do not rely on ZIP split volumes (`.z01`, `.z02`, …) or 7z numeric split volumes (`.001`, `.002`, …) in `v0.4.0`.
+RAR / RAR5 volume sets are *detected and listed*: `Archive::open` on the first volume works, and
+`detect_multipart()` / `volume_set_report()` enumerate the parts and name any that are missing. But
+every extraction path is closed, because a split file is listed once per volume with all copies
+sharing one path: `extract_all` trips the duplicate-output-path guard, `extract_file` and
+`extract_to_memory` refuse to disambiguate, and `extract_by_ids` — the call those two errors
+recommend — fails with a listing-drift error. `ArchiveFormat::Rar`/`Rar5` report
+`multipart_read: Support::Partial` accordingly.
+
+ZIP split volumes (`.z01`, `.z02`, …) are name-level detection only — `detect_multipart` enumerates
+sibling file names and never opens a volume. 7z numeric split volumes (`.001`, `.002`, …) are not
+supported at all.
 
 ### Standalone compressed files
 
@@ -415,7 +429,12 @@ That applies even to ZIP.
 
 Some operations stage data in temporary files:
 
-- `open_at_offset()` materializes the embedded payload to a temporary file
+- `open_at_offset()` / `open_sfx()` read a ZIP, RAR or 7z payload **in place** when the path has an
+  executable extension and the bytes at the offset carry that format's signature — nothing is
+  copied and no staging ceiling applies (DCR-015; the RAR arm needs `rar-support`). Otherwise —
+  the TAR family, ISO, or any open that declines those gates — the payload is staged into a
+  temporary file bounded by `ExtractionLimits::max_sfx_payload_size`. `Archive::payload_access()`
+  reports which happened
 - UnRAR-backed `extract_to_memory()` uses a temporary extraction path internally
 
 That behavior is expected in `v0.4.0`.
@@ -458,7 +477,7 @@ Use `Archive::open_encrypted(...)` for encrypted archives instead of `Archive::o
 
 ### Streaming uses more memory than expected
 
-That usually means you are on a buffered backend such as ZIP, 7z, or RAR. For true bounded-memory streaming, prefer TAR-family archives or ISO.
+That usually means you are on a buffered backend such as ZIP, 7z, or RAR. For true bounded-memory streaming, prefer TAR-family archives, ISO, or a standalone compressed stream.
 
 ### Creation with `password` fails
 
