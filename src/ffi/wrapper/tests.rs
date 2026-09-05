@@ -267,6 +267,7 @@ fn rar5_vint_reject_eof_mid_continuation() {
 /// the same handle used to return zero entries because the UnRAR
 /// handle was EOF-positioned after the first.
 #[test]
+#[serial_test::file_serial(rar)]
 fn rar_list_files_repeat_safe() {
     let path = crate::test_utils::fixture("test.rar");
     let archive = UnrarArchive::open(&path).expect("open RAR fixture");
@@ -283,6 +284,7 @@ fn rar_list_files_repeat_safe() {
 /// direct header walk (the `is_encrypted()` / `list_files_for_limits`
 /// call pattern), `list_files` must still return the full listing.
 #[test]
+#[serial_test::file_serial(rar)]
 fn rar_list_files_full_after_handle_exhausted() {
     let path = crate::test_utils::fixture("test.rar");
     let archive = UnrarArchive::open(&path).expect("open RAR fixture");

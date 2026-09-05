@@ -36,6 +36,7 @@ fn test_open_valid_zip() {
 
 #[cfg(feature = "rar-support")]
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_open_valid_rar() {
     let archive = Archive::open(fixture("test.rar")).unwrap();
     // test.rar is actually RAR5 format (created by RAR 7.12+)
@@ -116,6 +117,7 @@ fn test_open_has_no_modifications() {
 /// `Unsupported`, which is a different contract.
 #[cfg(feature = "rar-support")]
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_open_encrypted_rar() {
     let result = Archive::open_encrypted(fixture("test_encrypted.rar"), "test123");
     match result {
@@ -216,6 +218,7 @@ fn test_is_encrypted_unencrypted_zip() {
 /// after otherwise; see `UnrarArchive::open_with_mode_and_password`.
 #[cfg(feature = "rar-support")]
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_is_encrypted_encrypted_rar() {
     // test_encrypted.rar has header encryption - is_encrypted() may fail
     // with Password error since UnRAR can't read headers without a password.

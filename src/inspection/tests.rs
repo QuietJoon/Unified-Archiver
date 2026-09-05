@@ -86,6 +86,7 @@ fn test_list_files_7z() {
 
 #[cfg(feature = "rar-support")]
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_list_files_rar() {
     let archive = Archive::open(fixture("test.rar")).unwrap();
     let entries = archive.list_files().unwrap();
@@ -551,6 +552,7 @@ fn test_detect_multipart_zip_main_first_sort() {
 /// source archive needs real RAR content for `Archive::open`.
 #[cfg(feature = "rar-support")]
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_detect_multipart_rar_old_style_volumes() {
     let dir = tempfile::tempdir().unwrap();
     let main = dir.path().join("archive.rar");
@@ -604,6 +606,7 @@ fn test_detect_multipart_rar_old_style_volumes() {
 /// itself still never reads the siblings.
 #[cfg(feature = "rar-support")]
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_detect_multipart_old_style_set_is_the_same_from_every_member() {
     let dir = tempfile::tempdir().unwrap();
     let main = dir.path().join("archive.rar");
@@ -631,6 +634,7 @@ fn test_detect_multipart_old_style_set_is_the_same_from_every_member() {
 /// `Multi` and a lone `.rar` as `Single` (R0079-0029).
 #[cfg(feature = "rar-support")]
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_multipart_layout_rar_old_style_volumes() {
     let dir = tempfile::tempdir().unwrap();
     let main = dir.path().join("archive.rar");
@@ -692,6 +696,7 @@ fn test_detect_multipart_case_insensitive_zip_set() {
 /// touch files suffice; only the source needs real RAR content.
 #[cfg(feature = "rar-support")]
 #[test]
+#[serial_test::file_serial(rar)]
 fn test_detect_multipart_rar_part_anchored_base() {
     let dir = tempfile::tempdir().unwrap();
     let main = dir.path().join("my.part9.data.part1.rar");
