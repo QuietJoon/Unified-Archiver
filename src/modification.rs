@@ -1576,75 +1576,90 @@ impl Archive {
                     };
                     ArchiveError::io("backup", &backup_path, wrapped)
                 })?;
-            // R0081-0036: `create_new` opened the backup with
-            // umask-default permissions, so a restrictive original
-            // (e.g. 0600) would otherwise be copied into a wider
-            // 0644 backup — widening access to the archive's bytes,
-            // the same anti-widening violation R0079-0021 closes on
-            // the committed archive. Carry the locked descriptor's
-            // mode onto the backup before any bytes are written.
-            // Fatal on Unix (the mode is the access-control surface
-            // this preserves); best-effort elsewhere. Ownership and
-            // xattrs are out of scope — the load-bearing guarantee
-            // is denying the widen.
-            {
-                let lock_file = self._lock_file.as_ref().ok_or_else(|| {
-                    ArchiveError::operation_blocked(
-                        ops::COMMIT_CHANGES,
-                        "modify handle is missing its advisory-lock descriptor",
-                    )
-                })?;
-                #[cfg(unix)]
+            // Everything from here on runs with the backup path already
+            // claimed by `create_new`, so every failure below must remove
+            // it. Trapped in one closure rather than handled per-site:
+            // R0069-0066's promise that "we only delete files we actually
+            // created" used to hold only for the copy and sync arms, while
+            // the six `?` sites between the open and the copy — two
+            // missing-descriptor checks, `metadata`, `set_permissions`,
+            // `try_clone` and `seek` — returned with a zero-byte sidecar
+            // still on disk. A retry then tripped the noclobber gate above
+            // on a file this code had written and abandoned.
+            let staged = (|| -> Result<()> {
+                // R0081-0036: `create_new` opened the backup with
+                // umask-default permissions, so a restrictive original
+                // (e.g. 0600) would otherwise be copied into a wider
+                // 0644 backup — widening access to the archive's bytes,
+                // the same anti-widening violation R0079-0021 closes on
+                // the committed archive. Carry the locked descriptor's
+                // mode onto the backup before any bytes are written.
+                // Fatal on Unix (the mode is the access-control surface
+                // this preserves); best-effort elsewhere. Ownership and
+                // xattrs are out of scope — the load-bearing guarantee
+                // is denying the widen.
                 {
-                    let perms = lock_file
-                        .metadata()
-                        .map_err(|e| ArchiveError::io("backup", &self.path, e))?
-                        .permissions();
-                    std::fs::set_permissions(&backup_path, perms)
-                        .map_err(|e| ArchiveError::io("backup", &backup_path, e))?;
+                    let lock_file = self._lock_file.as_ref().ok_or_else(|| {
+                        ArchiveError::operation_blocked(
+                            ops::COMMIT_CHANGES,
+                            "modify handle is missing its advisory-lock descriptor",
+                        )
+                    })?;
+                    #[cfg(unix)]
+                    {
+                        let perms = lock_file
+                            .metadata()
+                            .map_err(|e| ArchiveError::io("backup", &self.path, e))?
+                            .permissions();
+                        std::fs::set_permissions(&backup_path, perms)
+                            .map_err(|e| ArchiveError::io("backup", &backup_path, e))?;
+                    }
+                    #[cfg(not(unix))]
+                    if let Ok(meta) = lock_file.metadata() {
+                        let _ = std::fs::set_permissions(&backup_path, meta.permissions());
+                    }
                 }
-                #[cfg(not(unix))]
-                if let Ok(meta) = lock_file.metadata() {
-                    let _ = std::fs::set_permissions(&backup_path, meta.permissions());
-                }
-            }
-            // R0080-0046: copy the backup from a clone of the locked
-            // descriptor (rewound to the start) rather than reopening
-            // `self.path`, so the backup captures the archive this
-            // session locked even if the pathname now names a different
-            // inode.
-            let mut src = {
-                let lock_file = self._lock_file.as_ref().ok_or_else(|| {
-                    ArchiveError::operation_blocked(
-                        ops::COMMIT_CHANGES,
-                        "modify handle is missing its advisory-lock descriptor",
-                    )
-                })?;
-                let mut clone = lock_file
-                    .try_clone()
-                    .map_err(|e| ArchiveError::io("backup", &self.path, e))?;
-                std::io::Seek::seek(&mut clone, std::io::SeekFrom::Start(0))
-                    .map_err(|e| ArchiveError::io("backup", &self.path, e))?;
-                clone
-            };
-            if let Err(copy_err) = std::io::copy(&mut src, &mut dst) {
-                drop(dst);
-                let _ = std::fs::remove_file(&backup_path);
-                return Err(ArchiveError::io("backup", &backup_path, copy_err));
-            }
-            // R0075-0035: flush and durably persist the backup
-            // before the original is replaced. Without
-            // `sync_data` a power loss between the rename below
-            // and the kernel's writeback could leave a backup
-            // whose payload was never durably written, defeating
-            // the recovery contract `create_backup = true`
-            // implies.
-            if let Err(e) = dst.sync_data() {
-                drop(dst);
-                let _ = std::fs::remove_file(&backup_path);
-                return Err(ArchiveError::io("backup_sync", &backup_path, e));
-            }
+                // R0080-0046: copy the backup from a clone of the locked
+                // descriptor (rewound to the start) rather than reopening
+                // `self.path`, so the backup captures the archive this
+                // session locked even if the pathname now names a different
+                // inode. The rewind is load-bearing: `try_clone` shares the
+                // open file description, so without it the copy would start
+                // at the lock descriptor's current offset.
+                let mut src = {
+                    let lock_file = self._lock_file.as_ref().ok_or_else(|| {
+                        ArchiveError::operation_blocked(
+                            ops::COMMIT_CHANGES,
+                            "modify handle is missing its advisory-lock descriptor",
+                        )
+                    })?;
+                    let mut clone = lock_file
+                        .try_clone()
+                        .map_err(|e| ArchiveError::io("backup", &self.path, e))?;
+                    std::io::Seek::seek(&mut clone, std::io::SeekFrom::Start(0))
+                        .map_err(|e| ArchiveError::io("backup", &self.path, e))?;
+                    clone
+                };
+                std::io::copy(&mut src, &mut dst)
+                    .map_err(|e| ArchiveError::io("backup", &backup_path, e))?;
+                // R0075-0035: flush and durably persist the backup
+                // before the original is replaced. Without
+                // `sync_data` a power loss between the rename below
+                // and the kernel's writeback could leave a backup
+                // whose payload was never durably written, defeating
+                // the recovery contract `create_backup = true`
+                // implies.
+                dst.sync_data()
+                    .map_err(|e| ArchiveError::io("backup_sync", &backup_path, e))?;
+                Ok(())
+            })();
+            // Close before any removal: on Windows an open handle makes the
+            // unlink fail with a sharing violation.
             drop(dst);
+            if let Err(e) = staged {
+                let _ = std::fs::remove_file(&backup_path);
+                return Err(e);
+            }
             Some(backup_path)
         } else {
             None
