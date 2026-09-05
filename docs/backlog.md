@@ -236,130 +236,6 @@ were wrong — a reading that checked whether the work was *described* and not w
   asserted only end-to-end through a full commit, which means a failure names the whole operation
   rather than the phase that broke — and the phase boundaries are exactly where the invariants live.
 
-### Non-UTF-8 path fidelity round 2 (OI-0076-001)
-- **Type:** 2
-- **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
-- **Sources:** docs/project/open-issues.md#OI-0076-001, ticgit:f1d3f5fc
-- **First seen:** 2026-08-04
-- **Last seen:** 2026-08-17
-- **Description:** Convert the 12 remaining lossy `to_string_lossy` sites in write/extract paths
-  (AD 0064 Option A). The API-design half is decided.
-- **Background:** OI-0075-001 closed the listing-side + `add_file_from_path` sites; Review 0076
-  found 12 more (recursive ZIP/libarchive create, extract destinations, raw pseudo-entries,
-  UnRAR path conversions). The site conversions are mechanical.
-- **Decided 2026-09-03 (owner ruling, AD 0064 amendment):** the extract-by-raw-bytes "gap" was not
-  one. `Archive::extract_by_ids` / `ReadArchive::extract_by_ids` select positionally and never
-  consult the name, so Required Action 5 is satisfied; a `&[u8]` key is rejected because archive
-  names are not unique and it would be a second, weaker addressing scheme. Documented and pinned by
-  `tests/integration/non_utf8_entry_names.rs`. What remains here is the mechanical site work — plus
-  ticgit `81f344`, the one measured residual (no in-memory route to one of two colliding names).
-
-
-- **RULED 2026-09-05 by the owner — REJECT. Now Type 1.** The open question was how far raw-byte
-  path fidelity is carried into the `&str`-keyed write surface, with three answers on the table
-  (preserve the bytes, reject the name, or accept the lossy rendering). The owner chose **reject**.
-  `add_directory_recursive` must refuse a path component that is not valid UTF-8, the way
-  `src/creation.rs` already refuses a non-UTF-8 name on the single-file add path. That removes the
-  inconsistency this entry exists for — single-file add rejects today while recursive add silently
-  substitutes `U+FFFD` — and it does so without growing any byte-keyed public write surface, which
-  is what made the "preserve" option expensive. `DirWalkEntry::archive_path` stays a `String`.
-  Whole-tree archiving now fails on one badly named file; that is the accepted cost. AD-0064 gains
-  an amendment recording that its write-side question is closed.
-
-### `ArchiveEntryBuilder` can violate entry-kind invariants (OI-0001-005)
-- **Type:** 3
-- **Verified:** yes — Review 0001 finding (R0001-0043), gate-accepted, user-routed track
-- **Blocked by:** the v0.4 breaking-change window — this is the same public surface as OI-0076-005
-  and OI-0081-002 (ticgit `165103b8`), and three separate passes over it would be three separate
-  breaking changes
-- **Blocker corrected 2026-09-02 — the line above is kept as written and is now false.** The v0.4
-  breaking-change window **closed**: 0.4.0 released 2026-08-17 (`CHANGELOG.md`). The **0.5.0 window
-  is open and in use** — `CHANGELOG.md`'s `[Unreleased]` opens "This will be 0.5.0, and the bump is
-  forced", `Cargo.toml` is still at 0.4.0, and five `!` commits landed into that window in the last
-  two days (`d952c59`, `804c005`, `8c2d982`, `246c131`, `5a0c035`). This entry was waiting for a
-  window that had closed while missing one that is open. The sequencing half of the blocker is dead
-  too, and by events rather than by re-reading: OI-0081-002 / `165103b8` closed 2026-08-21 and
-  OI-0076-005 / `479aa5b8` closed 2026-09-01, both without the builder, so "land all three together"
-  can no longer happen. Most of the work has meanwhile landed additively: `build_checked()` and
-  `entry_kind_violation` in `src/entry.rs` enforce empty-path, Directory-carries-no-size /
-  compressed_size / link_target, Symlink and HardLink must carry a link target, and File carries
-  none — the second branch of this entry's own acceptance criterion — and the kind-specific `file` /
-  `dir_at` / `symlink_at` / `hardlink_at` entry points plus their fallible `try_*` forms all exist,
-  with `[Unreleased]` already advertising `.build_checked()` as the migration. **Not covered:** the
-  CRC invariant this entry and Required Action 1 both name — `entry_kind_violation` never inspects
-  `crc32`, so `dir_at(..).crc32(x).build_checked()` still succeeds — and plain `build()` remains
-  deliberately unchecked behind roughly 101 call sites. So what survives is a scope question, not a
-  calendar one; ticket `deff990a`'s acceptance criteria still read "landed alongside OI-0076-005 and
-  OI-0081-002" and cannot be met as written. Re-filing this entry out of Type 3 is deliberately not
-  done here — that is the owner's call, and it is recorded so the next pass does not re-derive it.
-- **Sources:** docs/project/open-issues.md#OI-0001-005, reviews/reviewed/0001.md#R0001-0043, ticgit:deff990a
-- **First seen:** 2026-08-09
-- **Last seen:** 2026-08-17
-- **Description:** Every setter is available for every entry kind and `build` performs no
-  validation, so the advertised builder API returns a `Directory` carrying a payload size and CRC,
-  or a `File` carrying a link target. Wanted: kind-specific builders, or a fallible `build`.
-- **Background:** Medium severity. The builder (R0075-0078) enforces only the
-  `permissions & !0o7777 == 0` mask (R0075-0079). Downstream code that matches on `entry_type` and
-  trusts the kind-appropriate fields can be handed a contradiction by a caller who did nothing
-  unusual.
-
-- **Re-typed 2026-09-04 — Type 3 to Type 2.** The blocker named above is not what is holding this;
-  a decision is. Both remaining items are breaking changes to `src/entry.rs` and both are
-  scheduled to ride the same pass as ticgit `c1296744`'s field demotion, whose sequencing note
-  forbids moving the same construction sites twice. That is a coupling to be decided, not an
-  external prerequisite to wait on.
-
----
-
-
-- **RULED 2026-09-05 by the owner — make it fallible. Now Type 1.** `ArchiveEntryBuilder::build()`
-  becomes `-> Result<ArchiveEntry>`, in the owner's words: "a large job, but worth doing." The
-  decision-free half rides along — `entry_kind_violation` is extended to reject a `crc32` on kinds
-  that cannot carry one, Directory at minimum. Consequences accepted with the ruling: roughly 104
-  `.build()` call sites must handle the `Result`, and
-  `build_stays_unchecked_so_existing_call_sites_keep_behaving` pins the old behaviour and has to
-  be rewritten rather than kept. The sequencing note on ticgit `c1296744` still governs — this
-  rides the same pass as the field demotion so the construction sites move once, not twice.
-
-### 7z error classification and integrity drain (OI-0080-007)
-- **Type:** 2
-- **Verified:** yes — `classify_decode_error` and `test_integrity` read directly, 2026-08-07
-- **Sources:** ticgit:a17daf34, docs/project/open-issues.md (OI-0080-007), R0080-0025, R0080-0026,
-  src/ffi/sevenz_wrapper.rs
-- **First seen:** 2026-08-07 (recovered by `/indy-review-cleanup`; never routed)
-- **Description:** Corruption on an encrypted 7z entry is retyped as `Password`, so callers cannot
-  distinguish damaged media from a wrong passphrase; separately, the integrity drain swallows its
-  first error and may blame a later entry.
-- **Background:** The ambiguity in item 1 is real (7z AES has no auth tag) — the decision is how to
-  *express* it, typed or documented. Item 2 needs one upstream fact first: whether
-  `sevenz-rust2::for_each_entries` re-syncs the solid cursor after a short callback read.
-- **Ruling 1, 2026-09-03 — item 1 is documented, not typed.** The wrong-password / damaged-media
-  ambiguity on encrypted 7z is a property of the format (AES-256 with no authentication tag and no
-  password-verification value), not a defect in this API, so a typed marker would advertise a
-  distinction the format cannot supply. `ArchiveError::Password` now states it, scoped per backend
-  because RAR5 and ZIP genuinely do separate the two. `ArchiveError` is `#[non_exhaustive]`, so a
-  typed shape stays available later at no cost. **Item 2 is untouched** and still owes one fact, not
-  a decision: whether `sevenz_rust2::for_each_entries` re-syncs the solid cursor after a short
-  callback read.
-
-- **Re-examined 2026-09-04 — stays Type 2.** A type-1 reading was tried and refuted. Item 1 (the
-  deliberately lossy `classify_decode_error` mapping) is landed and documented. Item 2 is not a
-  fact question that the upstream `sevenz-rust2` behaviour settles: the proposed "stop treating a
-  drain error as EOF" change would reverse a landed ruling, so the ruling is what has to move
-  first.
-
-
-- **RULED 2026-09-05 by the owner — add a new error form. Now Type 1.** The blocker was that the
-  obvious fix (abort the walk when the solid-stream drain errors) would have moved a
-  corruption-class condition into the abort class, and the crate's two-class taxonomy — per-entry
-  corruption is recorded and the walk continues, archive-level I/O failure propagates — has no
-  third shape to express "the cursor could not be re-aligned, so every later verdict is
-  untrustworthy". The owner authorises adding that error form. With it, the drain-error path
-  aborts the walk with an error that says what actually went wrong, instead of continuing and
-  blaming healthy later entries. The taxonomy record gains an amendment; the existing test
-  asserting corrupt-payload-is-recorded-not-aborted still holds, because the drain-error case is a
-  new third branch and not a reclassification of that one.
-
 ## Type 2 — needs decision
 
 ### ZIP extended-timestamp central-record convention (OI-0081-004)
@@ -451,6 +327,75 @@ were wrong — a reading that checked whether the work was *described* and not w
   owner — keep the shipped `rar-support` name and correct AD-0058's table, and delete the one
   clause in the `create` row that makes the dependency tables cyclic.
 
+
+### Non-UTF-8 path fidelity round 2 (OI-0076-001)
+- **Type:** 2
+- **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
+- **Sources:** docs/project/open-issues.md#OI-0076-001, ticgit:f1d3f5fc
+- **First seen:** 2026-08-04
+- **Last seen:** 2026-08-17
+- **Description:** Convert the 12 remaining lossy `to_string_lossy` sites in write/extract paths
+  (AD 0064 Option A). The API-design half is decided.
+- **Background:** OI-0075-001 closed the listing-side + `add_file_from_path` sites; Review 0076
+  found 12 more (recursive ZIP/libarchive create, extract destinations, raw pseudo-entries,
+  UnRAR path conversions). The site conversions are mechanical.
+- **Decided 2026-09-03 (owner ruling, AD 0064 amendment):** the extract-by-raw-bytes "gap" was not
+  one. `Archive::extract_by_ids` / `ReadArchive::extract_by_ids` select positionally and never
+  consult the name, so Required Action 5 is satisfied; a `&[u8]` key is rejected because archive
+  names are not unique and it would be a second, weaker addressing scheme. Documented and pinned by
+  `tests/integration/non_utf8_entry_names.rs`. What remains here is the mechanical site work — plus
+  ticgit `81f344`, the one measured residual (no in-memory route to one of two colliding names).
+
+
+- **RULED 2026-09-05 by the owner — REJECT. Now Type 1.** The open question was how far raw-byte
+  path fidelity is carried into the `&str`-keyed write surface, with three answers on the table
+  (preserve the bytes, reject the name, or accept the lossy rendering). The owner chose **reject**.
+  `add_directory_recursive` must refuse a path component that is not valid UTF-8, the way
+  `src/creation.rs` already refuses a non-UTF-8 name on the single-file add path. That removes the
+  inconsistency this entry exists for — single-file add rejects today while recursive add silently
+  substitutes `U+FFFD` — and it does so without growing any byte-keyed public write surface, which
+  is what made the "preserve" option expensive. `DirWalkEntry::archive_path` stays a `String`.
+  Whole-tree archiving now fails on one badly named file; that is the accepted cost. AD-0064 gains
+  an amendment recording that its write-side question is closed.
+
+### 7z error classification and integrity drain (OI-0080-007)
+- **Type:** 2
+- **Verified:** yes — `classify_decode_error` and `test_integrity` read directly, 2026-08-07
+- **Sources:** ticgit:a17daf34, docs/project/open-issues.md (OI-0080-007), R0080-0025, R0080-0026,
+  src/ffi/sevenz_wrapper.rs
+- **First seen:** 2026-08-07 (recovered by `/indy-review-cleanup`; never routed)
+- **Description:** Corruption on an encrypted 7z entry is retyped as `Password`, so callers cannot
+  distinguish damaged media from a wrong passphrase; separately, the integrity drain swallows its
+  first error and may blame a later entry.
+- **Background:** The ambiguity in item 1 is real (7z AES has no auth tag) — the decision is how to
+  *express* it, typed or documented. Item 2 needs one upstream fact first: whether
+  `sevenz-rust2::for_each_entries` re-syncs the solid cursor after a short callback read.
+- **Ruling 1, 2026-09-03 — item 1 is documented, not typed.** The wrong-password / damaged-media
+  ambiguity on encrypted 7z is a property of the format (AES-256 with no authentication tag and no
+  password-verification value), not a defect in this API, so a typed marker would advertise a
+  distinction the format cannot supply. `ArchiveError::Password` now states it, scoped per backend
+  because RAR5 and ZIP genuinely do separate the two. `ArchiveError` is `#[non_exhaustive]`, so a
+  typed shape stays available later at no cost. **Item 2 is untouched** and still owes one fact, not
+  a decision: whether `sevenz_rust2::for_each_entries` re-syncs the solid cursor after a short
+  callback read.
+
+- **Re-examined 2026-09-04 — stays Type 2.** A type-1 reading was tried and refuted. Item 1 (the
+  deliberately lossy `classify_decode_error` mapping) is landed and documented. Item 2 is not a
+  fact question that the upstream `sevenz-rust2` behaviour settles: the proposed "stop treating a
+  drain error as EOF" change would reverse a landed ruling, so the ruling is what has to move
+  first.
+
+
+- **RULED 2026-09-05 by the owner — add a new error form. Now Type 1.** The blocker was that the
+  obvious fix (abort the walk when the solid-stream drain errors) would have moved a
+  corruption-class condition into the abort class, and the crate's two-class taxonomy — per-entry
+  corruption is recorded and the walk continues, archive-level I/O failure propagates — has no
+  third shape to express "the cursor could not be re-aligned, so every later verdict is
+  untrustworthy". The owner authorises adding that error form. With it, the drain-error path
+  aborts the walk with an error that says what actually went wrong, instead of continuing and
+  blaming healthy later entries. The taxonomy record gains an amendment; the existing test
+  asserting corrupt-payload-is-recorded-not-aborted still holds, because the drain-error case is a
+  new third branch and not a reclassification of that one.
 
 ## Type 3 — blocked
 - **Ruling 6, 2026-09-03 — widened to `Option<u16>`.** Landed. The old signature did not truncate
@@ -654,6 +599,61 @@ were wrong — a reading that checked whether the work was *described* and not w
   remains a first-class target — only the working priority.
 
 ---
+
+### `ArchiveEntryBuilder` can violate entry-kind invariants (OI-0001-005)
+- **Type:** 3
+- **Verified:** yes — Review 0001 finding (R0001-0043), gate-accepted, user-routed track
+- **Blocked by:** the v0.4 breaking-change window — this is the same public surface as OI-0076-005
+  and OI-0081-002 (ticgit `165103b8`), and three separate passes over it would be three separate
+  breaking changes
+- **Blocker corrected 2026-09-02 — the line above is kept as written and is now false.** The v0.4
+  breaking-change window **closed**: 0.4.0 released 2026-08-17 (`CHANGELOG.md`). The **0.5.0 window
+  is open and in use** — `CHANGELOG.md`'s `[Unreleased]` opens "This will be 0.5.0, and the bump is
+  forced", `Cargo.toml` is still at 0.4.0, and five `!` commits landed into that window in the last
+  two days (`d952c59`, `804c005`, `8c2d982`, `246c131`, `5a0c035`). This entry was waiting for a
+  window that had closed while missing one that is open. The sequencing half of the blocker is dead
+  too, and by events rather than by re-reading: OI-0081-002 / `165103b8` closed 2026-08-21 and
+  OI-0076-005 / `479aa5b8` closed 2026-09-01, both without the builder, so "land all three together"
+  can no longer happen. Most of the work has meanwhile landed additively: `build_checked()` and
+  `entry_kind_violation` in `src/entry.rs` enforce empty-path, Directory-carries-no-size /
+  compressed_size / link_target, Symlink and HardLink must carry a link target, and File carries
+  none — the second branch of this entry's own acceptance criterion — and the kind-specific `file` /
+  `dir_at` / `symlink_at` / `hardlink_at` entry points plus their fallible `try_*` forms all exist,
+  with `[Unreleased]` already advertising `.build_checked()` as the migration. **Not covered:** the
+  CRC invariant this entry and Required Action 1 both name — `entry_kind_violation` never inspects
+  `crc32`, so `dir_at(..).crc32(x).build_checked()` still succeeds — and plain `build()` remains
+  deliberately unchecked behind roughly 101 call sites. So what survives is a scope question, not a
+  calendar one; ticket `deff990a`'s acceptance criteria still read "landed alongside OI-0076-005 and
+  OI-0081-002" and cannot be met as written. Re-filing this entry out of Type 3 is deliberately not
+  done here — that is the owner's call, and it is recorded so the next pass does not re-derive it.
+- **Sources:** docs/project/open-issues.md#OI-0001-005, reviews/reviewed/0001.md#R0001-0043, ticgit:deff990a
+- **First seen:** 2026-08-09
+- **Last seen:** 2026-08-17
+- **Description:** Every setter is available for every entry kind and `build` performs no
+  validation, so the advertised builder API returns a `Directory` carrying a payload size and CRC,
+  or a `File` carrying a link target. Wanted: kind-specific builders, or a fallible `build`.
+- **Background:** Medium severity. The builder (R0075-0078) enforces only the
+  `permissions & !0o7777 == 0` mask (R0075-0079). Downstream code that matches on `entry_type` and
+  trusts the kind-appropriate fields can be handed a contradiction by a caller who did nothing
+  unusual.
+
+- **Re-typed 2026-09-04 — Type 3 to Type 2.** The blocker named above is not what is holding this;
+  a decision is. Both remaining items are breaking changes to `src/entry.rs` and both are
+  scheduled to ride the same pass as ticgit `c1296744`'s field demotion, whose sequencing note
+  forbids moving the same construction sites twice. That is a coupling to be decided, not an
+  external prerequisite to wait on.
+
+---
+
+
+- **RULED 2026-09-05 by the owner — make it fallible. Now Type 1.** `ArchiveEntryBuilder::build()`
+  becomes `-> Result<ArchiveEntry>`, in the owner's words: "a large job, but worth doing." The
+  decision-free half rides along — `entry_kind_violation` is extended to reject a `crc32` on kinds
+  that cannot carry one, Directory at minimum. Consequences accepted with the ruling: roughly 104
+  `.build()` call sites must handle the `Result`, and
+  `build_stays_unchecked_so_existing_call_sites_keep_behaving` pins the old behaviour and has to
+  be rewritten rather than kept. The sequencing note on ticgit `c1296744` still governs — this
+  rides the same pass as the field demotion so the construction sites move once, not twice.
 
 ## 2026-08-05 intake — triaged 2026-08-06
 
