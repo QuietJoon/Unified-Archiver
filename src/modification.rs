@@ -1104,7 +1104,19 @@ impl Archive {
     /// entry kinds. Warnings are only produced on the success path: a
     /// failed commit returns `Err` and replaces nothing, so there is no
     /// lossy result to describe.
-    pub fn commit_changes_with_warnings(mut self) -> Result<ResultWithWarnings<()>> {
+    /// Everything that must be decided before any file exists on disk.
+    ///
+    /// Split out of `commit_changes_with_warnings` (OI-0076-003 item 6). The
+    /// three phases are `commit_plan` → [`Self::commit_session`] →
+    /// [`Self::commit_swap`], and the boundaries are load-bearing rather than
+    /// cosmetic — see each one's own notes.
+    ///
+    /// Returns `Ok(None)` for the empty-tracker case. That third outcome is
+    /// why this cannot simply return `Result<CommitPlan>`: an empty commit
+    /// must succeed *without* creating a staging file or a backup, and the
+    /// caller's cleanup only runs on `Err`, so anything created before this
+    /// point would be orphaned permanently on the success path.
+    fn commit_plan(&mut self) -> Result<Option<CommitPlan>> {
         if self.mode != ArchiveMode::Modify {
             return Err(ArchiveError::operation_blocked(
                 ops::COMMIT_CHANGES,
@@ -1142,7 +1154,7 @@ impl Archive {
             && modifications.removed.is_empty()
             && modifications.added_directories.is_empty()
         {
-            return Ok(ResultWithWarnings::ok(()));
+            return Ok(None);
         }
 
         // Unique temp path beside the original. nanos+pid handles cross-process
@@ -1179,287 +1191,402 @@ impl Archive {
         // loop below. Declared outside the write closure (and passed in
         // by `&mut`) so they survive to the return statement instead of
         // being logged and lost inside it: the whole point of the
-        // warning is that it reaches the caller.
-        let mut warnings: Vec<ArchiveWarning> = Vec::new();
 
-        let result = (|warnings: &mut Vec<ArchiveWarning>| -> Result<()> {
-            // Use caller-supplied compression settings, or format defaults.
-            // `take()` lets us move the single owned `CompressionOptions`
-            // (progress callback and all) into the new archive; cloning
-            // would have silently dropped the callback.
-            let options = match mod_options.compression.take() {
-                Some(supplied) => supplied,
-                // `try_new` cannot fail here: only Zip and SevenZip are
-                // modifiable, and both are creatable.
-                None => crate::options::CompressionOptions::try_new(self.format)?,
-            };
+        Ok(Some(CommitPlan {
+            modifications,
+            mod_options,
+            temp_path,
+            validated_zip_extras,
+        }))
+    }
 
-            // R0071-0002: a modify-mode rewrite must keep the source's
-            // container format — see `check_rewrite_format_override`,
-            // shared with the `validate_pending_commit` dry-run
-            // (R0079-0014). The override remains useful for `level` and
-            // `progress`; `password` is rejected by the create facade
-            // (MADR-0027) and `split_size` is reserved/deferred (DEF-002,
-            // R0073-0013).
-            check_rewrite_format_override(options.format, self.format)?;
+    /// Build the finished staging archive at `temp_path`.
+    ///
+    /// Owns `Self::create` through `finish()`, and the writer handle never
+    /// escapes this frame. That is deliberate: the caller removes
+    /// `temp_path` on failure, and on Windows a live handle would make the
+    /// removal fail with a sharing violation. Returning the archive so a
+    /// later phase could finalize it would reintroduce exactly that.
+    ///
+    /// The mode carry (R0079-0021 / R0080-0045) belongs here rather than in
+    /// the swap because it targets this phase's own artifact — the staging
+    /// file — and because it must stay *before* the swap's identity gate.
+    /// Moving it after would insert a stat and a chmod between that gate and
+    /// the destructive rename, widening the window the gate exists to close.
+    #[allow(clippy::too_many_arguments)]
+    fn commit_session(
+        &self,
+        temp_path: &Path,
+        mod_options: &mut ModificationOptions,
+        modifications: &mut ModificationTracker,
+        locked_identity: Option<LockedFileIdentity>,
+        validated_zip_extras: Option<ZipSourceExtras>,
+        warnings: &mut Vec<ArchiveWarning>,
+    ) -> Result<()> {
+        // Use caller-supplied compression settings, or format defaults.
+        // `take()` lets us move the single owned `CompressionOptions`
+        // (progress callback and all) into the new archive; cloning
+        // would have silently dropped the callback.
+        let options = match mod_options.compression.take() {
+            Some(supplied) => supplied,
+            // `try_new` cannot fail here: only Zip and SevenZip are
+            // modifiable, and both are creatable.
+            None => crate::options::CompressionOptions::try_new(self.format)?,
+        };
 
-            let mut new_archive = Self::create(&temp_path, options)?;
+        // R0071-0002: a modify-mode rewrite must keep the source's
+        // container format — see `check_rewrite_format_override`,
+        // shared with the `validate_pending_commit` dry-run
+        // (R0079-0014). The override remains useful for `level` and
+        // `progress`; `password` is rejected by the create facade
+        // (MADR-0027) and `split_size` is reserved/deferred (DEF-002,
+        // R0073-0013).
+        check_rewrite_format_override(options.format, self.format)?;
 
-            let preserve = mod_options.preserve_metadata;
+        let mut new_archive = Self::create(temp_path, options)?;
 
-            // For ZIP sources, the archive comment and per-entry
-            // compression methods were loaded — and cross-checked
-            // against the facade listing (R0069-0064 / R0075-0034) —
-            // by `validate_pending_commit` above. The modify path
-            // routes source reads through libarchive, which does not
-            // surface this metadata; the side-car lookup keeps
-            // round-trips faithful without switching backends.
-            let zip_extras = validated_zip_extras
-                .filter(|_| matches!(new_archive.backend, ArchiveBackend::ZipWriter(_)));
+        let preserve = mod_options.preserve_metadata;
 
-            // Copy all entries from original except removed ones. The
-            // `ValidatedSource` token (D3) replaces the prior
-            // `_unchecked` calls — its existence is the type-level
-            // proof that the listing the loop iterates was sourced
-            // from `self`. Removal is keyed by entry ID so
-            // duplicate-named entries stay distinct.
+        // For ZIP sources, the archive comment and per-entry
+        // compression methods were loaded — and cross-checked
+        // against the facade listing (R0069-0064 / R0075-0034) —
+        // by `validate_pending_commit` above. The modify path
+        // routes source reads through libarchive, which does not
+        // surface this metadata; the side-car lookup keeps
+        // round-trips faithful without switching backends.
+        let zip_extras = validated_zip_extras
+            .filter(|_| matches!(new_archive.backend, ArchiveBackend::ZipWriter(_)));
+
+        // Copy all entries from original except removed ones. The
+        // `ValidatedSource` token (D3) replaces the prior
+        // `_unchecked` calls — its existence is the type-level
+        // proof that the listing the loop iterates was sourced
+        // from `self`. Removal is keyed by entry ID so
+        // duplicate-named entries stay distinct.
+        //
+        // Branch on `EntryType` (R0070-0006 / R0070-0007). The
+        // previous loop ran every retained entry through the
+        // file-payload pipeline, so retained directories became
+        // zero-byte files and retained symlinks/hardlinks had
+        // their link payloads materialized as regular files. Both
+        // violate the FR-022 link-skip policy and the round-trip
+        // contract documented on `commit_changes`.
+        // R0080-0044: the retained-entry replay reads the source
+        // through the pathname-based backend. Revalidate once before the
+        // loop that the pathname still names the locked inode so retained
+        // bytes cannot be sourced from a post-validation replacement.
+        revalidate_locked_identity(ops::COMMIT_CHANGES, &self.path, locked_identity)?;
+        use crate::entry::EntryType;
+        let src = self.validated_source();
+        let entries = self.list_files()?;
+        for entry in entries {
+            if modifications.removed.contains(&entry.id) {
+                continue;
+            }
+
+            // link/special entries are dropped per FR-022;
+            // documented on the public `commit_changes` rustdoc.
+            // The shared predicate keeps this loop and the
+            // `validate_pending_commit` namespace gate in lockstep
+            // (R0079-0037).
             //
-            // Branch on `EntryType` (R0070-0006 / R0070-0007). The
-            // previous loop ran every retained entry through the
-            // file-payload pipeline, so retained directories became
-            // zero-byte files and retained symlinks/hardlinks had
-            // their link payloads materialized as regular files. Both
-            // violate the FR-022 link-skip policy and the round-trip
-            // contract documented on `commit_changes`.
-            // R0080-0044: the retained-entry replay reads the source
-            // through the pathname-based backend. Revalidate once before the
-            // loop that the pathname still names the locked inode so retained
-            // bytes cannot be sourced from a post-validation replacement.
-            revalidate_locked_identity(
-                ops::COMMIT_CHANGES,
-                &self.path,
-                modifications.locked_identity,
-            )?;
-            use crate::entry::EntryType;
-            let src = self.validated_source();
-            let entries = self.list_files()?;
-            for entry in entries {
-                if modifications.removed.contains(&entry.id) {
+            // Dropping is lossy, so it must not be silent: emit one
+            // warning per dropped entry naming the path and the
+            // kind. `dropped_entry_kind` is the same function
+            // `rewrite_drops_entry_type` is defined in terms of, so
+            // a dropped entry can never fail to produce a warning.
+            if let Some(kind) = dropped_entry_kind(entry.entry_type) {
+                warnings.push(ArchiveWarning::dropped_unsupported_entry(
+                    entry.path.as_str(),
+                    kind,
+                ));
+                continue;
+            }
+
+            match entry.entry_type {
+                EntryType::Directory => {
+                    new_archive.add_directory(&entry.path)?;
                     continue;
                 }
+                // Handled by the FR-022 skip above; the arm stays
+                // so a new `EntryType` variant forces a decision
+                // here.
+                EntryType::Symlink | EntryType::HardLink | EntryType::Other => continue,
+                EntryType::File => {}
+            }
 
-                // link/special entries are dropped per FR-022;
-                // documented on the public `commit_changes` rustdoc.
-                // The shared predicate keeps this loop and the
-                // `validate_pending_commit` namespace gate in lockstep
-                // (R0079-0037).
-                //
-                // Dropping is lossy, so it must not be silent: emit one
-                // warning per dropped entry naming the path and the
-                // kind. `dropped_entry_kind` is the same function
-                // `rewrite_drops_entry_type` is defined in terms of, so
-                // a dropped entry can never fail to produce a warning.
-                if let Some(kind) = dropped_entry_kind(entry.entry_type) {
-                    warnings.push(ArchiveWarning::dropped_unsupported_entry(
-                        entry.path.as_str(),
-                        kind,
-                    ));
-                    continue;
-                }
+            let streamable_size = entry.size;
+            let compression_override = zip_extras
+                .as_ref()
+                .and_then(|extras| extras.per_index.get(entry.id).map(|v| v.compression));
 
-                match entry.entry_type {
-                    EntryType::Directory => {
-                        new_archive.add_directory(&entry.path)?;
-                        continue;
+            // One match on the backend routing; `preserve` only
+            // selects the writer method at each call site, so the
+            // streaming/staging decisions cannot drift between the
+            // metadata-preserving and plain variants.
+            match &mut new_archive.backend {
+                ArchiveBackend::ZipWriter(w) => {
+                    let mut stream = src.extract_to_stream(&entry.path)?;
+                    if preserve {
+                        w.add_file_from_reader_with_metadata(
+                            &entry.path,
+                            &mut stream,
+                            entry,
+                            compression_override,
+                        )?;
+                    } else {
+                        w.add_file_from_reader(&entry.path, &mut stream)?;
                     }
-                    // Handled by the FR-022 skip above; the arm stays
-                    // so a new `EntryType` variant forces a decision
-                    // here.
-                    EntryType::Symlink | EntryType::HardLink | EntryType::Other => continue,
-                    EntryType::File => {}
                 }
-
-                let streamable_size = entry.size;
-                let compression_override = zip_extras
-                    .as_ref()
-                    .and_then(|extras| extras.per_index.get(entry.id).map(|v| v.compression));
-
-                // One match on the backend routing; `preserve` only
-                // selects the writer method at each call site, so the
-                // streaming/staging decisions cannot drift between the
-                // metadata-preserving and plain variants.
-                match &mut new_archive.backend {
-                    ArchiveBackend::ZipWriter(w) => {
+                ArchiveBackend::Libarchive(b) => match streamable_size {
+                    Some(size) => {
                         let mut stream = src.extract_to_stream(&entry.path)?;
                         if preserve {
-                            w.add_file_from_reader_with_metadata(
+                            b.add_file_from_reader_with_metadata(
                                 &entry.path,
                                 &mut stream,
+                                size,
                                 entry,
-                                compression_override,
                             )?;
                         } else {
-                            w.add_file_from_reader(&entry.path, &mut stream)?;
+                            b.add_file_from_reader(&entry.path, &mut stream, size)?;
                         }
                     }
-                    ArchiveBackend::Libarchive(b) => match streamable_size {
-                        Some(size) => {
-                            let mut stream = src.extract_to_stream(&entry.path)?;
-                            if preserve {
-                                b.add_file_from_reader_with_metadata(
-                                    &entry.path,
-                                    &mut stream,
-                                    size,
-                                    entry,
-                                )?;
-                            } else {
-                                b.add_file_from_reader(&entry.path, &mut stream, size)?;
-                            }
+                    None => {
+                        // R0069-0065: libarchive needs a known
+                        // entry size in the header, but the
+                        // source format reports `None`
+                        // (streaming-only formats whose
+                        // uncompressed size isn't known until
+                        // the decoder finishes). Stage to a
+                        // tempfile so RAM is bounded by the
+                        // streaming chunk, learn the size, then
+                        // hand the staged file to the writer.
+                        let (mut staged, size) = stage_unknown_size_entry(&src, &entry.path)?;
+                        if preserve {
+                            b.add_file_from_reader_with_metadata(
+                                &entry.path,
+                                &mut staged,
+                                size,
+                                entry,
+                            )?;
+                        } else {
+                            b.add_file_from_reader(&entry.path, &mut staged, size)?;
                         }
-                        None => {
-                            // R0069-0065: libarchive needs a known
-                            // entry size in the header, but the
-                            // source format reports `None`
-                            // (streaming-only formats whose
-                            // uncompressed size isn't known until
-                            // the decoder finishes). Stage to a
-                            // tempfile so RAM is bounded by the
-                            // streaming chunk, learn the size, then
-                            // hand the staged file to the writer.
-                            let (mut staged, size) = stage_unknown_size_entry(&src, &entry.path)?;
-                            if preserve {
-                                b.add_file_from_reader_with_metadata(
-                                    &entry.path,
-                                    &mut staged,
-                                    size,
-                                    entry,
-                                )?;
-                            } else {
-                                b.add_file_from_reader(&entry.path, &mut staged, size)?;
-                            }
-                        }
-                    },
-                    _ => {
-                        let data = src.extract_to_memory(&entry.path)?;
-                        new_archive.add_file_from_data(&entry.path, &data)?;
                     }
+                },
+                _ => {
+                    let data = src.extract_to_memory(&entry.path)?;
+                    new_archive.add_file_from_data(&entry.path, &data)?;
                 }
             }
+        }
 
-            // Add new directory entries. A directory path is emitted
-            // at most once (R0081-0038): the namespace tracker
-            // coalesces duplicate directory reservations, but
-            // `added_directories` still retains each queued occurrence,
-            // so dedup the normalized path here before the backend
-            // writes a redundant central-directory record.
-            let mut emitted_dirs = std::collections::HashSet::new();
-            for dir_path in modifications.added_directories {
-                if emitted_dirs.insert(normalize_dup_check_path(&dir_path)) {
-                    new_archive.add_directory(&dir_path)?;
-                }
+        // Add new directory entries. A directory path is emitted
+        // at most once (R0081-0038): the namespace tracker
+        // coalesces duplicate directory reservations, but
+        // `added_directories` still retains each queued occurrence,
+        // so dedup the normalized path here before the backend
+        // writes a redundant central-directory record.
+        let mut emitted_dirs = std::collections::HashSet::new();
+        for dir_path in std::mem::take(&mut modifications.added_directories) {
+            if emitted_dirs.insert(normalize_dup_check_path(&dir_path)) {
+                new_archive.add_directory(&dir_path)?;
             }
+        }
 
-            // Add new entries. Branches over the typed `EntrySource`
-            // (AD 0062 A.4) so each source kind takes its own most-
-            // efficient writer path:
-            //
-            // - `Buffered`: writer's `add_file_from_data` (snapshot
-            //   semantic preserved).
-            // - `Path`: writer's `add_file_from_path` so source
-            //   mtime / atime / btime / Unix permissions flow
-            //   through automatically.
-            // - `Reader { size: Some(n) }`: writer's
-            //   `add_file_from_reader(... size = n)`.
-            // - `Reader { size: None }`: drain the reader through
-            //   `stage_unknown_size_entry` to learn the actual length
-            //   first, then route to `add_file_from_reader`.
-            for (path, source) in modifications.added {
-                match source {
-                    EntrySource::Buffered(data) => {
-                        new_archive.add_file_from_data(&path, &data)?;
+        // Add new entries. Branches over the typed `EntrySource`
+        // (AD 0062 A.4) so each source kind takes its own most-
+        // efficient writer path:
+        //
+        // - `Buffered`: writer's `add_file_from_data` (snapshot
+        //   semantic preserved).
+        // - `Path`: writer's `add_file_from_path` so source
+        //   mtime / atime / btime / Unix permissions flow
+        //   through automatically.
+        // - `Reader { size: Some(n) }`: writer's
+        //   `add_file_from_reader(... size = n)`.
+        // - `Reader { size: None }`: drain the reader through
+        //   `stage_unknown_size_entry` to learn the actual length
+        //   first, then route to `add_file_from_reader`.
+        for (path, source) in std::mem::take(&mut modifications.added) {
+            match source {
+                EntrySource::Buffered(data) => {
+                    new_archive.add_file_from_data(&path, &data)?;
+                }
+                EntrySource::Path(fs_path) => {
+                    new_archive.add_file_from_path_as(&fs_path, &path)?;
+                }
+                EntrySource::Reader {
+                    mut reader,
+                    size: Some(size),
+                } => match &mut new_archive.backend {
+                    ArchiveBackend::ZipWriter(w) => {
+                        // R0075-0032: route through the size-aware
+                        // ZipWriter helper so a reader that under-
+                        // or over-produces against the declared
+                        // size is rejected loudly rather than
+                        // silently committed under the wrong size.
+                        w.add_file_from_reader_with_size(&path, &mut reader, size)?;
                     }
-                    EntrySource::Path(fs_path) => {
-                        new_archive.add_file_from_path_as(&fs_path, &path)?;
+                    ArchiveBackend::Libarchive(b) => {
+                        b.add_file_from_reader(&path, &mut reader, size)?;
                     }
-                    EntrySource::Reader {
-                        mut reader,
-                        size: Some(size),
-                    } => match &mut new_archive.backend {
+                    _ => buffered_ingest_reader(
+                        &mut new_archive,
+                        &path,
+                        &mut reader,
+                        size,
+                        "reader-source declared",
+                        "commit_add_reader",
+                    )?,
+                },
+                EntrySource::Reader { reader, size: None } => {
+                    // R0081-0037: an unknown-size reader source is
+                    // attacker-influenced input, so bound the drain
+                    // — an infinite/hostile reader must not fill the
+                    // disk or block the commit forever.
+                    let (mut staged, learned_size) = drain_into_tempfile(
+                        reader,
+                        &path,
+                        crate::security::ExtractionLimits::default()
+                            .max_file_size()
+                            .get(),
+                    )?;
+                    match &mut new_archive.backend {
                         ArchiveBackend::ZipWriter(w) => {
-                            // R0075-0032: route through the size-aware
-                            // ZipWriter helper so a reader that under-
-                            // or over-produces against the declared
-                            // size is rejected loudly rather than
-                            // silently committed under the wrong size.
-                            w.add_file_from_reader_with_size(&path, &mut reader, size)?;
+                            w.add_file_from_reader(&path, &mut staged)?;
                         }
                         ArchiveBackend::Libarchive(b) => {
-                            b.add_file_from_reader(&path, &mut reader, size)?;
+                            b.add_file_from_reader(&path, &mut staged, learned_size)?;
                         }
                         _ => buffered_ingest_reader(
                             &mut new_archive,
                             &path,
-                            &mut reader,
-                            size,
-                            "reader-source declared",
-                            "commit_add_reader",
+                            &mut staged,
+                            learned_size,
+                            "staged reader-source",
+                            "commit_add_reader_staged",
                         )?,
-                    },
-                    EntrySource::Reader { reader, size: None } => {
-                        // R0081-0037: an unknown-size reader source is
-                        // attacker-influenced input, so bound the drain
-                        // — an infinite/hostile reader must not fill the
-                        // disk or block the commit forever.
-                        let (mut staged, learned_size) = drain_into_tempfile(
-                            reader,
-                            &path,
-                            crate::security::ExtractionLimits::default()
-                                .max_file_size()
-                                .get(),
-                        )?;
-                        match &mut new_archive.backend {
-                            ArchiveBackend::ZipWriter(w) => {
-                                w.add_file_from_reader(&path, &mut staged)?;
-                            }
-                            ArchiveBackend::Libarchive(b) => {
-                                b.add_file_from_reader(&path, &mut staged, learned_size)?;
-                            }
-                            _ => buffered_ingest_reader(
-                                &mut new_archive,
-                                &path,
-                                &mut staged,
-                                learned_size,
-                                "staged reader-source",
-                                "commit_add_reader_staged",
-                            )?,
-                        }
                     }
                 }
             }
+        }
 
-            // Propagate ZIP archive-level comment (if any) before finalizing.
-            if let (Some(extras), ArchiveBackend::ZipWriter(w)) =
-                (zip_extras.as_ref(), &mut new_archive.backend)
-            {
-                if !extras.archive_comment.is_empty() {
-                    w.set_archive_comment(&extras.archive_comment)?;
-                }
+        // Propagate ZIP archive-level comment (if any) before finalizing.
+        if let (Some(extras), ArchiveBackend::ZipWriter(w)) =
+            (zip_extras.as_ref(), &mut new_archive.backend)
+        {
+            if !extras.archive_comment.is_empty() {
+                w.set_archive_comment(&extras.archive_comment)?;
             }
+        }
 
-            // Finalize new archive
-            new_archive.finish()?;
+        // Finalize new archive
+        new_archive.finish()?;
 
-            // R0079-0021: the temp archive was created with
-            // umask-default permissions; carry the original archive's
-            // mode across so the atomic replace below cannot silently
-            // widen access (e.g. a 0600 archive resurfacing as 0644).
-            // Fatal on Unix, where the mode is the access-control
-            // surface this exists to preserve; best-effort elsewhere.
-            // R0080-0045: read the mode to preserve from the locked
-            // descriptor itself, not a fresh `self.path` stat that a
-            // non-cooperating writer could have re-pointed at an unrelated
-            // file. The lock descriptor is the inode this session has held
-            // since `modify()` opened it.
+        // R0079-0021: the temp archive was created with
+        // umask-default permissions; carry the original archive's
+        // mode across so the atomic replace below cannot silently
+        // widen access (e.g. a 0600 archive resurfacing as 0644).
+        // Fatal on Unix, where the mode is the access-control
+        // surface this exists to preserve; best-effort elsewhere.
+        // R0080-0045: read the mode to preserve from the locked
+        // descriptor itself, not a fresh `self.path` stat that a
+        // non-cooperating writer could have re-pointed at an unrelated
+        // file. The lock descriptor is the inode this session has held
+        // since `modify()` opened it.
+        {
+            let lock_file = self._lock_file.as_ref().ok_or_else(|| {
+                ArchiveError::operation_blocked(
+                    ops::COMMIT_CHANGES,
+                    "modify handle is missing its advisory-lock descriptor",
+                )
+            })?;
+            #[cfg(unix)]
+            {
+                let original_meta = lock_file
+                    .metadata()
+                    .map_err(|e| ArchiveError::io("commit_preserve_mode", &self.path, e))?;
+                std::fs::set_permissions(temp_path, original_meta.permissions())
+                    .map_err(|e| ArchiveError::io("commit_preserve_mode", temp_path, e))?;
+            }
+            #[cfg(not(unix))]
+            if let Ok(original_meta) = lock_file.metadata() {
+                let _ = std::fs::set_permissions(temp_path, original_meta.permissions());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Install the staging archive over the original.
+    ///
+    /// The first statement is the identity gate and every statement after it
+    /// is destructive — that ordering is the whole invariant of this
+    /// function, and is why the mode carry stays in the session.
+    ///
+    /// Takes the sanitised `mod_options` by reference rather than reading
+    /// `self.mod_options`, which the plan has already emptied. The
+    /// distinction is security-relevant: `backup_suffix` is re-sanitised at
+    /// the commit boundary (R0070-0009) because the field is `pub`, and
+    /// `backup_path_for` appends it to the archive path with no further
+    /// separator check.
+    fn commit_swap(
+        &self,
+        temp_path: &Path,
+        mod_options: &ModificationOptions,
+        locked_identity: Option<LockedFileIdentity>,
+    ) -> Result<()> {
+        // R0080-0005: final identity gate. Everything below either
+        // backs up the original or atomically replaces `self.path`; make
+        // sure the pathname still names the locked inode before we
+        // clobber it so a post-validation swap cannot redirect the
+        // replace onto an unrelated file.
+        revalidate_locked_identity(ops::COMMIT_CHANGES, &self.path, locked_identity)?;
+
+        // If a backup is requested, copy the original aside before the
+        // atomic replace. We use copy (not rename) so the new file can
+        // still take the original's path. A failure here aborts the
+        // commit so the caller can decide whether to retry without
+        // backups; we have not touched the original yet.
+        //
+        // On copy failure we also remove the partial backup file
+        // (R0069-0066) so retry-without-backups doesn't have to clean
+        // up a half-written `<path>.bak` first. The `create_new`
+        // call above ensures we only delete files we actually created.
+        let backup_path_committed: Option<std::path::PathBuf> = if mod_options.create_backup {
+            let backup_path = backup_path_for(&self.path, &mod_options.backup_suffix);
+            // Noclobber: atomically claim the backup path via O_CREAT|O_EXCL.
+            // If another process/thread wins the race, `create_new` returns
+            // AlreadyExists without touching the existing file — closing
+            // the TOCTOU window a plain exists()+copy() would leave open.
+            let mut dst = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&backup_path)
+                .map_err(|e| {
+                    let wrapped = if e.kind() == std::io::ErrorKind::AlreadyExists {
+                        std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            "backup target already exists; remove or rename it before committing",
+                        )
+                    } else {
+                        e
+                    };
+                    ArchiveError::io("backup", &backup_path, wrapped)
+                })?;
+            // R0081-0036: `create_new` opened the backup with
+            // umask-default permissions, so a restrictive original
+            // (e.g. 0600) would otherwise be copied into a wider
+            // 0644 backup — widening access to the archive's bytes,
+            // the same anti-widening violation R0079-0021 closes on
+            // the committed archive. Carry the locked descriptor's
+            // mode onto the backup before any bytes are written.
+            // Fatal on Unix (the mode is the access-control surface
+            // this preserves); best-effort elsewhere. Ownership and
+            // xattrs are out of scope — the load-bearing guarantee
+            // is denying the widen.
             {
                 let lock_file = self._lock_file.as_ref().ok_or_else(|| {
                     ArchiveError::operation_blocked(
@@ -1469,158 +1596,123 @@ impl Archive {
                 })?;
                 #[cfg(unix)]
                 {
-                    let original_meta = lock_file
+                    let perms = lock_file
                         .metadata()
-                        .map_err(|e| ArchiveError::io("commit_preserve_mode", &self.path, e))?;
-                    std::fs::set_permissions(&temp_path, original_meta.permissions())
-                        .map_err(|e| ArchiveError::io("commit_preserve_mode", &temp_path, e))?;
+                        .map_err(|e| ArchiveError::io("backup", &self.path, e))?
+                        .permissions();
+                    std::fs::set_permissions(&backup_path, perms)
+                        .map_err(|e| ArchiveError::io("backup", &backup_path, e))?;
                 }
                 #[cfg(not(unix))]
-                if let Ok(original_meta) = lock_file.metadata() {
-                    let _ = std::fs::set_permissions(&temp_path, original_meta.permissions());
+                if let Ok(meta) = lock_file.metadata() {
+                    let _ = std::fs::set_permissions(&backup_path, meta.permissions());
                 }
             }
-
-            // R0080-0005: final identity gate. Everything below either
-            // backs up the original or atomically replaces `self.path`; make
-            // sure the pathname still names the locked inode before we
-            // clobber it so a post-validation swap cannot redirect the
-            // replace onto an unrelated file.
-            revalidate_locked_identity(
-                ops::COMMIT_CHANGES,
-                &self.path,
-                modifications.locked_identity,
-            )?;
-
-            // If a backup is requested, copy the original aside before the
-            // atomic replace. We use copy (not rename) so the new file can
-            // still take the original's path. A failure here aborts the
-            // commit so the caller can decide whether to retry without
-            // backups; we have not touched the original yet.
-            //
-            // On copy failure we also remove the partial backup file
-            // (R0069-0066) so retry-without-backups doesn't have to clean
-            // up a half-written `<path>.bak` first. The `create_new`
-            // call above ensures we only delete files we actually created.
-            let backup_path_committed: Option<std::path::PathBuf> = if mod_options.create_backup {
-                let backup_path = backup_path_for(&self.path, &mod_options.backup_suffix);
-                // Noclobber: atomically claim the backup path via O_CREAT|O_EXCL.
-                // If another process/thread wins the race, `create_new` returns
-                // AlreadyExists without touching the existing file — closing
-                // the TOCTOU window a plain exists()+copy() would leave open.
-                let mut dst = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&backup_path)
-                    .map_err(|e| {
-                        let wrapped = if e.kind() == std::io::ErrorKind::AlreadyExists {
-                            std::io::Error::new(
-                                std::io::ErrorKind::AlreadyExists,
-                                "backup target already exists; remove or rename it before committing",
-                            )
-                        } else {
-                            e
-                        };
-                        ArchiveError::io("backup", &backup_path, wrapped)
-                    })?;
-                // R0081-0036: `create_new` opened the backup with
-                // umask-default permissions, so a restrictive original
-                // (e.g. 0600) would otherwise be copied into a wider
-                // 0644 backup — widening access to the archive's bytes,
-                // the same anti-widening violation R0079-0021 closes on
-                // the committed archive. Carry the locked descriptor's
-                // mode onto the backup before any bytes are written.
-                // Fatal on Unix (the mode is the access-control surface
-                // this preserves); best-effort elsewhere. Ownership and
-                // xattrs are out of scope — the load-bearing guarantee
-                // is denying the widen.
-                {
-                    let lock_file = self._lock_file.as_ref().ok_or_else(|| {
-                        ArchiveError::operation_blocked(
-                            ops::COMMIT_CHANGES,
-                            "modify handle is missing its advisory-lock descriptor",
-                        )
-                    })?;
-                    #[cfg(unix)]
-                    {
-                        let perms = lock_file
-                            .metadata()
-                            .map_err(|e| ArchiveError::io("backup", &self.path, e))?
-                            .permissions();
-                        std::fs::set_permissions(&backup_path, perms)
-                            .map_err(|e| ArchiveError::io("backup", &backup_path, e))?;
-                    }
-                    #[cfg(not(unix))]
-                    if let Ok(meta) = lock_file.metadata() {
-                        let _ = std::fs::set_permissions(&backup_path, meta.permissions());
-                    }
-                }
-                // R0080-0046: copy the backup from a clone of the locked
-                // descriptor (rewound to the start) rather than reopening
-                // `self.path`, so the backup captures the archive this
-                // session locked even if the pathname now names a different
-                // inode.
-                let mut src = {
-                    let lock_file = self._lock_file.as_ref().ok_or_else(|| {
-                        ArchiveError::operation_blocked(
-                            ops::COMMIT_CHANGES,
-                            "modify handle is missing its advisory-lock descriptor",
-                        )
-                    })?;
-                    let mut clone = lock_file
-                        .try_clone()
-                        .map_err(|e| ArchiveError::io("backup", &self.path, e))?;
-                    std::io::Seek::seek(&mut clone, std::io::SeekFrom::Start(0))
-                        .map_err(|e| ArchiveError::io("backup", &self.path, e))?;
-                    clone
-                };
-                if let Err(copy_err) = std::io::copy(&mut src, &mut dst) {
-                    drop(dst);
-                    let _ = std::fs::remove_file(&backup_path);
-                    return Err(ArchiveError::io("backup", &backup_path, copy_err));
-                }
-                // R0075-0035: flush and durably persist the backup
-                // before the original is replaced. Without
-                // `sync_data` a power loss between the rename below
-                // and the kernel's writeback could leave a backup
-                // whose payload was never durably written, defeating
-                // the recovery contract `create_backup = true`
-                // implies.
-                if let Err(e) = dst.sync_data() {
-                    drop(dst);
-                    let _ = std::fs::remove_file(&backup_path);
-                    return Err(ArchiveError::io("backup_sync", &backup_path, e));
-                }
-                drop(dst);
-                Some(backup_path)
-            } else {
-                None
+            // R0080-0046: copy the backup from a clone of the locked
+            // descriptor (rewound to the start) rather than reopening
+            // `self.path`, so the backup captures the archive this
+            // session locked even if the pathname now names a different
+            // inode.
+            let mut src = {
+                let lock_file = self._lock_file.as_ref().ok_or_else(|| {
+                    ArchiveError::operation_blocked(
+                        ops::COMMIT_CHANGES,
+                        "modify handle is missing its advisory-lock descriptor",
+                    )
+                })?;
+                let mut clone = lock_file
+                    .try_clone()
+                    .map_err(|e| ArchiveError::io("backup", &self.path, e))?;
+                std::io::Seek::seek(&mut clone, std::io::SeekFrom::Start(0))
+                    .map_err(|e| ArchiveError::io("backup", &self.path, e))?;
+                clone
             };
-
-            // Replace original file with new one. If the rename fails
-            // after the backup succeeded, remove the now-orphaned backup
-            // (R0069-0067) so the caller doesn't end up with a `<path>.bak`
-            // that doesn't correspond to any committed swap.
-            match rename_with_overwrite(&temp_path, &self.path) {
-                Ok(()) => {
-                    // R0075-0036: best-effort parent-directory sync
-                    // so the rename swap is durably observable after
-                    // a crash. Errors here are non-fatal — the rename
-                    // already succeeded, and on platforms where the
-                    // sync is unsupported we silently degrade.
-                    let _ = crate::ffi::common::sync_parent_dir(&self.path);
-                    let _ = backup_path_committed
-                        .as_ref()
-                        .map(|p| crate::ffi::common::sync_parent_dir(p));
-                    Ok(())
-                }
-                Err(rename_err) => {
-                    if let Some(backup_path) = backup_path_committed.as_ref() {
-                        let _ = std::fs::remove_file(backup_path);
-                    }
-                    Err(rename_err)
-                }
+            if let Err(copy_err) = std::io::copy(&mut src, &mut dst) {
+                drop(dst);
+                let _ = std::fs::remove_file(&backup_path);
+                return Err(ArchiveError::io("backup", &backup_path, copy_err));
             }
+            // R0075-0035: flush and durably persist the backup
+            // before the original is replaced. Without
+            // `sync_data` a power loss between the rename below
+            // and the kernel's writeback could leave a backup
+            // whose payload was never durably written, defeating
+            // the recovery contract `create_backup = true`
+            // implies.
+            if let Err(e) = dst.sync_data() {
+                drop(dst);
+                let _ = std::fs::remove_file(&backup_path);
+                return Err(ArchiveError::io("backup_sync", &backup_path, e));
+            }
+            drop(dst);
+            Some(backup_path)
+        } else {
+            None
+        };
+
+        // Replace original file with new one. If the rename fails
+        // after the backup succeeded, remove the now-orphaned backup
+        // (R0069-0067) so the caller doesn't end up with a `<path>.bak`
+        // that doesn't correspond to any committed swap.
+        match rename_with_overwrite(temp_path, &self.path) {
+            Ok(()) => {
+                // R0075-0036: best-effort parent-directory sync
+                // so the rename swap is durably observable after
+                // a crash. Errors here are non-fatal — the rename
+                // already succeeded, and on platforms where the
+                // sync is unsupported we silently degrade.
+                let _ = crate::ffi::common::sync_parent_dir(&self.path);
+                let _ = backup_path_committed
+                    .as_ref()
+                    .map(|p| crate::ffi::common::sync_parent_dir(p));
+                Ok(())
+            }
+            Err(rename_err) => {
+                if let Some(backup_path) = backup_path_committed.as_ref() {
+                    let _ = std::fs::remove_file(backup_path);
+                }
+                Err(rename_err)
+            }
+        }
+    }
+
+    pub fn commit_changes_with_warnings(mut self) -> Result<ResultWithWarnings<()>> {
+        let Some(plan) = self.commit_plan()? else {
+            // Empty tracker: nothing was written, nothing to roll back, and
+            // deliberately no backup — see `commit_plan`.
+            return Ok(ResultWithWarnings::ok(()));
+        };
+        let CommitPlan {
+            mut modifications,
+            mut mod_options,
+            temp_path,
+            validated_zip_extras,
+        } = plan;
+        // `LockedFileIdentity` is `Copy`, so both phases can hold it without
+        // either of them borrowing the tracker.
+        let locked_identity = modifications.locked_identity;
+
+        // FR-022 drop warnings, collected by the retained-entry replay
+        // loop. Declared outside the closure (and passed in by `&mut`) so
+        // they survive to the return statement instead of being logged and
+        // lost inside it: the whole point of the warning is that it reaches
+        // the caller.
+        let mut warnings: Vec<ArchiveWarning> = Vec::new();
+
+        // This closure is a result trap, not a scoping nicety. Both phases
+        // must funnel into one `Result` so the cleanup below runs on either
+        // one's failure; replacing it with `?` in the function body would
+        // delete the staging-file removal and the poison/finalize flags.
+        let result = (|warnings: &mut Vec<ArchiveWarning>| -> Result<()> {
+            self.commit_session(
+                &temp_path,
+                &mut mod_options,
+                &mut modifications,
+                locked_identity,
+                validated_zip_extras,
+                warnings,
+            )?;
+            self.commit_swap(&temp_path, &mod_options, locked_identity)
         })(&mut warnings);
 
         // Clean up the staging file on any failure (finish, write, or
@@ -1649,6 +1741,32 @@ impl Archive {
         // replaced nothing and has no lossy result to report.
         result.map(|()| ResultWithWarnings::with_warnings((), warnings))
     }
+}
+
+/// Everything `commit_changes_with_warnings` decides before touching disk.
+///
+/// Produced by [`Archive::commit_plan`] and consumed by
+/// [`Archive::commit_session`] and [`Archive::commit_swap`]. It exists so the
+/// three phases can be separate functions without any of them reaching back
+/// into `self` for state the plan has already moved out.
+///
+/// Two fields are here for reasons worth stating, because re-deriving either
+/// one would be a silent regression:
+///
+/// * `mod_options` is **moved** out of `self`, never cloned.
+///   `ModificationOptions` is deliberately not `Clone`; a rebuild would drop
+///   the caller's owned progress callback, so a long rewrite would report no
+///   progress at all. It also carries the `backup_suffix` re-sanitised at the
+///   commit boundary (R0070-0009) — the swap must see *this* value, not the
+///   builder's original.
+/// * `temp_path` lives here, and therefore in the caller's frame, because the
+///   caller's failure cleanup is the only thing that removes the staging
+///   file. A phase that built its own path would orphan it on every error.
+struct CommitPlan {
+    modifications: ModificationTracker,
+    mod_options: ModificationOptions,
+    temp_path: std::path::PathBuf,
+    validated_zip_extras: Option<ZipSourceExtras>,
 }
 
 /// Side-car ZIP metadata read directly from the source file via the `zip`
