@@ -210,61 +210,6 @@ were wrong — a reading that checked whether the work was *described* and not w
 *decided*.
 
 
-### True bounded-memory streaming for non-libarchive backends (DEF-004)
-- **Type:** 3
-- **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
-- **Sources:** docs/project/stub-manifest.md, ticgit:a4071277
-- **First seen:** 2026-08-04
-- **Last seen:** 2026-08-17
-- **Description:** Give the `zip`, `sevenz` and UnRAR backends real streaming readers instead of
-  materialising the entry and wrapping the buffer in a `Cursor`. **Re-scoped 2026-08-12:** the first
-  step (deriving the backend materialisation cap from `StreamBound`) has landed; what remains is the
-  incremental-reader work itself.
-- **Background:** Only libarchive actually streams; the others call `extract_to_memory()` and
-  hand back `StreamingExtractor::from_buffer`, so memory is O(entry size), not O(window). The
-  caveat is documented in `Limitations.md` §4 and the streaming rustdoc. The piz row of this
-  deferral disappeared with DCR-009. **Narrowed 2026-08-12 (R0001-0011):** the first
-  step landed — the backend materialisation budget is now derived from `StreamBound`
-  (`min(bound, max_file_size, max_total_size)`) and ZIP/7z gained
-  `extract_to_stream_with_limit` overrides, so the buffer is bounded by the caller's chosen
-  bound and an over-budget entry is refused before materialisation. What remains is genuine
-  incremental streaming: bounding the buffer is not the same as not having one. R0001-0011 (2026-08-12) landed the bound-derived budget:
-  `extract_to_stream_impl` now passes `min(bound, max_file_size, max_total_size)` to
-  `extract_to_stream_with_limit`, and ZIP/7z gained overrides that reject an over-budget declared size
-  before buffering (RAR already had one), so `Cap(1024)` on a multi-GiB entry no longer materialises
-  the entry — it fails at the call. Carried by DCR-006 Amendment 3. Ticket `a4071277` should be
-  re-scoped rather than closed; `6277386e`'s framing is fully absorbed by that amendment.
-- **Blocked by:** upstream — `sevenz-rust2` exposes no owned entry-level `Read` (AD 0035,
-  re-verified at 0.19.4) — and, for the remaining backends, a `StreamingExtractor`
-  handle-lifetime ownership design that lets the reader outlive the call without holding the
-  archive handle hostage.
-- **Version corrected 2026-09-02 — the conclusion is unaffected.** The line above cites a
-  re-verification "at 0.19.4", a version this project does not build against: `Cargo.lock` pins
-  `sevenz-rust2` **0.19.3**. Both source trees present on this machine were compared and the
-  relevant reader API is identical in each — `BlockDecoder<'a, R: Read + Seek>` and
-  `SharedBoundedReader<'a, R>` are lifetime-borrowed in both — so there is still no owned
-  entry-level `Read` and the blocker holds at the version actually pinned. Recorded rather than
-  quietly fixed because a blocker verified against a version the lockfile does not name is not
-  verified, and the next reader would have had to redo the comparison to find that out.
-
-- **Re-typed 2026-09-04 — Type 3 to Type 2.** No external prerequisite is unmet. All three
-  backends still materialise before `StreamingExtractor::from_bytes` — ZIP and 7z to a `Vec<u8>`,
-  RAR to a staging tempfile — and what is owed first is the scope/design decision about what
-  "bounded" means per backend, not a dependency or a host.
-- **Re-typed 2026-09-05 — Type 2 to Type 1, and the exit criterion is rewritten.** Both decisions
-  this entry was waiting on are made. The scope question ("re-scope to ZIP+RAR, or keep it as an
-  all-three item that cannot close") dissolves: it was created by an exit criterion demanding
-  *owned entry-level readers* for all three, which 7z's dependency does not offer and may never.
-  The owner has since defined this library's streaming narrowly — **deliver an entry's payload
-  without writing it to disk, processed in memory, mainly for checksum and integrity** — and
-  accepted a **caller-supplied sink** as the API shape. Under that definition nothing is blocked
-  upstream: 7z and ZIP already decode incrementally inside `test_integrity`, and RAR's
-  `UCM_PROCESSDATA` callback already receives the decoded buffer whose pointer the crate currently
-  ignores. AD-0035's amendment retains "disproportionate" as the verdict on the two pull-shaped
-  options it priced and withdraws it as the verdict on the gap. What is owed is implementation: a
-  push-shaped backend method implemented by all four backends, and the digest/integrity walk moved
-  onto it so no backend buffers a whole entry or stages one to disk.
-
 ### Split the modification commit path into plan / session / swap (OI-0076-003 item 6)
 
 - **Type:** 1
@@ -962,6 +907,80 @@ on this defect. Nothing in `5a0c035` touches the listing shape.
   `docs/project/open-issues.md` still describe items 5 and 6 as open — `/reopen` treats that file as
   read-only — and ticgit `3f7dfa37`, whose `blocked` state covered items 1/2/5/6, now covers
   nothing; closing or re-scoping it is its filer's call.
+
+### True bounded-memory streaming for non-libarchive backends (DEF-004)
+- **Type:** 3
+- **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
+- **Sources:** docs/project/stub-manifest.md, ticgit:a4071277
+- **First seen:** 2026-08-04
+- **Last seen:** 2026-08-17
+- **Description:** Give the `zip`, `sevenz` and UnRAR backends real streaming readers instead of
+  materialising the entry and wrapping the buffer in a `Cursor`. **Re-scoped 2026-08-12:** the first
+  step (deriving the backend materialisation cap from `StreamBound`) has landed; what remains is the
+  incremental-reader work itself.
+- **Background:** Only libarchive actually streams; the others call `extract_to_memory()` and
+  hand back `StreamingExtractor::from_buffer`, so memory is O(entry size), not O(window). The
+  caveat is documented in `Limitations.md` §4 and the streaming rustdoc. The piz row of this
+  deferral disappeared with DCR-009. **Narrowed 2026-08-12 (R0001-0011):** the first
+  step landed — the backend materialisation budget is now derived from `StreamBound`
+  (`min(bound, max_file_size, max_total_size)`) and ZIP/7z gained
+  `extract_to_stream_with_limit` overrides, so the buffer is bounded by the caller's chosen
+  bound and an over-budget entry is refused before materialisation. What remains is genuine
+  incremental streaming: bounding the buffer is not the same as not having one. R0001-0011 (2026-08-12) landed the bound-derived budget:
+  `extract_to_stream_impl` now passes `min(bound, max_file_size, max_total_size)` to
+  `extract_to_stream_with_limit`, and ZIP/7z gained overrides that reject an over-budget declared size
+  before buffering (RAR already had one), so `Cap(1024)` on a multi-GiB entry no longer materialises
+  the entry — it fails at the call. Carried by DCR-006 Amendment 3. Ticket `a4071277` should be
+  re-scoped rather than closed; `6277386e`'s framing is fully absorbed by that amendment.
+- **Blocked by:** upstream — `sevenz-rust2` exposes no owned entry-level `Read` (AD 0035,
+  re-verified at 0.19.4) — and, for the remaining backends, a `StreamingExtractor`
+  handle-lifetime ownership design that lets the reader outlive the call without holding the
+  archive handle hostage.
+- **Version corrected 2026-09-02 — the conclusion is unaffected.** The line above cites a
+  re-verification "at 0.19.4", a version this project does not build against: `Cargo.lock` pins
+  `sevenz-rust2` **0.19.3**. Both source trees present on this machine were compared and the
+  relevant reader API is identical in each — `BlockDecoder<'a, R: Read + Seek>` and
+  `SharedBoundedReader<'a, R>` are lifetime-borrowed in both — so there is still no owned
+  entry-level `Read` and the blocker holds at the version actually pinned. Recorded rather than
+  quietly fixed because a blocker verified against a version the lockfile does not name is not
+  verified, and the next reader would have had to redo the comparison to find that out.
+
+- **Re-typed 2026-09-04 — Type 3 to Type 2.** No external prerequisite is unmet. All three
+  backends still materialise before `StreamingExtractor::from_bytes` — ZIP and 7z to a `Vec<u8>`,
+  RAR to a staging tempfile — and what is owed first is the scope/design decision about what
+  "bounded" means per backend, not a dependency or a host.
+- **Re-typed 2026-09-05 — Type 2 to Type 1, and the exit criterion is rewritten.** Both decisions
+  this entry was waiting on are made. The scope question ("re-scope to ZIP+RAR, or keep it as an
+  all-three item that cannot close") dissolves: it was created by an exit criterion demanding
+  *owned entry-level readers* for all three, which 7z's dependency does not offer and may never.
+  The owner has since defined this library's streaming narrowly — **deliver an entry's payload
+  without writing it to disk, processed in memory, mainly for checksum and integrity** — and
+  accepted a **caller-supplied sink** as the API shape. Under that definition nothing is blocked
+  upstream: 7z and ZIP already decode incrementally inside `test_integrity`, and RAR's
+  `UCM_PROCESSDATA` callback already receives the decoded buffer whose pointer the crate currently
+  ignores. AD-0035's amendment retains "disproportionate" as the verdict on the two pull-shaped
+  options it priced and withdraws it as the verdict on the gap. What is owed is implementation: a
+  push-shaped backend method implemented by all four backends, and the digest/integrity walk moved
+  onto it so no backend buffers a whole entry or stages one to disk.
+
+- **DONE 2026-09-05 — implemented, tested and green.** The sink route
+  (`stream_payload_to_sink_by_listing_id`) is on all four backends and the content-multiset digest
+  walks it, falling back to the buffering route only where a backend has none. Landed in `1f657bc`
+  (implementation) and `2a95b6f` (tests).
+  The exit criterion this entry inherited from AD-0035 — owned entry-level `Read`ers from every
+  backend — was never satisfiable, because `sevenz-rust2` does not offer one. It was replaced
+  rather than met: the owner's definition of streaming here is *deliver a payload without writing
+  it to disk*, which is a hasher being fed bytes, i.e. a push. AD-0035 had priced two ways to
+  manufacture a pull reader from a push source and called both disproportionate; it never
+  considered not manufacturing one.
+  The RAR half is the substance. `UCM_PROCESSDATA` had been handing the crate the decoded block all
+  along and the code used the length and discarded the pointer, which is the whole reason RAR wrote
+  entries to a real file before anything could read them. The operation is `RAR_TEST`, not
+  `RAR_EXTRACT`, so the decoder runs and the callback fires while nothing is written.
+  **Two findings came out of testing it**, both recorded rather than folded in silently: the digest
+  is a CRC32 over sorted CRC32 elements (8 hex chars, not a cryptographic hash), and adding
+  concurrent RAR tests exposed that `unrar_lock()` is per-call, so concurrent RAR operations can
+  read each other's error state — filed as ticgit `b614375`, mitigated in tests by `c26fee5`.
 
 ### Retired 2026-09-05 — `docs/investigation/` staleness is permanently out of scope
 
