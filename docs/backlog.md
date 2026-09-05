@@ -189,8 +189,9 @@ the answers existed. Each had a named decision, and each got one:
 * **`open_at_offset` — decided the other way, and now discharged.** DCR-015's amendment ruled
   *against* building the libarchive arm, so no implementation remained; the bookkeeping is done and
   the entry has moved to "Closed since the previous run".
-* **OI-0076-003 — option (c).** The staging race is accepted and documented rather than defended
-  against, so what is owed is two specific documentation corrections and the item-6 split.
+* **OI-0076-003 — option (c), and now discharged.** The staging race is accepted and documented
+  rather than defended against. Both corrections landed and item 6 is its own entry, so the parent
+  has moved to "Closed since the previous run".
 
 One entry left the list entirely: **OI-0080-004** was discharged — decided *and* implemented
 within this session, so 7z volume sets now read as one archive. One item was retired outright: `docs/investigation/` staleness is permanently out of scope by owner
@@ -263,84 +264,6 @@ were wrong — a reading that checked whether the work was *described* and not w
   options it priced and withdraws it as the verdict on the gap. What is owed is implementation: a
   push-shaped backend method implemented by all four backends, and the digest/integrity walk moved
   onto it so no backend buffers a whole entry or stages one to disk.
-
-### Security & durability boundary refactors (OI-0076-003, items 5/6)
-- **Type:** 3
-- **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
-- **Sources:** docs/project/open-issues.md#OI-0076-003, ticgit:3f7dfa37
-- **First seen:** 2026-08-04
-- **Last seen:** 2026-08-21
-- **Description:** Two remaining hardening items: staging unlink→reopen-by-name race
-  (R0076-0045); `commit_changes` phase split (R0076-0089).
-- **Background:** 4 of 6 landed — ZIP-creation durability and extract-file staging (2026-06-06),
-  then items 1 and 2 on 2026-09-03.
-- **Items 1 and 2 landed 2026-09-03** (`8517e56`, `8d86fa5`; ticgit `5ebf46`, closed). Item 1's
-  recorded blocker had already dissolved, as the 2026-08-21 note below anticipated. Item 2's
-  recorded blocker ("needs a Unix `libc` dep") turned out to cover only the *evolution* to a
-  native `O_NOFOLLOW`, not the call-site wiring, which needed nothing new — the helper had sat
-  in `src/ffi/common.rs` with zero callers and an `#[expect(dead_code)]` since R0070-0021.
-  Item 1 narrows the TOCTOU window rather than closing it; closing it needs `openat`-relative
-  writes, which is not filed as work because nothing currently asks for it.
-- **Blocked by:** item 1 couples to the AD 0066 v0.4 strict-path flag; item 2 needs a Unix
-  `libc` dependency; item 5 needs an owned-fd / libarchive-callback design (AD 0009) — and
-  Innovation I6 established that `archive_read_open_fd` cannot deliver it, because libarchive's
-  read handle is iterator-shaped and shared fd offsets would corrupt concurrent readers;
-  item 6 couples to the AD 0053 D2 `ModifyArchive` handle.
-- **Blocker dissolved for item 1 (2026-08-21):** its recorded coupling was "the AD 0066 v0.4
-  strict-path flag", and that flag shipped — `ExtractionLimits::reject_unsafe_paths` is now enforced
-  by `check_entry_paths_safe` in `src/security.rs`, which refuses a hostile archive before a
-  destination directory is created or a byte is decoded, with the default `false` returning
-  immediately so the lossy-repair baseline pays nothing. The parent-creation race / re-canonicalise
-  work (R0076-0005) is therefore no longer waiting on a decision elsewhere; nothing of item 1 itself
-  landed. Items 2, 5 and 6 are blocked exactly as before, so the entry stays type 3.
-
-- **Re-typed 2026-09-04 — Type 3 to Type 2.** Items 1 and 2 landed; what is left is item 5's
-  staging approach (the unlink-then-reopen-by-name staging in the libarchive reader) and item 6,
-  and neither is blocked on anything external. They are waiting on a choice of approach, which is
-  a type 2.
-- **Re-typed 2026-09-05 — Type 2 to Type 1. The decision was taken: option (c).** The owner ruled
-  the staging unlink-then-reopen-by-name race **accepted and documented**, explicitly declining to
-  design against this attacker: it can disrupt Unified-Archiver's behaviour but there is no
-  economic gain in doing so, and the staging file lives in the caller's own destination directory,
-  so the exposure is exactly that directory's — unwinnable by anyone who cannot already create
-  names there. What is owed is therefore documentation, not defence, and two specific corrections
-  rather than a general note. **(1)** `build_staging_path`'s own comment overstates the defence: it
-  says winning the race "requires ... guessing that exact filename", but the placeholder is created
-  and *visible* before it is deleted, so an attacker who can write to the directory can also list
-  it — the name is observed, not guessed, and the six random characters only defeat pre-planting.
-  **(2)** A second window is documented nowhere: after libarchive finishes writing and before the
-  rename, an attacker can replace the staging file with their own, and the crate then renames
-  attacker content into place. That window is **wider** than the one item 5 names.
-  **Item 6 needs no decision and never did** — splitting the commit function into plan / session /
-  swap with per-phase tests is ordinary work held behind item 5 for no reason, and should be split
-  out as its own entry.
-
-
-
-
-**Refilled 2026-09-02 by one entry moved out of Type 2.** Multi-volume RAR extraction (`3b4d15`)
-was filed Type 2 on the belief that a scope question was open — "is multi-volume RAR extraction in
-scope at all?" That question is not what is blocking it, and the reason is that the cause is now
-pinned to a specific line of vendored C++ rather than to a design choice.
-`src/ffi/native/unrar/dll.cpp` collapses continuation headers **only** under `RAR_OM_LIST`; this
-crate opens exclusively with `RAR_OM_EXTRACT`, and `RAR_OM_LIST` is declared in `src/ffi/unrar.rs`
-and never used — which is exactly the three-entries-sharing-one-path listing shape the ticket
-measured. The information needed
-to fix it is already present and already unread: `dll.cpp` exports `RHDF_SPLITBEFORE` /
-`RHDF_SPLITAFTER` on every header, `src/ffi/unrar.rs` declares both constants, and
-`src/ffi/wrapper.rs` consumes only `RHDF_DIRECTORY` and `RHDF_ENCRYPTED`. Reassembly is likewise
-already the SDK's job — `MergeArchive` is called from inside `ExtractCurrentFile` — which is *why*
-`extract_by_ids(&[0])` reported "archive ended after 1 entries but the validated listing holds 3":
-the single extract had already consumed all three volumes. So what is owed is a known filter and a
-known sum, not a ruling. It is also priority 2 — the tracker's highest live priority — and, of the
-five open tickets at that priority, the only one that is neither in state `blocked` nor discharged
-by the 2026-09-02 pass.
-One residual scope choice is cheap enough to fold into the implementation rather than be asked for
-separately, and is stated in the entry.
-
-A correction that belongs with the entry rather than buried in a cross-reference: `DCR-015`'s
-"multi-volume RAR SFX chains now resolve" is about SFX sibling-volume *reach* only and does not bear
-on this defect. Nothing in `5a0c035` touches the listing shape.
 
 ### Split the modification commit path into plan / session / swap (OI-0076-003 item 6)
 
@@ -947,6 +870,98 @@ account of what changed and in which direction.
   agonising over nothing. Stated plainly, this is a **performance** difference and not an interface
   one — those files open, list and extract normally; they pay a copy — and it stays reconsiderable
   if that copy ever becomes real for someone.
+
+### Security & durability boundary refactors (OI-0076-003, items 5/6)
+- **Type:** 3
+- **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
+- **Sources:** docs/project/open-issues.md#OI-0076-003, ticgit:3f7dfa37
+- **First seen:** 2026-08-04
+- **Last seen:** 2026-08-21
+- **Description:** Two remaining hardening items: staging unlink→reopen-by-name race
+  (R0076-0045); `commit_changes` phase split (R0076-0089).
+- **Background:** 4 of 6 landed — ZIP-creation durability and extract-file staging (2026-06-06),
+  then items 1 and 2 on 2026-09-03.
+- **Items 1 and 2 landed 2026-09-03** (`8517e56`, `8d86fa5`; ticgit `5ebf46`, closed). Item 1's
+  recorded blocker had already dissolved, as the 2026-08-21 note below anticipated. Item 2's
+  recorded blocker ("needs a Unix `libc` dep") turned out to cover only the *evolution* to a
+  native `O_NOFOLLOW`, not the call-site wiring, which needed nothing new — the helper had sat
+  in `src/ffi/common.rs` with zero callers and an `#[expect(dead_code)]` since R0070-0021.
+  Item 1 narrows the TOCTOU window rather than closing it; closing it needs `openat`-relative
+  writes, which is not filed as work because nothing currently asks for it.
+- **Blocked by:** item 1 couples to the AD 0066 v0.4 strict-path flag; item 2 needs a Unix
+  `libc` dependency; item 5 needs an owned-fd / libarchive-callback design (AD 0009) — and
+  Innovation I6 established that `archive_read_open_fd` cannot deliver it, because libarchive's
+  read handle is iterator-shaped and shared fd offsets would corrupt concurrent readers;
+  item 6 couples to the AD 0053 D2 `ModifyArchive` handle.
+- **Blocker dissolved for item 1 (2026-08-21):** its recorded coupling was "the AD 0066 v0.4
+  strict-path flag", and that flag shipped — `ExtractionLimits::reject_unsafe_paths` is now enforced
+  by `check_entry_paths_safe` in `src/security.rs`, which refuses a hostile archive before a
+  destination directory is created or a byte is decoded, with the default `false` returning
+  immediately so the lossy-repair baseline pays nothing. The parent-creation race / re-canonicalise
+  work (R0076-0005) is therefore no longer waiting on a decision elsewhere; nothing of item 1 itself
+  landed. Items 2, 5 and 6 are blocked exactly as before, so the entry stays type 3.
+
+- **Re-typed 2026-09-04 — Type 3 to Type 2.** Items 1 and 2 landed; what is left is item 5's
+  staging approach (the unlink-then-reopen-by-name staging in the libarchive reader) and item 6,
+  and neither is blocked on anything external. They are waiting on a choice of approach, which is
+  a type 2.
+- **Re-typed 2026-09-05 — Type 2 to Type 1. The decision was taken: option (c).** The owner ruled
+  the staging unlink-then-reopen-by-name race **accepted and documented**, explicitly declining to
+  design against this attacker: it can disrupt Unified-Archiver's behaviour but there is no
+  economic gain in doing so, and the staging file lives in the caller's own destination directory,
+  so the exposure is exactly that directory's — unwinnable by anyone who cannot already create
+  names there. What is owed is therefore documentation, not defence, and two specific corrections
+  rather than a general note. **(1)** `build_staging_path`'s own comment overstates the defence: it
+  says winning the race "requires ... guessing that exact filename", but the placeholder is created
+  and *visible* before it is deleted, so an attacker who can write to the directory can also list
+  it — the name is observed, not guessed, and the six random characters only defeat pre-planting.
+  **(2)** A second window is documented nowhere: after libarchive finishes writing and before the
+  rename, an attacker can replace the staging file with their own, and the crate then renames
+  attacker content into place. That window is **wider** than the one item 5 names.
+  **Item 6 needs no decision and never did** — splitting the commit function into plan / session /
+  swap with per-phase tests is ordinary work held behind item 5 for no reason, and should be split
+  out as its own entry.
+
+
+
+
+**Refilled 2026-09-02 by one entry moved out of Type 2.** Multi-volume RAR extraction (`3b4d15`)
+was filed Type 2 on the belief that a scope question was open — "is multi-volume RAR extraction in
+scope at all?" That question is not what is blocking it, and the reason is that the cause is now
+pinned to a specific line of vendored C++ rather than to a design choice.
+`src/ffi/native/unrar/dll.cpp` collapses continuation headers **only** under `RAR_OM_LIST`; this
+crate opens exclusively with `RAR_OM_EXTRACT`, and `RAR_OM_LIST` is declared in `src/ffi/unrar.rs`
+and never used — which is exactly the three-entries-sharing-one-path listing shape the ticket
+measured. The information needed
+to fix it is already present and already unread: `dll.cpp` exports `RHDF_SPLITBEFORE` /
+`RHDF_SPLITAFTER` on every header, `src/ffi/unrar.rs` declares both constants, and
+`src/ffi/wrapper.rs` consumes only `RHDF_DIRECTORY` and `RHDF_ENCRYPTED`. Reassembly is likewise
+already the SDK's job — `MergeArchive` is called from inside `ExtractCurrentFile` — which is *why*
+`extract_by_ids(&[0])` reported "archive ended after 1 entries but the validated listing holds 3":
+the single extract had already consumed all three volumes. So what is owed is a known filter and a
+known sum, not a ruling. It is also priority 2 — the tracker's highest live priority — and, of the
+five open tickets at that priority, the only one that is neither in state `blocked` nor discharged
+by the 2026-09-02 pass.
+One residual scope choice is cheap enough to fold into the implementation rather than be asked for
+separately, and is stated in the entry.
+
+A correction that belongs with the entry rather than buried in a cross-reference: `DCR-015`'s
+"multi-volume RAR SFX chains now resolve" is about SFX sibling-volume *reach* only and does not bear
+on this defect. Nothing in `5a0c035` touches the listing shape.
+
+- **DISCHARGED 2026-09-05 — both halves are now elsewhere, and nothing is left in this entry.**
+  Items 1 and 2 were split out on 2026-09-03. Item 5 was ruled option (c) by the owner — accept the
+  staging unlink-then-reopen race and document it — and that documentation landed in `74a6714`,
+  correcting two things the old comment had wrong: the staging name is **observed, not guessed**
+  (the placeholder is visible in the directory before it is deleted, so `tempfile`'s random suffix
+  defeats pre-planting a name and not a watcher), and there is a **second, wider window** between
+  libarchive closing the staging file and the rename, which nothing had recorded. Item 6 needed no
+  decision and never did; it is now its own Type 1 entry rather than inheriting its sibling's
+  blocked status.
+  **Residuals, both outside this file's reach:** OI-0076-003's status line and Verification boxes in
+  `docs/project/open-issues.md` still describe items 5 and 6 as open — `/reopen` treats that file as
+  read-only — and ticgit `3f7dfa37`, whose `blocked` state covered items 1/2/5/6, now covers
+  nothing; closing or re-scoping it is its filer's call.
 
 ### Retired 2026-09-05 — `docs/investigation/` staleness is permanently out of scope
 
