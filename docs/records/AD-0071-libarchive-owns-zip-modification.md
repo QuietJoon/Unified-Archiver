@@ -86,3 +86,88 @@ DCR-009 (collapse of the dual ZIP backends onto the `zip` crate — the change
 that created the asymmetry, and which is silent on the modify path), DEF-005
 (the residual ZIP-modify caveats), `docs/architecture/mvp-scope.md`,
 `docs/architecture/effort-and-risk.md`, ticgit `fdd5f381`, ticgit `7318f6ca`.
+
+## Amendment (2026-09-05, the stated reasons were wrong; the real one is a precondition)
+
+AD-0072 made the uniform interface this library's stated purpose and named the
+reasoning shapes it inverts. This record's entire `## Why` section is two
+sentences, and both are on that list:
+
+> Migrating means rewriting the commit path for no user-visible gain on its own.
+> The split is ugly rather than harmful — it costs a reader's surprise, not a
+> caller's correctness — and the rewrite would spend a large, risky change budget
+> to buy internal symmetry.
+
+A re-examination against AD-0072 checked them against the tree. They are not
+merely inverted reasoning; **they are false**, and the record never named the
+reason that actually holds.
+
+### What is false
+
+**"Rewriting the commit path" is not what a migration means here.** The commit
+path already dispatches on `ArchiveBackend::ZipWriter`, and a read-side swap does
+not touch it. This record says so itself two paragraphs earlier — *"The write side
+stays native"*.
+
+**"A reader's surprise, not a caller's correctness"** is contradicted three ways,
+all verifiable:
+
+1. **Every ZIP commit walks the central directory twice.** The commit path reopens
+   the archive with the `zip` crate to recover the comment and the per-entry
+   compression method, because libarchive cannot surface them, after libarchive
+   has already walked it once for the listing. The in-tree comment at that site
+   says the real fix is to move the modify source to the `zip` crate so both walks
+   collapse into one. That is O(entries) of extra I/O per commit, which is a
+   caller's cost.
+2. **A correctness guard exists only to reconcile two readers, and its strongest
+   arm is dead.** `cross_check_source_listing` raises typed drift errors for name,
+   size and CRC. The CRC arm reads the facade listing's `crc32` — which is the
+   libarchive listing, where it is unconditionally `None`. It never fires. It
+   reads as a guard against a malformed archive whose central directory disagrees
+   with its local headers; it is one only for name and size.
+3. **It is the crate's one documented layering violation.** `src/modification.rs`
+   is the only orchestration module that imports a backend crate directly, and the
+   architecture notes already record that this collapses when the ZIP modify read
+   path moves.
+
+There is also a capability gap this record never mentions, which is exactly the
+case AD-0072 is about: libarchive's generic entry API cannot express the ZIP
+archive comment, the per-entry compression method, `crc32`, or `compressed_size`.
+The crate is already paying a code cost for that — but for a **reconciliation
+layer between two readers**, rather than for the better reader.
+
+### The reason that actually holds
+
+The `zip` crate's ZIP read side does not stream: `extract_to_stream` loads the
+whole entry into memory before wrapping it in a cursor. The retained-entry replay
+calls that once per entry, so swapping the modify read path to the `zip` crate
+**today** would turn a bounded-memory rewrite into one whose peak scales with the
+largest retained entry. That is a real, user-visible regression, and it is the
+argument this record should have made.
+
+It is a **precondition, not a permanent answer.** It is DEF-004 — and under
+AD-0072 an upstream gap of that shape is itself absorbable rather than final.
+
+### What this record now means
+
+- **The operative ruling stands, and stands for a better reason.** ZIP modify
+  reads through libarchive, and no document should carry an unowned "planned
+  ZIP-native migration" — that half of this record fixed a real drift, where
+  `effort-and-risk.md` was still prescribing the dead migration.
+- **Permanence becomes conditional.** The migration is not planned work *while
+  DEF-004's ZIP streaming reader is open*. It becomes reconsiderable when that
+  lands. "It is the answer", and the blanket ban on the phrase appearing anywhere,
+  are withdrawn.
+- **The cost is named rather than hidden**: a second central-directory walk per
+  commit, the reconciliation layer and its dead CRC arm, and the layering
+  violation. A future reader weighing this should weigh those, not "ugly rather
+  than harmful".
+- **`## What this does NOT settle` stands as written.** DEF-005's three caveats
+  are backend-independent — ZIP64 is already the `zip` crate's own write path,
+  encrypted re-encryption is a write-side hold that no reader change touches, and
+  journaling is orchestration — so they are correctly out of scope here and are
+  *not* examples of the AD-0072 case.
+
+Separately, and independently of this ruling: the dead CRC arm in
+`cross_check_source_listing` should be either fixed or documented as unreachable.
+It currently presents as a correctness guard that cannot fire.
