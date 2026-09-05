@@ -177,6 +177,14 @@ pub(crate) struct PayloadTarget<'a> {
 /// for the duration of the call; the visitor must not retain it. Bounding
 /// the payload (declared-size exactness, ceiling caps) is the visitor's
 /// job — see [`PayloadTarget::declared_size`].
+/// Sink handed each decoded chunk of a payload by
+/// [`ReadBackend::stream_payload_to_sink_by_listing_id`].
+///
+/// Chunk boundaries are an artefact of whatever the backend decoded in one
+/// step and carry no meaning; a sink that cares about structure must
+/// accumulate. Returning an error aborts the walk.
+pub(crate) type PayloadChunkSink<'v> = dyn FnMut(&[u8]) -> Result<()> + 'v;
+
 pub(crate) type PayloadVisitor<'v> =
     dyn FnMut(&PayloadTarget<'_>, &mut dyn std::io::Read) -> Result<()> + 'v;
 
@@ -454,6 +462,58 @@ pub(crate) trait ReadBackend {
         ))
     }
 
+    /// Push one entry's decoded payload into `sink`, chunk by chunk, without
+    /// materialising it in memory or staging it to disk (DEF-004).
+    ///
+    /// # Why this is push-shaped, when the rest of this trait is pull-shaped
+    ///
+    /// The owner's definition of streaming for this library is narrow and it is
+    /// not the same as what any dependency calls streaming: **deliver an
+    /// entry's payload without writing it to disk, processed in memory** —
+    /// the shape checksum and integrity work needs, which is a hasher being
+    /// fed bytes.
+    ///
+    /// That is inherently a *push*, and insisting on a pull `Read` is what made
+    /// this look impossible for years. AD-0035 priced two ways to manufacture a
+    /// pull reader from a push source — a thread-plus-pipe adapter and a
+    /// self-referential owning struct — and correctly called both
+    /// disproportionate. It never considered not manufacturing one. Every
+    /// backend can push:
+    ///
+    /// * **libarchive** — `archive_read_data` into a buffer, already streaming.
+    /// * **ZIP** — the `zip` crate's entry reader borrows from the archive, so
+    ///   it cannot be returned, but it can be read from *here*.
+    /// * **7z** — `sevenz-rust2` hands a callback-scoped reader; same shape.
+    /// * **RAR** — the SDK's `UCM_PROCESSDATA` callback already receives the
+    ///   decoded block. This is the backend a pull reader served worst and a
+    ///   sink serves best.
+    ///
+    /// # Contract
+    ///
+    /// Returns the total number of decoded bytes pushed. `sink` may be called
+    /// any number of times, with any chunk sizes, and must not assume chunk
+    /// boundaries mean anything. An error from `sink` aborts the walk and
+    /// propagates unchanged, so a caller can stop early by returning one.
+    ///
+    /// **Bounding is the caller's job**, exactly as it is for
+    /// [`Self::visit_payloads_by_listing_id`]: this method enforces no ceiling
+    /// and no declared-size exactness, because the digest surface needs a
+    /// different bound (the entry's own declared size) than an extraction does.
+    fn stream_payload_to_sink_by_listing_id(
+        &self,
+        _id: usize,
+        _validated_path: &str,
+        _sink: &mut PayloadChunkSink<'_>,
+    ) -> Result<u64> {
+        Err(ArchiveError::not_implemented(
+            crate::error::ops::EXTRACT_TO_STREAM,
+            format!(
+                "sink-based payload streaming is not implemented for backend {}",
+                std::any::type_name::<Self>()
+            ),
+        ))
+    }
+
     /// Resolve **every** listed target's payload in a *single* traversal
     /// of the archive (OI-0001-009 / ticgit `82bf8fd4`).
     ///
@@ -670,6 +730,15 @@ impl ReadBackend for crate::ffi::zip_wrapper::ZipArchive {
             plan.selection,
         )
     }
+    #[inline]
+    fn stream_payload_to_sink_by_listing_id(
+        &self,
+        id: usize,
+        validated_path: &str,
+        sink: &mut PayloadChunkSink<'_>,
+    ) -> Result<u64> {
+        self.stream_payload_to_sink_by_listing_id(id, validated_path, sink)
+    }
 }
 
 impl ReadBackend for crate::ffi::sevenz_wrapper::SevenZArchive {
@@ -768,6 +837,15 @@ impl ReadBackend for crate::ffi::sevenz_wrapper::SevenZArchive {
             plan.selection,
         )
     }
+    #[inline]
+    fn stream_payload_to_sink_by_listing_id(
+        &self,
+        id: usize,
+        validated_path: &str,
+        sink: &mut PayloadChunkSink<'_>,
+    ) -> Result<u64> {
+        self.stream_payload_to_sink_by_listing_id(id, validated_path, sink)
+    }
 }
 
 impl ReadBackend for crate::ffi::libarchive_wrapper::LibarchiveArchive {
@@ -855,6 +933,15 @@ impl ReadBackend for crate::ffi::libarchive_wrapper::LibarchiveArchive {
             plan.max_file_size,
             plan.max_total_size,
         )
+    }
+    #[inline]
+    fn stream_payload_to_sink_by_listing_id(
+        &self,
+        id: usize,
+        validated_path: &str,
+        sink: &mut PayloadChunkSink<'_>,
+    ) -> Result<u64> {
+        self.stream_payload_to_sink_by_listing_id(id, validated_path, sink)
     }
 }
 
@@ -1022,5 +1109,14 @@ impl ReadBackend for crate::ffi::wrapper::UnrarArchive {
             plan.max_file_size,
             plan.max_total_size,
         )
+    }
+    #[inline]
+    fn stream_payload_to_sink_by_listing_id(
+        &self,
+        id: usize,
+        validated_path: &str,
+        sink: &mut PayloadChunkSink<'_>,
+    ) -> Result<u64> {
+        self.stream_payload_to_sink_by_listing_id(id, validated_path, sink)
     }
 }

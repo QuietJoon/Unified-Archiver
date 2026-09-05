@@ -1539,6 +1539,90 @@ impl UnrarArchive {
     /// before the cursor wraps it, so `max_bytes` is applied to the
     /// actual decoded length, not just the metadata-declared one
     /// (R0072-0006).
+    /// Push the entry's decoded payload into `sink` without staging it to
+    /// disk (DEF-004).
+    ///
+    /// This is the backend the sink shape exists for. RAR was the only one
+    /// that wrote an entry to a real file before anything could read it, and
+    /// the reason given for years — "the UnRAR API requires extraction to disk
+    /// first" — was never true. The SDK hands every decoded block to
+    /// `UCM_PROCESSDATA`; this crate already relied on that callback to abort
+    /// mid-decode on a byte cap, and simply discarded the data pointer.
+    ///
+    /// The operation is `RAR_TEST`, not `RAR_EXTRACT`: `ProcessFile` sets
+    /// `Cmd.Test = (Operation != RAR_EXTRACT)`, so the decoder runs and the
+    /// callback still fires while nothing is written anywhere.
+    ///
+    /// Bounding is the caller's, per the trait contract.
+    pub(crate) fn stream_payload_to_sink_by_listing_id(
+        &self,
+        target_id: usize,
+        validated_path: &str,
+        sink: &mut crate::backend::PayloadChunkSink<'_>,
+    ) -> Result<u64> {
+        let op = crate::error::ops::EXTRACT_TO_STREAM;
+        let fresh = self.fresh_handle(op)?;
+
+        let mut entry_idx: usize = 0;
+        loop {
+            let Some((entry, flags)) = fresh.read_header_with_flags()? else {
+                // Walked off the end without reaching the target: the
+                // archive has fewer entries than the listing this id came
+                // from, i.e. it changed on disk.
+                return Err(listing_drift_eof(entry_idx, target_id + 1));
+            };
+            // Same continuation fold as every other walk (3b4d15): a
+            // continuation header is the file resumed, not another entry.
+            if flags & RHDF_SPLITBEFORE != 0 && entry_idx > 0 {
+                fresh.skip_entry()?;
+                continue;
+            }
+            let current_idx = entry_idx;
+            entry_idx += 1;
+            if current_idx != target_id {
+                fresh.skip_entry()?;
+                continue;
+            }
+            if entry.path != validated_path {
+                return Err(listing_drift_mismatch(
+                    current_idx,
+                    validated_path,
+                    &entry.path,
+                ));
+            }
+
+            // `entry_decoded` is already the running decoded-byte count the
+            // callback maintains for the byte cap, so there is nothing to
+            // count separately here.
+            let mut ctx = UnrarExtractContext::new(op, None, 0, None).with_sink(sink);
+            ctx.begin_file(None);
+
+            let result = unsafe {
+                let _guard = unrar_lock()?;
+                RARSetCallback(
+                    fresh.handle,
+                    Some(unrar_process_callback),
+                    &mut ctx as *mut UnrarExtractContext<'_> as isize,
+                );
+                // RAR_TEST decodes without writing; see the doc comment.
+                let r = RARProcessFile(fresh.handle, RAR_TEST, std::ptr::null(), std::ptr::null());
+                RARSetCallback(fresh.handle, Some(unrar_handle_callback), 0);
+                r
+            };
+
+            if let Some(err) = ctx.sink_error.take() {
+                return Err(err);
+            }
+            if result != ERAR_SUCCESS {
+                if let Some(err) = ctx.take_abort_error(&self.path) {
+                    return Err(err);
+                }
+                return Err(self.unrar_error(result));
+            }
+            return Ok(ctx.entry_decoded);
+        }
+    }
+
     pub fn extract_to_stream_with_limit(
         &self,
         file_path: &str,
@@ -2128,6 +2212,19 @@ struct UnrarExtractContext<'a> {
     /// Set by the trampoline when it returns `-1` to abort the current
     /// `RARProcessFile`.
     abort: Option<UnrarAbort>,
+    /// DEF-004: where decoded blocks go when this context is driving a
+    /// sink-based read rather than an extraction.
+    ///
+    /// The SDK hands every decoded block to `UCM_PROCESSDATA` with a pointer
+    /// and a length. This crate has always used the length (for progress and
+    /// the byte cap) and thrown the pointer away, which is why RAR was the one
+    /// backend that had to stage an entry to a real file before anything could
+    /// read it. With a sink there is nothing to invert and nothing to stage:
+    /// the callback already has the bytes.
+    sink: Option<&'a mut crate::backend::PayloadChunkSink<'a>>,
+    /// Error returned by `sink`, stashed because the trampoline can only
+    /// answer the C ABI with an int.
+    sink_error: Option<ArchiveError>,
 }
 
 impl<'a> UnrarExtractContext<'a> {
@@ -2147,7 +2244,16 @@ impl<'a> UnrarExtractContext<'a> {
             entry_cap: None,
             total_remaining: max_total_size,
             abort: None,
+            sink: None,
+            sink_error: None,
         }
+    }
+
+    /// Drive this context's decoded blocks into `sink` (DEF-004) instead of
+    /// letting the SDK write them anywhere.
+    fn with_sink(mut self, sink: &'a mut crate::backend::PayloadChunkSink<'a>) -> Self {
+        self.sink = Some(sink);
+        self
     }
 
     /// Prepare per-entry state before extracting a file payload. The
@@ -2210,13 +2316,32 @@ impl<'a> UnrarExtractContext<'a> {
     /// the byte cap, then run the rate-limited cancellation poll. Returns
     /// the C callback code (`1` continue, `-1` abort). Only ever called on
     /// the lock-holding thread (AD 0019).
-    fn on_process_data(&mut self, block: u64) -> c_int {
+    fn on_process_data(&mut self, data: *const u8, block: u64) -> c_int {
         self.entry_decoded = self.entry_decoded.saturating_add(block);
 
         if let Some(cap) = self.entry_cap {
             if self.entry_decoded > cap {
                 self.abort = Some(UnrarAbort::CapExceeded);
                 return -1;
+            }
+        }
+
+        // DEF-004: feed the sink before the progress poll, so a cancellation
+        // cannot swallow bytes the caller has already been promised.
+        if let Some(sink) = self.sink.as_mut() {
+            if !data.is_null() && block > 0 {
+                // SAFETY: the SDK passes a pointer to `block` bytes of decoded
+                // output that stay valid for the duration of this callback, and
+                // the slice never escapes it. A saturating cast is used rather
+                // than an unwrap so a hostile length can never panic inside a C
+                // callback.
+                let len = usize::try_from(block).unwrap_or(usize::MAX);
+                let chunk = unsafe { std::slice::from_raw_parts(data, len) };
+                if let Err(e) = sink(chunk) {
+                    self.sink_error = Some(e);
+                    self.abort = Some(UnrarAbort::CallbackError);
+                    return -1;
+                }
             }
         }
 
@@ -2363,7 +2488,7 @@ fn min_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 unsafe extern "C" fn unrar_process_callback(
     msg: c_uint,
     user_data: isize,
-    _p1: isize,
+    p1: isize,
     p2: isize,
 ) -> c_int {
     let outcome = std::panic::catch_unwind(|| {
@@ -2415,7 +2540,9 @@ unsafe extern "C" fn unrar_process_callback(
             ctx.abort = Some(UnrarAbort::CallbackError);
             return -1;
         }
-        ctx.on_process_data(p2 as u64)
+        // `p1` is the decoded block's address. It was ignored until DEF-004;
+        // only the length was ever read.
+        ctx.on_process_data(p1 as *const u8, p2 as u64)
     });
     outcome.unwrap_or(-1)
 }

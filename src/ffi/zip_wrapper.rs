@@ -1557,6 +1557,48 @@ impl ZipArchive {
     /// entry is materialized before the cursor is handed back (DEF-004 /
     /// OI-0057-007), so digesting a large AE-2 member costs its full size in
     /// memory plus full decryption.
+    /// Push the entry's decoded payload into `sink` without buffering it
+    /// (DEF-004).
+    ///
+    /// The `zip` crate's entry reader borrows from the archive, which is why
+    /// this backend cannot *return* a reader and has always buffered instead.
+    /// Nothing stops it being read from here, inside the borrow — the sink
+    /// shape is what makes the borrow a non-issue rather than a wall.
+    ///
+    /// Bounding is the caller's, per the trait contract, so this deliberately
+    /// does not enforce the declared size or verify the CRC: the digest
+    /// surface needs the entry's own declared bound, which the caller holds.
+    pub(crate) fn stream_payload_to_sink_by_listing_id(
+        &self,
+        id: usize,
+        validated_path: &str,
+        sink: &mut crate::backend::PayloadChunkSink<'_>,
+    ) -> Result<u64> {
+        self.reject_if_collapsed(crate::error::ops::EXTRACT_TO_STREAM)?;
+        let password = self.password.as_ref().map(Password::as_str);
+        self.with_zip(|zip| {
+            check_listing_drift(zip, id, validated_path)?;
+            let mut zip_file = open_entry_by_index(zip, id, password)?;
+            let mut buf = [0u8; 64 * 1024];
+            let mut total = 0u64;
+            loop {
+                let read = std::io::Read::read(&mut zip_file, &mut buf).map_err(|e| {
+                    ArchiveError::io(
+                        "read zip entry",
+                        std::path::PathBuf::from(validated_path),
+                        e,
+                    )
+                })?;
+                if read == 0 {
+                    break;
+                }
+                sink(&buf[..read])?;
+                total += read as u64;
+            }
+            Ok(total)
+        })
+    }
+
     pub(crate) fn extract_to_stream_by_listing_id(
         &self,
         id: usize,

@@ -491,6 +491,20 @@ impl Archive {
         // limit on what the hasher consumes. R6 (ti-c0d6fad6) makes it an
         // *exact* bound where a declaration exists, so the digest surface
         // detects truncation instead of hashing a short payload.
+        // DEF-004: prefer the push route. Every backend implements it, and
+        // it is the only one that holds the owner's definition of streaming —
+        // no temp file, no whole-entry buffer — on ZIP, 7z and RAR, all three
+        // of which materialise the entry before the pull route can see it.
+        // RAR is the one that mattered most: the pull route stages the entry
+        // to a real file on disk first.
+        match self.crc32_for_digest_via_sink(entry) {
+            Ok(Some(crc)) => return Ok(crc),
+            // No sink route on this backend: fall through to the reader path,
+            // which is correct and merely buffers.
+            Ok(None) => {}
+            Err(e) => return Err(e),
+        }
+
         let reader = match self.validated_source().extract_to_stream_by_id(
             entry,
             &crate::security::ExtractionLimits::unlimited(),
@@ -517,6 +531,72 @@ impl Archive {
             Err(e) => return Err(e),
         };
         crc32_of_bounded_payload(reader, entry.size, &entry.path, &self.path)
+    }
+
+    /// CRC32 of one entry's payload, computed while the backend pushes it
+    /// (DEF-004). `Ok(None)` means this backend has no sink route.
+    ///
+    /// **The bound here must match [`crc32_of_bounded_payload`]'s exactly** —
+    /// exact against a declared size, otherwise capped at the default
+    /// per-file ceiling — because the two routes have to produce the same
+    /// digest and the same refusal for the same archive. They are separate
+    /// implementations only because one is fed and the other pulls;
+    /// `both_digest_routes_agree_on_a_truncated_payload` is what holds them
+    /// together.
+    fn crc32_for_digest_via_sink(&self, entry: &ArchiveEntry) -> Result<Option<u32>> {
+        let declared = entry.size;
+        let ceiling = declared.unwrap_or(crate::security::DEFAULT_MAX_FILE_SIZE);
+        let mut hasher = crc32fast::Hasher::new();
+        let mut seen: u64 = 0;
+        let mut overran = false;
+
+        let mut sink = |chunk: &[u8]| -> Result<()> {
+            seen = seen.saturating_add(chunk.len() as u64);
+            if seen > ceiling {
+                overran = true;
+                return Err(ArchiveError::Corruption {
+                    path: entry.path.clone(),
+                    details: format!(
+                        "digest stream violated the declared size: produced more than {ceiling} bytes"
+                    ),
+                });
+            }
+            hasher.update(chunk);
+            Ok(())
+        };
+
+        let outcome =
+            crate::backend::dispatch_read_archive(self, "calculate_content_multiset_digest", |b| {
+                b.stream_payload_to_sink_by_listing_id(entry.id, &entry.path, &mut sink)
+            });
+
+        match outcome {
+            Ok(_) => {
+                if overran {
+                    // Unreachable: the sink returns Err on overrun. Kept so a
+                    // future backend that swallows the sink's error cannot
+                    // turn an overrun into a silently short digest.
+                    return Err(ArchiveError::Corruption {
+                        path: entry.path.clone(),
+                        details: "digest stream violated the declared size".to_string(),
+                    });
+                }
+                if let Some(declared) = declared
+                    && seen != declared
+                {
+                    return Err(ArchiveError::Corruption {
+                        path: entry.path.clone(),
+                        details: format!(
+                            "digest stream violated the declared size: expected {declared} bytes, \
+                             produced {seen}"
+                        ),
+                    });
+                }
+                Ok(Some(hasher.finalize()))
+            }
+            Err(ArchiveError::NotImplemented { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Resolve every CRC-less file entry's CRC32 in a **single** traversal

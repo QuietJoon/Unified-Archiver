@@ -1613,6 +1613,102 @@ impl SevenZArchive {
     /// The forward in `crate::backend` is what makes any of this reachable;
     /// calling this inherent method directly cannot detect a missing one.
     /// Prove it from the facade.
+    /// Push the entry's decoded payload into `sink` without buffering it
+    /// (DEF-004).
+    ///
+    /// `sevenz-rust2` exposes no owned per-entry reader — the data reader is
+    /// scoped to the `for_each_entries` callback — which is why this backend
+    /// has always buffered. AD-0035 priced two ways to manufacture an owned
+    /// reader anyway and called both disproportionate; it never considered not
+    /// needing one. Inside the callback the reader is perfectly usable, so a
+    /// sink turns the upstream limit into a non-issue.
+    ///
+    /// Bounding is the caller's, per the trait contract.
+    pub(crate) fn stream_payload_to_sink_by_listing_id(
+        &self,
+        target_id: usize,
+        validated_path: &str,
+        sink: &mut crate::backend::PayloadChunkSink<'_>,
+    ) -> Result<u64> {
+        let op = crate::error::ops::EXTRACT_TO_STREAM;
+        let mut reader = self.open_reader(op)?;
+        let visit_order = self.visit_order(reader.archive())?;
+
+        let mut total: u64 = 0;
+        let mut done = false;
+        let mut stashed: Option<ArchiveError> = None;
+        let mut callback_pos: usize = 0;
+
+        let walk = reader.for_each_entries(|entry, entry_reader| {
+            if done || stashed.is_some() {
+                return Ok(false);
+            }
+            let Some(current_idx) = visit_order.get(callback_pos).copied() else {
+                stashed = Some(ArchiveError::format(
+                    Some(ArchiveFormat::SevenZip),
+                    "Extract: archive walk visited more entries than the table of contents declares",
+                ));
+                return Ok(false);
+            };
+            callback_pos += 1;
+            if current_idx != target_id {
+                return Ok(true);
+            }
+
+            // Same drift guard as the buffering path: the AD 0065 snapshot can
+            // go stale between listing and read.
+            let walked_path = normalize_path(&entry.name);
+            if walked_path != validated_path {
+                stashed = Some(ArchiveError::format(
+                    Some(ArchiveFormat::SevenZip),
+                    format!(
+                        "single-entry listing drift at index {}: expected '{}', found '{}'",
+                        current_idx, validated_path, walked_path
+                    ),
+                ));
+                return Ok(false);
+            }
+
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                match std::io::Read::read(entry_reader, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if let Err(e) = sink(&buf[..n]) {
+                            stashed = Some(e);
+                            return Ok(false);
+                        }
+                        total += n as u64;
+                    }
+                    Err(e) => {
+                        stashed = Some(ArchiveError::io(
+                            op,
+                            std::path::PathBuf::from(validated_path),
+                            e,
+                        ));
+                        return Ok(false);
+                    }
+                }
+            }
+            done = true;
+            Ok(false)
+        });
+
+        if let Some(err) = stashed {
+            return Err(err);
+        }
+        walk.map_err(|e| {
+            ArchiveError::format(Some(ArchiveFormat::SevenZip), format!("Invalid 7z: {}", e))
+        })?;
+        if !done {
+            return Err(ArchiveError::format(
+                Some(ArchiveFormat::SevenZip),
+                format!("entry id {target_id} ('{validated_path}') was not reached by the walk"),
+            ));
+        }
+        Ok(total)
+    }
+
     pub(crate) fn extract_to_stream_by_listing_id(
         &self,
         id: usize,
