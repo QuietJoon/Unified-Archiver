@@ -165,6 +165,172 @@ Classification:
 
 ## Type 1 — ready to implement
 
+### True bounded-memory streaming for non-libarchive backends (DEF-004)
+- **Type:** 3
+- **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
+- **Sources:** docs/project/stub-manifest.md, ticgit:a4071277
+- **First seen:** 2026-08-04
+- **Last seen:** 2026-08-17
+- **Description:** Give the `zip`, `sevenz` and UnRAR backends real streaming readers instead of
+  materialising the entry and wrapping the buffer in a `Cursor`. **Re-scoped 2026-08-12:** the first
+  step (deriving the backend materialisation cap from `StreamBound`) has landed; what remains is the
+  incremental-reader work itself.
+- **Background:** Only libarchive actually streams; the others call `extract_to_memory()` and
+  hand back `StreamingExtractor::from_buffer`, so memory is O(entry size), not O(window). The
+  caveat is documented in `Limitations.md` §4 and the streaming rustdoc. The piz row of this
+  deferral disappeared with DCR-009. **Narrowed 2026-08-12 (R0001-0011):** the first
+  step landed — the backend materialisation budget is now derived from `StreamBound`
+  (`min(bound, max_file_size, max_total_size)`) and ZIP/7z gained
+  `extract_to_stream_with_limit` overrides, so the buffer is bounded by the caller's chosen
+  bound and an over-budget entry is refused before materialisation. What remains is genuine
+  incremental streaming: bounding the buffer is not the same as not having one. R0001-0011 (2026-08-12) landed the bound-derived budget:
+  `extract_to_stream_impl` now passes `min(bound, max_file_size, max_total_size)` to
+  `extract_to_stream_with_limit`, and ZIP/7z gained overrides that reject an over-budget declared size
+  before buffering (RAR already had one), so `Cap(1024)` on a multi-GiB entry no longer materialises
+  the entry — it fails at the call. Carried by DCR-006 Amendment 3. Ticket `a4071277` should be
+  re-scoped rather than closed; `6277386e`'s framing is fully absorbed by that amendment.
+- **Blocked by:** upstream — `sevenz-rust2` exposes no owned entry-level `Read` (AD 0035,
+  re-verified at 0.19.4) — and, for the remaining backends, a `StreamingExtractor`
+  handle-lifetime ownership design that lets the reader outlive the call without holding the
+  archive handle hostage.
+- **Version corrected 2026-09-02 — the conclusion is unaffected.** The line above cites a
+  re-verification "at 0.19.4", a version this project does not build against: `Cargo.lock` pins
+  `sevenz-rust2` **0.19.3**. Both source trees present on this machine were compared and the
+  relevant reader API is identical in each — `BlockDecoder<'a, R: Read + Seek>` and
+  `SharedBoundedReader<'a, R>` are lifetime-borrowed in both — so there is still no owned
+  entry-level `Read` and the blocker holds at the version actually pinned. Recorded rather than
+  quietly fixed because a blocker verified against a version the lockfile does not name is not
+  verified, and the next reader would have had to redo the comparison to find that out.
+
+- **Re-typed 2026-09-04 — Type 3 to Type 2.** No external prerequisite is unmet. All three
+  backends still materialise before `StreamingExtractor::from_bytes` — ZIP and 7z to a `Vec<u8>`,
+  RAR to a staging tempfile — and what is owed first is the scope/design decision about what
+  "bounded" means per backend, not a dependency or a host.
+- **Re-typed 2026-09-05 — Type 2 to Type 1, and the exit criterion is rewritten.** Both decisions
+  this entry was waiting on are made. The scope question ("re-scope to ZIP+RAR, or keep it as an
+  all-three item that cannot close") dissolves: it was created by an exit criterion demanding
+  *owned entry-level readers* for all three, which 7z's dependency does not offer and may never.
+  The owner has since defined this library's streaming narrowly — **deliver an entry's payload
+  without writing it to disk, processed in memory, mainly for checksum and integrity** — and
+  accepted a **caller-supplied sink** as the API shape. Under that definition nothing is blocked
+  upstream: 7z and ZIP already decode incrementally inside `test_integrity`, and RAR's
+  `UCM_PROCESSDATA` callback already receives the decoded buffer whose pointer the crate currently
+  ignores. AD-0035's amendment retains "disproportionate" as the verdict on the two pull-shaped
+  options it priced and withdraws it as the verdict on the gap. What is owed is implementation: a
+  push-shaped backend method implemented by all four backends, and the digest/integrity walk moved
+  onto it so no backend buffers a whole entry or stages one to disk.
+
+### In-place `open_at_offset` without a tempfile copy is still an unbuilt deferral
+- **Type:** 2
+- **Verified:** yes — reopen verified 2026-08-16: the SFX open paths in `src/archive.rs` still stage the payload to a tempfile and re-detect on it before opening
+- **Sources:** ticgit:5858e17b, docs/architecture/mvp-scope.md (Allowed DEFERRED Placeholders), docs/project/stub-manifest.md (DEF-001), src/archive.rs
+- **First seen:** 2026-08-16
+- **Last seen:** 2026-08-17
+- **Description:** `mvp-scope.md` keeps "In-place `open_at_offset` (no tempfile copy)" as a live
+  placeholder, saying that DEF-001 closed with a tempfile-backed implementation and that a true
+  offset-aware backend opening "is still a future item". Nothing tracked that future item.
+- **Background:** DEF-001 is correctly marked Closed in the stub manifest — `open_at_offset` does
+  work for every backend — but it closed by copying the payload out to a temporary file rather
+  than by teaching the backends to read from an offset. That copy is why AD 0040 imposes a 16 GiB
+  payload ceiling: a large self-extracting archive must be written to disk in full before a single
+  entry can be listed, so the ceiling is a consequence of the implementation and not of any format
+  limit. `open_at_offset` appears three times in this backlog already, but all three are other
+  items — the `max_sfx_payload_size` dead-configuration entry (`1dfb92d6`) and a MADR-0023
+  amendment note observing that the method is tempfile-backed — so the deferral itself was
+  invisible to both registers. It is type 2 because the first question is whether to pursue it at
+  all: ZIP already has an `OffsetReader`, but 7z, RAR, TAR and ISO would each need their own path
+  and libarchive would need a callback-based reader, which is a backend-trait-shaped change that
+  probably belongs after AD 0053 D1's successors rather than before them. If the ruling is not to
+  pursue it, the placeholder should be restated as accepted-permanent and AD 0040's ceiling
+  documented as a design consequence rather than a temporary limit — which is a real outcome, not
+  a non-answer.
+  **Narrowed 2026-08-21: the ZIP half is built, so the Verified line above is stale.** ZIP now opens
+  in place — `Archive::open_at_offset` hands the backend the caller's own file with no copy when three
+  gates agree: a `PK\x03\x04` local file header sits exactly at `offset`, the `zip` crate's own
+  `ZipArchive::offset()` resolves to the same value (built the same way the wrapper builds it, so
+  agreement here means agreement there), and the open then succeeds. Any disagreement returns
+  `Ok(None)` and the caller falls back to staging, so the strict path cannot silently mis-open.
+  `PayloadSource::{InPlace, Staged}` records which happened and `Archive::payload_access()` is its
+  public projection, which is how a caller now tells whether the AD 0040 ceiling applied at all.
+  `PayloadSource::InPlace` deliberately keeps the `offset` so `payload_size_for_ratio` — the
+  compression-ratio denominator — stays on the payload instead of widening to `stub + payload`
+  (R0069-0006), which would dilute the zip-bomb gate.
+  **What remains is the decision, and it is most of the original scope:** 7z, RAR, TAR and ISO each
+  need their own offset-aware path and libarchive needs a callback-based reader, so the ruling asked
+  for above is unchanged — pursue it per backend, or restate the placeholder as accepted-permanent
+  and document AD 0040's ceiling as a design consequence for the staging backends. AD 0040 already
+  carries the amendment saying the ceiling bounds a copy and therefore cannot bind an in-place open,
+  so that half of the documentation outcome is done either way.
+  Two tickets track this one deferral — `1ddc37ec` (2026-08-20, filed from `mvp-scope.md`) and
+  `5858e17b` (2026-08-16) — and they are duplicates of each other. Whoever rules on it should
+  collapse them rather than answer twice.
+
+- **Re-examined 2026-09-04 — stays Type 2.** A type-1 reading was tried and refuted. Three of the
+  four arms are built (`try_open_zip_in_place`, `try_open_rar_in_place`, `try_open_sevenz_in_place`
+  behind the shared executable-extension gate); the libarchive arm is the unbuilt quarter, and it
+  is not merely thirteen mechanical FFI declarations — the entry is narrowed rather than ready.
+- **Re-typed 2026-09-05 — Type 2 to Type 1, and there is nothing left to build.** The decision this
+  entry waited on has been taken, and it went the other way: DCR-015's 2026-09-05 amendment rules
+  that **in-place opening is ZIP, RAR and 7z, and libarchive-backed payloads stage** — a decision,
+  not a pending item. The affected class is makeself `.run`/`.sh` installers and only those;
+  plain-tar and ISO self-extractors cannot be detected at all, so the records' "TAR family, ISO,
+  raw streams" framing oversold it. `try_open_in_place` now carries the exclusion as a documented
+  arm with its reasoning. **No implementation work remains** — this entry is discharged by ruling
+  rather than by code, and the next reconciliation should move it to "Closed since the previous
+  run" rather than leave it here.
+
+### Security & durability boundary refactors (OI-0076-003, items 5/6)
+- **Type:** 3
+- **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
+- **Sources:** docs/project/open-issues.md#OI-0076-003, ticgit:3f7dfa37
+- **First seen:** 2026-08-04
+- **Last seen:** 2026-08-21
+- **Description:** Two remaining hardening items: staging unlink→reopen-by-name race
+  (R0076-0045); `commit_changes` phase split (R0076-0089).
+- **Background:** 4 of 6 landed — ZIP-creation durability and extract-file staging (2026-06-06),
+  then items 1 and 2 on 2026-09-03.
+- **Items 1 and 2 landed 2026-09-03** (`8517e56`, `8d86fa5`; ticgit `5ebf46`, closed). Item 1's
+  recorded blocker had already dissolved, as the 2026-08-21 note below anticipated. Item 2's
+  recorded blocker ("needs a Unix `libc` dep") turned out to cover only the *evolution* to a
+  native `O_NOFOLLOW`, not the call-site wiring, which needed nothing new — the helper had sat
+  in `src/ffi/common.rs` with zero callers and an `#[expect(dead_code)]` since R0070-0021.
+  Item 1 narrows the TOCTOU window rather than closing it; closing it needs `openat`-relative
+  writes, which is not filed as work because nothing currently asks for it.
+- **Blocked by:** item 1 couples to the AD 0066 v0.4 strict-path flag; item 2 needs a Unix
+  `libc` dependency; item 5 needs an owned-fd / libarchive-callback design (AD 0009) — and
+  Innovation I6 established that `archive_read_open_fd` cannot deliver it, because libarchive's
+  read handle is iterator-shaped and shared fd offsets would corrupt concurrent readers;
+  item 6 couples to the AD 0053 D2 `ModifyArchive` handle.
+- **Blocker dissolved for item 1 (2026-08-21):** its recorded coupling was "the AD 0066 v0.4
+  strict-path flag", and that flag shipped — `ExtractionLimits::reject_unsafe_paths` is now enforced
+  by `check_entry_paths_safe` in `src/security.rs`, which refuses a hostile archive before a
+  destination directory is created or a byte is decoded, with the default `false` returning
+  immediately so the lossy-repair baseline pays nothing. The parent-creation race / re-canonicalise
+  work (R0076-0005) is therefore no longer waiting on a decision elsewhere; nothing of item 1 itself
+  landed. Items 2, 5 and 6 are blocked exactly as before, so the entry stays type 3.
+
+- **Re-typed 2026-09-04 — Type 3 to Type 2.** Items 1 and 2 landed; what is left is item 5's
+  staging approach (the unlink-then-reopen-by-name staging in the libarchive reader) and item 6,
+  and neither is blocked on anything external. They are waiting on a choice of approach, which is
+  a type 2.
+- **Re-typed 2026-09-05 — Type 2 to Type 1. The decision was taken: option (c).** The owner ruled
+  the staging unlink-then-reopen-by-name race **accepted and documented**, explicitly declining to
+  design against this attacker: it can disrupt Unified-Archiver's behaviour but there is no
+  economic gain in doing so, and the staging file lives in the caller's own destination directory,
+  so the exposure is exactly that directory's — unwinnable by anyone who cannot already create
+  names there. What is owed is therefore documentation, not defence, and two specific corrections
+  rather than a general note. **(1)** `build_staging_path`'s own comment overstates the defence: it
+  says winning the race "requires ... guessing that exact filename", but the placeholder is created
+  and *visible* before it is deleted, so an attacker who can write to the directory can also list
+  it — the name is observed, not guessed, and the six random characters only defeat pre-planting.
+  **(2)** A second window is documented nowhere: after libarchive finishes writing and before the
+  rename, an attacker can replace the staging file with their own, and the crate then renames
+  attacker content into place. That window is **wider** than the one item 5 names.
+  **Item 6 needs no decision and never did** — splitting the commit function into plan / session /
+  swap with per-phase tests is ordinary work held behind item 5 for no reason, and should be split
+  out as its own entry.
+
+
 **Emptied again on 2026-09-04.** The section held one entry — multi-volume RAR (`3b4d15`), moved
 here by the 2026-09-02 pass — and the 2026-09-04 pass turned up four more Type 1 items hiding
 inside entries typed 2. All five were implemented and are now in "Closed since the previous run"
@@ -347,6 +513,40 @@ on this defect. Nothing in `5a0c035` touches the listing shape.
 
 ## Type 2 — needs decision
 
+### ZIP extended-timestamp central-record convention (OI-0081-004)
+- **Type:** 3
+- **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
+- **Sources:** docs/project/open-issues.md#OI-0081-004, ticgit:96be20d6
+- **First seen:** 2026-08-04
+- **Last seen:** 2026-08-17
+- **Description:** Emit the full `0x5455` payload locally but an mtime-only payload in the
+  central directory (Info-ZIP convention).
+- **Background:** One payload carrying mtime+atime+ctime is currently written to both records;
+  strict readers may misparse the central block (low impact — most key off `TSize`).
+- **Blocked by:** the `zip` 2.4.2 crate API — `FullFileOptions` offers only local+central or
+  central-only, no local-only channel. Reassess on crate upgrade or via raw-header emission.
+- **Trigger corrected 2026-09-02 — the blocker stands, the "reassess on crate upgrade" half of the
+  line above does not.** An upgrade will not lift this, and that was checked at both ends of the
+  range available on this machine rather than assumed. `Cargo.lock` still pins `zip` 2.4.2, so no
+  upgrade has happened. In 2.4.2, `add_extra_data(id, payload, central_only)` routes to `extra_data`
+  or `central_extra_data`, and the central-directory writer emits **both** `file.extra_field` and
+  `file.central_extra_field` — so `central_only = false`, which is what `src/ffi/zip_writer.rs`
+  passes for the `0x5455` block, means local+central and never local-only. `zip` 8.2.0, the newest
+  copy present in `CARGO_HOME` here, has identical semantics in `write_central_directory_header`.
+  Neither version has a local-only extra-field channel, so there is no upgrade to wait for. **The
+  real trigger is the other escape this line already names:** reassess only if a raw
+  central-directory *writer* is built. None exists — `src/ffi/zip_wrapper/raw_directory.rs` is a
+  read-side central-directory parser, not a writer — and that writer is the medium-sized
+  prerequisite this small change would ride on. Also noted while checking: TicGit has `96be20d6` in
+  state `new`, not `blocked`, so an agent running `ti-pick-next` could claim it believing it is
+  unblocked work.
+- **Re-typed 2026-09-05 — Type 3 to Type 2, and the question changes.** The blocker as written was
+  "the `zip` crate has no local-only extra-field channel", which framed this as waiting on
+  upstream. Under AD-0072 that is not a blocker but a choice: the question is not *when will the
+  dependency grow this* but **which route do we pay for** — a raw central-directory writer of our
+  own, or a second ZIP writing dependency that can express it. Neither is scheduled; what changes
+  is that nothing external is being waited on, so this is a decision rather than a block.
+
 ### Feature-first footprint split and facade crates (OI-0058-001)
 - **Type:** 2
 - **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
@@ -394,199 +594,14 @@ on this defect. Nothing in `5a0c035` touches the listing shape.
   pass that was NOT adversarially verified, because that run was stopped before its verify stage.
   Five of the thirteen verdicts that were verified got refuted, so treat this as unconfirmed until
   a second reader checks it.
+- **Standing raised 2026-09-05 (still Type 2).** AD-0072 names the feature split as the
+  **counterweight** that makes absorbing per-format cost affordable: the crate takes on extra
+  dependencies and code to keep the interface uniform, and compile-time selection is what stops
+  that landing on every consumer. This is not an optimisation item. Its six open choices are
+  unchanged and enumerated in AD-0058's 2026-09-04 amendment; two have since been answered by the
+  owner — keep the shipped `rar-support` name and correct AD-0058's table, and delete the one
+  clause in the `create` row that makes the dependency tables cyclic.
 
-### Typed multipart volume parser (OI-0080-004)
-- **Type:** 2
-- **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
-- **Sources:** docs/project/open-issues.md#OI-0080-004, ticgit:513f99fc
-- **First seen:** 2026-08-04
-- **Last seen:** 2026-08-21
-- **Description:** Replace the name-heuristic `detect_multipart` with a typed volume parser that
-  validates sequence continuity and reports gaps; decide the 7z `.001` routing.
-- **Background:** This is AD 0013's explicitly-deferred "Option 2." `MultipartLayout::Multi`
-  carries no numbering/gap data, so incomplete sets fail late. Needs a decision on the
-  `MultipartLayout` API evolution (a v0.4 API change) and whether numeric splits route before
-  the `supports_multipart` capability gate. Innovation I3 recommends pairing it with the
-  SFX-detection collapse to stop a third heuristic round.
-- **Narrowed 2026-08-21 (ticgit `513f99fc`, closed):** the typed model landed as **additive
-  public API with no in-crate consumer**, so this entry survives as its unfinished half.
-  `src/format/multipart.rs` now holds `VolumeScheme` / `VolumeName` / `Volume` / `VolumeSet`,
-  `parse_volume_name`, `parse_volume_set` and `VolumeSetReport::defects() -> &[VolumeSetDefect]` — a
-  defect *list*, deliberately, so a caller learns which volume is missing and learns about more than
-  one problem per set.
-  **Correction 2026-08-22.** An earlier note here said `VolumeSet::defects()`. Wrong type, and the
-  note was itself written as a correction, which is the embarrassing part. Walking the impl blocks of
-  `src/format/multipart.rs`: `VolumeSet` owns `paths`, `to_layout` and `expected_name`;
-  `VolumeSetReport` owns `set`, `defects` and `is_complete`. Both `parse_volume_set` and
-  `parse_volume_set_for` return a `VolumeSetReport`, so the chain is
-  `parse_volume_set(paths).defects()`. `continuity_defects` remains the private function that
-  computes the list. What remains is what the decision was actually about:
-  `Archive::detect_multipart` in `src/inspection.rs` still runs its own sibling scan with the old
-  string predicates and never calls the parser, so the crate now holds two implementations of "is
-  this a volume name"; and the 7z `.001` routing question (R0080-0093) is untouched. Verified by
-  grepping all of `src/` for `parse_volume_set`, `continuity_defects` and `VolumeSet`: outside that
-  module and its tests child the only hit is an unrelated `VolumeSetSize` local in the vendored
-  UnRAR C++ sources. Still type 2 for the same reason as before — migrating `detect_multipart` is a
-  `MultipartLayout` API change, and the `.001` routing is a capability-gate decision.
-- **Landed 2026-08-29 (the second implementation is gone).** `Archive::detect_multipart` now
-  collects the sibling names and hands them to `parse_volume_set_for`, anchored on the archive
-  that was opened; the ~270-line matcher — four boundary closures, four hoisted source predicates,
-  the bespoke numeric sort — went with it, along with the now-unused `parse_rar_part_suffix` and
-  `MAX_VOL_DIGITS` in `src/inspection.rs`. Grepping that file for `.part`, `.z0`, `strip_prefix`,
-  `strip_suffix` and `is_ascii_digit` now returns only doc prose and two test paths — no matching
-  logic at all, so the crate holds exactly one answer to "is this a volume name", which is what
-  this entry was about. `src/archive/mode_split.rs` needed no change — its
-  `detect_multipart`/`multipart_layout` are pure delegations and inherit the behaviour.
-
-  Two halves stay open, and this entry stays with them. The **`MultipartLayout` API evolution**
-  is untouched: `VolumeSetReport` knows which volume is missing, which files claim the same
-  number and which siblings are foreign, and the `(bool, Vec<PathBuf>)` tuple has nowhere to put
-  any of it, so the migrated body discards the defects at the boundary. The **7z `.001` routing**
-  (R0080-0093) is likewise untouched and was left untouched on purpose: `supports_multipart()` is
-  a boolean OR that `detect_multipart` gates on before any scan, `SevenZip` reports
-  `multipart_read: None`, and `src/format.rs`'s `test_supports_multipart` pins that value — so
-  flipping it inside a migration billed as behaviour-preserving would have changed 7z silently.
-  The parser already understands `VolumeScheme::Numeric`, so when the decision is taken it is a
-  capability flip plus its own fixtures, not another change to `detect_multipart`.
-- **Ruling 8, 2026-09-03 — a new `Archive::volume_set_report()`, and `MultipartLayout` left alone.**
-  The question was whether the public multipart surface should be able to report a DEFECTIVE set —
-  a hole, a duplicate number, a foreign sibling — or keep answering only "is it multipart, and which
-  files". Answer: add a method, do not widen the existing types. `MultipartLayout` is matched on by
-  callers and is not `#[non_exhaustive]`, so widening it is a break for people who do not need it;
-  the report was already being computed on every `detect_multipart` call and thrown away, so
-  exposing it costs nothing and recomputes nothing. `ReadArchive` mirrors it. Pinned by a test that
-  stages a set with its middle volume absent and asserts the report carries a defect while
-  `detect_multipart` reports two files and cannot say a third is missing — the older shape's
-  limitation, asserted rather than described.
-
-### In-place `open_at_offset` without a tempfile copy is still an unbuilt deferral
-- **Type:** 2
-- **Verified:** yes — reopen verified 2026-08-16: the SFX open paths in `src/archive.rs` still stage the payload to a tempfile and re-detect on it before opening
-- **Sources:** ticgit:5858e17b, docs/architecture/mvp-scope.md (Allowed DEFERRED Placeholders), docs/project/stub-manifest.md (DEF-001), src/archive.rs
-- **First seen:** 2026-08-16
-- **Last seen:** 2026-08-17
-- **Description:** `mvp-scope.md` keeps "In-place `open_at_offset` (no tempfile copy)" as a live
-  placeholder, saying that DEF-001 closed with a tempfile-backed implementation and that a true
-  offset-aware backend opening "is still a future item". Nothing tracked that future item.
-- **Background:** DEF-001 is correctly marked Closed in the stub manifest — `open_at_offset` does
-  work for every backend — but it closed by copying the payload out to a temporary file rather
-  than by teaching the backends to read from an offset. That copy is why AD 0040 imposes a 16 GiB
-  payload ceiling: a large self-extracting archive must be written to disk in full before a single
-  entry can be listed, so the ceiling is a consequence of the implementation and not of any format
-  limit. `open_at_offset` appears three times in this backlog already, but all three are other
-  items — the `max_sfx_payload_size` dead-configuration entry (`1dfb92d6`) and a MADR-0023
-  amendment note observing that the method is tempfile-backed — so the deferral itself was
-  invisible to both registers. It is type 2 because the first question is whether to pursue it at
-  all: ZIP already has an `OffsetReader`, but 7z, RAR, TAR and ISO would each need their own path
-  and libarchive would need a callback-based reader, which is a backend-trait-shaped change that
-  probably belongs after AD 0053 D1's successors rather than before them. If the ruling is not to
-  pursue it, the placeholder should be restated as accepted-permanent and AD 0040's ceiling
-  documented as a design consequence rather than a temporary limit — which is a real outcome, not
-  a non-answer.
-  **Narrowed 2026-08-21: the ZIP half is built, so the Verified line above is stale.** ZIP now opens
-  in place — `Archive::open_at_offset` hands the backend the caller's own file with no copy when three
-  gates agree: a `PK\x03\x04` local file header sits exactly at `offset`, the `zip` crate's own
-  `ZipArchive::offset()` resolves to the same value (built the same way the wrapper builds it, so
-  agreement here means agreement there), and the open then succeeds. Any disagreement returns
-  `Ok(None)` and the caller falls back to staging, so the strict path cannot silently mis-open.
-  `PayloadSource::{InPlace, Staged}` records which happened and `Archive::payload_access()` is its
-  public projection, which is how a caller now tells whether the AD 0040 ceiling applied at all.
-  `PayloadSource::InPlace` deliberately keeps the `offset` so `payload_size_for_ratio` — the
-  compression-ratio denominator — stays on the payload instead of widening to `stub + payload`
-  (R0069-0006), which would dilute the zip-bomb gate.
-  **What remains is the decision, and it is most of the original scope:** 7z, RAR, TAR and ISO each
-  need their own offset-aware path and libarchive needs a callback-based reader, so the ruling asked
-  for above is unchanged — pursue it per backend, or restate the placeholder as accepted-permanent
-  and document AD 0040's ceiling as a design consequence for the staging backends. AD 0040 already
-  carries the amendment saying the ceiling bounds a copy and therefore cannot bind an in-place open,
-  so that half of the documentation outcome is done either way.
-  Two tickets track this one deferral — `1ddc37ec` (2026-08-20, filed from `mvp-scope.md`) and
-  `5858e17b` (2026-08-16) — and they are duplicates of each other. Whoever rules on it should
-  collapse them rather than answer twice.
-
-- **Re-examined 2026-09-04 — stays Type 2.** A type-1 reading was tried and refuted. Three of the
-  four arms are built (`try_open_zip_in_place`, `try_open_rar_in_place`, `try_open_sevenz_in_place`
-  behind the shared executable-extension gate); the libarchive arm is the unbuilt quarter, and it
-  is not merely thirteen mechanical FFI declarations — the entry is narrowed rather than ready.
-
----
-
-### Security & durability boundary refactors (OI-0076-003, items 5/6)
-- **Type:** 3
-- **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
-- **Sources:** docs/project/open-issues.md#OI-0076-003, ticgit:3f7dfa37
-- **First seen:** 2026-08-04
-- **Last seen:** 2026-08-21
-- **Description:** Two remaining hardening items: staging unlink→reopen-by-name race
-  (R0076-0045); `commit_changes` phase split (R0076-0089).
-- **Background:** 4 of 6 landed — ZIP-creation durability and extract-file staging (2026-06-06),
-  then items 1 and 2 on 2026-09-03.
-- **Items 1 and 2 landed 2026-09-03** (`8517e56`, `8d86fa5`; ticgit `5ebf46`, closed). Item 1's
-  recorded blocker had already dissolved, as the 2026-08-21 note below anticipated. Item 2's
-  recorded blocker ("needs a Unix `libc` dep") turned out to cover only the *evolution* to a
-  native `O_NOFOLLOW`, not the call-site wiring, which needed nothing new — the helper had sat
-  in `src/ffi/common.rs` with zero callers and an `#[expect(dead_code)]` since R0070-0021.
-  Item 1 narrows the TOCTOU window rather than closing it; closing it needs `openat`-relative
-  writes, which is not filed as work because nothing currently asks for it.
-- **Blocked by:** item 1 couples to the AD 0066 v0.4 strict-path flag; item 2 needs a Unix
-  `libc` dependency; item 5 needs an owned-fd / libarchive-callback design (AD 0009) — and
-  Innovation I6 established that `archive_read_open_fd` cannot deliver it, because libarchive's
-  read handle is iterator-shaped and shared fd offsets would corrupt concurrent readers;
-  item 6 couples to the AD 0053 D2 `ModifyArchive` handle.
-- **Blocker dissolved for item 1 (2026-08-21):** its recorded coupling was "the AD 0066 v0.4
-  strict-path flag", and that flag shipped — `ExtractionLimits::reject_unsafe_paths` is now enforced
-  by `check_entry_paths_safe` in `src/security.rs`, which refuses a hostile archive before a
-  destination directory is created or a byte is decoded, with the default `false` returning
-  immediately so the lossy-repair baseline pays nothing. The parent-creation race / re-canonicalise
-  work (R0076-0005) is therefore no longer waiting on a decision elsewhere; nothing of item 1 itself
-  landed. Items 2, 5 and 6 are blocked exactly as before, so the entry stays type 3.
-
-- **Re-typed 2026-09-04 — Type 3 to Type 2.** Items 1 and 2 landed; what is left is item 5's
-  staging approach (the unlink-then-reopen-by-name staging in the libarchive reader) and item 6,
-  and neither is blocked on anything external. They are waiting on a choice of approach, which is
-  a type 2.
-
-### True bounded-memory streaming for non-libarchive backends (DEF-004)
-- **Type:** 3
-- **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
-- **Sources:** docs/project/stub-manifest.md, ticgit:a4071277
-- **First seen:** 2026-08-04
-- **Last seen:** 2026-08-17
-- **Description:** Give the `zip`, `sevenz` and UnRAR backends real streaming readers instead of
-  materialising the entry and wrapping the buffer in a `Cursor`. **Re-scoped 2026-08-12:** the first
-  step (deriving the backend materialisation cap from `StreamBound`) has landed; what remains is the
-  incremental-reader work itself.
-- **Background:** Only libarchive actually streams; the others call `extract_to_memory()` and
-  hand back `StreamingExtractor::from_buffer`, so memory is O(entry size), not O(window). The
-  caveat is documented in `Limitations.md` §4 and the streaming rustdoc. The piz row of this
-  deferral disappeared with DCR-009. **Narrowed 2026-08-12 (R0001-0011):** the first
-  step landed — the backend materialisation budget is now derived from `StreamBound`
-  (`min(bound, max_file_size, max_total_size)`) and ZIP/7z gained
-  `extract_to_stream_with_limit` overrides, so the buffer is bounded by the caller's chosen
-  bound and an over-budget entry is refused before materialisation. What remains is genuine
-  incremental streaming: bounding the buffer is not the same as not having one. R0001-0011 (2026-08-12) landed the bound-derived budget:
-  `extract_to_stream_impl` now passes `min(bound, max_file_size, max_total_size)` to
-  `extract_to_stream_with_limit`, and ZIP/7z gained overrides that reject an over-budget declared size
-  before buffering (RAR already had one), so `Cap(1024)` on a multi-GiB entry no longer materialises
-  the entry — it fails at the call. Carried by DCR-006 Amendment 3. Ticket `a4071277` should be
-  re-scoped rather than closed; `6277386e`'s framing is fully absorbed by that amendment.
-- **Blocked by:** upstream — `sevenz-rust2` exposes no owned entry-level `Read` (AD 0035,
-  re-verified at 0.19.4) — and, for the remaining backends, a `StreamingExtractor`
-  handle-lifetime ownership design that lets the reader outlive the call without holding the
-  archive handle hostage.
-- **Version corrected 2026-09-02 — the conclusion is unaffected.** The line above cites a
-  re-verification "at 0.19.4", a version this project does not build against: `Cargo.lock` pins
-  `sevenz-rust2` **0.19.3**. Both source trees present on this machine were compared and the
-  relevant reader API is identical in each — `BlockDecoder<'a, R: Read + Seek>` and
-  `SharedBoundedReader<'a, R>` are lifetime-borrowed in both — so there is still no owned
-  entry-level `Read` and the blocker holds at the version actually pinned. Recorded rather than
-  quietly fixed because a blocker verified against a version the lockfile does not name is not
-  verified, and the next reader would have had to redo the comparison to find that out.
-
-- **Re-typed 2026-09-04 — Type 3 to Type 2.** No external prerequisite is unmet. All three
-  backends still materialise before `StreamingExtractor::from_bytes` — ZIP and 7z to a `Vec<u8>`,
-  RAR to a staging tempfile — and what is owed first is the scope/design decision about what
-  "bounded" means per backend, not a dependency or a host.
 
 ## Type 3 — blocked
 - **Ruling 6, 2026-09-03 — widened to `Option<u16>`.** Landed. The old signature did not truncate
@@ -655,35 +670,6 @@ on this defect. Nothing in `5a0c035` touches the listing shape.
   still branches on host `#[cfg(target_os = …)]`, and no smoke job exists.
 - **Blocked by:** owner decision — cross-compilation is explicitly out of scope pre-v2; native
   Windows/macOS/Linux only. The libarchive axis is also shared with OI-0065-001.
-
-### ZIP extended-timestamp central-record convention (OI-0081-004)
-- **Type:** 3
-- **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
-- **Sources:** docs/project/open-issues.md#OI-0081-004, ticgit:96be20d6
-- **First seen:** 2026-08-04
-- **Last seen:** 2026-08-17
-- **Description:** Emit the full `0x5455` payload locally but an mtime-only payload in the
-  central directory (Info-ZIP convention).
-- **Background:** One payload carrying mtime+atime+ctime is currently written to both records;
-  strict readers may misparse the central block (low impact — most key off `TSize`).
-- **Blocked by:** the `zip` 2.4.2 crate API — `FullFileOptions` offers only local+central or
-  central-only, no local-only channel. Reassess on crate upgrade or via raw-header emission.
-- **Trigger corrected 2026-09-02 — the blocker stands, the "reassess on crate upgrade" half of the
-  line above does not.** An upgrade will not lift this, and that was checked at both ends of the
-  range available on this machine rather than assumed. `Cargo.lock` still pins `zip` 2.4.2, so no
-  upgrade has happened. In 2.4.2, `add_extra_data(id, payload, central_only)` routes to `extra_data`
-  or `central_extra_data`, and the central-directory writer emits **both** `file.extra_field` and
-  `file.central_extra_field` — so `central_only = false`, which is what `src/ffi/zip_writer.rs`
-  passes for the `0x5455` block, means local+central and never local-only. `zip` 8.2.0, the newest
-  copy present in `CARGO_HOME` here, has identical semantics in `write_central_directory_header`.
-  Neither version has a local-only extra-field channel, so there is no upgrade to wait for. **The
-  real trigger is the other escape this line already names:** reassess only if a raw
-  central-directory *writer* is built. None exists — `src/ffi/zip_wrapper/raw_directory.rs` is a
-  read-side central-directory parser, not a writer — and that writer is the medium-sized
-  prerequisite this small change would ride on. Also noted while checking: TicGit has `96be20d6` in
-  state `new`, not `blocked`, so an agent running `ti-pick-next` could claim it believing it is
-  unblocked work.
-
 
 ### External RAR creator design hardening (OI-0076-006)
 - **Type:** 2
@@ -909,6 +895,85 @@ account of what changed and in which direction.
   discharged; it stays here until the next reconciliation moves it.
 
 ### Retired 2026-09-05 — `docs/investigation/` staleness is permanently out of scope
+
+### Typed multipart volume parser (OI-0080-004)
+- **Type:** 2
+- **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
+- **Sources:** docs/project/open-issues.md#OI-0080-004, ticgit:513f99fc
+- **First seen:** 2026-08-04
+- **Last seen:** 2026-08-21
+- **Description:** Replace the name-heuristic `detect_multipart` with a typed volume parser that
+  validates sequence continuity and reports gaps; decide the 7z `.001` routing.
+- **Background:** This is AD 0013's explicitly-deferred "Option 2." `MultipartLayout::Multi`
+  carries no numbering/gap data, so incomplete sets fail late. Needs a decision on the
+  `MultipartLayout` API evolution (a v0.4 API change) and whether numeric splits route before
+  the `supports_multipart` capability gate. Innovation I3 recommends pairing it with the
+  SFX-detection collapse to stop a third heuristic round.
+- **Narrowed 2026-08-21 (ticgit `513f99fc`, closed):** the typed model landed as **additive
+  public API with no in-crate consumer**, so this entry survives as its unfinished half.
+  `src/format/multipart.rs` now holds `VolumeScheme` / `VolumeName` / `Volume` / `VolumeSet`,
+  `parse_volume_name`, `parse_volume_set` and `VolumeSetReport::defects() -> &[VolumeSetDefect]` — a
+  defect *list*, deliberately, so a caller learns which volume is missing and learns about more than
+  one problem per set.
+  **Correction 2026-08-22.** An earlier note here said `VolumeSet::defects()`. Wrong type, and the
+  note was itself written as a correction, which is the embarrassing part. Walking the impl blocks of
+  `src/format/multipart.rs`: `VolumeSet` owns `paths`, `to_layout` and `expected_name`;
+  `VolumeSetReport` owns `set`, `defects` and `is_complete`. Both `parse_volume_set` and
+  `parse_volume_set_for` return a `VolumeSetReport`, so the chain is
+  `parse_volume_set(paths).defects()`. `continuity_defects` remains the private function that
+  computes the list. What remains is what the decision was actually about:
+  `Archive::detect_multipart` in `src/inspection.rs` still runs its own sibling scan with the old
+  string predicates and never calls the parser, so the crate now holds two implementations of "is
+  this a volume name"; and the 7z `.001` routing question (R0080-0093) is untouched. Verified by
+  grepping all of `src/` for `parse_volume_set`, `continuity_defects` and `VolumeSet`: outside that
+  module and its tests child the only hit is an unrelated `VolumeSetSize` local in the vendored
+  UnRAR C++ sources. Still type 2 for the same reason as before — migrating `detect_multipart` is a
+  `MultipartLayout` API change, and the `.001` routing is a capability-gate decision.
+- **Landed 2026-08-29 (the second implementation is gone).** `Archive::detect_multipart` now
+  collects the sibling names and hands them to `parse_volume_set_for`, anchored on the archive
+  that was opened; the ~270-line matcher — four boundary closures, four hoisted source predicates,
+  the bespoke numeric sort — went with it, along with the now-unused `parse_rar_part_suffix` and
+  `MAX_VOL_DIGITS` in `src/inspection.rs`. Grepping that file for `.part`, `.z0`, `strip_prefix`,
+  `strip_suffix` and `is_ascii_digit` now returns only doc prose and two test paths — no matching
+  logic at all, so the crate holds exactly one answer to "is this a volume name", which is what
+  this entry was about. `src/archive/mode_split.rs` needed no change — its
+  `detect_multipart`/`multipart_layout` are pure delegations and inherit the behaviour.
+
+  Two halves stay open, and this entry stays with them. The **`MultipartLayout` API evolution**
+  is untouched: `VolumeSetReport` knows which volume is missing, which files claim the same
+  number and which siblings are foreign, and the `(bool, Vec<PathBuf>)` tuple has nowhere to put
+  any of it, so the migrated body discards the defects at the boundary. The **7z `.001` routing**
+  (R0080-0093) is likewise untouched and was left untouched on purpose: `supports_multipart()` is
+  a boolean OR that `detect_multipart` gates on before any scan, `SevenZip` reports
+  `multipart_read: None`, and `src/format.rs`'s `test_supports_multipart` pins that value — so
+  flipping it inside a migration billed as behaviour-preserving would have changed 7z silently.
+  The parser already understands `VolumeScheme::Numeric`, so when the decision is taken it is a
+  capability flip plus its own fixtures, not another change to `detect_multipart`.
+- **Ruling 8, 2026-09-03 — a new `Archive::volume_set_report()`, and `MultipartLayout` left alone.**
+  The question was whether the public multipart surface should be able to report a DEFECTIVE set —
+  a hole, a duplicate number, a foreign sibling — or keep answering only "is it multipart, and which
+  files". Answer: add a method, do not widen the existing types. `MultipartLayout` is matched on by
+  callers and is not `#[non_exhaustive]`, so widening it is a break for people who do not need it;
+  the report was already being computed on every `detect_multipart` call and thrown away, so
+  exposing it costs nothing and recomputes nothing. `ReadArchive` mirrors it. Pinned by a test that
+  stages a set with its middle volume absent and asserts the report carries a defect while
+  `detect_multipart` reports two files and cannot say a third is missing — the older shape's
+  limitation, asserted rather than described.
+- **DISCHARGED 2026-09-05 — the decision was taken and implemented the same day.** The open
+  question was how to route a 7z numeric split set, with three live options (flip the capability,
+  detect ahead of the gate, or ratify the status quo). The owner ruled: implement it. Establishing
+  the fact settled the choice — a 7z volume set is a **plain byte split of one archive**, verified
+  on this host by concatenating a `7zz a -v64k` set and `cmp`-ing it byte-identical against the
+  same content written unsplit — so the capability flip needed no detection-order trickery and no
+  format knowledge at all. `ArchiveFormat::SevenZip.multipart_read` is now `Support::Full`,
+  `VolumeChain` presents the members as one source, an incomplete set is refused by name before any
+  bytes are read, and `tests/sevenz_multivolume_test.rs` pins listing, extraction, validation and
+  that refusal against `test_split_whole.7z` as a differential control. `multipart_write` stays
+  `None` — reading a split set and writing one are different jobs.
+  **Residual, outside this file's reach:** OI-0080-004's Status block and Verification boxes in
+  `docs/project/open-issues.md` still describe the pre-decision state. `/reopen` treats that file as
+  read-only, so correcting it belongs to whoever owns the register.
+
 
 **Owner ruling, 2026-09-05: "이 항목의 stale은 전혀 중요하지 않습니다. 이 항목이 stale되는 것은
 항상 무시해주세요."** — the staleness of this snapshot does not matter, and is to be ignored from
