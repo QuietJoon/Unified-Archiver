@@ -372,6 +372,57 @@ fn git(args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Why a git query came back empty, distinguished well enough to act on.
+///
+/// The census used to report every failure as "not a git worktree (or git is
+/// unavailable)". That is one of at least three causes, and it sends a reader
+/// to check the wrong thing: on this repository git is installed, the
+/// directory *is* a worktree, and `git status` succeeds — what fails is
+/// history traversal, because an object referenced by the commit graph cannot
+/// be read. Naming the cause is the difference between a one-line fix and an
+/// afternoon.
+fn git_failure_reason() -> String {
+    let root = repo_root();
+    match Command::new("git")
+        .arg("--version")
+        .current_dir(&root)
+        .output()
+    {
+        Err(e) => return format!("git could not be executed: {e}"),
+        Ok(o) if !o.status.success() => return "`git --version` failed".to_string(),
+        Ok(_) => {}
+    }
+    let in_worktree = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(&root)
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !in_worktree {
+        return "not a git worktree".to_string();
+    }
+    // git runs and this is a worktree, so one specific query failed. The
+    // history walk is the one that traverses parents, so it is the one that
+    // surfaces an unreadable object; report its own words.
+    match Command::new("git")
+        .args(["log", "--format=%x00%cI", "--name-only"])
+        .current_dir(&root)
+        .output()
+    {
+        Ok(o) if !o.status.success() => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            let first = stderr
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("no stderr")
+                .trim();
+            format!(
+                "git is present and this is a worktree, but the history could not be traversed: {first}"
+            )
+        }
+        _ => "a git query failed, but re-running it here succeeded".to_string(),
+    }
+}
+
 /// Paths with uncommitted changes, as repo-relative strings. `None` means the
 /// question could not be asked (not a git worktree, or git is missing).
 fn dirty_paths() -> Option<BTreeSet<String>> {
@@ -1088,16 +1139,15 @@ fn census() -> Census {
     // 27 pages with no signal at all. Outside a worktree we emit exactly one
     // `unknown` line naming the reason and stop; we never guess.
     let (Some(dirty), Some(commits)) = (dirty, commits) else {
+        let why = git_failure_reason();
         return Census {
-            lines: vec![
-                "unknown: not a git worktree (or git is unavailable), so source drift is \
-                 not decidable; no mtime guess is made"
-                    .to_string(),
-            ],
+            lines: vec![format!(
+                "unknown: source drift is not decidable ({why}); no mtime guess is made"
+            )],
             counts,
             stale_or_worse: 0,
             hash_mismatches: 0,
-            reason: Some("git unavailable".to_string()),
+            reason: Some(why),
         };
     };
 
