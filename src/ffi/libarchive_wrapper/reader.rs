@@ -350,15 +350,54 @@ fn bare_compressed_hint(archive_path: &str) -> &'static str {
 /// `tempfile::Builder` so we don't have to roll our own collision-
 /// resistant suffix scheme.
 ///
-/// Returns the staging tempfile's path (the tempfile itself is
-/// closed before we return so libarchive can `open(O_CREAT|...)` the
-/// path itself). The brief gap between the unlink and libarchive's
-/// open is narrow — the path is in a fresh tempfile name space, so
-/// winning it requires an external process with write access to the
-/// destination directory guessing that exact filename — but it is a
-/// real residual race, tracked as R0076-0045 (OI-0076-003 item 5).
-/// Closing it needs an owned fd or a libarchive callback hand-off,
-/// which is why it is deferred rather than fixed here.
+/// Returns the staging tempfile's path. The tempfile itself is created
+/// and then **deleted** before we return, so libarchive can create the
+/// file at that path itself. That delete-then-recreate is where the
+/// residual race lives (R0076-0045, OI-0076-003 item 5).
+///
+/// **Ruled accepted and documented on 2026-09-05** — option (c). The
+/// owner declined to design against this attacker: winning the race can
+/// disrupt an extraction, but there is no economic gain in doing so, and
+/// the exposure is bounded by the destination directory itself (see
+/// below). What follows is therefore a description of a known residual,
+/// not a TODO.
+///
+/// # Two corrections to what this comment used to claim
+///
+/// It used to say winning the race "requires an external process with
+/// write access to the destination directory **guessing that exact
+/// filename**". That overstates the defence. The placeholder is created
+/// and is *visible in the directory* before it is deleted, and anyone who
+/// can write to a directory can also list it — so the name is
+/// **observed, not guessed**. `tempfile`'s random suffix defeats
+/// *pre-planting* a name; it does not defeat a watcher.
+///
+/// It also described only one window. There are two, and the second is
+/// wider:
+///
+/// 1. **delete → libarchive's open.** An attacker who wins it can place a
+///    symlink at the path, and the decoded entry is written through it,
+///    outside the destination directory.
+/// 2. **libarchive's close → our rename.** An attacker who wins it
+///    replaces the finished staging file with their own, and this code
+///    then renames *their* content into place under the name the user
+///    asked for. Nothing documented this window before.
+///
+/// # Why the exposure is narrow
+///
+/// The staging file lives in the caller's **own destination directory**,
+/// not in a shared temp dir, so the exposure is exactly that directory's.
+/// What matters is *directory* write permission, not file permission: on
+/// a normal `~/Downloads` no other user can create a name there and the
+/// race is unwinnable. It becomes real only when the destination is
+/// writable by another security principal — a world-writable directory, a
+/// shared network mount, or a privileged service extracting into a
+/// directory it does not exclusively own.
+///
+/// Closing it would need an owned descriptor (`O_CREAT|O_EXCL` plus our
+/// own copy loop, moving permission/mtime/xattr restoration into this
+/// crate) or platform-specific `openat`/`O_NOFOLLOW`, which libarchive's
+/// API cannot express. Both were weighed; neither was chosen.
 fn build_staging_path(final_path: &Path) -> Result<std::path::PathBuf> {
     let parent = final_path
         .parent()
@@ -2634,6 +2673,41 @@ impl LibarchiveArchive {
             Box::new(reader),
             size,
         ))
+    }
+
+    /// Push the entry's decoded payload into `sink` without buffering it
+    /// (DEF-004).
+    ///
+    /// This backend already streams — `LibarchiveStreamReader` reads straight
+    /// out of `archive_read_data` — so this is a thin copy loop rather than
+    /// new capability. It exists so every backend answers the same question
+    /// the same way, which is the point of the trait method: a caller asking
+    /// "give me this payload without materialising it" should not have to know
+    /// which backend it is talking to.
+    pub(crate) fn stream_payload_to_sink_by_listing_id(
+        &self,
+        id: usize,
+        validated_path: &str,
+        sink: &mut crate::backend::PayloadChunkSink<'_>,
+    ) -> Result<u64> {
+        let mut reader =
+            LibarchiveStreamReader::open(&self.path, self.identity, id, validated_path)?;
+        for warning in reader.take_backend_warnings() {
+            self.record_backend_warning(warning);
+        }
+        let mut buf = [0u8; 64 * 1024];
+        let mut total = 0u64;
+        loop {
+            let read = std::io::Read::read(&mut reader, &mut buf).map_err(|e| {
+                ArchiveError::io(crate::error::ops::EXTRACT_TO_STREAM, self.path.clone(), e)
+            })?;
+            if read == 0 {
+                break;
+            }
+            sink(&buf[..read])?;
+            total += read as u64;
+        }
+        Ok(total)
     }
 
     /// Resolve every target's payload in ONE traversal of the archive
