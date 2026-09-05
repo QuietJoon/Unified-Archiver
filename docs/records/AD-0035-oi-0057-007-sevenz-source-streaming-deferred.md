@@ -77,3 +77,53 @@ to `docs/project/open-issues-resolved.md`; look for it there.
 not exist and never did. The field and its accessor are `ExtractionLimits::max_file_size`
 (`src/security.rs`). The reasoning is unchanged — a per-entry ceiling does bound peak RSS per commit
 — only the identifier was wrong.
+
+## Amendment (2026-09-05, the option set was incomplete; "disproportionate" is withdrawn as the verdict on the gap)
+
+The owner has since defined what **this library** means by streaming, and it is
+narrower than what any dependency means by it:
+
+> extract an entry **without writing it to disk**, process it in memory —
+> mainly for checksum and integrity computation.
+
+Judged against that definition, this record's investigation stands and its
+conclusion does not.
+
+**What stands.** The upstream finding is still true at the pinned version:
+`sevenz-rust2` exposes no owned entry-level `Read`. A caller cannot be handed a
+reader it keeps. That was checked again, not assumed.
+
+**What was missed.** The two options priced here — a thread-plus-pipe adapter,
+and a self-referential owning struct — are both attempts to manufacture a **pull**
+reader from a **push** source. A third option was never considered: *do not
+manufacture a reader at all; push the decoded chunks into a caller-supplied
+sink.* That option is not blocked upstream, is not exotic, and **is already the
+shape used twice in this crate** — by `ReadBackend::visit_payloads_by_listing_id`
+and by `SevenZArchive::test_integrity`, which decodes an entry incrementally with
+no temp file and no whole-entry buffer today.
+
+So "disproportionate" is retained as a correct verdict **on options 1 and 2**,
+and **withdrawn as the verdict on the gap**. The gap has a cheap answer that was
+not on the table when this record was written.
+
+**Why the push shape is the right one here, and not merely cheaper.** The
+owner's definition is about *not touching disk* and *processing in memory* — a
+hasher being fed bytes. That is inherently a push. Forcing it through a pull
+reader is what made the problem look hard, and it is why the one backend that
+genuinely cannot supply a pull reader (RAR, whose SDK emits blocks through a
+callback) looked worst while being the most natural fit for a sink: its callback
+already receives the decoded buffer and this crate currently ignores that
+pointer.
+
+**Consequences.**
+
+- DEF-004's exit criterion is rewritten from "all three backends provide true
+  streaming readers" to the owner's definition: every backend can deliver an
+  entry's payload to a caller-supplied sink without a temp file. Under the old
+  wording DEF-004 could never close, because it demanded of 7z something the
+  dependency does not offer.
+- 7z is no longer parked on an upstream revisit trigger. The revisit trigger in
+  this record's body applies to *owned readers*, which remain unavailable; it
+  does not gate the sink route.
+- This record's `status` should move to `superseded` once the sink decision has
+  its own record to name as successor.

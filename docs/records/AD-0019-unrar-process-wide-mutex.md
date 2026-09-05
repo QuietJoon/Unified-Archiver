@@ -68,3 +68,39 @@ The R0080-0022 `UCM_PROCESSDATA` trampoline runs the caller's `ProgressCallback`
 Every guarded FFI site now acquires the lock via `let _guard = unrar_lock()?;` (all callers already return `Result`); the `Drop` path binds the result without `?`.
 
 This imposes a matching constraint on the **ProgressCallback contract**: a callback must not perform another archive operation on the archiver while extraction is in flight. Re-entering during a RAR extraction returns the typed error above instead of deadlocking. The caller-facing statement of this constraint lives on the `ProgressCallback` trait doc in `src/options.rs`; this ADR records the FFI-layer enforcement that backs it.
+
+## Amendment (2026-09-05, the mutex stands; the acceptance does not)
+
+AD-0072 named "disproportionate for the value at this stage" as a scheduling
+argument that is not admissible as a permanent answer, and named a large
+per-format performance difference inside an offered capability as a case the
+crate should absorb rather than accept. A re-examination against it reached this
+record. The verdict has two halves and they go opposite ways.
+
+**The mutex stands, on correctness.** UnRAR's global mutable state is not
+thread-safe, and the alternatives this record already priced — per-handle
+locking, making the handle `!Send` — do not avoid it. No other RAR dependency
+exists that would. This is not a disproportionality judgement; it is what the
+library requires, and nothing in AD-0072 touches it.
+
+**The acceptance of its consequence does not stand.** This record justifies
+living with the resulting throughput cliff on the grounds that *"RAR is a
+minority format"* and that the alternative carries a *"higher engineering
+cost"*. Those are exactly the two shapes AD-0072 rules out as sufficient
+reasons. And the consequence is not small: **RAR reads serialise process-wide
+while ZIP, 7z and the TAR family run concurrently.** A caller extracting four
+archives in parallel gets three of them in parallel and the RAR one behind a
+global lock — one format behaving materially differently from the others behind
+a single interface, which is AD-0072's second trigger.
+
+**Considered Option 5 (a dedicated UnRAR worker thread, or a worker-process
+pool) is reopened** as ordinary work rather than an option rejected on
+engineering cost. It is not scheduled by this amendment and it is not claimed to
+be cheap; what changes is that "RAR is a minority format" may no longer be cited
+as the reason not to do it. Its landing needs its own record — a worker thread
+moves the FFI off the caller's thread and interacts with cancellation, progress
+callbacks and the re-entrancy sentinel this record established, none of which
+should be decided in an amendment.
+
+Nothing in the tree changes today. `docs/CAPABILITY_MATRIX.md` records the
+per-format difference so a caller can see it rather than discover it under load.
