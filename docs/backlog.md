@@ -165,76 +165,11 @@ Classification:
 
 ## Type 1 — ready to implement
 
-**Emptied again on 2026-09-04.** The section held one entry — multi-volume RAR (`3b4d15`), moved
-here by the 2026-09-02 pass — and the 2026-09-04 pass turned up four more Type 1 items hiding
-inside entries typed 2. All five were implemented and are now in "Closed since the previous run"
-with their evidence: the RAR extraction-walk remainder, the operator build-environment page, the
-progress/cancel manual page, and the ZIP-modification record.
-
-**Six items became ready on 2026-09-05, and every one by a decision rather than by discovery.**
-That is the shape of this pass: the backlog was not blocked on work, it was blocked on answers, and
-the answers existed. Each had a named decision, and each got one:
-
-* **OI-0076-001 — reject.** Recursive add refuses a non-UTF-8 path component instead of silently
-  substituting `U+FFFD`, matching what single-file add already does. No byte-keyed public write
-  surface is added.
-* **OI-0001-005 — make `build()` fallible.** Accepted as a large job worth doing: ~104 call sites
-  and one behaviour-pinning test move with it.
-* **OI-0080-007 — add a new error form.** The taxonomy gains a third shape so a solid-stream
-  drain failure can abort the walk honestly instead of blaming later healthy entries.
-* **DEF-004 — the exit criterion was the blocker, not the work.** It demanded owned entry-level
-  readers for all three backends, which 7z's dependency does not offer, so as written it could
-  never close. With streaming defined as "deliver a payload without writing it to disk" and a
-  caller-supplied sink accepted as the shape, nothing is blocked upstream.
-* **`open_at_offset` — decided the other way, and now discharged.** DCR-015's amendment ruled
-  *against* building the libarchive arm, so no implementation remained; the bookkeeping is done and
-  the entry has moved to "Closed since the previous run".
-* **OI-0076-003 — option (c), and now discharged.** The staging race is accepted and documented
-  rather than defended against. Both corrections landed and item 6 is its own entry, so the parent
-  has moved to "Closed since the previous run".
-
-One entry left the list entirely: **OI-0080-004** was discharged — decided *and* implemented
-within this session, so 7z volume sets now read as one archive. One item was retired outright: `docs/investigation/` staleness is permanently out of scope by owner
-ruling, and must not be collected again. One was deferred: Windows platform support, which takes
-OI-0065-001's decidable half down to Type 3 with it.
-
-**Previously ready, still not:** one candidate was tried and withdrawn: Feature-first footprint split
-(OI-0058-001) was re-typed 2 to 1 during this pass, then challenged by three readers and refuted by
-two, so it stays Type 2 in the section below. Six choices inside AD-0058 Stage 1 are unmade — see
-that record's 2026-09-04 amendment — and one of them is a contradiction with AD-0071, which was
-filed hours earlier in this same pass and makes `modify` depend on `libarchive` permanently.
-
-That withdrawal is the pass's own lesson applied to itself: the promotion was the one verdict that
-escaped adversarial review, and it was wrong in exactly the direction the other five refutations
-were wrong — a reading that checked whether the work was *described* and not whether it was
-*decided*.
-
-
-### Split the modification commit path into plan / session / swap (OI-0076-003 item 6)
-
-- **Type:** 1
-- **Verified:** yes — reopen verified 2026-09-05; split out of OI-0076-003 by the owner's option (c)
-  ruling, which settled item 5 and left this half with nothing to wait for
-- **Sources:** docs/project/open-issues.md#OI-0076-003 (item 6, R0076-0089), ticgit:3f7dfa37
-- **Unfiled:** carried here rather than ticketed — `3f7dfa37` covers items 1/2/5/6 and its `blocked`
-  state now fits item 5 alone; re-filing this half is the filer's call
-- **First seen:** 2026-09-05
-- **Last seen:** 2026-09-05
-- **Description:** `commit_changes` in `src/modification.rs` is one long function that plans the
-  rewrite, performs it, and swaps the result into place. The work is to split it into three pieces
-  with narrow invariants — a commit plan, a rewrite session, and the final swap — each with its own
-  tests for the properties that currently have none of their own: backup-noclobber, retained-entry
-  replay, duplicate-path handling, and poison.
-- **Background:** This was item 6 of OI-0076-003, an entry whose other half (item 5, the staging
-  unlink-then-reopen race) genuinely needed a decision. Item 6 never did. It needs no decision, has
-  no external prerequisite, and touches no design question — it was simply carried in the same entry
-  as its harder sibling and inherited that sibling's blocked status for months. The owner's
-  2026-09-05 ruling settled item 5 as accept-and-document, which removes even the appearance of a
-  dependency, so it is split out here rather than left to look blocked. Items 1 and 2 of the same
-  entry were split out the same way on 2026-09-03, so this follows an established shape rather than
-  inventing one. The reason it is worth doing at all is that the properties listed above are today
-  asserted only end-to-end through a full commit, which means a failure names the whole operation
-  rather than the phase that broke — and the phase boundaries are exactly where the invariants live.
+**Empty again on 2026-09-05.** The last entry — splitting the modification commit path — is done,
+so nothing here is currently ready to pick up without asking someone. Three entries that had been
+sitting in this section were moved out the same day: they declared themselves Type 2 or Type 3 in
+their own metadata, so an agent reading this section for work it could finish alone would have hit
+a decision wall on three of four.
 
 ## Type 2 — needs decision
 
@@ -981,6 +916,61 @@ on this defect. Nothing in `5a0c035` touches the listing shape.
   is a CRC32 over sorted CRC32 elements (8 hex chars, not a cryptographic hash), and adding
   concurrent RAR tests exposed that `unrar_lock()` is per-call, so concurrent RAR operations can
   read each other's error state — filed as ticgit `b614375`, mitigated in tests by `c26fee5`.
+
+### Split the modification commit path into plan / session / swap (OI-0076-003 item 6)
+
+- **Type:** 1
+- **Verified:** yes — reopen verified 2026-09-05; split out of OI-0076-003 by the owner's option (c)
+  ruling, which settled item 5 and left this half with nothing to wait for
+- **Sources:** docs/project/open-issues.md#OI-0076-003 (item 6, R0076-0089), ticgit:3f7dfa37
+- **Unfiled:** carried here rather than ticketed — `3f7dfa37` covers items 1/2/5/6 and its `blocked`
+  state now fits item 5 alone; re-filing this half is the filer's call
+- **First seen:** 2026-09-05
+- **Last seen:** 2026-09-05
+- **Description:** `commit_changes` in `src/modification.rs` is one long function that plans the
+  rewrite, performs it, and swaps the result into place. The work is to split it into three pieces
+  with narrow invariants — a commit plan, a rewrite session, and the final swap — each with its own
+  tests for the properties that currently have none of their own: backup-noclobber, retained-entry
+  replay, duplicate-path handling, and poison.
+- **Background:** This was item 6 of OI-0076-003, an entry whose other half (item 5, the staging
+  unlink-then-reopen race) genuinely needed a decision. Item 6 never did. It needs no decision, has
+  no external prerequisite, and touches no design question — it was simply carried in the same entry
+  as its harder sibling and inherited that sibling's blocked status for months. The owner's
+  2026-09-05 ruling settled item 5 as accept-and-document, which removes even the appearance of a
+  dependency, so it is split out here rather than left to look blocked. Items 1 and 2 of the same
+  entry were split out the same way on 2026-09-03, so this follows an established shape rather than
+  inventing one. The reason it is worth doing at all is that the properties listed above are today
+  asserted only end-to-end through a full commit, which means a failure names the whole operation
+  rather than the phase that broke — and the phase boundaries are exactly where the invariants live.
+
+- **DONE 2026-09-05.** `commit_changes_with_warnings` was 544 lines, 440 of them in one
+  immediately-invoked closure; it is now `commit_plan` (82) → `commit_session` (304) →
+  `commit_swap` (142) composed by a 64-line body. Landed in `1b43c91` (split), `6b3ce99` (tests),
+  `16f335b` (a defect the split exposed). The 85 commit-path tests pass and the set is
+  byte-identical to the pre-change baseline.
+- **The seam moved once, for a real reason.** The obvious cut was at the end of the write loop.
+  That would have put the mode carry (R0079-0021 / R0080-0045) at the *start* of `commit_swap`,
+  where the natural next tidy-up is to hoist the R0080-0005 identity gate above it — inserting a
+  stat and a chmod between the gate and the destructive rename, widening the window the gate
+  exists to close. The cut is at the gate instead, so the swap's invariant is one line: the first
+  statement is the gate, everything after it is destructive.
+- **The closure survives on purpose.** It is a result trap, not a scoping nicety: both phases must
+  funnel into one `Result` so the staging-file cleanup runs on either one's failure. Replacing it
+  with `?` would have silently dropped that cleanup and both R0075-0005 flag assignments — and
+  nothing observes those flags, so no test would have caught half of it.
+- **A real defect fell out of the mapping** and is fixed in `16f335b`: R0069-0066 claimed a partial
+  backup is always removed, but six `?` sites between `create_new` claiming the path and the copy
+  returned with a zero-byte sidecar on disk, so a retry tripped the noclobber gate on a file this
+  code had abandoned. Verified by injection, because none of the six can be driven from a test.
+- **Tests were written for the plan phase, not just around it** — six, each mutation-checked. The
+  one that mattered had no coverage in any form: `backup_suffix` is a `pub` field, so a caller can
+  bypass the builder's sanitiser by assignment, and the suffix reaches `backup_path_for`, which
+  appends it to the archive path with no separator check before the result is opened `create_new`,
+  chmod'ed and possibly unlinked.
+- **Residual, stated rather than hidden:** the staging-name `static COUNTER` is not pinned by any
+  test. Replacing it with a constant leaves the suite green, which was checked. The name derives
+  from `self.path`, so different archives differ regardless and same-path commits are serialized by
+  the advisory lock; the counter defends a same-tick collision a test cannot force.
 
 ### Retired 2026-09-05 — `docs/investigation/` staleness is permanently out of scope
 
