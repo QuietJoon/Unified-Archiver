@@ -165,6 +165,49 @@ Classification:
 
 ## Type 1 — ready to implement
 
+**Emptied again on 2026-09-04.** The section held one entry — multi-volume RAR (`3b4d15`), moved
+here by the 2026-09-02 pass — and the 2026-09-04 pass turned up four more Type 1 items hiding
+inside entries typed 2. All five were implemented and are now in "Closed since the previous run"
+with their evidence: the RAR extraction-walk remainder, the operator build-environment page, the
+progress/cancel manual page, and the ZIP-modification record.
+
+**Six items became ready on 2026-09-05, and every one by a decision rather than by discovery.**
+That is the shape of this pass: the backlog was not blocked on work, it was blocked on answers, and
+the answers existed. Each had a named decision, and each got one:
+
+* **OI-0076-001 — reject.** Recursive add refuses a non-UTF-8 path component instead of silently
+  substituting `U+FFFD`, matching what single-file add already does. No byte-keyed public write
+  surface is added.
+* **OI-0001-005 — make `build()` fallible.** Accepted as a large job worth doing: ~104 call sites
+  and one behaviour-pinning test move with it.
+* **OI-0080-007 — add a new error form.** The taxonomy gains a third shape so a solid-stream
+  drain failure can abort the walk honestly instead of blaming later healthy entries.
+* **DEF-004 — the exit criterion was the blocker, not the work.** It demanded owned entry-level
+  readers for all three backends, which 7z's dependency does not offer, so as written it could
+  never close. With streaming defined as "deliver a payload without writing it to disk" and a
+  caller-supplied sink accepted as the shape, nothing is blocked upstream.
+* **`open_at_offset` — decided the other way.** DCR-015's amendment ruled *against* building the
+  libarchive arm, so no implementation remains; only bookkeeping does.
+* **OI-0076-003 — option (c).** The staging race is accepted and documented rather than defended
+  against, so what is owed is two specific documentation corrections and the item-6 split.
+
+One entry left the list entirely: **OI-0080-004** was discharged — decided *and* implemented
+within this session, so 7z volume sets now read as one archive. One item was retired outright: `docs/investigation/` staleness is permanently out of scope by owner
+ruling, and must not be collected again. One was deferred: Windows platform support, which takes
+OI-0065-001's decidable half down to Type 3 with it.
+
+**Previously ready, still not:** one candidate was tried and withdrawn: Feature-first footprint split
+(OI-0058-001) was re-typed 2 to 1 during this pass, then challenged by three readers and refuted by
+two, so it stays Type 2 in the section below. Six choices inside AD-0058 Stage 1 are unmade — see
+that record's 2026-09-04 amendment — and one of them is a contradiction with AD-0071, which was
+filed hours earlier in this same pass and makes `modify` depend on `libarchive` permanently.
+
+That withdrawal is the pass's own lesson applied to itself: the promotion was the one verdict that
+escaped adversarial review, and it was wrong in exactly the direction the other five refutations
+were wrong — a reading that checked whether the work was *described* and not whether it was
+*decided*.
+
+
 ### True bounded-memory streaming for non-libarchive backends (DEF-004)
 - **Type:** 3
 - **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
@@ -331,37 +374,7 @@ Classification:
   out as its own entry.
 
 
-**Emptied again on 2026-09-04.** The section held one entry — multi-volume RAR (`3b4d15`), moved
-here by the 2026-09-02 pass — and the 2026-09-04 pass turned up four more Type 1 items hiding
-inside entries typed 2. All five were implemented and are now in "Closed since the previous run"
-with their evidence: the RAR extraction-walk remainder, the operator build-environment page, the
-progress/cancel manual page, and the ZIP-modification record.
 
-**Three items became ready on 2026-09-05, by owner ruling rather than by discovery.** Each had a
-named decision blocking it, and each got an answer:
-
-* **OI-0076-001 — reject.** Recursive add refuses a non-UTF-8 path component instead of silently
-  substituting `U+FFFD`, matching what single-file add already does. No byte-keyed public write
-  surface is added.
-* **OI-0001-005 — make `build()` fallible.** Accepted as a large job worth doing: ~104 call sites
-  and one behaviour-pinning test move with it.
-* **OI-0080-007 — add a new error form.** The taxonomy gains a third shape so a solid-stream
-  drain failure can abort the walk honestly instead of blaming later healthy entries.
-
-One item was retired outright: `docs/investigation/` staleness is permanently out of scope by owner
-ruling, and must not be collected again. One was deferred: Windows platform support, which takes
-OI-0065-001's decidable half down to Type 3 with it.
-
-**Previously ready, still not:** one candidate was tried and withdrawn: Feature-first footprint split
-(OI-0058-001) was re-typed 2 to 1 during this pass, then challenged by three readers and refuted by
-two, so it stays Type 2 in the section below. Six choices inside AD-0058 Stage 1 are unmade — see
-that record's 2026-09-04 amendment — and one of them is a contradiction with AD-0071, which was
-filed hours earlier in this same pass and makes `modify` depend on `libarchive` permanently.
-
-That withdrawal is the pass's own lesson applied to itself: the promotion was the one verdict that
-escaped adversarial review, and it was wrong in exactly the direction the other five refutations
-were wrong — a reading that checked whether the work was *described* and not whether it was
-*decided*.
 
 **Refilled 2026-09-02 by one entry moved out of Type 2.** Multi-volume RAR extraction (`3b4d15`)
 was filed Type 2 on the belief that a scope question was open — "is multi-volume RAR extraction in
