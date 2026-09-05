@@ -400,6 +400,32 @@ A correction that belongs with the entry rather than buried in a cross-reference
 "multi-volume RAR SFX chains now resolve" is about SFX sibling-volume *reach* only and does not bear
 on this defect. Nothing in `5a0c035` touches the listing shape.
 
+### Split the modification commit path into plan / session / swap (OI-0076-003 item 6)
+
+- **Type:** 1
+- **Verified:** yes — reopen verified 2026-09-05; split out of OI-0076-003 by the owner's option (c)
+  ruling, which settled item 5 and left this half with nothing to wait for
+- **Sources:** docs/project/open-issues.md#OI-0076-003 (item 6, R0076-0089), ticgit:3f7dfa37
+- **Unfiled:** carried here rather than ticketed — `3f7dfa37` covers items 1/2/5/6 and its `blocked`
+  state now fits item 5 alone; re-filing this half is the filer's call
+- **First seen:** 2026-09-05
+- **Last seen:** 2026-09-05
+- **Description:** `commit_changes` in `src/modification.rs` is one long function that plans the
+  rewrite, performs it, and swaps the result into place. The work is to split it into three pieces
+  with narrow invariants — a commit plan, a rewrite session, and the final swap — each with its own
+  tests for the properties that currently have none of their own: backup-noclobber, retained-entry
+  replay, duplicate-path handling, and poison.
+- **Background:** This was item 6 of OI-0076-003, an entry whose other half (item 5, the staging
+  unlink-then-reopen race) genuinely needed a decision. Item 6 never did. It needs no decision, has
+  no external prerequisite, and touches no design question — it was simply carried in the same entry
+  as its harder sibling and inherited that sibling's blocked status for months. The owner's
+  2026-09-05 ruling settled item 5 as accept-and-document, which removes even the appearance of a
+  dependency, so it is split out here rather than left to look blocked. Items 1 and 2 of the same
+  entry were split out the same way on 2026-09-03, so this follows an established shape rather than
+  inventing one. The reason it is worth doing at all is that the properties listed above are today
+  asserted only end-to-end through a full commit, which means a failure names the whole operation
+  rather than the phase that broke — and the phase boundaries are exactly where the invariants live.
+
 ### Non-UTF-8 path fidelity round 2 (OI-0076-001)
 - **Type:** 2
 - **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
