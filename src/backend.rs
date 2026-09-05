@@ -1120,3 +1120,7 @@ impl ReadBackend for crate::ffi::wrapper::UnrarArchive {
         self.stream_payload_to_sink_by_listing_id(id, validated_path, sink)
     }
 }
+
+#[cfg(test)]
+#[path = "backend/sink_streaming_tests.rs"]
+mod sink_streaming_tests;

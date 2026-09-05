@@ -229,29 +229,68 @@ fn rar_propagates_the_sinks_own_error_across_the_callback_boundary() {
 
 // ── the property that keeps the two digest routes honest ───────────────────
 
-/// The digest has two implementations of the same bound — `HardCapReader` on
-/// the pull route, an inline check on the push route — because one is fed and
-/// the other pulls. Two implementations of one rule drift. This is what stops
-/// them: the digest of an archive must not depend on which route resolved it.
+/// The digest resolves CRC-less entries through the push route, and this
+/// checks that what it resolves is *correct* — not merely stable.
+///
+/// TAR carries no per-member CRC at all, so every entry in this fixture
+/// takes the CRC-less path. The digest is therefore built entirely from
+/// CRCs the sink produced. Recomputing it here from payloads read by the
+/// independent buffering route gives a genuine differential: if the sink
+/// dropped a chunk, mis-ordered one, or reported a length it had not
+/// pushed, the two digests diverge.
+///
+/// An earlier version of this test called the digest twice and compared
+/// the results. That compares a route to itself and would pass with the
+/// sink returning consistently wrong bytes.
 #[test]
-fn both_digest_routes_agree_on_every_crc_less_backend() {
-    // TAR carries no per-member CRC at all, so every entry takes the
-    // CRC-less path — this is the fixture where the two routes are most
-    // exercised against each other.
+fn the_digest_resolves_crc_less_entries_to_the_correct_values() {
     let archive = crate::Archive::open(fixture("test.tar")).expect("open");
     let (digest, total) = archive
         .calculate_content_multiset_digest_and_size()
-        .expect("digest through whichever route the backend offers");
-    assert_eq!(digest.len(), 64, "sha256 hex");
-    assert!(total.sized_entries() > 0);
+        .expect("digest");
 
-    // Same archive, twice: the route is chosen inside, so a route that
-    // produced different bytes would show up as a non-deterministic digest.
-    let (again, _) = archive
-        .calculate_content_multiset_digest_and_size()
-        .expect("digest again");
+    // 8 lowercase hex chars: the digest is a CRC32 over the sorted CRC32
+    // elements, not a cryptographic hash. Pinned so a change to the shape
+    // has to be deliberate.
+    assert_eq!(digest.len(), 8, "digest is crc32 hex, got {digest:?}");
+    assert!(
+        digest
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    );
+    assert!(
+        total.sized_entries() > 0,
+        "the fixture must hold sized files"
+    );
+
+    // Rebuild the same digest from payloads read the other way.
+    let backend = crate::ffi::libarchive_wrapper::LibarchiveArchive::open(fixture("test.tar"))
+        .expect("open the backend directly");
+    let entries = backend.list_files_metadata_only().expect("list");
+    let mut elements: Vec<String> = Vec::new();
+    for entry in entries.iter() {
+        if entry.entry_type != crate::entry::EntryType::File {
+            continue;
+        }
+        let mut payload = Vec::new();
+        backend
+            .extract_to_stream_by_listing_id(entry.id, &entry.path)
+            .expect("buffering route")
+            .read_to_end(&mut payload)
+            .expect("read the payload");
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&payload);
+        elements.push(format!("{:08x}", hasher.finalize()));
+    }
+    assert!(!elements.is_empty(), "no file entries were hashed");
+    elements.sort();
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(elements.join(",").as_bytes());
+    let expected = format!("{:08x}", hasher.finalize());
+
     assert_eq!(
-        digest, again,
-        "the digest must not depend on the route taken"
+        digest, expected,
+        "the digest built from sink-resolved CRCs must equal the one built \
+         from payloads read by the buffering route"
     );
 }
