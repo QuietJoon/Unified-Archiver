@@ -982,3 +982,208 @@ mod rename_tests {
         assert!(result.is_err());
     }
 }
+
+// ── commit-phase tests (OI-0076-003 item 6) ────────────────────────────────
+//
+// These call `commit_plan` directly. Before the plan / session / swap split
+// there was no way to do that: every property below could only be reached
+// through a whole commit, so a failure named the entire operation instead of
+// the phase that broke — and several of them could not be observed at all,
+// because the plan's decisions are invisible once the write has happened.
+//
+// The suffix test is the one that mattered most: it had NO coverage in any
+// form, and the property it pins is a filesystem-write target.
+
+/// Build a Modify-mode handle over a one-entry ZIP with one pending change.
+fn modify_handle_with_pending_change(dir: &std::path::Path, name: &str) -> Archive {
+    let path = dir.join(name);
+    let options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
+    let mut archive = Archive::create(&path, options).unwrap();
+    archive
+        .add_file_from_data("original.txt", b"original")
+        .unwrap();
+    archive.finish().unwrap();
+
+    let mut modify = Archive::modify(&path).unwrap();
+    modify.add_entry("added.txt", b"added").unwrap();
+    modify
+}
+
+/// R0070-0009. `backup_suffix` is `pub`, so a caller can bypass
+/// `with_backup`'s sanitiser by assigning the field directly. The suffix is
+/// appended to the archive path by `backup_path_for` with no further
+/// separator check, and the result is then opened `create_new`, chmod'ed and
+/// — on a copy failure — unlinked. A separator in it therefore aims those
+/// three operations outside the archive's own directory.
+///
+/// This had no test of any kind before the split. `with_backup` was covered;
+/// the direct-assignment bypass it exists to catch was not.
+#[test]
+fn commit_plan_rejects_a_backup_suffix_that_would_escape_the_directory() {
+    let temp = tempfile::tempdir().unwrap();
+
+    for bad in ["/../evil", "..\\evil", "", "sub/dir"] {
+        let mut modify = modify_handle_with_pending_change(temp.path(), "esc.zip");
+        modify.mod_options = Some(ModificationOptions {
+            create_backup: true,
+            backup_suffix: bad.to_string(),
+            ..Default::default()
+        });
+
+        let plan = modify
+            .commit_plan()
+            .expect("planning must succeed")
+            .expect("a pending change means a plan");
+        assert_eq!(
+            plan.mod_options.backup_suffix, ".bak",
+            "a suffix of {bad:?} must fall back to `.bak`; it reaches \
+             backup_path_for, which appends it to the archive path with no \
+             separator check"
+        );
+        std::fs::remove_file(temp.path().join("esc.zip")).ok();
+    }
+}
+
+/// A suffix with no separator is the caller's business and must survive.
+/// Pinned so the sanitiser above cannot be "hardened" into ignoring the
+/// caller entirely.
+#[test]
+fn commit_plan_keeps_a_backup_suffix_that_is_merely_unusual() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut modify = modify_handle_with_pending_change(temp.path(), "keep.zip");
+    modify.mod_options = Some(ModificationOptions {
+        create_backup: true,
+        backup_suffix: ".backup-2026".to_string(),
+        ..Default::default()
+    });
+
+    let plan = modify.commit_plan().unwrap().unwrap();
+    assert_eq!(plan.mod_options.backup_suffix, ".backup-2026");
+}
+
+/// The staging file must be a sibling of the original, and must *append* to
+/// the archive's name rather than replace its extension.
+///
+/// Sibling because the swap is a rename, which is only atomic within one
+/// filesystem — a staging file in a temp directory could land on a different
+/// mount and turn the atomic replace into a copy. Appending because it keeps
+/// the original extension visible in leftover staging names.
+#[test]
+fn commit_plan_stages_beside_the_original_and_keeps_its_extension() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut modify = modify_handle_with_pending_change(temp.path(), "beside.zip");
+    let archive_path = temp.path().join("beside.zip");
+
+    let plan = modify.commit_plan().unwrap().unwrap();
+
+    assert_eq!(
+        plan.temp_path.parent(),
+        archive_path.parent(),
+        "the staging file must be a sibling: rename is only atomic within a filesystem"
+    );
+    let name = plan
+        .temp_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert!(
+        name.starts_with("beside.zip"),
+        "the suffix must be appended, not replace the extension: {name}"
+    );
+    assert!(
+        !plan.temp_path.exists(),
+        "planning must not create the staging file — nothing before the \
+         empty-tracker check may leave a file behind"
+    );
+}
+
+/// Two plans in the same process must not collide on a staging name.
+///
+/// Be precise about what this does and does not pin. It pins the observable
+/// property — two plans, two distinct staging paths. It does **not** pin the
+/// `static COUNTER` that the temp-name comment credits for uniqueness:
+/// replacing that counter with a constant leaves this test green, which was
+/// checked rather than assumed.
+///
+/// That is not a gap in the test so much as a property of the name. The
+/// staging name is derived from `self.path`, so two *different* archives
+/// differ with or without the counter, and two commits on the *same* path
+/// cannot overlap because `Archive::modify` holds an advisory lock on it.
+/// The counter is defence-in-depth against a same-tick collision that a test
+/// cannot force. Written down here so nobody later reads a green suite as
+/// evidence the counter is load-bearing and deletes it.
+#[test]
+fn commit_plan_staging_names_are_unique_within_one_process() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut h1 = modify_handle_with_pending_change(temp.path(), "u1.zip");
+    let a = h1.commit_plan().unwrap().unwrap();
+    let mut h2 = modify_handle_with_pending_change(temp.path(), "u2.zip");
+    let b = h2.commit_plan().unwrap().unwrap();
+    assert_ne!(
+        a.temp_path, b.temp_path,
+        "two commits in one process must not share a staging path"
+    );
+}
+
+/// The empty-tracker case is an early *success*, and the caller's cleanup
+/// only runs on `Err` — so a file created before this point would be
+/// orphaned permanently rather than removed. `None` is the signal that
+/// nothing was decided and nothing exists.
+#[test]
+fn commit_plan_returns_none_for_an_empty_tracker_and_creates_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("empty.zip");
+    let options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
+    let mut archive = Archive::create(&path, options).unwrap();
+    archive.add_file_from_data("only.txt", b"x").unwrap();
+    archive.finish().unwrap();
+
+    let mut modify = Archive::modify(&path).unwrap();
+    modify.mod_options = Some(ModificationOptions {
+        create_backup: true,
+        ..Default::default()
+    });
+
+    assert!(
+        modify.commit_plan().unwrap().is_none(),
+        "an empty tracker must plan nothing"
+    );
+
+    let siblings: Vec<String> = std::fs::read_dir(temp.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(
+        siblings,
+        vec!["empty.zip".to_string()],
+        "planning an empty commit must create neither a staging file nor a \
+         backup — the success path removes nothing, so either would leak"
+    );
+}
+
+/// A non-Modify handle must be refused before anything else happens. Such a
+/// handle has no advisory-lock descriptor and no captured identity, so every
+/// downstream gate degenerates to a pass and the swap would replace a path
+/// this session never locked.
+#[test]
+fn commit_plan_refuses_a_handle_that_is_not_in_modify_mode() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("read.zip");
+    let options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
+    let mut archive = Archive::create(&path, options).unwrap();
+    archive.add_file_from_data("a.txt", b"a").unwrap();
+    archive.finish().unwrap();
+
+    let mut reader = Archive::open(&path).unwrap();
+    // Matched rather than `expect_err`: `CommitPlan` cannot be `Debug`,
+    // because `EntrySource::Reader` holds a `Box<dyn Read>`.
+    let err = match reader.commit_plan() {
+        Err(e) => e,
+        Ok(_) => panic!("a Read-mode handle must be refused"),
+    };
+    assert!(
+        err.to_string().contains("Modify mode"),
+        "the refusal must name the mode requirement: {err}"
+    );
+}
