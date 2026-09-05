@@ -186,8 +186,9 @@ the answers existed. Each had a named decision, and each got one:
   readers for all three backends, which 7z's dependency does not offer, so as written it could
   never close. With streaming defined as "deliver a payload without writing it to disk" and a
   caller-supplied sink accepted as the shape, nothing is blocked upstream.
-* **`open_at_offset` — decided the other way.** DCR-015's amendment ruled *against* building the
-  libarchive arm, so no implementation remains; only bookkeeping does.
+* **`open_at_offset` — decided the other way, and now discharged.** DCR-015's amendment ruled
+  *against* building the libarchive arm, so no implementation remained; the bookkeeping is done and
+  the entry has moved to "Closed since the previous run".
 * **OI-0076-003 — option (c).** The staging race is accepted and documented rather than defended
   against, so what is owed is two specific documentation corrections and the item-6 split.
 
@@ -262,65 +263,6 @@ were wrong — a reading that checked whether the work was *described* and not w
   options it priced and withdraws it as the verdict on the gap. What is owed is implementation: a
   push-shaped backend method implemented by all four backends, and the digest/integrity walk moved
   onto it so no backend buffers a whole entry or stages one to disk.
-
-### In-place `open_at_offset` without a tempfile copy is still an unbuilt deferral
-- **Type:** 2
-- **Verified:** yes — reopen verified 2026-08-16: the SFX open paths in `src/archive.rs` still stage the payload to a tempfile and re-detect on it before opening
-- **Sources:** ticgit:5858e17b, docs/architecture/mvp-scope.md (Allowed DEFERRED Placeholders), docs/project/stub-manifest.md (DEF-001), src/archive.rs
-- **First seen:** 2026-08-16
-- **Last seen:** 2026-08-17
-- **Description:** `mvp-scope.md` keeps "In-place `open_at_offset` (no tempfile copy)" as a live
-  placeholder, saying that DEF-001 closed with a tempfile-backed implementation and that a true
-  offset-aware backend opening "is still a future item". Nothing tracked that future item.
-- **Background:** DEF-001 is correctly marked Closed in the stub manifest — `open_at_offset` does
-  work for every backend — but it closed by copying the payload out to a temporary file rather
-  than by teaching the backends to read from an offset. That copy is why AD 0040 imposes a 16 GiB
-  payload ceiling: a large self-extracting archive must be written to disk in full before a single
-  entry can be listed, so the ceiling is a consequence of the implementation and not of any format
-  limit. `open_at_offset` appears three times in this backlog already, but all three are other
-  items — the `max_sfx_payload_size` dead-configuration entry (`1dfb92d6`) and a MADR-0023
-  amendment note observing that the method is tempfile-backed — so the deferral itself was
-  invisible to both registers. It is type 2 because the first question is whether to pursue it at
-  all: ZIP already has an `OffsetReader`, but 7z, RAR, TAR and ISO would each need their own path
-  and libarchive would need a callback-based reader, which is a backend-trait-shaped change that
-  probably belongs after AD 0053 D1's successors rather than before them. If the ruling is not to
-  pursue it, the placeholder should be restated as accepted-permanent and AD 0040's ceiling
-  documented as a design consequence rather than a temporary limit — which is a real outcome, not
-  a non-answer.
-  **Narrowed 2026-08-21: the ZIP half is built, so the Verified line above is stale.** ZIP now opens
-  in place — `Archive::open_at_offset` hands the backend the caller's own file with no copy when three
-  gates agree: a `PK\x03\x04` local file header sits exactly at `offset`, the `zip` crate's own
-  `ZipArchive::offset()` resolves to the same value (built the same way the wrapper builds it, so
-  agreement here means agreement there), and the open then succeeds. Any disagreement returns
-  `Ok(None)` and the caller falls back to staging, so the strict path cannot silently mis-open.
-  `PayloadSource::{InPlace, Staged}` records which happened and `Archive::payload_access()` is its
-  public projection, which is how a caller now tells whether the AD 0040 ceiling applied at all.
-  `PayloadSource::InPlace` deliberately keeps the `offset` so `payload_size_for_ratio` — the
-  compression-ratio denominator — stays on the payload instead of widening to `stub + payload`
-  (R0069-0006), which would dilute the zip-bomb gate.
-  **What remains is the decision, and it is most of the original scope:** 7z, RAR, TAR and ISO each
-  need their own offset-aware path and libarchive needs a callback-based reader, so the ruling asked
-  for above is unchanged — pursue it per backend, or restate the placeholder as accepted-permanent
-  and document AD 0040's ceiling as a design consequence for the staging backends. AD 0040 already
-  carries the amendment saying the ceiling bounds a copy and therefore cannot bind an in-place open,
-  so that half of the documentation outcome is done either way.
-  Two tickets track this one deferral — `1ddc37ec` (2026-08-20, filed from `mvp-scope.md`) and
-  `5858e17b` (2026-08-16) — and they are duplicates of each other. Whoever rules on it should
-  collapse them rather than answer twice.
-
-- **Re-examined 2026-09-04 — stays Type 2.** A type-1 reading was tried and refuted. Three of the
-  four arms are built (`try_open_zip_in_place`, `try_open_rar_in_place`, `try_open_sevenz_in_place`
-  behind the shared executable-extension gate); the libarchive arm is the unbuilt quarter, and it
-  is not merely thirteen mechanical FFI declarations — the entry is narrowed rather than ready.
-- **Re-typed 2026-09-05 — Type 2 to Type 1, and there is nothing left to build.** The decision this
-  entry waited on has been taken, and it went the other way: DCR-015's 2026-09-05 amendment rules
-  that **in-place opening is ZIP, RAR and 7z, and libarchive-backed payloads stage** — a decision,
-  not a pending item. The affected class is makeself `.run`/`.sh` installers and only those;
-  plain-tar and ISO self-extractors cannot be detected at all, so the records' "TAR family, ISO,
-  raw streams" framing oversold it. `try_open_in_place` now carries the exclusion as a documented
-  arm with its reasoning. **No implementation work remains** — this entry is discharged by ruling
-  rather than by code, and the next reconciliation should move it to "Closed since the previous
-  run" rather than leave it here.
 
 ### Security & durability boundary refactors (OI-0076-003, items 5/6)
 - **Type:** 3
@@ -932,6 +874,79 @@ account of what changed and in which direction.
   because either alone can pass on a dense archive, and it now fails with an instruction to
   regenerate rather than silently degrading to "a mostly-zero member digests exactly". This entry is
   discharged; it stays here until the next reconciliation moves it.
+
+### In-place `open_at_offset` without a tempfile copy is still an unbuilt deferral
+- **Type:** 2
+- **Verified:** yes — reopen verified 2026-08-16: the SFX open paths in `src/archive.rs` still stage the payload to a tempfile and re-detect on it before opening
+- **Sources:** ticgit:5858e17b, docs/architecture/mvp-scope.md (Allowed DEFERRED Placeholders), docs/project/stub-manifest.md (DEF-001), src/archive.rs
+- **First seen:** 2026-08-16
+- **Last seen:** 2026-08-17
+- **Description:** `mvp-scope.md` keeps "In-place `open_at_offset` (no tempfile copy)" as a live
+  placeholder, saying that DEF-001 closed with a tempfile-backed implementation and that a true
+  offset-aware backend opening "is still a future item". Nothing tracked that future item.
+- **Background:** DEF-001 is correctly marked Closed in the stub manifest — `open_at_offset` does
+  work for every backend — but it closed by copying the payload out to a temporary file rather
+  than by teaching the backends to read from an offset. That copy is why AD 0040 imposes a 16 GiB
+  payload ceiling: a large self-extracting archive must be written to disk in full before a single
+  entry can be listed, so the ceiling is a consequence of the implementation and not of any format
+  limit. `open_at_offset` appears three times in this backlog already, but all three are other
+  items — the `max_sfx_payload_size` dead-configuration entry (`1dfb92d6`) and a MADR-0023
+  amendment note observing that the method is tempfile-backed — so the deferral itself was
+  invisible to both registers. It is type 2 because the first question is whether to pursue it at
+  all: ZIP already has an `OffsetReader`, but 7z, RAR, TAR and ISO would each need their own path
+  and libarchive would need a callback-based reader, which is a backend-trait-shaped change that
+  probably belongs after AD 0053 D1's successors rather than before them. If the ruling is not to
+  pursue it, the placeholder should be restated as accepted-permanent and AD 0040's ceiling
+  documented as a design consequence rather than a temporary limit — which is a real outcome, not
+  a non-answer.
+  **Narrowed 2026-08-21: the ZIP half is built, so the Verified line above is stale.** ZIP now opens
+  in place — `Archive::open_at_offset` hands the backend the caller's own file with no copy when three
+  gates agree: a `PK\x03\x04` local file header sits exactly at `offset`, the `zip` crate's own
+  `ZipArchive::offset()` resolves to the same value (built the same way the wrapper builds it, so
+  agreement here means agreement there), and the open then succeeds. Any disagreement returns
+  `Ok(None)` and the caller falls back to staging, so the strict path cannot silently mis-open.
+  `PayloadSource::{InPlace, Staged}` records which happened and `Archive::payload_access()` is its
+  public projection, which is how a caller now tells whether the AD 0040 ceiling applied at all.
+  `PayloadSource::InPlace` deliberately keeps the `offset` so `payload_size_for_ratio` — the
+  compression-ratio denominator — stays on the payload instead of widening to `stub + payload`
+  (R0069-0006), which would dilute the zip-bomb gate.
+  **What remains is the decision, and it is most of the original scope:** 7z, RAR, TAR and ISO each
+  need their own offset-aware path and libarchive needs a callback-based reader, so the ruling asked
+  for above is unchanged — pursue it per backend, or restate the placeholder as accepted-permanent
+  and document AD 0040's ceiling as a design consequence for the staging backends. AD 0040 already
+  carries the amendment saying the ceiling bounds a copy and therefore cannot bind an in-place open,
+  so that half of the documentation outcome is done either way.
+  Two tickets track this one deferral — `1ddc37ec` (2026-08-20, filed from `mvp-scope.md`) and
+  `5858e17b` (2026-08-16) — and they are duplicates of each other. Whoever rules on it should
+  collapse them rather than answer twice.
+
+- **Re-examined 2026-09-04 — stays Type 2.** A type-1 reading was tried and refuted. Three of the
+  four arms are built (`try_open_zip_in_place`, `try_open_rar_in_place`, `try_open_sevenz_in_place`
+  behind the shared executable-extension gate); the libarchive arm is the unbuilt quarter, and it
+  is not merely thirteen mechanical FFI declarations — the entry is narrowed rather than ready.
+- **Re-typed 2026-09-05 — Type 2 to Type 1, and there is nothing left to build.** The decision this
+  entry waited on has been taken, and it went the other way: DCR-015's 2026-09-05 amendment rules
+  that **in-place opening is ZIP, RAR and 7z, and libarchive-backed payloads stage** — a decision,
+  not a pending item. The affected class is makeself `.run`/`.sh` installers and only those;
+  plain-tar and ISO self-extractors cannot be detected at all, so the records' "TAR family, ISO,
+  raw streams" framing oversold it. `try_open_in_place` now carries the exclusion as a documented
+  arm with its reasoning. **No implementation work remains** — this entry is discharged by ruling
+  rather than by code, and the next reconciliation should move it to "Closed since the previous
+  run" rather than leave it here.
+
+- **DISCHARGED 2026-09-05 — by ruling, not by code.** DCR-015's 2026-09-05 amendment decided
+  *against* the libarchive arm: in-place opening is ZIP, RAR and 7z, and libarchive-backed payloads
+  stage a full copy. That is the answer rather than a pending item, so there is nothing left to
+  build and the entry is discharged rather than implemented. `try_open_in_place` carries the
+  exclusion as a documented fall-through with its reasoning, so the next reader meets a decision
+  instead of what looks like an oversight — which is what kept getting it re-filed.
+  The affected class is makeself `.run` / `.sh` installers and only those: plain-tar and ISO
+  self-extractors cannot be detected at all, because TAR was deliberately removed from the SFX
+  signature table and ISO was never in it. The records' "TAR family, ISO, raw streams" framing
+  oversold it by naming two things that do not exist, which is a large part of why the item read as
+  agonising over nothing. Stated plainly, this is a **performance** difference and not an interface
+  one — those files open, list and extract normally; they pay a copy — and it stays reconsiderable
+  if that copy ever becomes real for someone.
 
 ### Retired 2026-09-05 — `docs/investigation/` staleness is permanently out of scope
 
