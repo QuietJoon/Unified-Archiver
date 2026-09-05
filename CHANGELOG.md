@@ -297,6 +297,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   All three variants also became individually `#[non_exhaustive]`, so this is the last time adding
   a field to one breaks a caller.
 
+- **7z volume sets (`.7z.001`, `.7z.002`, …) read as one archive** (OI-0080-004).
+  `ArchiveFormat::SevenZip` reports `multipart_read: Support::Full` where it reported `None`, and
+  `Archive::open("big.7z.001")` now lists and extracts the whole set. Previously that call
+  *succeeded* — part 1 begins with the 7z magic, so detection was happy — and then failed on the
+  first real operation with `Invalid 7z`, because the parser sought to an offset past the end of
+  part 1. A user with a perfectly good volume set was told their archive was corrupt.
+
+  The fix needed no 7z format knowledge, because **a 7z volume set is a plain byte split of one
+  archive**: no part carries a header, a footer, or a volume number, and concatenating the members
+  reproduces the unsplit archive byte for byte. The new `VolumeChain` presents the members as one
+  `Read + Seek` source and the 7z parser never learns there was a split. An ordinary archive is a
+  chain of one and reads exactly as before.
+
+  **Caller-visible consequence.** An *incomplete* set is now refused with an error naming the
+  missing volume, raised before any bytes are read. This is deliberate rather than incidental: a
+  byte split has nothing marking a boundary, so a missing middle volume cannot be detected while
+  reading — the later parts land at the wrong offsets and the archive decodes as garbage. Left to
+  emerge, it would report `Invalid 7z` and send the caller looking for a damaged file instead of a
+  missing one. Writing split sets remains unsupported (`multipart_write: Support::None`).
+
 - **Multi-volume RAR sets list as one entry, and extract** (ticgit `3b4d15`).
   `ArchiveFormat::Rar` / `Rar5` report `multipart_read: Support::Full` where they reported
   `Partial`. A split file is stored once per volume, and the listing surfaced each of those headers
@@ -311,6 +331,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   predecessor restored extraction as a side effect, with no volume-change callback: the SDK opens
   the continuation volumes itself once it is asked for one logical entry. Verified byte-for-byte
   against `unrar x`.
+
+  **The fold has to reach the extraction walks too.** Folding continuations in the listing alone
+  left the two extraction walks counting one index per *header* while the listing counted one per
+  *file*. That is invisible whenever an entry is extracted — `ExtractCurrentFile` merges the
+  volumes itself and consumes every part — but a walk that *skips* a split entry is handed the
+  next volume's header instead, because `ProcessFile`'s `RAR_SKIP` branch on a non-solid archive
+  calls `MergeArchive` and returns positioned on it. So on a set holding a split file *followed by
+  another file*, `extract_by_ids` and `extract_file` ran one index ahead and refused with listing
+  drift — reporting an on-disk rewrite that never happened, for an archive `unrar t` calls
+  healthy. Both walks now fold continuations the same way the listing does. The original fixture
+  holds a single logical entry and so could not show this; `test_multivol_tail.part*.rar` is the
+  set that can.
 
   **Caller-visible consequences.** A split entry's `crc32` is now `None` — each volume carries a
   checksum over its own fragment, never over the file, so any previous value was a checksum that

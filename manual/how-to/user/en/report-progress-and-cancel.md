@@ -121,13 +121,17 @@ clamped to the denominator — and a `Break` returned there is honoured as well.
 
 Which calls honour the field is not uniform:
 
-- Honoured: `extract_all`, `extract_some` / `extract_filtered`,
-  `extract_files`, `extract_by_ids`.
-- Ignored: `extract_file`, `extract_to_memory` and
-  `extract_to_memory_with_options`, `extract_to_stream` and
-  `extract_to_stream_with_options`. The single-entry and in-memory paths hand
-  the work straight to the backend without the progress plan; for a stream,
-  drive reporting from `StreamingExtractor::bytes_read` instead.
+- Honoured, with per-chunk cadence: `extract_all`, `extract_some` /
+  `extract_filtered`, `extract_files`, `extract_by_ids`.
+- Honoured, but sampled only at the ends: `extract_file`. The facade calls back
+  once before the backend runs and once after it finishes — `0` of the declared
+  size, then the declared size — so you can drive a spinner and honour a
+  `Break`, but you get no movement in between. An entry whose size the format
+  never declared reports a total of `0` both times.
+- Ignored: `extract_to_memory` and `extract_to_memory_with_options`,
+  `extract_to_stream` and `extract_to_stream_with_options`. The in-memory paths
+  hand the work straight to the backend without the progress plan; for a
+  stream, drive reporting from `StreamingExtractor::bytes_read` instead.
 
 Cadence is per entry boundary plus once per 64 KiB chunk within an entry. The
 libarchive and UnRAR paths throttle themselves to roughly sixty calls per second
@@ -152,10 +156,12 @@ match archive.extract_all(options) {
 }
 ```
 
-For every disk-extraction entry point the label is `"extract_all"`, including
-cancellations raised from `extract_files`, `extract_by_ids`, and
-`extract_some` — the backends pass one shared label. Creation reports
-`"create"`, and SFX staging reports `"sfx_staging"`.
+The bulk disk-extraction entry points share one label, `"extract_all"` — that
+covers cancellations raised from `extract_files`, `extract_by_ids` and
+`extract_some`, because the backends pass the same label for all of them.
+`extract_file` is the exception and reports `"extract_file"`, so a caller that
+matches on the label rather than on the variant must expect both. Creation
+reports `"create"`, and SFX staging reports `"sfx_staging"`.
 
 Cancelling means "stop future work", never "undo finished work":
 

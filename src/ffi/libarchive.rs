@@ -89,15 +89,30 @@ pub const ARCHIVE_WARN: c_int = -20;
 pub const ARCHIVE_FAILED: c_int = -25;
 pub const ARCHIVE_FATAL: c_int = -30;
 
-// Extract flags
-pub const ARCHIVE_EXTRACT_TIME: c_int = 0x0004;
+// Extract flags.
+//
+// These are a hand transcription of libarchive's own `#define`s in
+// `archive.h`, and they are load-bearing: `archive_write_disk_set_options`
+// takes an opaque `int`, so a wrong value is not a type error, not a link
+// error, and not a runtime error. It silently turns a different feature on.
+//
+// Two of them WERE wrong. `SECURE_SYMLINKS` was `0x4000` and
+// `SECURE_NODOTDOT` was `0x8000`; the real values are `0x0100` and `0x0200`,
+// while `0x4000` and `0x8000` are `NO_HFS_COMPRESSION` and
+// `HFS_COMPRESSION_FORCED` — two contradictory macOS HFS+ compression flags.
+// Since `extract_flags` ORs both security flags unconditionally, every
+// libarchive extraction this crate has ever performed ran with libarchive's
+// symlink-redirect guard and `..` rejection OFF, and with two conflicting
+// compression hints ON. Corrected 2026-09-05 against libarchive 3.8.9's
+// `archive.h`; see `extract_flag_values_match_libarchive_header`.
+pub const ARCHIVE_EXTRACT_OWNER: c_int = 0x0001;
 pub const ARCHIVE_EXTRACT_PERM: c_int = 0x0002;
+pub const ARCHIVE_EXTRACT_TIME: c_int = 0x0004;
+pub const ARCHIVE_EXTRACT_NO_OVERWRITE: c_int = 0x0008;
 pub const ARCHIVE_EXTRACT_ACL: c_int = 0x0020;
 pub const ARCHIVE_EXTRACT_FFLAGS: c_int = 0x0040;
-pub const ARCHIVE_EXTRACT_OWNER: c_int = 0x0001;
-pub const ARCHIVE_EXTRACT_NO_OVERWRITE: c_int = 0x0008;
-pub const ARCHIVE_EXTRACT_SECURE_SYMLINKS: c_int = 0x4000;
-pub const ARCHIVE_EXTRACT_SECURE_NODOTDOT: c_int = 0x8000;
+pub const ARCHIVE_EXTRACT_SECURE_SYMLINKS: c_int = 0x0100;
+pub const ARCHIVE_EXTRACT_SECURE_NODOTDOT: c_int = 0x0200;
 
 // File type constants (`__LA_MODE_T` values in archive_entry.h)
 pub const AE_IFMT: la_mode_t = 0o170000;
@@ -381,6 +396,127 @@ mod declaration_site_tests {
             assert!(
                 scanned.iter().any(|s| s == anchor),
                 "declaration-site walk missed {anchor}"
+            );
+        }
+    }
+}
+
+/// The extract-flag constants are a hand transcription of C `#define`s, and
+/// `archive_write_disk_set_options` takes an opaque `int` — so a wrong value
+/// cannot fail to compile, fail to link, or fail at run time. It just turns a
+/// different feature on, permanently and silently.
+///
+/// That is not hypothetical here. `SECURE_SYMLINKS` and `SECURE_NODOTDOT`
+/// carried `0x4000` / `0x8000` until 2026-09-05 — the values of
+/// `NO_HFS_COMPRESSION` and `HFS_COMPRESSION_FORCED` — so libarchive's two
+/// extraction guards were off for the whole life of the crate while two
+/// contradictory macOS compression hints were on. Nothing caught it because
+/// there was nothing to catch it with. This module is that something.
+#[cfg(test)]
+mod extract_flag_tests {
+    use super::*;
+
+    /// Read libarchive's own header if we can find it, and compare every flag
+    /// this crate declares against the `#define` it claims to mirror.
+    ///
+    /// Header discovery is best-effort — it is not present on every machine —
+    /// so a miss skips the comparison rather than failing. The pinned-value
+    /// test below is what guarantees this module always asserts *something*.
+    #[test]
+    fn extract_flag_values_match_libarchive_header() {
+        const CANDIDATES: [&str; 4] = [
+            "/opt/homebrew/opt/libarchive/include/archive.h",
+            "/usr/local/opt/libarchive/include/archive.h",
+            "/usr/include/archive.h",
+            "/usr/local/include/archive.h",
+        ];
+        let Some(header) = CANDIDATES
+            .iter()
+            .find_map(|path| std::fs::read_to_string(path).ok())
+        else {
+            eprintln!("libarchive archive.h not found; comparison skipped");
+            return;
+        };
+
+        // `#define\tARCHIVE_EXTRACT_PERM\t\t\t(0x0002)` — the value is always
+        // parenthesised hex in this header.
+        let defined = |name: &str| -> Option<i32> {
+            header.lines().find_map(|line| {
+                let rest = line.strip_prefix("#define")?.trim_start();
+                let rest = rest.strip_prefix(name)?;
+                // Guard against `ARCHIVE_EXTRACT_TIME` matching
+                // `ARCHIVE_EXTRACT_TIME_SOMETHING`.
+                if !rest.starts_with(char::is_whitespace) {
+                    return None;
+                }
+                let value = rest.trim().trim_start_matches('(').trim_end_matches(')');
+                let digits = value
+                    .strip_prefix("0x")
+                    .or_else(|| value.strip_prefix("0X"))?;
+                i32::from_str_radix(digits, 16).ok()
+            })
+        };
+
+        for (name, ours) in [
+            ("ARCHIVE_EXTRACT_OWNER", ARCHIVE_EXTRACT_OWNER),
+            ("ARCHIVE_EXTRACT_PERM", ARCHIVE_EXTRACT_PERM),
+            ("ARCHIVE_EXTRACT_TIME", ARCHIVE_EXTRACT_TIME),
+            ("ARCHIVE_EXTRACT_NO_OVERWRITE", ARCHIVE_EXTRACT_NO_OVERWRITE),
+            ("ARCHIVE_EXTRACT_ACL", ARCHIVE_EXTRACT_ACL),
+            ("ARCHIVE_EXTRACT_FFLAGS", ARCHIVE_EXTRACT_FFLAGS),
+            (
+                "ARCHIVE_EXTRACT_SECURE_SYMLINKS",
+                ARCHIVE_EXTRACT_SECURE_SYMLINKS,
+            ),
+            (
+                "ARCHIVE_EXTRACT_SECURE_NODOTDOT",
+                ARCHIVE_EXTRACT_SECURE_NODOTDOT,
+            ),
+        ] {
+            let theirs = defined(name)
+                .unwrap_or_else(|| panic!("{name} not found in the located archive.h"));
+            assert_eq!(
+                ours, theirs,
+                "{name}: this crate declares {ours:#06x}, libarchive defines {theirs:#06x}. \
+                 A mismatch here silently enables a DIFFERENT libarchive feature — that is \
+                 exactly how the two SECURE_* guards spent the crate's whole life switched off."
+            );
+        }
+    }
+
+    /// The values, pinned literally, so this module asserts something even on
+    /// a host with no libarchive headers installed. Sourced from libarchive
+    /// 3.8.9 `archive.h`; they have been stable across libarchive 3.x.
+    #[test]
+    fn extract_flag_values_are_pinned() {
+        assert_eq!(ARCHIVE_EXTRACT_OWNER, 0x0001);
+        assert_eq!(ARCHIVE_EXTRACT_PERM, 0x0002);
+        assert_eq!(ARCHIVE_EXTRACT_TIME, 0x0004);
+        assert_eq!(ARCHIVE_EXTRACT_NO_OVERWRITE, 0x0008);
+        assert_eq!(ARCHIVE_EXTRACT_ACL, 0x0020);
+        assert_eq!(ARCHIVE_EXTRACT_FFLAGS, 0x0040);
+        assert_eq!(ARCHIVE_EXTRACT_SECURE_SYMLINKS, 0x0100);
+        assert_eq!(ARCHIVE_EXTRACT_SECURE_NODOTDOT, 0x0200);
+    }
+
+    /// The two guards are not optional and must not become caller-tunable:
+    /// every extraction gets them. This pins the intent so a future options
+    /// refactor cannot quietly drop them behind a flag.
+    #[test]
+    fn both_security_guards_are_distinct_bits_and_not_compression_flags() {
+        assert_ne!(
+            ARCHIVE_EXTRACT_SECURE_SYMLINKS,
+            ARCHIVE_EXTRACT_SECURE_NODOTDOT
+        );
+        // 0x4000 / 0x8000 are NO_HFS_COMPRESSION / HFS_COMPRESSION_FORCED.
+        for flag in [
+            ARCHIVE_EXTRACT_SECURE_SYMLINKS,
+            ARCHIVE_EXTRACT_SECURE_NODOTDOT,
+        ] {
+            assert_eq!(
+                flag & (0x4000 | 0x8000),
+                0,
+                "a security guard must not collide with the HFS+ compression flags"
             );
         }
     }

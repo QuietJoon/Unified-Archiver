@@ -67,6 +67,13 @@ for i in $(seq 0 1023); do
     printf 'unified-archive multi-volume fixture block %04d ' "$i" >> "$staging/volume_payload.bin"
 done
 
+# A second, tiny file to sit AFTER the split one. The three-volume fixture
+# above holds a single logical entry, so every extraction walk reaches its
+# target before any continuation header can be mis-counted. Index alignment
+# only breaks when a split entry is SKIPPED and the walk carries on, which
+# needs something after it to walk to (ticgit 3b4d15 remainder).
+printf 'tail marker after the split file\n' > "$staging/tail_marker.txt"
+
 want() {
     local target="$1"
     if [[ $force -eq 0 && -e "$fixtures/$target" ]]; then
@@ -133,6 +140,25 @@ if want "test_multivol.part1.rar"; then
     done
 fi
 
+# 5. test_multivol_tail.part1.rar .. — a volume set whose FIRST entry is
+#    split across volumes and whose SECOND entry follows it. This is the
+#    shape that catches index drift in the extraction walks: UnRAR collapses
+#    continuation headers only under RAR_OM_LIST, and this crate opens with
+#    RAR_OM_EXTRACT, so a walk that skips the split entry (a selective
+#    extract_by_ids, or extract_file seeking a later id) is handed the
+#    part-2 header with RHDF_SPLITBEFORE set and counts it as another entry.
+#    test_multivol.part1.rar cannot show this because it holds one entry.
+#    Argument order is storage order, so volume_payload.bin splits and
+#    tail_marker.txt lands after it (ticgit 3b4d15 remainder).
+if want "test_multivol_tail.part1.rar"; then
+    rm -f "$fixtures"/test_multivol_tail.part*.rar
+    rm -f "$staging"/test_multivol_tail.part*.rar
+    run_rar a -m0 -v20k -ep -idq test_multivol_tail.rar volume_payload.bin tail_marker.txt
+    for part in "$staging"/test_multivol_tail.part*.rar; do
+        made+=("$(basename "$part")")
+    done
+fi
+
 if [[ ${#made[@]} -eq 0 ]]; then
     echo "nothing to do."
     exit 0
@@ -158,6 +184,10 @@ if command -v "$UNRAR_BIN" >/dev/null 2>&1; then
             test_multivol.part1.rar)
                 "$UNRAR_BIN" t "$fixtures/$name" || echo "WARN: $name failed unrar t" ;;
             test_multivol.part*)
+                : ;;  # covered by part1
+            test_multivol_tail.part1.rar)
+                "$UNRAR_BIN" t "$fixtures/$name" || echo "WARN: $name failed unrar t" ;;
+            test_multivol_tail.part*)
                 : ;;  # covered by part1
             test_encrypted_recovery.rar|test_encrypted_data_recovery.rar)
                 "$UNRAR_BIN" t "-p$PASSWORD" "$fixtures/$name" || echo "WARN: $name failed unrar t" ;;

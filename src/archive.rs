@@ -1450,6 +1450,30 @@ impl Archive {
             return Ok(Some(archive));
         }
 
+        // Everything else stages, and libarchive-backed payloads are the class
+        // that means in practice — above all **makeself installers**: a `.run`
+        // or `.sh` file that is a shell stub followed by a gzip-compressed tar
+        // (NVIDIA drivers, CUDA, VirtualBox's Linux packages), routinely
+        // multi-GB. Those reach here with a `Gzip` hint, match no arm, and get
+        // a full-payload copy.
+        //
+        // That is DECIDED, not pending (DCR-015 amendment 2026-09-05). It used
+        // to be merely emergent — no arm happened to match — which read as an
+        // oversight and kept being re-filed as one.
+        //
+        // The reason is the shape of the check, not the size of the payoff.
+        // Every arm above confirms from magic bytes at `offset` *before* a
+        // backend exists, and returns `None` on any doubt. libarchive cannot be
+        // asked that cheaply: confirming it would open the payload means
+        // building a reader and reading a header, then throwing both away when
+        // it fails — speculative backend construction, which is exactly what
+        // these arms are written to avoid, paid on every decline too.
+        //
+        // Under AD-0072 this is a *performance* difference, not an interface
+        // one: `open_sfx` / `open_at_offset` accept a makeself installer, list
+        // it and extract from it with the same spelling and the same errors as
+        // any other SFX. Only the copy differs. It stays reconsiderable if that
+        // copy becomes real for someone; it is not an open question today.
         Ok(None)
     }
 

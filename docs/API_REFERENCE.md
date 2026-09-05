@@ -735,7 +735,10 @@ guaranteed to reject. The only setters are `level` and `progress`.
 
 Typed entrypoint for libarchive-backed creation (TAR / TAR.GZ /
 TAR.BZ2 / TAR.XZ today). ZIP is rejected explicitly — use
-`create_zip` or `Archive::create`. ISO is read-only and not accepted.
+`create_zip` or `Archive::create`. ISO is not accepted — note that the
+reason is **not recorded anywhere**: the linked libarchive does export an
+ISO writer (`archive_write_set_format_iso9660`), so this is not an upstream
+limit. See `docs/CAPABILITY_MATRIX.md`, "Reasons not established".
 
 ---
 
@@ -1573,7 +1576,7 @@ impl ProgressCallback for MyProgress {
         // Return Continue to keep extracting, or Break to cancel.
         // A Break surfaces from the operation as
         // `ArchiveError::Cancelled { operation }` (e.g. "extract_all",
-        // "create", "sfx_staging").
+        // "extract_file", "create", "sfx_staging").
         // Example: cancel after processing 50MB
         if current > 50 * 1024 * 1024 {
             ControlFlow::Break(())

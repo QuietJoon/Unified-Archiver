@@ -180,3 +180,69 @@ cite this constraint. It was borrowing a constraint written about *footprint*
 features for a flag that gates a module, two `cfg` sites and some in-crate
 tests, and no platform-specific code at all. That comment is corrected; the two
 are sequenced independently, consistent with the 2026-09-02 ruling above.
+
+## Amendment (2026-09-04, Stage 1 is not ready to implement as written)
+
+A 2026-09-04 reconciliation re-typed OI-0058-001 from "needs decision" to
+"ready to implement" on the reading that this record specifies Stage 1
+concretely and AD-0070 already removed its only blocker. Three independent
+readers were then asked to refute that; two did, and this amendment records
+what they found. **Stage 1 remains correct as a direction and is still not
+blocked — but it is not startable, because six choices inside it are unmade.**
+Two of the six are contradictions with records written *after* the Stage 1
+tables above, which the 2026-09-02 and 2026-09-03 amendments did not reconcile.
+
+1. **`modify` is not orthogonal to `libarchive`, and AD-0071 froze that.** The
+   operation table says `modify` depends on `read` and `create`. In the tree,
+   `Archive::open_modify` binds the libarchive backend unconditionally for
+   every format, and **AD-0071** (2026-09-02) rules that this is permanent
+   rather than a deferral. So `modify` in fact requires `libarchive`, and the
+   standalone `modify` gate profile cannot exist as specified. Whether the
+   dependency becomes `modify = ["read", "create", "libarchive"]` or the
+   profile is redefined is unmade. This is the item most likely to stop an
+   implementer mid-change: marking `libarchive` optional will break ZIP and 7z
+   `commit_changes()`, and the fix is a ruling, not a patch.
+2. **The feature name `rar` collides with the shipped `rar-support`.** MADR-0020
+   is `status: active` and chose `rar-support`; it is a default feature, is used
+   at roughly 190 `cfg` sites, and is published surface named in the crate
+   description and in README. The tables above say `rar`. Rename, alias, or
+   deviate — none is ruled, and a rename removes a documented feature from a
+   released 0.4.0 crate.
+3. **`external-rar-create` has no slot in either matrix.** It exists, has its
+   own release-gate lane, and the tables do not mention it. Whether it implies
+   `create`, implies `rar`, or belongs inside `full` — which would change what
+   `full` means on a non-Windows host — is unruled.
+4. **The dependency tables are cyclic.** The operation table has `create`
+   depending on the format writer features; the format table has `zip-write`
+   depending on `create`. Cargo cannot express both, so the implementer must
+   choose which way the matrix points. That is structural, not a detail.
+5. **The six profiles have no defined feature sets.** `read-minimal`,
+   `read-zip`, `read-all-formats`, `create`, `modify` and `full` appear
+   everywhere as bare names and nowhere as selections. `read` alone links no
+   backend and reads nothing, so `read-minimal` is undefined. This is
+   load-bearing: the restated constraint 2 gates the default flip on
+   `read-minimal` and `full` being green test lanes, so whoever picks the sets
+   picks what the gate proves.
+6. **What a disabled format reports is an open API question.** With `libarchive`
+   off, does `ArchiveFormat::Iso` report `Support::None` — indistinguishable
+   from a format the crate never supported — or a new behind-a-feature state?
+   `Support` is `#[non_exhaustive]` and its own rustdoc anticipates exactly this
+   variant. MADR-0020's precedent covers the error path, not
+   `FormatCapabilities`, which is public.
+
+Two things are genuinely settled and should not be re-litigated: `ArchiveBackend`
+is `pub(crate)`, so gating it is internal and mechanical; and `ArchiveFormat`,
+`Support`, `FormatCapabilities`, `ArchiveError` and `Operation` are already
+`#[non_exhaustive]`, so gating variants is not a semver break. Gating `build.rs`'s
+unconditional libarchive probe is likewise real, unambiguous work.
+
+One framing correction. Stage 1 step 1 requires the default to stay equivalent
+to today's crate, and today ZIP, 7z and libarchive are not features at all — so
+preserving behaviour means `default` gains roughly eleven names. Whether that
+counts as a "flip" under restated constraint 2, which demands the lanes and a
+verification record *first*, is itself unsettled. "Stage 1 with no default flip"
+is therefore not a thing these records establish.
+
+**Effect:** OI-0058-001 stays Type 2. The work needed before it can start is a
+ruling on the six items above — most of which are cheap to decide and none of
+which is cheap to discover halfway through a large refactor.

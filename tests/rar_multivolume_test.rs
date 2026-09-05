@@ -15,10 +15,19 @@
 //!   observes.
 //! * ticgit 8c29f8 tracked the absent fixture that blocked the above.
 //!
-//! What the fixture then revealed is the larger finding: a complete, valid,
-//! `unrar`-verified volume set cannot be extracted by **any** public path.
-//! These tests state that precisely rather than leaving it to be discovered
-//! again, and they are the regression surface for ticgit 3b4d15.
+//! What the fixture then revealed is the larger finding that became ticgit
+//! 3b4d15: a complete, valid, `unrar`-verified volume set could not be
+//! extracted by **any** public path, because UnRAR reports one file header
+//! per volume and the crate read them as distinct entries. That is fixed —
+//! `walk_entries` folds continuation headers into their predecessor — and
+//! these tests are its regression surface.
+//!
+//! The fold has to reach the *extraction* walks too, not only the listing
+//! walk, and `PARTS` cannot show it: a set of one logical entry lets every
+//! walk reach its target before a continuation header is ever miscounted.
+//! `TAIL_PARTS` is the shape that can, and
+//! `split_entry_followed_by_another_extracts_by_id_and_name` is where it is
+//! pinned.
 
 #![cfg(feature = "rar-support")]
 
@@ -37,6 +46,20 @@ const PARTS: [&str; 3] = [
     "test_multivol.part3.rar",
 ];
 
+/// A set whose first entry is split across all three volumes and whose second
+/// entry follows it. `PARTS` holds one logical entry, so every walk reaches
+/// its target before a continuation header can be miscounted; this set is the
+/// one that can show index drift.
+const TAIL_PARTS: [&str; 3] = [
+    "test_multivol_tail.part1.rar",
+    "test_multivol_tail.part2.rar",
+    "test_multivol_tail.part3.rar",
+];
+
+/// The literal content of `tail_marker.txt` in `TAIL_PARTS`, from
+/// `scripts/generate-rar-fixtures.sh`.
+const TAIL_CONTENT: &[u8] = b"tail marker after the split file\n";
+
 /// Copy the named volumes into a fresh directory and return its path plus the
 /// path of the first volume, which is where a reader must start.
 fn stage_volumes(names: &[&str]) -> (PathBuf, PathBuf) {
@@ -45,7 +68,7 @@ fn stage_volumes(names: &[&str]) -> (PathBuf, PathBuf) {
         fs::copy(common::fixture(name), dir.join(name))
             .unwrap_or_else(|e| panic!("staging {name}: {e}"));
     }
-    (dir.clone(), dir.join(PARTS[0]))
+    (dir.clone(), dir.join(names[0]))
 }
 
 fn subdir(dir: &Path, name: &str) -> PathBuf {
@@ -54,11 +77,6 @@ fn subdir(dir: &Path, name: &str) -> PathBuf {
     path
 }
 
-/// A file split across three volumes is listed as **three** entries, one per
-/// volume: same `path`, same declared `size`, different `compressed_size` and
-/// different `crc32` (each volume's own fragment). That is UnRAR surfacing the
-/// per-volume file header rather than one logical entry, and it is the root of
-/// every extraction failure below — the duplicate path is what the extraction
 /// A complete set lists as **one logical entry**, not one per volume.
 ///
 /// UnRAR surfaces a per-volume file header for a split file: three headers
@@ -169,6 +187,97 @@ fn complete_volume_set_extracts_through_every_public_route() {
         (report.total_entries, report.validated, report.failed.len()),
         (1, 1, 0),
         "it used to report three healthy entries for an archive nothing could read"
+    );
+
+    common::cleanup(&dir);
+}
+
+/// A split entry followed by another entry extracts by id and by name.
+///
+/// This is the half of ticgit 3b4d15 that `PARTS` cannot reach. UnRAR
+/// collapses continuation headers only under `RAR_OM_LIST` (`dll.cpp`), and
+/// this crate opens with `RAR_OM_EXTRACT`, so the extraction walks see every
+/// per-volume header. Extracting a split entry is safe — `ExtractCurrentFile`
+/// merges the volumes internally and consumes all its parts — but *skipping*
+/// one is not: `ProcessFile`'s `RAR_SKIP` branch on a non-solid archive calls
+/// `MergeArchive(..,'L')` and returns positioned on the part-2 header, which
+/// still carries `RHDF_SPLITBEFORE`.
+///
+/// A walk that counts that header as another entry runs one index ahead of
+/// the coalesced listing, and the drift guard then reports
+/// `listing drift` — blaming an on-disk rewrite that never happened — for a
+/// set `unrar t` calls healthy. Both routes below have to skip past the split
+/// entry to reach `tail_marker.txt`, which is exactly the path that breaks.
+#[test]
+#[serial_test::file_serial(rar)]
+fn split_entry_followed_by_another_extracts_by_id_and_name() {
+    let (dir, first) = stage_volumes(&TAIL_PARTS);
+    let archive = Archive::open(&first).expect("open the first volume");
+
+    let entries = archive.list_files().expect("list");
+    assert_eq!(
+        entries.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+        vec!["volume_payload.bin", "tail_marker.txt"],
+        "the split entry must coalesce and the tail entry must follow it: {entries:?}"
+    );
+
+    // By id. The walk skips the split entry, so it meets the continuation
+    // header before it reaches index 1.
+    let ids_dest = subdir(&dir, "ids");
+    archive
+        .extract_by_ids(&[1], common::default_extraction_options(ids_dest.clone()))
+        .expect("extract_by_ids must skip past a split entry without losing its place");
+    assert_eq!(
+        fs::read(ids_dest.join("tail_marker.txt")).expect("read the tail entry"),
+        TAIL_CONTENT
+    );
+    assert!(
+        !ids_dest.join("volume_payload.bin").exists(),
+        "only the selected id may be written"
+    );
+
+    // By name, which seeks to the same position through a different walk.
+    let file_dest = subdir(&dir, "file");
+    archive
+        .extract_file(
+            "tail_marker.txt",
+            common::default_extraction_options(file_dest.clone()),
+        )
+        .expect("extract_file must seek past a split entry without losing its place");
+    assert_eq!(
+        fs::read(file_dest.join("tail_marker.txt")).expect("read the tail entry"),
+        TAIL_CONTENT
+    );
+
+    assert_eq!(
+        archive
+            .extract_to_memory("tail_marker.txt")
+            .expect("extract_to_memory shares the by-name walk"),
+        TAIL_CONTENT
+    );
+
+    // The unselective route was already correct — nothing is skipped, so the
+    // index never drifts — and is asserted here as the control.
+    let all_dest = subdir(&dir, "all");
+    archive
+        .extract_all(common::default_extraction_options(all_dest.clone()))
+        .expect("extract_all");
+    assert_eq!(
+        fs::read(all_dest.join("tail_marker.txt")).expect("read the tail entry"),
+        TAIL_CONTENT
+    );
+    assert!(
+        fs::metadata(all_dest.join("volume_payload.bin"))
+            .expect("stat the split entry")
+            .len()
+            > 20_480,
+        "the split entry must still be reassembled across volumes"
+    );
+
+    let report = archive.validate_integrity().expect("validate");
+    assert_eq!(
+        (report.total_entries, report.validated, report.failed.len()),
+        (2, 2, 0)
     );
 
     common::cleanup(&dir);

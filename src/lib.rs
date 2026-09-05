@@ -177,9 +177,13 @@
 //! Standalone `.gz`/`.bz2`/`.xz` files are supported for read/extract via libarchive's
 //! raw-format binding (MADR-0019). Creation of standalone compressed files is out of scope
 //! per AD 0018; use the TAR compound variants to produce compressed archives.
-//! ZIP encryption is read-only (MADR-0027): `open_encrypted()` reads
-//! AES/ZipCrypto archives, but `Archive::create()` deliberately rejects password-based
-//! ZIP creation with `OperationBlocked`.
+//! ZIP encryption is read-only today (MADR-0027): `open_encrypted()` reads
+//! WinZip AES and legacy ZipCrypto archives, and `Archive::create()` refuses
+//! password-based ZIP creation with `OperationBlocked`. That refusal is a
+//! **hold, not a settled rejection** — MADR-0027's original permanent ban was
+//! amended to "deferred behind an explicit default-off opt-in", and the owner
+//! paused that opt-in on 2026-09-01. The `zip` crate can write AES entries, so
+//! nothing upstream prevents it.
 //!
 //! ## Performance
 //!
@@ -234,6 +238,7 @@ pub(crate) mod modification;
 /// `Read + Seek` view of a byte range inside a larger file — how an SFX
 /// payload is opened where it lies instead of being copied out (DEF-001).
 pub(crate) mod payload_window;
+pub(crate) mod volume_chain;
 
 #[cfg(test)]
 pub(crate) mod test_utils;

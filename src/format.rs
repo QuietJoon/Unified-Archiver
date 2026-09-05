@@ -406,7 +406,18 @@ impl ArchiveFormat {
             ArchiveFormat::SevenZip => FormatCapabilities {
                 encryption_read: Support::Full,
                 encryption_write: Support::None,
-                multipart_read: Support::None,
+                // `Full` since 2026-09-05 (OI-0080-004). A 7z volume set is a
+                // plain byte split of one archive — the format specification
+                // has no volume concept at all, and 7-Zip itself handles
+                // `.001` sets through a signature-less pseudo-format whose
+                // reader is a bare concatenating adapter. Verified on this
+                // machine: `7zz a -v64k` output `cat`-ed back together `cmp`s
+                // identical to the same content written unsplit. So the
+                // backend reads a set through `VolumeChain`, which presents
+                // the members as one source, and nothing format-specific was
+                // needed. Writing split sets is a different job and is still
+                // `None`.
+                multipart_read: Support::Full,
                 multipart_write: Support::None,
                 // Modify is a copy-on-write rewrite that drops solid/block
                 // layout, encryption, and several 7z-specific metadata
@@ -620,7 +631,13 @@ impl ArchiveFormat {
     /// - **Standalone Gzip / Bzip2 / Xz / Zst / Lz4 / Lzma**: AD 0018
     ///   keeps standalone single-file compressor *creation* out of scope;
     ///   the codecs are only producible via the TAR.* compound formats.
-    /// - **ISO**: libarchive's ISO support is read-only.
+    /// - **ISO**: not creatable here, and **the reason is not recorded
+    ///   anywhere**. This bullet used to say "libarchive's ISO support is
+    ///   read-only", which is false: the linked libarchive declares and
+    ///   exports `archive_write_set_format_iso9660`. The crate simply never
+    ///   binds that symbol, and no decision record says whether ISO writing
+    ///   is out of scope or merely unbuilt. See
+    ///   `docs/CAPABILITY_MATRIX.md`, "Reasons not established".
     ///
     /// TAR.ZST / TAR.LZ4 / TAR.LZMA creation requires a libarchive built
     /// with the matching codec library; a build without it fails loudly at
@@ -1878,8 +1895,18 @@ mod tests {
         assert!(ArchiveFormat::Rar.supports_multipart());
         assert!(ArchiveFormat::Rar5.supports_multipart());
 
-        // 7z multipart reading is not implemented in the sevenz-rust2 backend
-        assert!(!ArchiveFormat::SevenZip.supports_multipart());
+        // 7z reads split sets since OI-0080-004: `.7z.001`, `.7z.002`, … is a
+        // byte split of one archive, so the backend reads the concatenation.
+        assert!(ArchiveFormat::SevenZip.supports_multipart());
+        assert_eq!(
+            ArchiveFormat::SevenZip.capabilities().multipart_read,
+            Support::Full
+        );
+        assert_eq!(
+            ArchiveFormat::SevenZip.capabilities().multipart_write,
+            Support::None,
+            "reading a split set and writing one are different jobs"
+        );
         assert!(!ArchiveFormat::Tar.supports_multipart());
         assert!(!ArchiveFormat::TarGzip.supports_multipart());
         assert!(!ArchiveFormat::Iso.supports_multipart());

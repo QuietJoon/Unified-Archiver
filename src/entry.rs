@@ -186,8 +186,14 @@ pub struct ArchiveEntry {
     ///
     /// - libarchive: populated from `archive_entry_symlink` /
     ///   `archive_entry_hardlink` when present.
-    /// - ZIP / 7z / UnRAR: populated when the backend's
-    ///   metadata API exposes the target; otherwise `None`.
+    /// - ZIP / 7z / UnRAR: **never populated — always `None`**, even for an
+    ///   entry those backends classify as `Symlink` or `HardLink`. There is no
+    ///   conditional here; libarchive is the only backend that writes this
+    ///   field at all. That makes such an entry violate this type's own
+    ///   documented invariant (a link must carry a target), which
+    ///   `ArchiveEntryBuilder::build_checked` would reject — the backends reach
+    ///   the field directly and so escape the check. Tracked in
+    ///   `docs/CAPABILITY_MATRIX.md`.
     ///
     /// Always `None` for `EntryType::File` and `EntryType::Directory`.
     pub link_target: Option<String>,

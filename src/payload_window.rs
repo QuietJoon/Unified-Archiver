@@ -80,6 +80,27 @@ impl<R: Read + Seek> PayloadWindow<R> {
     pub(crate) fn len(&self) -> u64 {
         self.len
     }
+
+    /// A window from `start` to the end of a source whose total length is
+    /// already known.
+    ///
+    /// The sized variant of [`Self::from_file`], for sources that cannot be
+    /// `fstat`-ed because they are not one file — a volume chain, whose length
+    /// is the sum of its parts. The same "start past the end" refusal applies,
+    /// and for the same reason: a caller asking for a payload that cannot exist
+    /// is a bug worth surfacing rather than an empty window worth serving.
+    pub(crate) fn from_sized(inner: R, start: u64, total_len: u64) -> std::io::Result<Self> {
+        let len = total_len.checked_sub(start).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "payload offset {start} is past the end of the {total_len}-byte source it \
+                     is supposed to index into"
+                ),
+            )
+        })?;
+        Ok(Self::new(inner, start, len))
+    }
 }
 
 impl PayloadWindow<std::fs::File> {

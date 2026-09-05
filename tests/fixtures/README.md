@@ -125,10 +125,48 @@ percentage for every archive.
 - **Purpose**: the missing-volume regression (ticgit d3cfce) and the
   volume-set contract in `tests/rar_multivolume_test.rs`
 
-`unrar t` on part1 passes for the complete set. This crate lists the split
-file as one entry *per volume* and cannot extract it by any public path; that
-is documented in `tests/rar_multivolume_test.rs` and is why
-`ArchiveFormat::Rar`'s `multipart_read` is `Support::Partial` (ticgit 3b4d15).
+`unrar t` on part1 passes for the complete set. This crate folds the
+per-volume headers into one logical entry and extracts it through every public
+route, which is why `ArchiveFormat::Rar`'s `multipart_read` is `Support::Full`
+(ticgit 3b4d15). The contract is pinned in `tests/rar_multivolume_test.rs`.
+
+#### test_multivol_tail.part1.rar / .part2.rar / .part3.rar (split entry, then a second entry)
+
+- **Generation**: `rar a -m0 -v20k -ep test_multivol_tail.rar volume_payload.bin tail_marker.txt`
+- **Payload**: the same 48 KiB `volume_payload.bin` as above, split across all
+  three volumes, followed by `tail_marker.txt` (33 bytes) in the last volume
+- **Purpose**: the set above holds **one** logical entry, so every walk reaches
+  its target before a continuation header can be miscounted. This one has
+  something *after* the split entry, which is what makes index drift
+  observable: a walk that skips the split entry meets the next volume's header
+  — still carrying `RHDF_SPLITBEFORE` — and, if it counts it, runs one index
+  ahead of the coalesced listing. Pinned by
+  `split_entry_followed_by_another_extracts_by_id_and_name` (ticgit 3b4d15
+  remainder).
+- **Note**: argument order is storage order, so `volume_payload.bin` must be
+  listed before `tail_marker.txt` when regenerating, or the shape is lost.
+
+#### test_split.7z.001 / .002 / .003 / .004 + test_split_whole.7z (7z volume set)
+
+- **Generation**: `scripts/generate-7z-fixtures.sh`
+  (`7zz a -mx0 -v64k test_split.7z split_payload.bin tail_marker.txt`, plus the
+  same content written unsplit as `test_split_whole.7z`)
+- **Payload**: 200,000 random bytes (`split_payload.bin`) followed by
+  `tail_marker.txt`. Random and `-mx0` (store) so the payload is
+  incompressible and `-v64k` actually splits it; a compressible payload would
+  collapse into one volume.
+- **Purpose**: 7z multi-volume reading (OI-0080-004), pinned by
+  `tests/sevenz_multivolume_test.rs`.
+- **The property these encode**: a 7z volume set is a **plain byte split of one
+  archive**. `cat test_split.7z.0* > rejoined.7z` produces a valid archive, and
+  only `.001` carries the 7z magic — every later part is raw payload with no
+  header of its own. That is why this crate reads a set by concatenating the
+  members rather than by parsing per-volume metadata, and it is the opposite of
+  RAR, where each volume is a self-describing archive.
+- **Why the `_whole` sibling exists**: it is the differential control. The
+  split set and the unsplit archive hold identical content, so a reassembly bug
+  shows up as a difference between them rather than having to be recognised in
+  isolation.
 
 ### test_multi.rar (single RAR archive with several entries)
 - **Format**: RAR 5, 8616 bytes

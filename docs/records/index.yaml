@@ -398,6 +398,18 @@ records:
     file: AD-0070-ci-means-recorded-per-platform-verification.md
     ois: [OI-0065-001, OI-0080-001, OI-0058-001]
     mentions: [AD-0046, AD-0058, MADR-0029]
+  - id: AD-0071
+    type: AD
+    title: "AD 0071: libarchive owns ZIP modification; the zip crate owns everything else ZIP"
+    status: active
+    file: AD-0071-libarchive-owns-zip-modification.md
+    mentions: [DCR-009, AD-0058]
+  - id: AD-0072
+    type: AD
+    title: "AD 0072: The uniform interface is the product; the crate absorbs dependency gaps"
+    status: active
+    file: AD-0072-the-uniform-interface-is-the-product.md
+    mentions: [AD-0058, AD-0071, DCR-009]
   - id: DCR-001
     type: DCR
     title: "Design Change Record"

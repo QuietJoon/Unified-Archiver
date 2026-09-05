@@ -103,3 +103,45 @@ it — whether standalone-compressor creation is ever added is untouched by this
 "AD 0019", raw-format verification and stem normalization); OI-0026-003 (read support);
 OI-0078-001 (ZST/LZ4/LZMA fixture coverage); R0075-0031 (variant addition, creation deferral closed
 2026-08-04); DCR-003 (raw-LZMA extension fallback, since `.lzma` has no stable short magic).
+
+## Amendment (2026-09-05, re-affirmed under AD-0072)
+
+AD-0072 made the uniform interface the crate's stated purpose and declared that
+"fewer dependencies", "no user-visible gain on its own" and "accepted
+limitation" are no longer sufficient grounds for leaving one format behaving
+differently from the others. A re-examination run against that record flagged
+this one: standalone `.gz` / `.bz2` / `.xz` / `.zst` / `.lz4` / `.lzma`
+**creation** is absent while `.tar.gz` and friends are creatable, and libarchive
+— already linked here — can emit those same codecs as single streams through
+`archive_write_set_format_raw`. On that reading the gap looked absorbable rather
+than declinable.
+
+**That reading was wrong, and the owner has re-affirmed this record.** The
+finding inferred *scope* from *capability*: because the dependency could do it,
+it concluded the crate should. AD-0072's own amendment now states the rule the
+finding missed — the crate provides the same interface for every feature **and
+documents what cannot be done as something that cannot be done**. Whether a
+capability is offered at all is a scope decision and the owner's to make; the
+absorb-the-cost rule governs only *within* a capability the project has decided
+to offer.
+
+**Standalone single-file compressor creation is out of scope, and stays out.**
+It is not deferred work, not a tracked gap, and not a candidate for a second
+dependency. The codecs remain producible through the TAR.* compound formats,
+which is the shape this crate offers.
+
+What this record is therefore held to is the honesty half, and the tree already
+meets it:
+
+- `FormatCapabilities` for `Gzip | Bzip2 | Xz | Zst | Lz4 | Lzma` reports
+  `compression_write: Support::None` — the same question, asked the same way, as
+  for every other format.
+- `ArchiveFormat::can_create()` excludes those variants, and its rustdoc names
+  this record as the reason.
+- `Archive::create` consults that predicate first, so the refusal is a
+  facade-level `OperationBlocked` naming the limitation rather than a
+  backend-specific error leaking out of libarchive.
+
+A caller therefore discovers the "no" by asking the ordinary capability
+question, which is what makes a documented limitation part of the uniform
+interface rather than a departure from it. No code change is owed.

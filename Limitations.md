@@ -55,7 +55,7 @@ Current caveats:
 - there is no crash-recovery journal; the operation is temporary-file + atomic-rename based
 - because commit installs a **new inode** via atomic rename, only the original archive's Unix **mode bits** are preserved (copied onto the replacement to prevent access-widening). Ownership (uid/gid), POSIX ACLs, extended attributes / security labels (xattrs, SELinux), and the archive file's own timestamps are **not** carried across the replace — the new file has fresh ownership/xattrs and the rewrite's timestamps. Re-apply these yourself after commit if your workflow depends on them. A backup created with `with_backup` follows the same contract: it inherits the original's mode bits but not its ownership/ACLs/xattrs/timestamps.
 
-RAR, TAR-family, standalone compressed formats, and ISO are read-only.
+RAR, the TAR family, the standalone compressed formats, and ISO are **not modifiable**. (The TAR family *can* be created — this sentence is about modification only.)
 
 ## 3. Split-volume support varies by format
 
@@ -74,7 +74,7 @@ Not supported:
 
 - ZIP split volumes (`.z01`, `.z02`, ...) — name-level detection only; `detect_multipart` enumerates sibling file
   names and never opens a volume.
-- 7z numeric split volumes (`.001`, `.002`, ...) — not supported at all.
+- 7z numeric split volumes (`.001`, `.002`, ...) — **supported for reading since 2026-09-05.** Open the first part and the set lists and extracts as one archive; an incomplete set is refused by name before any bytes are read. Creating a split 7z is not supported.
 
 ## 4. Streaming is not uniformly bounded-memory
 

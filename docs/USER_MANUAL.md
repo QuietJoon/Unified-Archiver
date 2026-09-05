@@ -393,7 +393,7 @@ Related methods:
 
 ### Split archives
 
-**RAR / RAR5 volume sets extract end-to-end. No other split format does.**
+**RAR / RAR5 and 7z volume sets extract end-to-end. ZIP split volumes do not.**
 
 Open the **first** volume. A split file appears as one logical entry, and every read route reaches
 it — `extract_all`, `extract_file`, `extract_to_memory`, `extract_by_ids` — with UnRAR opening the
@@ -408,8 +408,20 @@ Two behaviours to know:
   truncated output file.
 
 ZIP split volumes (`.z01`, `.z02`, …) are name-level detection only — `detect_multipart` enumerates
-sibling file names and never opens a volume. 7z numeric split volumes (`.001`, `.002`, …) are not
-supported at all.
+sibling file names and never opens a volume, and no read route spans segments. A split ZIP is not a
+plain byte split (it carries a spanning marker and disk-relative central-directory offsets), so the
+concatenation approach that works for 7z does not apply.
+
+7z numeric split volumes (`.001`, `.002`, …) **read as one archive.** Open the first part; the set
+lists and extracts as the archive it is. A 7z volume set is a plain byte split — no part carries a
+header, a footer, or a volume number — so the members are read as their concatenation.
+
+An **incomplete** 7z set is refused by name, before any bytes are read. That is deliberate: a byte
+split has nothing marking a boundary, so a missing middle volume cannot be noticed while reading —
+the later parts simply land at the wrong offsets and the archive would decode as corruption. You
+would be sent looking for a damaged file instead of a missing one.
+
+Creating a split archive is not supported for any format.
 
 ### Standalone compressed files
 

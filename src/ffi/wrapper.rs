@@ -991,9 +991,31 @@ impl UnrarArchive {
         );
         let mut entry_idx: usize = 0;
 
-        while let Some(entry) = fresh.read_header()? {
+        while let Some((entry, flags)) = fresh.read_header_with_flags()? {
             // Rate-limited cancellation check before extracting.
             ctx.poll_between_entries()?;
+
+            // 3b4d15: a continuation header is the same file resumed in the
+            // next volume, not another entry. `walk_entries` folds these into
+            // their predecessor, so the cached listing counts one entry where
+            // UnRAR reports one header per volume — and this walk has to fold
+            // them the same way or its index runs ahead of that listing.
+            //
+            // They only reach this walk when an entry is SKIPPED rather than
+            // extracted: `ExtractCurrentFile` merges the volumes itself and
+            // consumes every part, while `ProcessFile`'s `RAR_SKIP` branch on
+            // a non-solid archive calls `MergeArchive(..,'L')` and returns
+            // positioned on the next volume's header. Counting that header
+            // would make the drift guard below report a rewrite that never
+            // happened, for an archive `unrar t` calls healthy.
+            //
+            // `entry_idx > 0` mirrors `walk_entries`' "nothing to fold into"
+            // case: a continuation as the very first header means the caller
+            // opened a middle volume directly, and there it stands alone.
+            if flags & RHDF_SPLITBEFORE != 0 && entry_idx > 0 {
+                fresh.skip_entry()?;
+                continue;
+            }
 
             // Selection filter: skip entries whose positional index is not in
             // the set (RAR requires sequential traversal; non-selected entries
@@ -1206,8 +1228,30 @@ impl UnrarArchive {
         // R0076-0059: seek by stable listing position, never by name scan.
         let mut entry_idx: usize = 0;
         loop {
-            match fresh.read_header()? {
-                Some(entry) => {
+            match fresh.read_header_with_flags()? {
+                Some((entry, flags)) => {
+                    // 3b4d15: a continuation header is the same file resumed in the
+                    // next volume, not another entry. `walk_entries` folds these into
+                    // their predecessor, so the cached listing counts one entry where
+                    // UnRAR reports one header per volume — and this walk has to fold
+                    // them the same way or its index runs ahead of that listing.
+                    //
+                    // They only reach this walk when an entry is SKIPPED rather than
+                    // extracted: `ExtractCurrentFile` merges the volumes itself and
+                    // consumes every part, while `ProcessFile`'s `RAR_SKIP` branch on
+                    // a non-solid archive calls `MergeArchive(..,'L')` and returns
+                    // positioned on the next volume's header. Counting that header
+                    // would make the drift guard below report a rewrite that never
+                    // happened, for an archive `unrar t` calls healthy.
+                    //
+                    // `entry_idx > 0` mirrors `walk_entries`' "nothing to fold into"
+                    // case: a continuation as the very first header means the caller
+                    // opened a middle volume directly, and there it stands alone.
+                    if flags & RHDF_SPLITBEFORE != 0 && entry_idx > 0 {
+                        fresh.skip_entry()?;
+                        continue;
+                    }
+
                     let current_idx = entry_idx;
                     entry_idx += 1;
                     if current_idx != target_id {
@@ -1311,9 +1355,15 @@ impl UnrarArchive {
 
     /// Extract a single file to memory
     ///
-    /// Note: The UnRAR API requires extraction to disk first, so this method
-    /// extracts to a temporary directory and reads the result into memory.
-    /// This is a fundamental limitation of the UnRAR SDK.
+    /// Note: this extracts to a temporary directory and reads the result
+    /// back into memory.
+    ///
+    /// That is **not** an UnRAR limitation, though this comment used to say so.
+    /// The vendored SDK hands each decoded block to the `UCM_PROCESSDATA`
+    /// callback for any operation other than `RAR_SKIP`, and this crate already
+    /// relies on that callback elsewhere to abort mid-decode on a size cap. The
+    /// real obstacle is adapting a *push* callback into a *pull* `Read`, which
+    /// is ordinary work rather than an upstream wall (DEF-004).
     ///
     /// Concurrency: the staging directory is owned by `tempfile::TempDir`,
     /// which generates a collision-free name and removes the entire tree
@@ -1465,9 +1515,17 @@ impl UnrarArchive {
 
     /// Extract a single file to a stream
     ///
-    /// Note: Currently loads the entire file into memory before wrapping in a cursor.
-    /// The UnRAR API requires extraction to disk first, so true streaming is not possible
-    /// without a fundamental change to the extraction pipeline.
+    /// Note: currently stages the entry to a temporary file on disk, then
+    /// loads it into memory before wrapping it in a cursor. Of the three
+    /// non-libarchive backends this is the only one that touches disk, so it is
+    /// the one that fails the crate's definition of streaming outright rather
+    /// than only on the memory axis.
+    ///
+    /// The previous wording — "the UnRAR API requires extraction to disk first"
+    /// — was wrong, and wrong in the direction that stops someone fixing it: it
+    /// names an upstream wall where there is none. The SDK emits decoded blocks
+    /// through `UCM_PROCESSDATA`; turning that push callback into a pull `Read`
+    /// is the actual work (DEF-004).
     pub fn extract_to_stream(
         &self,
         file_path: &str,

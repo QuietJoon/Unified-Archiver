@@ -186,10 +186,11 @@ Per-format detail is in
 All native artifacts — UnRAR object files and the static `unrar` library — are written
 under `OUT_DIR`. The vendored source tree is left untouched by the build.
 
-The repository ships a tracked `.cargo/config.toml` whose `[build]` `target-dir` is an
-absolute path, `/Volumes/Common/QJoon/Unified-Archiver/target`. A clone on another
-machine therefore writes its Cargo artifacts to that path rather than to `./target`,
-and Cargo fails before compiling anything if that path is not writable.
+The repository ships `.cargo/config.toml.example`, not a working `.cargo/config.toml`.
+The real file is machine-local and git-ignored, so a fresh clone builds into `./target`
+with no configuration at all. Copy the example and edit it only if you want a shared
+target directory; because `[build]` `target-dir` there is an absolute path, a value
+that is not writable on your machine makes Cargo fail before it compiles anything.
 
 ## Diagnostics the build emits
 
@@ -197,12 +198,20 @@ and Cargo fails before compiling anything if that path is not writable.
 |---|---|---|
 | stderr | `unified-archive: using Homebrew libarchive from {prefix}` | macOS host, a Homebrew prefix carrying the dylib was found |
 | stderr | `unified-archive: building vendored UnRAR (cc) for target_os={target_os}` | `rar-support` enabled |
-| `cargo:warning` | `Windows libarchive linking will be configured in future implementation` | Windows host |
+| `cargo:warning` | `Windows libarchive linking will be configured in future implementation` | Windows host, **and** no libarchive link configuration was detected |
 | panic | `libarchive not found. Install it with: brew install libarchive` | macOS host, no Homebrew dylib and the pkg-config probe failed |
 | panic | `libarchive not found via pkg-config. Install libarchive development files: …` | non-macOS non-Windows host, pkg-config probe failed |
 | panic | `Failed to enumerate vendored UnRAR sources in {dir}`, `Failed to read a directory entry in vendored UnRAR sources {dir}`, or `Failed to stat vendored UnRAR source {path}` | `rar-support` enabled and the vendored tree cannot be walked |
 
 Both stderr lines are visible with `cargo build -vv`.
+
+The Windows `cargo:warning` is conditional, not unconditional. `build.rs` first looks
+for evidence that linking has already been arranged — a `-L` link-search flag in the
+rustflags Cargo will pass on, or `archive.lib` / `libarchive.lib` / `archive_static.lib`
+present in a directory named by `LIBARCHIVE_LIB_DIR` or `LIB` — and stays silent when it
+finds any. It detects and never configures, so reading those variables decides only
+whether to warn. A build whose link was arranged externally therefore does not get told
+it is unconfigured.
 
 ## Platform support status
 
@@ -212,8 +221,10 @@ not release-verified:
 - The vendored UnRAR half is done. `build.rs` compiles the MSVC source set natively,
   and the earlier `make`-only build — along with the Windows `panic!` that replaced it
   as a stopgap — is gone.
-- The libarchive half is open. On Windows the discovery block is a warning-only no-op,
-  so nothing links libarchive: the libarchive-backed formats (the TAR family, ISO, the
+- The libarchive half is open. On Windows `build.rs` performs no libarchive discovery of
+  its own — it only reports whether link configuration appears to be present — so unless
+  you supply that configuration yourself nothing links libarchive: the libarchive-backed
+  formats (the TAR family, ISO, the
   standalone compressed streams, and non-ZIP creation) cannot be built there without
   externally supplied link configuration. This is OI-0065-001 in
   `docs/project/open-issues.md`, whose remaining required actions are vcpkg-based
@@ -235,8 +246,9 @@ consulted in this order:
 
 1. `UNIFIED_ARCHIVE_TEMP_DIR`, if the path exists or can be created.
 2. `temp_dir` from the first `.unified-archive.toml` found by walking up from the
-   current directory, if that path exists or can be created. The tracked
-   `.unified-archive.toml` at the repository root sets it to `/Volumes/Temp/claude`.
+   current directory, if that path exists or can be created. `.unified-archive.toml` is
+   machine-local and git-ignored; `.unified-archive.toml.example` is what ships, and it
+   carries a placeholder path rather than a real one.
 3. `std::env::temp_dir()`.
 
 Building and running the suite from a clean checkout is covered by

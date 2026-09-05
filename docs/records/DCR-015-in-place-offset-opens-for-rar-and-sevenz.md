@@ -380,3 +380,71 @@ The file carries facade-level coverage for both new arms:
 The second RAR test is the load-bearing one: it pins the *decline*, so an over-eager signature scan
 that latched onto a marker inside the stub would fail the suite rather than silently open the wrong
 bytes. The ZIP decoy case (`decoy_header_at_the_offset_declines_in_place`) does the same for ZIP.
+
+## Amendment (2026-09-05, the libarchive arm is decided, not deferred)
+
+This record left the libarchive arm "documented and filed", and `mvp-scope.md`
+carried it as "blocked on gate policy, not on FFI ... which is new policy and
+wants its own review". A ticket comment then claimed the policy was approved,
+which nothing in the repository corroborated. The owner has now settled it, and
+asked for a decision rather than another note saying the policy is undecided.
+
+**Decision: in-place opening is for ZIP, RAR and 7z. libarchive-backed payloads
+stage a copy, and that is the answer, not a pending item.**
+
+### What this covers, named properly
+
+The records described the affected class as "the TAR family, ISO, and the raw
+single-file readers", which oversells it and is why the item read as agonising
+over nothing. Plain-tar and ISO self-extractors are effectively a non-thing
+here: TAR was deliberately removed from the SFX signature table (the tests
+assert that `ustar` at any offset must not match) and ISO was never in it, so
+`detect_sfx` cannot discover such a file at all.
+
+The real class is exactly one thing: **makeself installers** — `.run` / `.sh`
+files that are a shell stub followed by a gzip-compressed tar. NVIDIA drivers,
+CUDA and VirtualBox's Linux packages ship this way and are routinely multi-GB.
+Every link already exists — the gzip signature is in the SFX table, `.run` and
+`.sh` are admitted by `extension_suggests_executable`, and gzip/tar dispatch to
+libarchive — so a makeself installer opens correctly today and pays a
+full-payload copy to do it.
+
+**So the exclusion is explicit from here on**, rather than emerging from the
+fact that no arm happens to match a gzip hint.
+
+### Why this way
+
+Every in-place arm decides **before** a backend is constructed, from magic bytes
+at the offset, and returns "stage it" on any doubt. libarchive cannot be
+questioned that cheaply: confirming it would open the payload means constructing
+a reader and reading a header, then discarding both when it fails. That is
+speculative backend construction — the shape every existing arm was written to
+avoid — and it spends a real header read on every decline, including on the
+files that then stage anyway.
+
+### Its standing under AD-0072, stated honestly
+
+This is a **performance** difference, not an interface one. `open_at_offset`
+and `open_sfx` accept a makeself installer, list it and extract from it, with
+the same call spelling and the same errors as any other SFX; what differs is
+that the payload is copied first. The uniform interface is intact.
+
+AD-0072 still applies to it, though, and pretending otherwise would repeat the
+mistake this whole review exists to correct: a large per-format performance
+difference *inside* an offered capability is the second trigger that record
+names. So this decision rests on cost and shape — not on "no user-visible gain",
+which would be the inverted reasoning — and it is reconsiderable if the cost
+becomes real for someone. What it is not is open. Nothing is pending, nobody is
+waiting on a policy, and `try_open_in_place` should carry the exclusion as a
+documented arm with this reasoning attached.
+
+### Follow-through
+
+- `mvp-scope.md`'s "blocked on gate policy" row is superseded by this amendment.
+- Ticket `05e2dea4` is closed by this decision rather than by implementation;
+  closing it is its filer's call, and the ticket comment claiming an unrecorded
+  2026-09-03 approval should be read as superseded by this record either way.
+- The staged-format label stays coarse for makeself (`Gzip` rather than
+  `TarGzip`, taken from the detected payload signature); the entry listing is
+  correct because libarchive bids tar-under-gzip itself. That is a separate,
+  smaller wart and is not addressed here.

@@ -14,6 +14,7 @@ use crate::fs_identity::{FileIdentity, identity_drift};
 use crate::options::ProgressCallback;
 use crate::payload_window::PayloadWindow;
 use crate::security::{canonicalize_dest_base, sanitize_entry_path, sanitize_entry_path_with_base};
+use crate::volume_chain::VolumeChain;
 use once_cell::sync::OnceCell;
 use sevenz_rust2::{ArchiveReader, Password};
 use std::path::{Path, PathBuf};
@@ -261,7 +262,88 @@ impl SevenZArchive {
     /// identity contract rather than to offset reads, and belongs to
     /// its own ticket alongside the same move for the other backends.
     /// The residual window is unchanged by this ticket, not widened.
-    fn open_reader(&self, op: &'static str) -> Result<ArchiveReader<PayloadWindow<std::fs::File>>> {
+    /// The source this handle reads from: one file, or the concatenation of a
+    /// numerically split volume set.
+    ///
+    /// **Why this is cheap for the common case.** A `.7z` with no numeric
+    /// suffix cannot be a volume member, so the name is checked first and an
+    /// ordinary archive never pays for a directory scan.
+    ///
+    /// **Why completeness is decided here and not while reading.** A byte-split
+    /// set has nothing in its bytes to mark a boundary, so a missing middle
+    /// volume is invisible to the reader — the later parts simply land at the
+    /// wrong offsets and the archive reads as corrupt. That is the opposite of
+    /// RAR, where a volume names itself and its absence is reportable. So the
+    /// set is judged complete *before* a chain is built, and an incomplete one
+    /// is refused by name here rather than surfacing later as "Invalid 7z",
+    /// which would send the caller looking for a damaged file instead of a
+    /// missing one.
+    fn volume_chain_for(&self, op: &'static str) -> Result<VolumeChain> {
+        let Some(paths) = self.volume_set_paths(op)? else {
+            let file = std::fs::File::open(&self.path)
+                .map_err(|e| ArchiveError::io("open", self.path.clone(), e))?;
+            return VolumeChain::single(file)
+                .map_err(|e| ArchiveError::io("measure", self.path.clone(), e));
+        };
+        VolumeChain::open(&paths).map_err(|e| ArchiveError::io("open volume", self.path.clone(), e))
+    }
+
+    /// The ordered member paths when `self.path` belongs to a complete numeric
+    /// volume set, or `None` when it is an ordinary single-file archive.
+    fn volume_set_paths(&self, op: &'static str) -> Result<Option<Vec<PathBuf>>> {
+        use crate::format::multipart::{VolumeScheme, parse_volume_name, parse_volume_set_for};
+
+        // Cheap gate: only a `.NNN`-suffixed name can be a member.
+        let name = self.path.file_name().map(|n| n.to_string_lossy());
+        let is_numeric_member = name
+            .as_deref()
+            .and_then(parse_volume_name)
+            .is_some_and(|parsed| parsed.scheme == VolumeScheme::Numeric);
+        if !is_numeric_member {
+            return Ok(None);
+        }
+
+        let Some(parent) = self.path.parent() else {
+            return Ok(None);
+        };
+        let scan_dir = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        let siblings: Vec<PathBuf> = std::fs::read_dir(scan_dir)
+            .map_err(|e| ArchiveError::io("scan for volumes", self.path.clone(), e))?
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .collect();
+
+        let report = parse_volume_set_for(&self.path, &siblings);
+        let Some(set) = report.set() else {
+            return Ok(None);
+        };
+        if set.scheme != VolumeScheme::Numeric {
+            return Ok(None);
+        }
+        let paths = set.paths();
+        if paths.len() <= 1 {
+            // A lone `.001` is just a file with an odd name.
+            return Ok(None);
+        }
+        if !report.is_complete() {
+            return Err(ArchiveError::operation_blocked(
+                op,
+                format!(
+                    "7z volume set {} is incomplete ({:?}). A split 7z set is a plain byte \
+                     split, so a missing volume cannot be detected once reading starts — it \
+                     would surface as a corrupt archive instead. Supply every volume and retry.",
+                    set.base,
+                    report.defects(),
+                ),
+            ));
+        }
+        Ok(Some(paths))
+    }
+
+    fn open_reader(&self, op: &'static str) -> Result<ArchiveReader<PayloadWindow<VolumeChain>>> {
         self.check_identity_if_bound(FileIdentity::capture(&self.path), op)?;
         let password = self
             .password
@@ -281,9 +363,13 @@ impl SevenZArchive {
         // below as an "Invalid 7z" format error. That is a deliberate
         // improvement in precision, not an accident: a file that cannot
         // be opened is not a format failure.
-        let file = std::fs::File::open(&self.path)
-            .map_err(|e| ArchiveError::io("open", self.path.clone(), e))?;
-        let window = PayloadWindow::from_file(file, self.payload_offset)
+        // OI-0080-004: a 7z volume set is a byte split of one archive, so the
+        // source is the concatenation of its parts. `volume_chain_for` returns
+        // a chain of one for an ordinary archive, which reads exactly as the
+        // `File` did before — the split case is not a second code path.
+        let chain = self.volume_chain_for(op)?;
+        let total_len = chain.total_len();
+        let window = PayloadWindow::from_sized(chain, self.payload_offset, total_len)
             .map_err(|e| ArchiveError::io("open payload window", self.path.clone(), e))?;
         let reader = ArchiveReader::new(window, password).map_err(|e| {
             let msg = e.to_string();
@@ -825,10 +911,17 @@ impl SevenZArchive {
         // file attributes; the upper 16 bits store Unix mode (when
         // produced by p7zip on Unix). Map the Windows half into
         // `attributes.windows`; the Unix permissions half is masked
-        // into `permissions` if non-zero. Other 7z fields (e.g.
-        // creation time / archive-specific flags) are not exposed
-        // by sevenz-rust2's `ArchiveEntry` yet — surface what we
-        // have and leave the rest as `None`.
+        // into `permissions` if non-zero.
+        //
+        // `created` and `accessed` are left `None`, and this comment used to
+        // blame the dependency for it. That was wrong: the pinned
+        // sevenz-rust2 publishes `has_creation_date` / `creation_date` and
+        // `has_access_date` / `access_date` as public fields, right beside
+        // the `has_last_modified_date` pair this function already reads, and
+        // the NT-time conversion helper it would need is already here. The
+        // gap is unbuilt, not upstream — naming the wrong kind is worse than
+        // naming none, because it tells the next reader to wait on something
+        // that is not the blocker.
         if entry.has_windows_attributes {
             let win_attrs = entry.windows_attributes;
             entry_parsed.permissions = Self::entry_unix_mode(entry);

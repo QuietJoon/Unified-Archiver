@@ -4,6 +4,21 @@
 
 A cross-platform Rust library providing a unified interface for archive inspection, extraction, and creation. Write code once that automatically works for all supported archive formats.
 
+## Why this library exists
+
+**The uniform interface is the product.** You write one piece of code and it works across ZIP, 7z, RAR, the TAR family, ISO and the standalone compressed streams. Everything else here is in service of that.
+
+That goal decides how backends are chosen:
+
+- **One dependency per format is preferred, not required.** Where a single library covers a format completely and performs well, that is what is used.
+- **Where it does not, this crate uses more than one and pays the cost itself.** The two triggers are a dependency that cannot provide every feature, and a large performance difference. In either case the extra code, testing and maintenance live here — so that the *interface* stays the same across formats. Absorbing that cost is the job, not a sign of a design that failed to settle.
+- **What cannot be done is documented as something that cannot be done.** The uniform interface is about shape and honesty, not coverage: the same call spelling, the same way of asking what a format supports (`FormatCapabilities`, `can_create()`), and the same way of refusing — a typed, facade-level error naming the limitation. Not every format supports every operation, and saying so plainly is part of the uniform interface rather than a departure from it.
+- **Within a capability the crate does offer, one format behaving worse than the others is a defect.** That is the case this library absorbs with a second dependency — not "format X's library cannot, so the API is narrower there".
+
+**The consequence, stated honestly:** absorbing per-format cost makes the crate large. The answer to that is compile-time feature selection — a consumer who wants only ZIP reading should compile only that — and not a narrower interface. Shrinking what the API can do in order to keep the build small is the wrong trade here.
+
+This is recorded as [AD 0072](docs/records/AD-0072-the-uniform-interface-is-the-product.md); the feature-split counterweight is [AD 0058](docs/records/AD-0058-feature-first-footprint-split-and-facade-crates.md).
+
 ## Features
 
 ✨ **Unified Interface** - Same API works identically for ZIP, 7z, RAR, RAR5, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, TAR.ZST, TAR.LZ4, TAR.LZMA, GZIP, BZIP2, XZ, ZST, LZ4, LZMA, and ISO
@@ -64,7 +79,7 @@ Keep `rar-support` enabled: the bundled UnRAR sources compile on Windows through
 the `cc` crate, so `--no-default-features` does not help with libarchive — it drops working RAR read support *and*
 the `v2-api` typed handles (`unified_archive::v2::{ReadArchive, WriteArchive, ModifyArchive}`), default-on since
 2026-09-03. The default feature set is `["rar-support", "v2-api"]`; `external-rar-create` is opt-in. RAR *creation* on Windows continues to work
-through the optional `external::RarCreator` (WinRAR CLI).
+through the optional `external::RarCreator` (WinRAR CLI) — though see the platform note below: the Windows build does not currently compile, so that lane is not reachable today either.
 
 ## Documentation
 
@@ -196,12 +211,19 @@ See the [User Manual](./docs/USER_MANUAL.md) and [Getting Started guide](./docs/
 
 ## Supported Formats
 
+> **The canonical answer is [`docs/CAPABILITY_MATRIX.md`](docs/CAPABILITY_MATRIX.md).**
+> It carries every format against every capability, a stated reason and a *kind*
+> (`format` / `upstream` / `scope` / `hold` / `platform` / `unbuilt`) for each thing
+> that is not supported, plus the per-platform and per-architecture differences. The
+> table below is the summary; where the two disagree, the matrix is right.
+
+
 | Format | Open / Inspect | Extract | Create via `Archive::create` | Modify | Encrypted Read | Notes |
 |--------|----------------|---------|------------------------------|--------|----------------|-------|
 | **RAR** | ✅ | ✅ | ❌ | ❌ | ✅ | RAR creation is not part of `Archive::create`; an optional Windows-only `external::RarCreator` exists behind `external-rar-create` |
 | **RAR5** | ✅ | ✅ | ❌ | ❌ | ✅ | Same caveats as RAR |
-| **ZIP** | ✅ | ✅ | ✅ | ✅ | ✅ | Encrypted ZIP creation is deliberately rejected in v0.4.0 |
-| **7z** | ✅ | ✅ | ✅ | ✅ | ✅ | Encrypted 7z creation is not supported |
+| **ZIP** | ✅ | ✅ | ✅ | △ | △ | Modify is lossy — symlinks, hard links and special entries are dropped from a commit. Encrypted read covers WinZip AES and ZipCrypto, not PKWARE Strong Encryption. Encrypted **creation** is paused, not refused on principle (MADR-0027) |
+| **7z** | ✅ | ✅ | ✅ | △ | ✅ | Modify is lossy twice over — it drops symlinks/hard links/special entries, and libarchive's 7z writer cannot reproduce BCJ/BCJ2/delta filters or AES. Encrypted **creation** is paused, not refused on principle (MADR-0027) |
 | **TAR** | ✅ | ✅ | ✅ | ❌ | ❌ | |
 | **TAR.GZ** | ✅ | ✅ | ✅ | ❌ | ❌ | |
 | **TAR.BZ2** | ✅ | ✅ | ✅ | ❌ | ❌ | |
@@ -215,12 +237,12 @@ See the [User Manual](./docs/USER_MANUAL.md) and [Getting Started guide](./docs/
 | **ZST** | ✅ | ✅ | ❌ | ❌ | ❌ | Standalone `.zst` is read/extract only |
 | **LZ4** | ✅ | ✅ | ❌ | ❌ | ❌ | Standalone `.lz4` is read/extract only |
 | **LZMA** | ✅ | ✅ | ❌ | ❌ | ❌ | Standalone `.lzma` is read/extract only |
-| **ISO** | ✅ | ✅ | ❌ | ❌ | ❌ | Read/extract only |
+| **ISO** | ✅ | ✅ | ❌ | ❌ | ❌ | Read/extract only. The reason is **not recorded** — libarchive does export an ISO writer, so this is not an upstream limit (see the capability matrix) |
 
 Additional notes:
 
 - **Compressed-tar codecs:** creating `TAR.ZST` / `TAR.LZ4` / `TAR.LZMA` uses libarchive's zstd / lz4 / lzma **write** filters, which the linked libarchive must have been built with. When a filter is missing, creation fails immediately at writer construction with `ArchiveError::CodecUnavailable { codec, format, install_instructions }`, which names the missing codec and carries per-platform install instructions — the library never silently falls back to an external compressor binary. Reading those formats has no such requirement beyond the matching read filter.
-- **Multi-part extraction:** RAR/RAR5 split sets extract end-to-end. Open the first volume and a split file appears as one logical entry that every read route can reach; UnRAR follows the continuation volumes itself. Its `crc32` is `None`, because each volume carries a checksum over its own fragment rather than over the file. A set with a volume missing fails at listing with an error naming what to call to find it. ZIP split volumes (`.z01`, `.z02`, …) are name-level detection only — `detect_multipart` enumerates sibling names and never opens a volume. 7z numeric split volumes (`.001`, `.002`, …) are not supported.
+- **Multi-part extraction:** RAR/RAR5 split sets extract end-to-end. Open the first volume and a split file appears as one logical entry that every read route can reach; UnRAR follows the continuation volumes itself. Its `crc32` is `None`, because each volume carries a checksum over its own fragment rather than over the file. A set with a volume missing fails at listing with an error naming what to call to find it. ZIP split volumes (`.z01`, `.z02`, …) are name-level detection only — `detect_multipart` enumerates sibling names and never opens a volume. 7z numeric split volumes (`.001`, `.002`, …) read as one archive: open the first part and the set lists and extracts as the archive it is. A 7z split set is a plain byte split — no part carries a header or a volume number — so the members are simply read as their concatenation. An **incomplete** set is refused with an error naming the missing volume, raised before any bytes are read, because a byte split has nothing marking a boundary and a missing middle volume would otherwise decode as corruption rather than as an absence. Creating split sets is not supported for any format.
 - **SFX workflows:** `detect_sfx()`, `open_sfx()`, `open_at_offset()`, and `extract_stub()` are available for embedded archive inspection.
 - **Streaming memory bounds:** Bounded-memory streaming currently applies to libarchive-backed formats (TAR family and ISO). ZIP, 7z, and RAR backends expose the same `Read` API but buffer entries first.
 
@@ -246,8 +268,8 @@ See [Limitations.md](./Limitations.md) for the full catalog. Key caveats in v0.4
 
 - **Modification is rewrite-based and limited to ZIP/7z.** `commit_changes()` recreates the archive instead of editing in place. `modify_with_options()` preserves modified, accessed, and created timestamps plus Unix permissions on retained regular-file entries (where the backend supports the timestamp); directory metadata still uses backend defaults. ZIP rewrites preserve the archive comment plus stored/deflated method. Encrypted archives are refused up front by `Archive::modify`, the rewrite drops symlink, hardlink, and other special entries, and ZIP64 edge coverage remains a caveat.
 - **Streaming bounded-memory is libarchive-only.** `extract_to_stream()` reads TAR/ISO in chunks; ZIP, 7z, and RAR backends present the same `Read` API but buffer the entry in memory first.
-- **Split archives: RAR/RAR5 only.** RAR/RAR5 sets extract across volumes; ZIP split volumes are name-level detection only, and 7z numeric split volumes are unsupported.
-- **Encrypted creation is rejected by the main facade.** `Archive::create()` returns `OperationBlocked` when `CompressionOptions.password` is set. Optional Windows-only RAR creation lives in `external::RarCreator`, not the `Archive` facade.
+- **Split archives: reading only, and not every format.** RAR/RAR5 and 7z sets read end-to-end; ZIP split volumes are name-level detection only. Creating a split archive is not supported for any format.
+- **Encrypted creation is paused, and the facade refuses it meanwhile.** `Archive::create()` returns `OperationBlocked` when `CompressionOptions.password` is set. This is a hold rather than a settled rejection: MADR-0027 originally banned it, was amended to allow it behind an explicit default-off opt-in, and that opt-in was then paused by the owner on 2026-09-01. The `zip` crate can write AES entries, so nothing upstream prevents it. Optional Windows-only RAR creation lives in `external::RarCreator`, not the `Archive` facade.
 - **Standalone `.gz` / `.bz2` / `.xz` / `.zst` / `.lz4` / `.lzma` are read-only.** Use the creatable `.tar.*` compound variants for compressed-archive creation.
 - **Encrypted-header archives** (RAR `-hp`, 7z `-mhe`) cannot be listed without the password — use `Archive::open_encrypted` up front. Encrypted ZIP entries still surface names without a password.
 - **Platform coverage:** only macOS has a recorded verification run (`docs/verification/`, one record per `scripts/release-gate.sh` run, per AD-0070). Linux is unverified — its cross-check lane is parked pre-v2 — and Windows is unverified and additionally not auto-configured for libarchive (see Build Requirements).
@@ -263,6 +285,7 @@ See [Limitations.md](./Limitations.md) for the full catalog. Key caveats in v0.4
 - **Optional `external::RarCreator`** - Windows-only WinRAR CLI bridge for out-of-process RAR creation
 
 **Key Design Decisions:**
+- The uniform interface is the product; where one library cannot cover a format, the crate uses several and absorbs the cost (AD 0072 — see "Why this library exists" above)
 - Zero JVM dependency; core read/extract/create flows are in-process
 - Streaming architecture for memory efficiency
 - Automatic format detection via magic bytes
