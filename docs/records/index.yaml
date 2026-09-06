@@ -416,6 +416,12 @@ records:
     status: active
     file: AD-0073-integrity-scan-aborted-is-a-third-class.md
     mentions: [AD-0064]
+  - id: AD-0074
+    type: AD
+    title: "AD 0074: the ZIP central-directory extended-timestamp convention is not pursued"
+    status: active
+    file: AD-0074-zip-central-extended-timestamp-not-pursued.md
+    mentions: [AD-0072]
   - id: DCR-001
     type: DCR
     title: "Design Change Record"

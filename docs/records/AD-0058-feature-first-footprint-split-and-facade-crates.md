@@ -246,3 +246,126 @@ is therefore not a thing these records establish.
 **Effect:** OI-0058-001 stays Type 2. The work needed before it can start is a
 ruling on the six items above — most of which are cheap to decide and none of
 which is cheap to discover halfway through a large refactor.
+
+## Amendment (2026-09-06, the six open choices are ruled — Stage 1 becomes startable)
+
+The 2026-09-04 amendment above enumerated six choices that had to be made before
+Stage 1 could start, and concluded "OI-0058-001 stays Type 2." Two were answered
+by the owner shortly after (keep the shipped `rar-support` name; delete the
+cyclic clause in the `create` row). The remaining four are ruled here, together
+with the framing correction that amendment raised. **Stage 1 is now startable.**
+
+These are recorded as decisions, not proposals, so that an implementer is not
+stranded mid-refactor. Each is cheap to overturn — they are table entries and
+feature lists, not code — and the reasoning is given so that overturning one does
+not require re-deriving why it was chosen.
+
+### 1. `modify` depends on `libarchive`, and the operation table is corrected
+
+`modify = ["read", "create", "libarchive"]`.
+
+AD-0071 (2026-09-02) ruled that `Archive::open_modify`'s unconditional libarchive
+binding is **permanent**, not a deferral. The operation table's "Depends on `read`
+and `create`" was written before that ruling and is wrong as of it. Declaring the
+dependency is the honest option: the alternative — marking `libarchive` optional
+while `modify` is on — breaks ZIP and 7z `commit_changes()` at link time, and
+that is a ruling to reverse, not a patch to write.
+
+Consequence, stated rather than discovered later: **there is no libarchive-free
+modify profile**, and the standalone `modify` gate profile pulls libarchive by
+construction. A consumer who wants modification pays for libarchive. That is the
+cost AD-0071 accepted; this only writes it into the matrix.
+
+### 2. `external-rar-create` implies `create`, and stays out of `full`
+
+`external-rar-create = ["create"]`. It does **not** imply `rar`, and it is **not**
+a member of `full`.
+
+It does not imply `rar` because it drives an external WinRAR CLI; it is unrelated
+to the vendored UnRAR *reader* that `rar` builds. Coupling them would force a
+C++ build on a consumer who only wants to shell out to a binary.
+
+It stays out of `full` because `full` has to mean "everything this crate can do
+from its own code", and this feature can do nothing without a third-party WinRAR
+installation, on Windows only. Folding it in would make `full` mean different
+things on different hosts — and constraint 2 leans on `full` being a *green test
+lane*, which a platform-dependent, externally-provisioned aggregate cannot be.
+It already has the right home: its own `check-windows-msvc --features
+external-rar-create` lane in `scripts/release-gate.sh`.
+
+### 3. The six profiles, defined
+
+`read` alone links no backend and reads nothing, which is what made
+`read-minimal` undefined. Each profile below names a complete selection:
+
+| Profile | Features |
+| --- | --- |
+| `read-minimal` | `read`, `zip-read` |
+| `read-zip` | `read`, `zip-read`, `zip-crypto`, `sfx` |
+| `read-all-formats` | `read`, `zip-read`, `zip-crypto`, `sevenzip`, `rar-support`, `libarchive`, `sfx` |
+| `create` | `create`, `zip-write`, `sevenzip`, `libarchive` |
+| `modify` | `modify`, `zip-read`, `zip-write`, `sevenzip`, `libarchive` |
+| `full` | every feature above except `external-rar-create` |
+
+`read-minimal` is ZIP-only and deliberately so: it is the **one format, no C
+toolchain** floor, and that floor is the footprint claim this whole record
+exists to substantiate. A `read`-only profile that reads nothing would measure
+an artefact rather than a product.
+
+`read-zip` earns its separate existence by adding the two things a real ZIP
+consumer actually hits — encrypted entries and SFX — so the gap between it and
+`read-minimal` measures the cost of completeness rather than the cost of a
+second format.
+
+`create` names the writable formats the crate description already advertises
+(ZIP, 7z, TAR family). `modify` names ZIP and 7z, the two modifiable formats,
+and inherits `libarchive` through item 1 above.
+
+Because constraint 2 gates on `read-minimal` and `full` being green lanes, these
+two sets are the ones that decide what the gate proves. They are the widest and
+narrowest selections in the table, which is the property that makes the pair
+worth gating on.
+
+### 4. A disabled format reports a distinct state, not `Support::None`
+
+`Support` gains a variant for "this format is supported by the crate but was
+compiled out", carrying the feature name that would enable it.
+
+`Support::None` means *this crate cannot do this*. For a feature-gated format
+that is false, and the falsehood is the actionable kind: the caller can fix it by
+enabling a feature, but only if something tells them so. Reporting `None` makes
+a compiled-out ISO indistinguishable from a format the crate never supported, and
+sends the caller looking for a different library.
+
+This is the cheapest of the four: `Support` is already `#[non_exhaustive]`, so the
+variant is not a breaking change, and its own rustdoc already anticipates exactly
+this case. Naming the feature in the variant is what makes the diagnostic
+actionable rather than merely accurate.
+
+### 5. Framing correction: growing `default` to preserve behaviour is not a "flip"
+
+The 2026-09-04 amendment observed that Stage 1 step 1 requires the default to
+stay equivalent to today's crate, and that today ZIP, 7z and libarchive are not
+features at all — so preserving behaviour means `default` gains roughly eleven
+names. It then asked whether that counts as a "flip" under constraint 2, and left
+it unsettled.
+
+**It does not.** Constraint 2 exists to stop the default set *losing* capability
+before both profiles are proven — that is the failure it protects against, and
+the reason it names `read-minimal` and `full`. Adding names that reproduce
+today's exact capability set changes nothing observable to any consumer: same
+formats, same operations, same build. A re-expression is not a reduction.
+
+So "Stage 1 with no default flip" is a coherent thing after all, and Stage 1 is
+not gated on constraint 2. The genuine flip — narrowing `default` — is a later
+step and keeps the constraint.
+
+### Effect
+
+OI-0058-001 moves from Type 2 to **Type 1**: the decisions are made and the work
+is ready to implement. It remains large — twelve features, `cfg`-gating the
+backend enum, format routing and public re-exports, gating `build.rs`'s
+unconditional libarchive probe, six gate profiles, and the Required Action 5
+measurement — so it should land in increments. The recommended first increment is
+unchanged from the owner's 2026-09-02 ruling: **format features only**, which is
+where the UnRAR payoff lives and is mechanically checkable.

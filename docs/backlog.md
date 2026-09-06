@@ -165,11 +165,16 @@ Classification:
 
 ## Type 1 — ready to implement
 
-**Empty again on 2026-09-05.** The last entry — splitting the modification commit path — is done,
-so nothing here is currently ready to pick up without asking someone. Three entries that had been
-sitting in this section were moved out the same day: they declared themselves Type 2 or Type 3 in
-their own metadata, so an agent reading this section for work it could finish alone would have hit
-a decision wall on three of four.
+**One entry, 2026-09-06: the feature-first footprint split (OI-0058-001), whose last four open
+choices were ruled the same day.** It stays filed under Type 2 below until the next reconciliation
+moves it, rather than being duplicated here — see the `RULED 2026-09-06` note on that entry and
+AD-0058's amendment for the decisions. It is large and should land in increments; the recommended
+first increment is format features only.
+
+Everything else that was here is discharged. Of the four entries this section held on 2026-09-05,
+the commit-path split was implemented, and three declared themselves Type 2 or Type 3 in their own
+metadata and were moved out — so an agent reading this section for work it could finish alone would
+have hit a decision wall on three of four.
 
 ## Type 2 — needs decision
 
@@ -206,6 +211,28 @@ a decision wall on three of four.
   dependency grow this* but **which route do we pay for** — a raw central-directory writer of our
   own, or a second ZIP writing dependency that can express it. Neither is scheduled; what changes
   is that nothing external is being waited on, so this is a decision rather than a block.
+
+- **DECIDED 2026-09-06 — NOT PURSUED, recorded as AD-0074. Entry closes.** The 2026-09-05 re-typing
+  was right that this is a choice, not a block, and the choice is to decline both routes. A raw
+  central-directory writer means owning central-directory emission for every ZIP this crate writes —
+  risk concentrated in the exact structure that decides whether an archive is readable at all — and
+  a second ZIP writing dependency lands its weight on every consumer, since AD-0072 makes that cost
+  affordable only via the feature split, which is unstarted. The entry rates its own impact low
+  (most readers key off `TSize`), and it has been re-triaged at least four times, which has already
+  cost more than the fix would once a prerequisite exists.
+
+  Re-verified in the crate source rather than taken from the earlier note: `add_extra_data` routes
+  on `central_only`, and the central-directory header writer emits **both** `file.extra_field` and
+  `file.central_extra_field` — so `central_only = false` is local+central, and the mtime-only
+  payload cannot be confined to one record. Emitting a second `0x5455` centrally would be a
+  duplicate header id; putting mtime-only in `extra_data` would drop atime/ctime from the local
+  record, which is worse than today. **Required Action 2's "reassess on crate upgrade" is retired**
+  — there is no upgrade coming. One trigger reopens this: a raw central-directory writer built for
+  another reason, at which point it is nearly free.
+
+  Correction to an earlier note in this entry: TicGit `96be20d6` was **not** in state `new`. It is
+  `blocked`, so the "an agent running `ti-pick-next` could claim it as unblocked work" hazard did
+  not exist as described. It is now closed.
 
 ### Feature-first footprint split and facade crates (OI-0058-001)
 - **Type:** 2
@@ -261,6 +288,36 @@ a decision wall on three of four.
   unchanged and enumerated in AD-0058's 2026-09-04 amendment; two have since been answered by the
   owner — keep the shipped `rar-support` name and correct AD-0058's table, and delete the one
   clause in the `create` row that makes the dependency tables cyclic.
+
+- **RULED 2026-09-06 — the remaining four choices are made. Now Type 1.** AD-0058 carries a new
+  amendment deciding each, with reasoning, so an implementer is not stranded mid-refactor and
+  overturning any one of them costs a table edit rather than a re-derivation:
+  1. **`modify = ["read", "create", "libarchive"]`.** AD-0071 froze the libarchive binding as
+     permanent, so the operation table was wrong as of that ruling. Declaring the dependency is the
+     honest option; the alternative breaks ZIP and 7z `commit_changes()` at link time. Consequence
+     written down rather than discovered later: **there is no libarchive-free modify profile.**
+  2. **`external-rar-create = ["create"]`, not implying `rar`, not in `full`.** It drives an
+     external WinRAR CLI and is unrelated to the vendored UnRAR reader, so coupling them would
+     force a C++ build on a consumer who only wants to shell out. It stays out of `full` because
+     `full` must mean "everything this crate can do from its own code" — an aggregate that needs a
+     third-party install, on one platform, cannot be the green test lane constraint 2 leans on. It
+     already has its own gate lane.
+  3. **The six profiles are defined** as concrete feature sets in the amendment's table.
+     `read-minimal` is ZIP-only on purpose: it is the one-format, no-C-toolchain floor, which is the
+     footprint claim this record exists to substantiate. A `read`-only profile reads nothing and
+     would measure an artefact rather than a product.
+  4. **`Support` gains a variant for "compiled out"**, carrying the feature name. `Support::None`
+     means "this crate cannot do this", which for a feature-gated format is false in the actionable
+     way — the caller can fix it, but only if told. The enum is already `#[non_exhaustive]` and its
+     rustdoc anticipates this exact case.
+
+  Plus the framing question that amendment left open: **growing `default` to preserve today's
+  behaviour is not a "flip"** under constraint 2. That constraint protects against the default set
+  *losing* capability before both profiles are proven; adding names that reproduce the exact current
+  capability set changes nothing observable. So Stage 1 is not gated on it.
+
+  Still large, so it lands in increments. Recommended first increment unchanged from the owner's
+  2026-09-02 ruling: format features only.
 
 
 ### Non-UTF-8 path fidelity round 2 (OI-0076-001)

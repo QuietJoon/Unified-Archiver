@@ -2293,8 +2293,16 @@ covered by extension fallback).
 
 - **Source:** R0081-0049 (Review 0081)
 - **Date:** 2026-07-18
-- **Decision:** ACCEPT (tracked — blocked by the `zip` crate API)
-- **Status:** OPEN
+- **Decision:** ACCEPT (tracked — blocked by the `zip` crate API), superseded 2026-09-06 by AD 0074
+- **Status:** CLOSED 2026-09-06 — NOT PURSUED (AD 0074). Neither route is worth its cost against a
+  low-impact strict-reader edge: a raw central-directory writer of our own means owning
+  central-directory emission for every ZIP written, and a second ZIP writing dependency lands its
+  weight on every consumer while the feature split that AD-0072 makes it conditional on is
+  unstarted. Required Action 2 below — "reassess when the `zip` dependency exposes a local-only
+  extra-field channel" — is **retired and should not be acted on**: re-verified for AD 0074 that the
+  central-directory writer emits both `extra_field` and `central_extra_field`, so `central_only =
+  false` means local+central in 2.4.2 and identically in 8.2.0. There is no upgrade coming. The one
+  condition that reopens this is a raw central-directory writer being built for another reason.
 
 ### Problem
 
@@ -2314,7 +2322,10 @@ Strict readers may misparse or ignore the central-directory UT record. Low.
 
 ### Verification
 
-- [ ] Central UT record carries mtime only (once the crate API allows)
+- [ ] Central UT record carries mtime only (once the crate API allows)  <!-- Deliberately unticked
+      2026-09-06: this criterion is not met and will not be, because the item is closed as NOT
+      PURSUED (AD 0074) rather than as done. Leave it unticked; do not sweep it in a tick-them-all
+      pass. -->
 
 ### Related
 
