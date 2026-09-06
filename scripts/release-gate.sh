@@ -197,6 +197,8 @@ run_lane test-no-default-features cargo test --no-default-features -- --test-thr
 # if `sevenzip` stops actually selecting the backend.
 run_lane test-sevenzip-only \
     cargo test --no-default-features --features sevenzip -- --test-threads=4
+run_lane test-zip-crypto-only \
+    cargo test --no-default-features --features zip-crypto -- --test-threads=4
 
 # L5: default features as a consumer gets them, compile-only. Links no test
 # binaries, so it cannot hit the first-exec admission stall.
