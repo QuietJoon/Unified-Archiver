@@ -1774,6 +1774,26 @@ impl SevenZArchive {
     /// path; a genuine archive-file I/O error (open/read on the archive
     /// itself) propagates as `Err` (R0080-0030). Returns a list of paths
     /// that failed.
+    ///
+    /// A third outcome exists (OI-0080-007 item 2): if the shared
+    /// solid-block cursor cannot be re-aligned after a corrupt entry,
+    /// the scan stops with
+    /// [`ArchiveError::IntegrityScanAborted`](crate::error::ArchiveError::IntegrityScanAborted)
+    /// rather than continuing from an unknown offset and recording
+    /// healthy later entries as corrupt. That error carries the verdicts
+    /// already reached; entries after the abort point are *untested*.
+    ///
+    /// # Known upstream hazard: corrupt LZMA2 payloads
+    ///
+    /// A 7z archive whose LZMA2-compressed region is damaged can hang
+    /// this call indefinitely. The hang is inside sevenz-rust2's
+    /// decoder, in a single `read` that never returns — measured on a
+    /// two-entry 80 KB fixture, one `read` entered and no second one,
+    /// still running past a five-minute timeout. Both loops here are
+    /// bounded by the declared unpacked size and so terminate on their
+    /// own, but no bound in this crate can interrupt a call that does
+    /// not return. Callers that must stay responsive on untrusted input
+    /// should run this on a thread they can abandon.
     pub fn test_integrity(&self) -> Result<Vec<String>> {
         let mut reader = self.open_reader(crate::error::ops::VALIDATE_INTEGRITY)?;
 
@@ -1798,7 +1818,7 @@ impl SevenZArchive {
         // failure counts vs the file-only `validated` accounting.
         // R0001-0022: the shared classifier also skips `EntryType::Other`
         // (FIFO/device/socket), which extraction skips too.
-        let walk = reader.for_each_entries(|entry, entry_reader| {
+        let walk = reader.for_each_entries(|entry, mut entry_reader| {
             if operational_error.is_some() {
                 return Ok(false);
             }
@@ -1830,10 +1850,23 @@ impl SevenZArchive {
             // R0075-0051), so require exact equality.
             let mut bytes_read: u64 = 0;
             loop {
-                match entry_reader.read(&mut buf) {
+                // Bounded by the declared size, plus exactly one byte so
+                // an over-producing decoder is *detected* rather than
+                // looped on. Unbounded, this does not terminate: on a
+                // damaged LZMA2 solid block the decoder neither errors
+                // nor ends, it keeps returning bytes, and `test_integrity`
+                // hangs forever on an 80 KB archive. Each iteration
+                // either breaks or advances `bytes_read` by at least one,
+                // so the loop is now provably finite.
+                let budget = entry.size.saturating_sub(bytes_read).saturating_add(1);
+                let want = (buf.len() as u64).min(budget) as usize;
+                match entry_reader.read(&mut buf[..want]) {
                     Ok(0) => break,
                     Ok(n) => {
                         bytes_read = bytes_read.saturating_add(n as u64);
+                        if bytes_read > entry.size {
+                            break;
+                        }
                         continue;
                     }
                     Err(e) => {
@@ -1848,18 +1881,39 @@ impl SevenZArchive {
                             return Ok(false);
                         }
                         // R0075-0054: drain remaining data after a
-                        // CRC failure so the solid-stream cursor
-                        // stays aligned for the next entry.
-                        // Subsequent drain errors are intentionally
-                        // ignored — the entry is already recorded
-                        // as failed, and any persistent stream
-                        // damage will surface again on the next
-                        // entry's own read loop. Surfacing them
-                        // separately here would require a parallel
-                        // failed-list that the caller currently
-                        // has no way to interpret.
-                        while entry_reader.read(&mut buf).unwrap_or(0) > 0 {}
-                        failed_files.push(path);
+                        // CRC failure so the solid-stream cursor stays
+                        // aligned for the next entry.
+                        //
+                        // OI-0080-007 item 2: a drain error means that
+                        // re-alignment did *not* happen. The original
+                        // reasoning for swallowing it — "persistent
+                        // stream damage will surface again on the next
+                        // entry's own read loop" — is the weak half: a
+                        // misaligned cursor need not error next, it can
+                        // hand back structurally plausible bytes from
+                        // the wrong offset, and then a healthy entry is
+                        // recorded as corrupt. Every verdict after this
+                        // point is untrustworthy, so the scan stops and
+                        // says so, carrying the verdicts it did reach.
+                        let abort_reason = drain_to_realign(
+                            &mut entry_reader,
+                            &mut buf,
+                            entry.size.saturating_sub(bytes_read),
+                        );
+
+                        // The entry that failed is a real verdict and is
+                        // kept either way; the abort is about every
+                        // entry *after* it.
+                        failed_files.push(path.clone());
+                        if let Err(reason) = abort_reason {
+                            operational_error = Some(ArchiveError::integrity_scan_aborted(
+                                self.path.display().to_string(),
+                                path,
+                                reason,
+                                failed_files.clone(),
+                            ));
+                            return Ok(false);
+                        }
                         return Ok(true);
                     }
                 }
@@ -1867,7 +1921,28 @@ impl SevenZArchive {
             // R0001-0024: a clean early EOF is an integrity failure, not a
             // pass — record the short entry instead of reporting success.
             if bytes_read != entry.size {
-                failed_files.push(path);
+                let overproduced = bytes_read > entry.size;
+                failed_files.push(path.clone());
+                // OI-0080-007 item 2: a *short* entry ended cleanly, so
+                // the cursor is where the table of contents says and the
+                // walk can go on. An entry that decoded *past* its
+                // declared size did not — the shared solid-block cursor
+                // is beyond the next entry's start, so every later
+                // verdict would be read from the wrong offset.
+                if overproduced {
+                    operational_error = Some(ArchiveError::integrity_scan_aborted(
+                        self.path.display().to_string(),
+                        path,
+                        format!(
+                            "the entry decoded past its declared size of {} bytes, so the \
+                             solid-block cursor is no longer where the table of contents says \
+                             it is",
+                            entry.size
+                        ),
+                        failed_files.clone(),
+                    ));
+                    return Ok(false);
+                }
             }
             Ok(true)
         });
@@ -1957,6 +2032,62 @@ fn open_directory_for_metadata(path: &Path) -> std::io::Result<std::fs::File> {
     #[cfg(not(windows))]
     {
         std::fs::File::open(path)
+    }
+}
+
+/// Consume what is left of a corrupt entry so the shared solid-block
+/// cursor lands on the next entry's first byte, and report whether that
+/// re-alignment actually succeeded.
+///
+/// `Ok(())` means the cursor is where the table of contents says it is
+/// and the scan may continue. `Err(reason)` means it is not, and every
+/// later verdict would be decoded from the wrong offset — the caller
+/// turns that into
+/// [`ArchiveError::IntegrityScanAborted`](crate::error::ArchiveError::IntegrityScanAborted)
+/// rather than continuing and blaming healthy entries (OI-0080-007
+/// item 2).
+///
+/// `remaining` is the entry's declared unpacked size minus what was
+/// already decoded; the 7z table of contents is authoritative for it
+/// (R0075-0051). Bounding by it also makes this loop provably finite —
+/// each iteration either returns or reduces `remaining` by at least one.
+///
+/// Split out from the walk callback because the two failure branches
+/// cannot be produced by any 7z archive that can be built and read on
+/// this host: a COPY-stored entry reaches its CRC comparison only once
+/// its byte budget is spent, so the drain that follows sees a clean EOF,
+/// and the LZMA2 route is unusable because a corrupt LZMA2 stream hangs
+/// inside sevenz-rust2's decoder before the drain is ever reached (see
+/// the note on `test_integrity`). Taking a `Read` makes both branches
+/// reachable from a test.
+fn drain_to_realign(
+    reader: &mut impl std::io::Read,
+    buf: &mut [u8],
+    mut remaining: u64,
+) -> std::result::Result<(), String> {
+    const CURSOR_LOST: &str = "the solid-block cursor could not be re-aligned after a corrupt \
+                               entry";
+    const OVERRUN: &str = "the entry decoded past its declared size, so the solid-block cursor \
+                           is no longer where the table of contents says it is";
+
+    debug_assert!(!buf.is_empty(), "drain needs somewhere to put the bytes");
+    loop {
+        if remaining == 0 {
+            // Budget spent. If the reader still has data the entry
+            // over-produced, which is the same misalignment by a
+            // different route.
+            return match reader.read(&mut buf[..1]) {
+                Ok(0) => Ok(()),
+                Ok(_) => Err(OVERRUN.to_string()),
+                Err(e) => Err(format!("{CURSOR_LOST}: {e}")),
+            };
+        }
+        let want = (buf.len() as u64).min(remaining) as usize;
+        match reader.read(&mut buf[..want]) {
+            Ok(0) => return Ok(()),
+            Ok(n) => remaining = remaining.saturating_sub(n as u64),
+            Err(e) => return Err(format!("{CURSOR_LOST}: {e}")),
+        }
     }
 }
 

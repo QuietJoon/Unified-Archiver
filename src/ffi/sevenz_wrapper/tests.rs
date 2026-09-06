@@ -1377,3 +1377,136 @@ fn test_sevenz_offset_handle_still_binds_its_identity() {
         crate::error::ops::EXTRACT_TO_MEMORY,
     );
 }
+
+// ── OI-0080-007 item 2: the re-alignment drain ──
+
+/// A `Read` scripted to produce a fixed number of bytes and then a
+/// chosen ending, so both `drain_to_realign` abort branches are
+/// reachable. No 7z archive buildable on this host reaches them: a
+/// COPY-stored entry only fails its CRC once its byte budget is spent,
+/// so the drain that follows sees a clean EOF, and a corrupt LZMA2
+/// stream hangs inside the upstream decoder before the drain is reached.
+struct ScriptedReader {
+    /// Bytes still to hand out before `ending` applies.
+    yield_bytes: usize,
+    ending: Ending,
+}
+
+enum Ending {
+    /// Clean end of stream — the cursor is where it should be.
+    Eof,
+    /// The decoder failed while draining.
+    Error,
+    /// The decoder keeps producing past the declared size.
+    Endless,
+}
+
+impl std::io::Read for ScriptedReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.yield_bytes > 0 {
+            let n = self.yield_bytes.min(buf.len());
+            self.yield_bytes -= n;
+            buf[..n].fill(0xAB);
+            return Ok(n);
+        }
+        match self.ending {
+            Ending::Eof => Ok(0),
+            Ending::Error => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "decoder gave up mid-drain",
+            )),
+            Ending::Endless => {
+                let n = buf.len().max(1).min(buf.len());
+                buf[..n].fill(0xCD);
+                Ok(n)
+            }
+        }
+    }
+}
+
+/// The ordinary case: the rest of the entry is consumed, the cursor is
+/// re-aligned, and the walk continues. This is what keeps
+/// `test_sevenz_integrity_records_corrupt_payload` passing — a corrupt
+/// payload stays a recorded failure and does not abort the scan.
+#[test]
+fn test_drain_realigns_when_the_entry_ends_cleanly() {
+    let mut buf = [0u8; 8192];
+    let mut reader = ScriptedReader {
+        yield_bytes: 20_000,
+        ending: Ending::Eof,
+    };
+    assert!(super::drain_to_realign(&mut reader, &mut buf, 20_000).is_ok());
+}
+
+/// A drain that errors means re-alignment did not happen. The old code
+/// swallowed this (`read(..).unwrap_or(0)`), so the walk continued from
+/// an unknown offset and could record a healthy later entry as corrupt.
+#[test]
+fn test_drain_reports_a_lost_cursor_when_the_drain_errors() {
+    let mut buf = [0u8; 8192];
+    let mut reader = ScriptedReader {
+        yield_bytes: 100,
+        ending: Ending::Error,
+    };
+    let reason = super::drain_to_realign(&mut reader, &mut buf, 20_000)
+        .expect_err("a drain error must not be reported as a successful re-alignment");
+    assert!(
+        reason.contains("could not be re-aligned"),
+        "the reason must say the cursor is lost, got: {reason}"
+    );
+    assert!(
+        reason.contains("decoder gave up mid-drain"),
+        "the underlying error must survive into the reason, got: {reason}"
+    );
+}
+
+/// An entry that decodes past its declared size is the same
+/// misalignment by a different route, and is the branch that makes the
+/// bound necessary: without it the loop never returns.
+#[test]
+fn test_drain_reports_a_lost_cursor_when_the_entry_overruns() {
+    let mut buf = [0u8; 8192];
+    let mut reader = ScriptedReader {
+        yield_bytes: 0,
+        ending: Ending::Endless,
+    };
+    let reason = super::drain_to_realign(&mut reader, &mut buf, 4_096)
+        .expect_err("an over-producing entry must not be reported as re-aligned");
+    assert!(
+        reason.contains("past its declared size"),
+        "the reason must name the overrun, got: {reason}"
+    );
+}
+
+/// The bound is what makes the drain terminate at all. An endless
+/// reader must be answered, not looped on — this test hangs forever if
+/// the bound is removed, which is exactly the pre-existing defect in
+/// the loop this replaced.
+#[test]
+fn test_drain_terminates_against_an_endless_reader() {
+    let mut buf = [0u8; 8192];
+    let mut reader = ScriptedReader {
+        yield_bytes: 0,
+        ending: Ending::Endless,
+    };
+    // 64 MiB of declared size against a reader that never stops: the
+    // bound has to end this in a bounded number of iterations.
+    assert!(super::drain_to_realign(&mut reader, &mut buf, 64 * 1024 * 1024).is_err());
+}
+
+/// `IntegrityScanAborted` must not read like an ordinary failure
+/// report. A caller skimming the message has to learn that the entries
+/// it never reached are *untested*, not passed.
+#[test]
+fn test_integrity_scan_aborted_message_states_the_results_are_incomplete() {
+    let err = crate::error::ArchiveError::integrity_scan_aborted(
+        "/tmp/broken.7z",
+        "a.txt",
+        "the solid-block cursor could not be re-aligned after a corrupt entry",
+        vec!["a.txt".to_string()],
+    );
+    let msg = err.to_string();
+    assert!(msg.contains("incomplete"), "{msg}");
+    assert!(msg.contains("untested, not passed"), "{msg}");
+    assert!(msg.contains("a.txt"), "{msg}");
+}

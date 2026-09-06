@@ -31,6 +31,40 @@ pub enum ArchiveError {
     /// of the two it is (R0001-0069).
     Corruption { path: String, details: String },
 
+    /// An integrity scan was abandoned partway, so its verdicts are
+    /// incomplete: the entries it had not reached are neither passed nor
+    /// failed, they are *untested*.
+    ///
+    /// # Why this is a third class
+    ///
+    /// Integrity checking has two ordinary outcomes, and this is
+    /// neither. Per-entry payload corruption is *recorded* and the walk
+    /// continues, because one damaged entry says nothing about the rest;
+    /// an archive-level I/O failure *propagates*, because nothing can be
+    /// read at all. This variant covers the case where the walk read
+    /// enough to know it can no longer trust itself — a solid-block
+    /// cursor that could not be re-aligned after a failed entry, so
+    /// every later entry would be decoded from the wrong offset and
+    /// reported against the wrong name.
+    ///
+    /// Continuing would produce the worst possible answer: a report that
+    /// blames healthy entries and looks exactly like a real one.
+    ///
+    /// `failed_before_abort` carries the verdicts the scan *had* reached
+    /// and is safe to trust; it is retained rather than discarded so a
+    /// caller can act on known damage without re-running the scan.
+    IntegrityScanAborted {
+        /// Archive whose scan was abandoned.
+        path: String,
+        /// Entry the scan was processing when it gave up.
+        entry: String,
+        /// What stopped it.
+        reason: String,
+        /// Entries already known to have failed. Complete only up to
+        /// the abort point.
+        failed_before_abort: Vec<String>,
+    },
+
     /// Password authentication error: a password was required and not
     /// supplied, or the one supplied did not open the payload.
     ///
@@ -428,6 +462,30 @@ impl std::fmt::Display for ArchiveError {
                 // "entry" and mislabelling whole-archive corruption.
                 write!(f, "Corruption detected in '{}': {}", path, details)
             }
+            ArchiveError::IntegrityScanAborted {
+                path,
+                entry,
+                reason,
+                failed_before_abort,
+            } => {
+                // State the untrustworthiness first: a caller skimming
+                // this must not read it as an ordinary failure report.
+                write!(
+                    f,
+                    "Integrity scan of '{}' was abandoned at entry '{}' and its results are \
+                     incomplete: {}. {} entr{} had already failed; every entry after this point \
+                     is untested, not passed",
+                    path,
+                    entry,
+                    reason,
+                    failed_before_abort.len(),
+                    if failed_before_abort.len() == 1 {
+                        "y"
+                    } else {
+                        "ies"
+                    }
+                )
+            }
             ArchiveError::Password { message } => {
                 write!(f, "Password error: {}", message)
             }
@@ -570,6 +628,22 @@ impl ArchiveError {
         Self::Corruption {
             path: path.into(),
             details,
+        }
+    }
+
+    /// Create an [`IntegrityScanAborted`](Self::IntegrityScanAborted)
+    /// error, carrying the verdicts the scan had already reached.
+    pub fn integrity_scan_aborted(
+        path: impl Into<String>,
+        entry: impl Into<String>,
+        reason: impl Into<String>,
+        failed_before_abort: Vec<String>,
+    ) -> Self {
+        Self::IntegrityScanAborted {
+            path: path.into(),
+            entry: entry.into(),
+            reason: reason.into(),
+            failed_before_abort,
         }
     }
 
