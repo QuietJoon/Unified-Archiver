@@ -369,3 +369,60 @@ unconditional libarchive probe, six gate profiles, and the Required Action 5
 measurement — so it should land in increments. The recommended first increment is
 unchanged from the owner's 2026-09-02 ruling: **format features only**, which is
 where the UnRAR payoff lives and is mechanically checkable.
+
+## Amendment (2026-09-06, first increment landed — `sevenzip`, with one ruling corrected)
+
+The format-features increment recommended above is started. `sevenzip` is the
+first one, chosen because it is a pure-Rust dependency (so the gate is a clean
+`dep:` selection with no C toolchain in the way) and because it is small enough
+to prove the shape before the 505-reference `libarchive` split is attempted.
+
+### Required Action 5, partially delivered: the dependency measurement
+
+The footprint claim is now measured rather than asserted. Dropping `sevenzip`
+removes **ten crates** from the dependency graph — not merely the code paths:
+
+`sevenz-rust2`, `lzma-rust2`, `ppmd-rust`, `bzip2`, `libbz2-rs-sys`, `sha2`,
+`aes`, `cbc`, `cipher`, `block-padding`.
+
+154 crates with default features, 144 without, and the delta is attributable to
+`sevenzip` alone (`--no-default-features` vs `--no-default-features --features
+sevenzip` gives the same ten). Build-time and binary-size measurements are still
+outstanding.
+
+### Correction to decision 4 of the previous amendment
+
+That decision said a disabled format should report a new behind-a-feature state
+instead of `Support::None`. Implementing it surfaced a fact the decision was made
+without: **`capabilities()` does not report `None` for a disabled format today.**
+It reports `Full`, and R0001-0063 documents that as deliberate — the capability
+matrix describes the *format*, is build-independent by design, and RAR already
+advertises `Full` in a build compiled without `rar-support`.
+
+So the premise was wrong, and putting `BehindFeature` into that matrix would have
+silently reversed a documented decision. The variant is right; its home was not.
+
+`Support::BehindFeature { feature }` is therefore reported by a **new,
+build-aware accessor**, `ArchiveFormat::availability()`, while `capabilities()`
+keeps its build-independent contract untouched and pinned by a test. The two
+answer different questions — "what can this format do" and "can I open this file
+in this build" — and conflating them was the actual defect behind open question
+6, rather than the choice of variant.
+
+`Support::is_available()` is added alongside, so callers gating behaviour do not
+have to enumerate variants of a `#[non_exhaustive]` enum.
+
+### What this increment does not do
+
+Only `sevenzip` is gated. `zip-read` / `zip-write` / `zip-crypto`, `libarchive`
+and `sfx` are untouched, and the five operation features do not exist yet — so
+the six profiles in the previous amendment's table remain definitions rather than
+selectable configurations. `libarchive` is the hard one (505 references across 29
+files) and inherits the `modify` dependency ruled in decision 1.
+
+Coverage note worth carrying forward: gating a format feature tends to
+over-gate tests. The first mechanical pass disabled four multi-backend tests in
+`stream_bound_test.rs` wholesale because they *mentioned* a 7z fixture, silently
+removing ZIP and TAR coverage from the minimal profile. They now skip only the
+7z fixture. Expect the same trap on every later format feature, and check for it
+rather than trusting a green minimal lane.
