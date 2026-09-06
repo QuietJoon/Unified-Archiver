@@ -319,6 +319,31 @@ have hit a decision wall on three of four.
   Still large, so it lands in increments. Recommended first increment unchanged from the owner's
   2026-09-02 ruling: format features only.
 
+- **First increment LANDED 2026-09-06 — `sevenzip`.** Chosen first because it is a pure-Rust
+  dependency, so the gate is a clean `dep:` selection with no C toolchain in the way, and small
+  enough to prove the shape before the 505-reference `libarchive` split.
+
+  **The footprint claim is now a measurement, not an assertion.** Dropping the feature removes
+  **ten crates** from the dependency graph — `sevenz-rust2`, `lzma-rust2`, `ppmd-rust`, `bzip2`,
+  `libbz2-rs-sys`, `sha2`, `aes`, `cbc`, `cipher`, `block-padding` — 154 → 144, attributable to this
+  feature alone. That is part of Required Action 5; build-time and binary-size are still owed.
+
+  **Decision 4 was wrong and is corrected in the record.** It assumed a disabled format reports
+  `Support::None` from `capabilities()`. It does not — it reports `Full`, and R0001-0063 documents
+  that as deliberate, because the matrix describes the *format* and is build-independent by design.
+  `BehindFeature` went to a new build-aware `ArchiveFormat::availability()` instead of silently
+  reversing that contract.
+
+  **A trap to expect on every remaining format feature:** the mechanical gating pass disabled four
+  multi-backend tests wholesale because they *mentioned* a 7z fixture, dropping ZIP and TAR coverage
+  from the minimal profile while leaving it green. A green minimal lane is exactly what hides this.
+  They now skip only the 7z fixture. A `test-sevenzip-only` gate lane was added for the same reason:
+  the existing lanes test both extremes, and a feature wired to nothing passes both.
+
+  Remaining in this item: `zip-read` / `zip-write` / `zip-crypto`, `libarchive`, `sfx`, and the five
+  operation features — so the six profiles are still definitions rather than selectable
+  configurations. `libarchive` is the hard one and inherits the `modify` dependency from decision 1.
+
 
 ### Non-UTF-8 path fidelity round 2 (OI-0076-001)
 - **Type:** 2
