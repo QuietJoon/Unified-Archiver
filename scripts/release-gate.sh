@@ -207,6 +207,18 @@ run_lane test-zip-crypto-only \
 # would still be green with the backend wired to nothing.
 run_lane test-libarchive-only \
     cargo test --no-default-features --features libarchive -- --test-threads=4
+# `sfx` and `rar-support` complete the per-feature set, and the reason every
+# format feature needs its OWN lane is not symmetry — it is that one feature's
+# code can reference another feature's module. `Archive::first_rar_signature_before`
+# is gated on `rar-support` and calls `crate::sfx::signatures`, so a build with
+# rar on and sfx off did not compile. Neither extreme lane sees that: with
+# everything on it compiles, and with everything off both sides are gone. It was
+# found by sweeping combinations, and a `rar-support`-only lane is what keeps it
+# found (AD 0058).
+run_lane test-sfx-only \
+    cargo test --no-default-features --features sfx -- --test-threads=4
+run_lane test-rar-support-only \
+    cargo test --no-default-features --features rar-support -- --test-threads=4
 
 # L5: default features as a consumer gets them, compile-only. Links no test
 # binaries, so it cannot hit the first-exec admission stall.
