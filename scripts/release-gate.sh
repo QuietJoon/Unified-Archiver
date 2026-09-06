@@ -199,6 +199,14 @@ run_lane test-sevenzip-only \
     cargo test --no-default-features --features sevenzip -- --test-threads=4
 run_lane test-zip-crypto-only \
     cargo test --no-default-features --features zip-crypto -- --test-threads=4
+# `libarchive` is the odd one of the three: it adds no Cargo dependency at all,
+# so a dependency-tree diff cannot see it. What it gates is the build-script
+# probe for the system C library — the thing that makes this crate unbuildable
+# on a host without libarchive installed. This lane is what fails if the
+# `libarchive` feature stops selecting the backend, since L4 (everything off)
+# would still be green with the backend wired to nothing.
+run_lane test-libarchive-only \
+    cargo test --no-default-features --features libarchive -- --test-threads=4
 
 # L5: default features as a consumer gets them, compile-only. Links no test
 # binaries, so it cannot hit the first-exec admission stall.
