@@ -1,3 +1,5 @@
+mod common;
+
 // Comprehensive integrity checking tests for critical core library validation
 // These tests ensure archive integrity verification works correctly under all conditions
 
@@ -97,6 +99,10 @@ fn test_corruption_detection_consistency_across_formats() {
         ("tests/fixtures/test_rar5.rar", "RAR5"),
         ("tests/fixtures/test.7z", "7z"),
     ];
+    let test_cases: Vec<_> = test_cases
+        .into_iter()
+        .filter(|f| common::backend_available(f.0))
+        .collect();
 
     let mut successful_validations = 0;
 
@@ -351,6 +357,10 @@ fn test_concurrent_validation_different_archives() {
         "tests/fixtures/test_rar5.rar",
         "tests/fixtures/test.7z",
     ];
+    let archives: Vec<_> = archives
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
 
     let handles: Vec<_> = archives
         .into_iter()

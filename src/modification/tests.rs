@@ -117,7 +117,7 @@ fn test_modify_zip_archive() {
     assert_eq!(archive.format(), ArchiveFormat::Zip);
 }
 
-#[cfg(feature = "sevenzip")]
+#[cfg(all(feature = "sevenzip", feature = "libarchive"))]
 #[test]
 fn test_modify_7z_archive() {
     let (_td, _p) = fixture_copy("test.7z");

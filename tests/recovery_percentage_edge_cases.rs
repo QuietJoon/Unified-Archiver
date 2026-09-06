@@ -185,6 +185,10 @@ fn test_consistency_no_recovery_formats() {
         ("tests/fixtures/test.zip", "ZIP"),
         ("tests/fixtures/test.7z", "7z"),
     ];
+    let test_cases: Vec<_> = test_cases
+        .into_iter()
+        .filter(|f| common::backend_available(f.0))
+        .collect();
 
     for (path, format) in test_cases {
         let archive = Archive::open(path).unwrap_or_else(|_| panic!("Failed to open {}", format));
@@ -284,6 +288,10 @@ fn test_recovery_percentage_range_validation() {
         "tests/fixtures/test_rar5.rar",
         "tests/fixtures/test_recovery.rar",
     ];
+    let test_files: Vec<_> = test_files
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
 
     for path in test_files {
         assert_fixture_recovery_metadata(path);
@@ -366,6 +374,16 @@ fn test_recovery_percentage_all_supported_formats() {
         ("tests/fixtures/test.zip", "ZIP", false),
         ("tests/fixtures/test.7z", "7z", false),
     ];
+    let test_cases: Vec<_> = test_cases
+        .into_iter()
+        .filter(|f| common::backend_available(f.0))
+        .collect();
+    // Keep every backend this build has, drop the ones it does not — gating
+    // the whole test on one format would take the others with it (AD 0058).
+    let test_cases: Vec<(&str, &str, bool)> = test_cases
+        .into_iter()
+        .filter(|(path, _, _)| common::backend_available(path))
+        .collect();
 
     for (path, format, supports_recovery) in test_cases {
         let archive =

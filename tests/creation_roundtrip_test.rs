@@ -3,7 +3,12 @@
 //! These tests create archives and then extract them to verify correctness.
 
 use std::fs;
-#[cfg_attr(not(feature = "sevenzip"), allow(unused_imports))]
+// The 7z round-trip needs both features — `sevenzip` reads 7z but libarchive
+// is what writes it — so the allow has to track both, not just `sevenzip`.
+#[cfg_attr(
+    not(all(feature = "sevenzip", feature = "libarchive")),
+    allow(unused_imports)
+)]
 use unified_archive::{
     Archive, ArchiveFormat, CompressionLevel, CompressionOptions, WritableFormat,
 };
@@ -83,7 +88,7 @@ fn test_create_and_extract_targz() {
     common::cleanup(&temp);
 }
 
-#[cfg(feature = "sevenzip")]
+#[cfg(all(feature = "sevenzip", feature = "libarchive"))]
 #[test]
 fn test_create_and_extract_7z() {
     let temp = common::temp_test_dir();

@@ -15,17 +15,16 @@
 //! broader cross-format expectations. Future consolidation tracked
 //! under R0074-0079 (test taxonomy).
 
-// This suite's cases are `rar-support`-gated, so the minimal profile compiles
-// the file to nothing and every helper below it dangles. AD-0070 makes that
-// profile a release lane under `-D warnings`, where a dangling helper is a
-// build failure.
-#[cfg(feature = "rar-support")]
+// Every case here loops over ZIP / RAR / 7z fixtures. This suite used to be
+// `rar-support`-gated in its entirety, which compiled the whole cross-format
+// compatibility file to nothing in any build without RAR — the minimal profile
+// included. The fixture list is filtered per backend instead, so each build
+// covers exactly the formats it can actually read (AD 0058 format features).
+use super::common;
 use std::path::PathBuf;
-#[cfg(feature = "rar-support")]
 use unified_archive::{Archive, ArchiveFormat};
 
 /// Helper to get fixture path
-#[cfg(feature = "rar-support")]
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -39,7 +38,6 @@ fn fixture_path(name: &str) -> PathBuf {
 /// missing file signals a mispackaged checkout rather than an optional case to
 /// skip. Panicking here keeps the cross-format matrix from passing vacuously
 /// when no fixtures are exercised (R0081-0089).
-#[cfg(feature = "rar-support")]
 fn require_fixture(name: &str) -> PathBuf {
     let path = fixture_path(name);
     assert!(
@@ -51,7 +49,6 @@ fn require_fixture(name: &str) -> PathBuf {
     path
 }
 
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_open_multiple_formats() {
@@ -63,6 +60,10 @@ fn test_open_multiple_formats() {
         ("test.zip", ArchiveFormat::Zip),
         ("test.7z", ArchiveFormat::SevenZip),
     ];
+    let formats: Vec<(&str, ArchiveFormat)> = formats
+        .into_iter()
+        .filter(|f| common::backend_available(f.0))
+        .collect();
 
     for (filename, expected_format) in formats {
         let path = require_fixture(filename);
@@ -86,12 +87,15 @@ fn test_open_multiple_formats() {
     }
 }
 
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_list_files_consistency() {
     // Test that list_files() provides consistent entry structure across formats
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
+    let test_files: Vec<&str> = test_files
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
 
     for filename in test_files {
         let path = require_fixture(filename);
@@ -134,12 +138,15 @@ fn test_list_files_consistency() {
     }
 }
 
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_entry_count_consistency() {
     // Test that entry_count() returns consistent values
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
+    let test_files: Vec<&str> = test_files
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
 
     for filename in test_files {
         let path = require_fixture(filename);
@@ -163,7 +170,6 @@ fn test_entry_count_consistency() {
     }
 }
 
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_find_entry_consistency() {
@@ -173,6 +179,10 @@ fn test_find_entry_consistency() {
     // hard-coded member name, so the case exercises every committed fixture
     // without depending on any particular file being present inside them.
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
+    let test_files: Vec<&str> = test_files
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
 
     for filename in test_files {
         let path = require_fixture(filename);
@@ -213,12 +223,15 @@ fn test_find_entry_consistency() {
     }
 }
 
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_find_entry_not_found() {
     // Test that find_entry() returns None for non-existent entries
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
+    let test_files: Vec<&str> = test_files
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
 
     for filename in test_files {
         let path = require_fixture(filename);
@@ -238,12 +251,15 @@ fn test_find_entry_not_found() {
     }
 }
 
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_validate_integrity_consistency() {
     // Test that validate_integrity() provides consistent reporting across formats
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
+    let test_files: Vec<&str> = test_files
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
 
     for filename in test_files {
         let path = require_fixture(filename);
@@ -275,12 +291,15 @@ fn test_validate_integrity_consistency() {
     }
 }
 
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_path_getter_consistency() {
     // Test that path() returns the correct path for all formats
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
+    let test_files: Vec<&str> = test_files
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
 
     for filename in test_files {
         let path = require_fixture(filename);
@@ -297,12 +316,15 @@ fn test_path_getter_consistency() {
     }
 }
 
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_is_encrypted_consistency() {
     // Test that is_encrypted() works consistently across formats
     let unencrypted_files = vec!["test.rar", "test.zip", "test.7z"];
+    let unencrypted_files: Vec<&str> = unencrypted_files
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
 
     for filename in unencrypted_files {
         let path = require_fixture(filename);
@@ -325,6 +347,10 @@ fn test_is_encrypted_consistency() {
         ("test_encrypted_data.rar", true, "test123"),
         ("test_encrypted.zip", true, "test123"),
     ];
+    let encrypted_files: Vec<(&str, bool, &str)> = encrypted_files
+        .into_iter()
+        .filter(|f| common::backend_available(f.0))
+        .collect();
 
     for (filename, should_be_encrypted, password) in encrypted_files {
         let path = require_fixture(filename);
@@ -361,12 +387,15 @@ fn test_is_encrypted_consistency() {
     }
 }
 
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_calculate_archive_crc_consistency() {
     // Test that calculate_archive_crc() works consistently
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
+    let test_files: Vec<&str> = test_files
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
 
     for filename in test_files {
         let path = require_fixture(filename);
@@ -394,7 +423,6 @@ fn test_calculate_archive_crc_consistency() {
     }
 }
 
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_unified_api_cross_format() {
@@ -405,6 +433,10 @@ fn test_unified_api_cross_format() {
         ("test.zip", ArchiveFormat::Zip),
         ("test.7z", ArchiveFormat::SevenZip),
     ];
+    let test_files: Vec<(&str, ArchiveFormat)> = test_files
+        .into_iter()
+        .filter(|f| common::backend_available(f.0))
+        .collect();
 
     for (filename, expected_format) in test_files {
         let path = require_fixture(filename);

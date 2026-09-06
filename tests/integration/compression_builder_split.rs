@@ -7,7 +7,14 @@
 //! path through a format-specific entry point. Round-trip tests
 //! confirm the resulting archives are readable.
 
-#[cfg_attr(not(feature = "sevenzip"), allow(unused_imports))]
+// Different names here belong to different backends, so the import block is
+// partly unused whenever either feature is off. One `cfg_attr` covers both —
+// two separate ones expand to the same `allow` when both are off, which
+// clippy rejects as a duplicated attribute.
+#[cfg_attr(
+    not(all(feature = "sevenzip", feature = "libarchive")),
+    allow(unused_imports)
+)]
 use unified_archive::{
     Archive, ArchiveFormat, CompressionLevel, LibarchiveCompressionOptions,
     SevenZCompressionOptions, WritableFormat, ZipCompressionOptions,
@@ -44,7 +51,7 @@ fn zip_compression_options_round_trips() {
     let _ = std::fs::remove_file(&archive_path);
 }
 
-#[cfg(feature = "sevenzip")]
+#[cfg(all(feature = "sevenzip", feature = "libarchive"))]
 #[test]
 fn seven_zip_compression_options_round_trips() {
     let opts = SevenZCompressionOptions::new().level(CompressionLevel::Normal);

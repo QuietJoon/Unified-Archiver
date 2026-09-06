@@ -340,6 +340,10 @@ fn test_id_consistency_across_formats() {
         ("tests/fixtures/test.rar", "RAR"),
         ("tests/fixtures/test.7z", "7z"),
     ];
+    let test_archives: Vec<_> = test_archives
+        .into_iter()
+        .filter(|f| common::backend_available(f.0))
+        .collect();
 
     for (path, format) in test_archives {
         if let Ok(archive) = Archive::open(path) {

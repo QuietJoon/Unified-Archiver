@@ -4,44 +4,53 @@
 //! Tests compression ratios, entry count consistency, and CRC32 verification.
 
 use proptest::prelude::*;
-#[cfg(feature = "rar-support")]
 use std::path::PathBuf;
-// Every property in this file is `rar-support`-gated, and so is everything
-// that feeds them — including the fixture strategies, which is why
-// `ArchiveFormat` is gated too. On the minimal profile this file compiles to
-// nothing. AD-0070 makes that profile a release lane run under `-D warnings`,
-// so "nothing" has to mean no dangling items either.
-#[cfg(feature = "rar-support")]
 use unified_archive::{Archive, ArchiveFormat, EntryType, StreamBound};
 
 /// Helper to get test fixtures directory
-#[cfg(feature = "rar-support")]
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
+/// The fixtures whose backend this build can actually read.
+///
+/// This whole file used to be `rar-support`-gated — strategies included — so
+/// it "compiled to nothing" in any build without RAR, taking every ZIP
+/// property with it. The strategies draw from the compiled-in backends
+/// instead, so each profile exercises exactly what it can read and ZIP is
+/// never lost (AD 0058 format features). ZIP is unconditional, so the list is
+/// never empty and `select` always has an arm.
+fn available_fixtures() -> Vec<(&'static str, ArchiveFormat)> {
+    let mut v = vec![("test.zip", ArchiveFormat::Zip)];
+    if cfg!(feature = "rar-support") {
+        v.push(("test.rar", ArchiveFormat::Rar5));
+    }
+    if cfg!(feature = "sevenzip") {
+        v.push(("test.7z", ArchiveFormat::SevenZip));
+    }
+    v
+}
+
 /// Strategy: pick one of the available test fixture files
-#[cfg(feature = "rar-support")]
 fn fixture_file_strategy() -> impl Strategy<Value = (&'static str, ArchiveFormat)> {
-    prop_oneof![
-        Just(("test.rar", ArchiveFormat::Rar5)),
-        Just(("test.zip", ArchiveFormat::Zip)),
-        Just(("test.7z", ArchiveFormat::SevenZip)),
-    ]
+    proptest::sample::select(available_fixtures())
 }
 
 /// Strategy: pick a fixture filename
-#[cfg(feature = "rar-support")]
 fn fixture_name_strategy() -> impl Strategy<Value = &'static str> {
-    prop_oneof![Just("test.rar"), Just("test.zip"), Just("test.7z"),]
+    proptest::sample::select(
+        available_fixtures()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>(),
+    )
 }
 
 // ── Property-based tests using proptest macros ──
 
 proptest! {
     /// Property: Format detection is deterministic across random iteration counts
-    #[cfg(feature = "rar-support")]
-    #[test]
+        #[test]
     #[serial_test::file_serial(rar)]
     fn prop_format_detection_deterministic(
         (filename, expected_format) in fixture_file_strategy(),
@@ -63,8 +72,7 @@ proptest! {
     }
 
     /// Property: Entry count is consistent regardless of how many times list_files is called
-    #[cfg(feature = "rar-support")]
-    #[test]
+        #[test]
     #[serial_test::file_serial(rar)]
     fn prop_entry_count_consistent(
         filename in fixture_name_strategy(),
@@ -92,8 +100,7 @@ proptest! {
     }
 
     /// Property: Entry paths are always unique within any archive
-    #[cfg(feature = "rar-support")]
-    #[test]
+        #[test]
     #[serial_test::file_serial(rar)]
     fn prop_entry_paths_unique(filename in fixture_name_strategy()) {
         let path = fixtures_dir().join(filename);
@@ -112,8 +119,8 @@ proptest! {
     }
 
     /// Property: All file entries in RAR archives have CRC32 checksums
-    #[cfg(feature = "rar-support")]
-    #[test]
+        #[cfg(feature = "rar-support")]
+        #[test]
     #[serial_test::file_serial(rar)]
     fn prop_rar_file_entries_have_crc32(_dummy in 0u8..1) {
         let path = fixtures_dir().join("test.rar");
@@ -135,8 +142,7 @@ proptest! {
     }
 
     /// Property: Extracted data size matches the entry's reported size
-    #[cfg(feature = "rar-support")]
-    #[test]
+        #[test]
     #[serial_test::file_serial(rar)]
     fn prop_extracted_size_matches_entry(filename in fixture_name_strategy()) {
         let path = fixtures_dir().join(filename);
@@ -164,8 +170,7 @@ proptest! {
     }
 
     /// Property: Streaming extraction produces identical data to memory extraction
-    #[cfg(feature = "rar-support")]
-    #[test]
+        #[test]
     #[serial_test::file_serial(rar)]
     fn prop_streaming_equals_memory_extraction(filename in fixture_name_strategy()) {
         use std::io::Read;
@@ -194,8 +199,7 @@ proptest! {
     }
 
     /// Property: Archive opening is idempotent (N random opens all succeed)
-    #[cfg(feature = "rar-support")]
-    #[test]
+        #[test]
     #[serial_test::file_serial(rar)]
     fn prop_archive_open_idempotent(
         filename in fixture_name_strategy(),
@@ -214,8 +218,7 @@ proptest! {
     }
 
     /// Property: Validation reports are consistent across multiple runs
-    #[cfg(feature = "rar-support")]
-    #[test]
+        #[test]
     #[serial_test::file_serial(rar)]
     fn prop_validation_consistent(
         filename in fixture_name_strategy(),
@@ -248,8 +251,7 @@ proptest! {
     }
 
     /// Property: find_entry is equivalent to filtering list_files
-    #[cfg(feature = "rar-support")]
-    #[test]
+        #[test]
     #[serial_test::file_serial(rar)]
     fn prop_find_entry_equivalent_to_filter(filename in fixture_name_strategy()) {
         let path = fixtures_dir().join(filename);
@@ -283,8 +285,7 @@ proptest! {
     }
 
     /// Property: Entry IDs are sequential starting from 0
-    #[cfg(feature = "rar-support")]
-    #[test]
+        #[test]
     #[serial_test::file_serial(rar)]
     fn prop_entry_ids_sequential(filename in fixture_name_strategy()) {
         let path = fixtures_dir().join(filename);
@@ -304,8 +305,7 @@ proptest! {
     }
 
     /// Property: File entries have non-negative sizes
-    #[cfg(feature = "rar-support")]
-    #[test]
+        #[test]
     #[serial_test::file_serial(rar)]
     fn prop_file_entries_have_sizes(filename in fixture_name_strategy()) {
         let path = fixtures_dir().join(filename);
@@ -327,8 +327,7 @@ proptest! {
     }
 
     /// Property: Compression ratio, when present, is non-negative
-    #[cfg(feature = "rar-support")]
-    #[test]
+        #[test]
     #[serial_test::file_serial(rar)]
     fn prop_compression_ratio_non_negative(filename in fixture_name_strategy()) {
         let path = fixtures_dir().join(filename);

@@ -79,7 +79,6 @@ fn test_extract_all_7z() {
     common::cleanup(&temp);
 }
 
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_extract_single_file_multiple_formats() {
@@ -88,6 +87,10 @@ fn test_extract_single_file_multiple_formats() {
         ("test.zip", ArchiveFormat::Zip),
         ("test.7z", ArchiveFormat::SevenZip),
     ];
+    let formats: Vec<(&str, ArchiveFormat)> = formats
+        .into_iter()
+        .filter(|f| common::backend_available(f.0))
+        .collect();
 
     for (filename, expected_format) in formats {
         let temp = common::temp_test_dir();
@@ -135,11 +138,14 @@ fn test_extract_single_file_multiple_formats() {
     }
 }
 
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_extract_to_memory_multiple_formats() {
     let formats = vec![("test.rar", "test_file.txt"), ("test.zip", "test_file.txt")];
+    let formats: Vec<(&str, &str)> = formats
+        .into_iter()
+        .filter(|f| common::backend_available(f.0))
+        .collect();
 
     for (archive_name, file_name) in formats {
         let archive_path = common::fixture(archive_name);
@@ -175,11 +181,14 @@ fn test_extract_to_memory_multiple_formats() {
     }
 }
 
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_extract_filtered_multiple_formats() {
     let formats = vec!["test.rar", "test.zip", "test.7z"];
+    let formats: Vec<&str> = formats
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
 
     for archive_name in formats {
         let temp = common::temp_test_dir();
@@ -221,11 +230,14 @@ fn test_extract_filtered_multiple_formats() {
     }
 }
 
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_extract_to_nested_directory() {
     let formats = vec!["test.rar", "test.zip"];
+    let formats: Vec<&str> = formats
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
 
     for archive_name in formats {
         let temp = common::temp_test_dir();
@@ -312,6 +324,10 @@ fn test_extract_overwrite_handling() {
 fn test_extract_preserves_file_content() {
     // Verify that extraction doesn't corrupt file content across formats
     let formats = vec!["test.rar", "test.zip"];
+    let formats: Vec<&str> = formats
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
 
     for archive_name in formats {
         let temp = common::temp_test_dir();
@@ -350,7 +366,6 @@ fn test_extract_preserves_file_content() {
     }
 }
 
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_unified_extraction_api_consistency() {
@@ -360,6 +375,10 @@ fn test_unified_extraction_api_consistency() {
         ("test.zip", ArchiveFormat::Zip),
         ("test.7z", ArchiveFormat::SevenZip),
     ];
+    let test_archives: Vec<(&str, ArchiveFormat)> = test_archives
+        .into_iter()
+        .filter(|f| common::backend_available(f.0))
+        .collect();
 
     for (archive_name, expected_format) in test_archives {
         let temp = common::temp_test_dir();

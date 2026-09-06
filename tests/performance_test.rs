@@ -7,15 +7,15 @@
 //!
 //! These tests use actual timing assertions rather than relative benchmarks.
 
-// `Read`, `Archive` and `StreamBound` are used only by the RAR lanes below.
-// Gated so `--no-default-features` compiles warning-free: that profile is a
-// release-gate lane (AD-0070) and runs under `-D warnings`, where an unused
-// import is a failure rather than a nuisance.
-#[cfg(feature = "rar-support")]
+mod common;
+
+// `Read` and `StreamBound` used to be gated on `rar-support`, because the
+// only lanes reaching them were the RAR ones. They are now used by the
+// multi-format tests, which run in every profile and filter their fixture
+// list rather than being gated on one format (AD 0058).
 use std::io::Read;
 use std::path::PathBuf;
 use std::time::Instant;
-#[cfg(feature = "rar-support")]
 use unified_archive::{Archive, StreamBound};
 
 /// Helper to get test fixtures directory
@@ -27,11 +27,14 @@ fn fixtures_dir() -> PathBuf {
 ///
 /// Target: <100ms for our small test archives (1 file)
 /// Scales to ~1s for 10k files based on linear extrapolation.
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn perf_entry_listing_cached() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
+    let test_files: Vec<&str> = test_files
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
 
     for filename in test_files {
         let path = fixtures_dir().join(filename);
@@ -69,6 +72,10 @@ fn perf_entry_listing_cached() {
 #[serial_test::file_serial(rar)]
 fn perf_format_detection() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
+    let test_files: Vec<&str> = test_files
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
 
     for filename in test_files {
         let path = fixtures_dir().join(filename);
@@ -96,11 +103,14 @@ fn perf_format_detection() {
 /// Performance target: Archive opening overhead
 ///
 /// Target: <10ms to open small archive
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn perf_archive_open() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
+    let test_files: Vec<&str> = test_files
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
 
     for filename in test_files {
         let path = fixtures_dir().join(filename);
@@ -128,11 +138,14 @@ fn perf_archive_open() {
 /// Performance target: Small file extraction
 ///
 /// Target: <50ms to extract small file (< 1KB)
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn perf_small_file_extraction() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
+    let test_files: Vec<&str> = test_files
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
     let file_to_extract = "test_file.txt";
 
     for filename in test_files {
@@ -179,6 +192,10 @@ fn perf_small_file_extraction() {
 #[serial_test::file_serial(rar)]
 fn perf_streaming_overhead() {
     let test_files = vec!["test.rar", "test.7z"];
+    let test_files: Vec<&str> = test_files
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
     let file_to_extract = "test_file.txt";
 
     for filename in test_files {
@@ -230,11 +247,14 @@ fn perf_streaming_overhead() {
 /// Performance target: Entry lookup is efficient
 ///
 /// Target: find_entry() should be O(n) but fast for small archives
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn perf_entry_lookup() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
+    let test_files: Vec<&str> = test_files
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
     let search_path = "test_file.txt";
 
     for filename in test_files {
@@ -267,11 +287,14 @@ fn perf_entry_lookup() {
 /// Performance target: Validation is reasonably fast
 ///
 /// Target: <100ms for small archives
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn perf_validation() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
+    let test_files: Vec<&str> = test_files
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
 
     for filename in test_files {
         let path = fixtures_dir().join(filename);
@@ -310,11 +333,14 @@ fn perf_validation() {
 /// reads reassembles into the exact entry content on every backend.
 /// Memory-bound verification (SC-009) needs an external profiling
 /// harness.
-#[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn perf_streaming_chunked_read_integrity() {
     let test_files = vec!["test.rar", "test.zip", "test.7z"];
+    let test_files: Vec<&str> = test_files
+        .into_iter()
+        .filter(|f| common::backend_available(f))
+        .collect();
     let file_to_extract = "test_file.txt";
 
     for filename in test_files {

@@ -180,6 +180,44 @@ pub fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// Whether the backend that reads `fixture` is compiled into this build
+/// (AD 0058 format features).
+///
+/// Multi-format tests loop over a fixture list, and under a partial feature
+/// set some of those backends are gone. The wrong fix is to gate the whole
+/// test on one format's feature: that is how `test_extract_single_file_multiple_formats`
+/// came to be `#[cfg(feature = "rar-support")]` while also opening `test.zip`
+/// and `test.7z` — harmless while every build had all backends, and 32 test
+/// failures the moment a `rar-support`-only lane existed. It also silently
+/// removed the ZIP half from the minimal profile.
+///
+/// Filter the list instead, so every backend that IS present stays covered.
+#[allow(dead_code)]
+pub fn backend_available(fixture: &str) -> bool {
+    let f = fixture.rsplit('/').next().unwrap_or(fixture);
+    if f.ends_with(".7z") {
+        return cfg!(feature = "sevenzip");
+    }
+    if f.ends_with(".rar") {
+        return cfg!(feature = "rar-support");
+    }
+    // TAR family, ISO, and the raw single-stream codecs are all libarchive.
+    if f.contains(".tar")
+        || f.ends_with(".tgz")
+        || f.ends_with(".iso")
+        || f.ends_with(".gz")
+        || f.ends_with(".bz2")
+        || f.ends_with(".xz")
+        || f.ends_with(".zst")
+        || f.ends_with(".lz4")
+        || f.ends_with(".lzma")
+    {
+        return cfg!(feature = "libarchive");
+    }
+    // ZIP and anything else is always compiled in.
+    true
+}
+
 /// Check whether the given executable is available on PATH. Tests use this
 /// to skip gracefully when a fixture-building CLI (tar, zip, 7z…) is
 /// missing from the environment.

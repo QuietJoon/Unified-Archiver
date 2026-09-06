@@ -1,3 +1,5 @@
+mod common;
+
 // Test archive integrity checking with validate_integrity()
 
 use unified_archive::{Archive, ArchiveError};
@@ -122,6 +124,10 @@ fn test_integrity_check_across_formats() {
         ("tests/fixtures/test_rar5.rar", "RAR5"),
         ("tests/fixtures/test.7z", "7z"),
     ];
+    let test_archives: Vec<_> = test_archives
+        .into_iter()
+        .filter(|f| common::backend_available(f.0))
+        .collect();
 
     for (path, format) in test_archives {
         if let Ok(archive) = Archive::open(path) {
