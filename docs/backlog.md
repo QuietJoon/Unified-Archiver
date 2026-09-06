@@ -450,6 +450,63 @@ have hit a decision wall on three of four.
   justified on API-surface grounds instead.
 
 
+- **Fourth increment LANDED 2026-09-07 — `sfx`, the cheapest to write and the most instructive.**
+  15 files and 112 insertions against `libarchive`'s 49 and 385, because the interface really is
+  narrow: the detection module plus five public entry points. `PayloadWindow` and the backends'
+  `payload_offset` field are deliberately left ungated — the field defaults to 0, only the
+  offset-open paths set it, and the RAR4 recovery walk uses the window independently, so gating a
+  `u64` and a 219-line adapter would buy nothing and force compound cfgs on both backends.
+
+  **Cost: +54 KB stripped** (837 KB → 891 KB), between `zip-crypto` (+17 KB) and `libarchive`
+  (+197 KB). Cheap, as the Required Action 5 amendment predicted — and note that 3,334 lines of Rust
+  cost 54 KB, so line count is no better a footprint proxy than crate count. **This lowers the
+  `read-minimal` floor published one commit earlier from 891 KB to 837 KB**; that figure was right
+  when measured, but the headline number moves with every increment and should be read as "the floor
+  as of increment N".
+
+  **Three blind spots in the verification method, each found the hard way:**
+
+  1. **Neither extreme lane can see a cross-feature reference.** `first_rar_signature_before` is
+     gated on `rar-support` and calls `crate::sfx::signatures`, so RAR-on/SFX-off did not compile.
+     All-on compiles; all-off `cfg`s both sides away. Found by sweeping nine feature *combinations*.
+     Fixed with compound `cfg(all(...))`, and **every format feature now gets its own isolation
+     lane** — this adds `test-sfx-only` and `test-rar-support-only`, since RAR never had one and a
+     RAR-only lane is exactly what catches this.
+  2. **A failure-driven gating pass cannot see an already-gated test.** Every SFX test already behind
+     `libarchive` / `sevenzip` / `target_os` raised no error and was skipped, leaving four files
+     partly gated and broken in a `libarchive`-on/`sfx`-off build. Whole-file `#![cfg]` fixes it and
+     composes with the inner gates. Rule: prefer a whole-file gate when a file is *about* the feature.
+  3. **`cargo check --all-targets` excludes doc tests.** Two doc examples calling the gated API passed
+     the entire nine-combination sweep and failed the lane. Now feature-aware rather than `ignore`, so
+     they stay compile-checked in the default build.
+
+  **The new `rar-support` lane found 32 failures that had nothing to do with `sfx`.** They were
+  pre-existing and invisible, because no build had ever had RAR without everything else. The pattern:
+  a multi-format test gated `#[cfg(feature = "rar-support")]` because it *mentions* a `.rar` fixture
+  while also opening `test.zip` and `test.7z`. RAR-on/others-off makes it fail loudly; RAR-**off**
+  makes it not run at all, silently taking its ZIP coverage out of the minimal profile. Two files
+  said so in their own header comments — *"the minimal profile compiles the file to nothing"* — and
+  it had been read as a `-D warnings` housekeeping note rather than as lost coverage. A whole
+  cross-format compatibility suite and the entire property-test suite were absent from every
+  non-RAR build, `read-minimal` included.
+
+  Fixed at the list rather than the test: `common::backend_available(fixture)` filters a fixture list
+  to the backends this build compiled in. Gates removed — `format_compatibility.rs` 14 → **0**,
+  `property_tests.rs` 12 → **1** (the one genuinely RAR-specific property), `performance_test.rs`
+  10 → 4, `integration/extraction.rs` 8 → 3.
+
+  **The lesson outranks the `sfx` work itself.** A feature gate on a test claims the test is *about*
+  that feature; when it is about several, the gate is wrong in both directions and only the failing
+  direction is ever visible. A per-feature isolation lane converts the invisible direction into the
+  visible one — the argument for one lane per feature is now evidence, not symmetry, since it paid
+  for itself on its first run against a defect predating every increment in this item.
+
+  Lanes: `--no-default-features` 43 suites / 1294 passed / 0 failed; `--all-features` 43 / 2088 / 0 —
+  the full count unchanged from before the increment, which is the check that nothing left the
+  default build. `sfx` carries 195 tests (1489 → 1294).
+
+  Remaining in this item: `zip-read` / `zip-write` and the five operation features.
+
 ### Non-UTF-8 path fidelity round 2 (OI-0076-001)
 - **Type:** 2
 - **Verified:** yes — gated register (indy-review-gate route or approved design baseline); reopen re-confirmed the source still lists it 2026-08-12
