@@ -202,3 +202,48 @@ separately rather than folded in here or dropped.
 
 **Disposition: this record stays ACTIVE.** Option A remains the policy; this amendment settles the
 question the previous one deferred and records what remains.
+
+## Amendment (2026-09-06, owner ruling — the write side rejects, and the two add paths now agree)
+
+The 2026-09-03 amendment settled the *read* side and left the write side open. OI-0076-001 carried
+the question with three answers on the table: preserve the bytes into the archive, reject the name,
+or accept the lossy rendering. **The owner chose reject**, and this amendment records the choice and
+what implementing it actually took.
+
+**The inconsistency this closes.** `Archive::add_file_from_path` has rejected a non-UTF-8 source
+filename since this record was written — the rejection even names the escape hatch
+(`add_file_from_path_as`). `add_directory_recursive` did not. It reached
+`ffi::common::compose_archive_path`, which composed through `to_string_lossy`, and the entry was
+stored under a `U+FFFD` rendering of a name that was not the source's. Two adds of the same file,
+one by path and one as part of its tree, disagreed on whether that file could be archived at all.
+
+**Why reject rather than preserve.** Preserving would have meant a byte-keyed public write surface,
+which the 2026-09-03 amendment rejects on the read side for reasons that apply unchanged here: it is
+a second addressing scheme competing with the shipped one. `DirWalkEntry::archive_path` therefore
+stays a `String`. The accepted cost is stated plainly: **archiving a whole tree now fails when one
+file in it is badly named**, and there is no per-entry rename hook on a recursive add to soften
+that. Rename the file, exclude it, or add it individually.
+
+**Where the guard went, which is not where the ruling's wording implies.** The ruling names
+`add_directory_recursive`, but there are three of those — the facade's, and one in each of the ZIP
+and libarchive writers. All three are the only callers of `ffi::common::walk_directory_tree`, and
+that walk is the single place the lossy composition happened. The guard is one function there
+(`reject_non_utf8_relative`), so no route can bypass it and the three cannot drift apart. It tests
+the *relative* path, which covers the source root's own name — the one component that prefixes every
+entry in the resulting archive.
+
+**A measurement that changes how this can be tested, recorded so it is not rediscovered.** A
+non-UTF-8 *child* name cannot be produced on either macOS filesystem in use here. `/Volumes/Temp` is
+HFS+, which transliterates an invalid byte into the literal ASCII text `%FF`: a file created as
+`bad\xFF.txt` comes back out of `read_dir` as `bad%FF.txt`, which is valid UTF-8 and is correctly
+*not* rejected. A filesystem-level test of that case does not fail on this host — it passes without
+ever constructing the case it claims to cover, which is worse. What is reachable is the source
+*root*, because the walk visits it under the spelling the caller passed in rather than one the
+filesystem has rewritten. So the coverage is split deliberately: the root case end-to-end in
+`creation::tests::test_recursive_create_rejects_non_utf8_root_name`, and the child case on in-memory
+paths in `ffi::common::root_naming_tests::non_utf8_relative_paths_are_refused`. Both directions of
+the guard were mutation-checked.
+
+**Disposition: this record stays ACTIVE.** Option A remains the policy. With this amendment its
+write-side question is closed; the read-side residual named in the 2026-09-03 amendment (ticgit
+`81f344`, the in-memory route to one of two colliding names) is untouched and still open.
