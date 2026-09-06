@@ -895,8 +895,10 @@ pub(crate) enum DirWalkKind {
 }
 
 /// One filesystem entry surfaced by [`walk_directory_tree`], with its
-/// parent-rooted relative archive path (raw `to_string_lossy` form —
-/// callers apply their own separator-normalization policy).
+/// parent-rooted relative archive path (raw, un-normalized form —
+/// callers apply their own separator-normalization policy). The walk
+/// refuses a non-UTF-8 source component rather than substituting
+/// U+FFFD, so this is the source's own name and not a rendering of it.
 pub(crate) struct DirWalkEntry<'a> {
     pub fs_path: &'a Path,
     pub archive_path: String,
@@ -955,6 +957,7 @@ pub(crate) fn walk_directory_tree(
         let entry = entry_result.map_err(|e| walkdir_io_error(&e, dir_path, op))?;
         let fs_path = entry.path();
         let relative = fs_path.strip_prefix(base_path).unwrap_or(fs_path);
+        reject_non_utf8_relative(fs_path, relative)?;
         let archive_path = compose_archive_path(relative, synthetic_root.as_deref());
         // Defensive: with a parent-rooted base every entry has a
         // non-empty relative form, and a synthesised root supplies one
@@ -988,6 +991,30 @@ pub(crate) fn walk_directory_tree(
         })?;
     }
     Ok(())
+}
+
+/// Refuse a walked entry whose archive-relative path is not valid
+/// UTF-8, rather than rendering it lossily (AD 0064 write-side ruling).
+///
+/// The single-file add has rejected a non-UTF-8 source name since
+/// AD 0064; the recursive add reached [`compose_archive_path`] and
+/// substituted `U+FFFD`, storing the entry under a name that is not the
+/// source's. This is the one point where the two disagreed. A recursive
+/// add has no per-entry rename hook, so the whole call fails — the
+/// accepted cost of not growing a byte-keyed public write surface.
+///
+/// `fs_path` is only used to spell the diagnostic; `relative` is what
+/// decides. Checking the relative path covers the source root's own
+/// name too, since that name becomes the top-level archive prefix.
+fn reject_non_utf8_relative(fs_path: &Path, relative: &Path) -> Result<()> {
+    if relative.to_str().is_some() {
+        return Ok(());
+    }
+    Err(ArchiveError::invalid_path(
+        fs_path.to_string_lossy().as_ref(),
+        "source path component is not valid UTF-8; rename or exclude it, \
+         or add the file individually with add_file_from_path_as (AD 0064)",
+    ))
 }
 
 /// Choose the base every archive path is made relative to, plus a
@@ -1397,6 +1424,61 @@ mod root_naming_tests {
             "project/src/main.rs"
         );
         assert_eq!(compose_archive_path(Path::new(""), None), "");
+    }
+
+    /// AD 0064 write-side ruling, tested on in-memory paths.
+    ///
+    /// It has to be in-memory. Both macOS filesystems in play here
+    /// refuse to store the bytes: `/Volumes/Temp` is HFS+, which
+    /// transliterates an invalid byte into the literal ASCII text
+    /// `%FF`, so a file created as `bad\xFF.txt` comes back out of
+    /// `read_dir` as `bad%FF.txt` — valid UTF-8, and correctly not
+    /// rejected. A filesystem-level test of a non-UTF-8 *child* name
+    /// therefore cannot be written on this host at all; it would pass
+    /// only by never constructing the case it claims to cover.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_relative_paths_are_refused() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let fs_path = Path::new("/src/tree/bad.txt");
+
+        // A child component carrying a byte that is never valid UTF-8.
+        let bad = Path::new(OsStr::from_bytes(b"tree/bad\xFF.txt"));
+        let err = reject_non_utf8_relative(fs_path, bad)
+            .expect_err("an invalid byte in a child component must be refused");
+        assert!(
+            err.to_string().contains("not valid UTF-8"),
+            "the refusal must name the encoding: {err}"
+        );
+
+        // The source root's own name is a component like any other —
+        // and the one that prefixes every entry in the archive.
+        let bad_root = Path::new(OsStr::from_bytes(b"tree\xFF/fine.txt"));
+        reject_non_utf8_relative(fs_path, bad_root)
+            .expect_err("an invalid byte in the root component must be refused");
+
+        // A lone truncated multi-byte sequence, which `to_string_lossy`
+        // would render as a single U+FFFD.
+        let truncated = Path::new(OsStr::from_bytes(b"tree/\xE6\x97.txt"));
+        reject_non_utf8_relative(fs_path, truncated)
+            .expect_err("a truncated multi-byte sequence must be refused");
+    }
+
+    /// The guard must key on UTF-8 validity, not on being ASCII. A
+    /// "printable ASCII" check would pass the test above and silently
+    /// break every non-English filename, so pin the difference.
+    #[test]
+    fn valid_utf8_relative_paths_are_accepted() {
+        reject_non_utf8_relative(Path::new("/x"), Path::new("tree/plain.txt"))
+            .expect("ASCII must be accepted");
+        reject_non_utf8_relative(Path::new("/x"), Path::new("tree/日本語.txt"))
+            .expect("non-ASCII UTF-8 must be accepted");
+        reject_non_utf8_relative(Path::new("/x"), Path::new("트리/파일.txt"))
+            .expect("non-ASCII UTF-8 must be accepted in every component");
+        reject_non_utf8_relative(Path::new("/x"), Path::new(""))
+            .expect("the empty relative path of a synthesised root must be accepted");
     }
 
     /// The name is derived from the root's own spelling, so it is stable

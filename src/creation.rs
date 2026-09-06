@@ -362,6 +362,15 @@ impl Archive {
     ///
     /// All files within the directory tree are added to the archive.
     ///
+    /// Per AD 0064 (non-UTF-8 path policy — Option A), every source path
+    /// component must be valid UTF-8, matching
+    /// [`Self::add_file_from_path`]. A tree holding one badly named file
+    /// fails as a whole rather than archiving that file under a lossy
+    /// `U+FFFD` rendering of its name: a recursive add has no per-entry
+    /// rename hook, so there is nowhere to supply a corrected name.
+    /// Rename or exclude the file, or add it individually with
+    /// [`Self::add_file_from_path_as`].
+    ///
     /// # One observation of the source tree (OI-0080-005)
     ///
     /// The tree is walked **once**. That single walk builds a
@@ -1530,6 +1539,99 @@ mod tests {
         let entries = reader.list_files().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path, "only.txt");
+    }
+
+    // ── AD 0064 write-side ruling: non-UTF-8 source names ──
+
+    /// The single-file add has rejected a non-UTF-8 source name since
+    /// AD 0064; the recursive add substituted `U+FFFD` and stored the
+    /// entry under a name that was not the source's. The owner ruled
+    /// **reject**, so the two agree now.
+    ///
+    /// This drives it through the *source root's own name*, which is the
+    /// only non-UTF-8 case reachable from a test on this host. The root
+    /// is walked under the spelling the caller passed in, so the bytes
+    /// survive; a child name comes back out of `read_dir` after the
+    /// filesystem has had its say, and both macOS filesystems here
+    /// refuse to store the bytes (HFS+ rewrites `\xFF` to the literal
+    /// text `%FF`). The child case is covered where it can be covered —
+    /// `ffi::common::non_utf8_relative_paths_are_refused`, on in-memory
+    /// paths.
+    ///
+    /// The root is not a lesser case: its name becomes the top-level
+    /// prefix on every entry in the archive.
+    #[cfg(unix)]
+    #[test]
+    fn test_recursive_create_rejects_non_utf8_root_name() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        // 0xFF is never valid UTF-8 in any position.
+        let src_dir = temp.path().join(std::ffi::OsStr::from_bytes(b"tree\xFF"));
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("fine.txt"), b"data").unwrap();
+
+        let archive_path = temp.path().join("root.zip");
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
+        let mut archive = Archive::create(&archive_path, options).unwrap();
+        let err = archive.add_directory_recursive(&src_dir).unwrap_err();
+        assert!(
+            err.to_string().contains("not valid UTF-8"),
+            "the refusal must name the encoding, got: {err}"
+        );
+
+        // Same preflight contract as the symlink rejection: nothing was
+        // emitted, the namespace is released, and the writer is usable.
+        archive
+            .add_file_from_data("only.txt", b"ok")
+            .expect("writer must remain usable after the rejection");
+        archive.finish().unwrap();
+
+        let reader = Archive::open(&archive_path).unwrap();
+        let entries = reader.list_files().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "only.txt");
+    }
+
+    /// The guard must not fire on names that merely are not ASCII. A
+    /// `to_str()` check is the correct test and a "printable ASCII"
+    /// check is not; this pins the difference end to end.
+    ///
+    /// Asserted on entry *count* and on a name with no decomposable
+    /// characters: HFS+ normalises to NFD, so a round-tripped `café.txt`
+    /// comes back as `cafe\u{301}.txt` and an equality assertion on the
+    /// NFC spelling fails for reasons that have nothing to do with this
+    /// guard.
+    #[test]
+    fn test_recursive_create_accepts_non_ascii_utf8_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = temp.path().join("tree");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("日本語.txt"), b"data").unwrap();
+        std::fs::write(src_dir.join("파일.txt"), b"data").unwrap();
+
+        let archive_path = temp.path().join("utf8.zip");
+        let options = CompressionOptions::for_writable(WritableFormat::ZIP);
+        let mut archive = Archive::create(&archive_path, options).unwrap();
+        archive
+            .add_directory_recursive(&src_dir)
+            .expect("valid UTF-8 names must still be accepted");
+        archive.finish().unwrap();
+
+        let reader = Archive::open(&archive_path).unwrap();
+        let names: Vec<String> = reader
+            .list_files()
+            .unwrap()
+            .iter()
+            .filter(|e| e.entry_type == EntryType::File)
+            .map(|e| e.path.clone())
+            .collect();
+        assert_eq!(
+            names.len(),
+            2,
+            "both non-ASCII names must survive: {names:?}"
+        );
+        assert!(names.iter().any(|n| n.ends_with("日本語.txt")), "{names:?}");
     }
 
     // ── OI-0080-005: single-walk manifest pinning ──
