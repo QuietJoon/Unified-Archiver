@@ -190,6 +190,14 @@ run_lane test-all-features cargo test --all-features -- --test-threads=4
 # shipping a default change that breaks the minimal build.
 run_lane test-no-default-features cargo test --no-default-features -- --test-threads=4
 
+# L4b: one AD 0058 format feature on its own. L3 and L4 cover only the two
+# extremes — everything on, everything off — and a feature can be wired to
+# nothing and still pass both: with it on, the always-compiled code carries the
+# tests; with it off, the tests are cfg'd away. This lane is the one that fails
+# if `sevenzip` stops actually selecting the backend.
+run_lane test-sevenzip-only \
+    cargo test --no-default-features --features sevenzip -- --test-threads=4
+
 # L5: default features as a consumer gets them, compile-only. Links no test
 # binaries, so it cannot hit the first-exec admission stall.
 run_lane check-default cargo check --all-targets
