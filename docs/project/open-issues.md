@@ -2521,7 +2521,15 @@ than the page hand-patched a second time.
 - **Date:** 2026-08-07
 - **Decision:** ACCEPT (recovered by the `/indy-review-cleanup` triage; consolidated from two
   findings in the same backend that were never routed)
-- **Status:** OPEN
+- **Status:** RESOLVED 2026-09-06 — item 1 documented (owner ruling 2026-09-03), item 2
+  implemented as a third error class (owner ruling, AD 0073). Required Action 3 was answered by
+  measurement rather than left conditional: `sevenz-rust2` **does** re-sync the solid cursor after
+  a short callback read (10 of 30,000 bytes consumed from entry 1; entry 2 still returned complete
+  and byte-correct), so the mis-attribution as originally described is unreachable by that route.
+  The guard is kept for the decode-*error* state, which is a different state and could not be
+  observed on this host. Two unbounded read loops were found and bounded while implementing it.
+  A separate, pre-existing hang on corrupt LZMA2 input is filed as ticgit `f8c4b2` — it is inside
+  the upstream decoder and is not fixed here.
 
 ### Problem
 
@@ -2563,10 +2571,15 @@ libarchive (`classify_libarchive_error` on a non-EOF terminal status, R0080-0019
 
 ### Verification
 
-- [ ] An encrypted 7z entry with a correct password and corrupt payload is distinguishable from a
-      wrong-password failure, by type or by documented contract
-- [ ] Solid-stream drain behaviour on error is decided, implemented and commented
-- [ ] `for_each_entries` cursor re-sync question answered in the record or the code comment
+- [x] An encrypted 7z entry with a correct password and corrupt payload is distinguishable from a
+      wrong-password failure, by type or by documented contract — documented, not typed
+      (owner ruling 2026-09-03; `ArchiveError::Password` rustdoc states the ambiguity per backend)
+- [x] Solid-stream drain behaviour on error is decided, implemented and commented — the scan
+      aborts with `ArchiveError::IntegrityScanAborted`, carrying the verdicts already reached
+      (AD 0073). Extracted as `drain_to_realign` so both abort branches are testable; neither is
+      producible from a real archive on this host. Both mutation-checked.
+- [x] `for_each_entries` cursor re-sync question answered in the record or the code comment —
+      **it does re-sync**, measured 2026-09-06 and recorded in AD 0073
 
 ### Related
 

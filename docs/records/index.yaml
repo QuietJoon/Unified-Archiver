@@ -410,6 +410,12 @@ records:
     status: active
     file: AD-0072-the-uniform-interface-is-the-product.md
     mentions: [AD-0058, AD-0071, DCR-009]
+  - id: AD-0073
+    type: AD
+    title: "AD 0073: an abandoned integrity scan is a third outcome class, not a corruption verdict"
+    status: active
+    file: AD-0073-integrity-scan-aborted-is-a-third-class.md
+    mentions: [AD-0064]
   - id: DCR-001
     type: DCR
     title: "Design Change Record"
