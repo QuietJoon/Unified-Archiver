@@ -365,6 +365,62 @@ have hit a decision wall on three of four.
   `scripts/generate-zip-fixtures.sh` and `tests/fixtures/test_aes256.zip`, run by hand and never
   from the build, like the 7z/RAR/TAR scripts. Both directions mutation-checked, end to end.
 
+- **Third increment LANDED 2026-09-06 — `libarchive`, the one the item was written for.** It removes
+  **zero crates**, and that is the finding rather than a disappointment: libarchive is a *system C
+  library* found by `pkg-config` in `build.rs`, so a dependency-tree diff — the measurement the first
+  two increments leaned on — cannot see it at all. What it removes is the build probe that used to
+  panic *"libarchive not found. Install it with: brew install libarchive"* on every consumer,
+  including one who only ever wanted to read a ZIP. Verified in emitted build-script output, not by
+  reading source: the minimal build emits no `rustc-link-lib` and no link-search for archive; the
+  default build emits `dylib=archive`. **A read-only ZIP consumer now builds on a host with no
+  system C library and no C toolchain.**
+
+  **Decision 1 arrived as a bill, and it is a third of the pass.** **230 tests run with `libarchive`
+  and not without it**, measured as the isolation lane (1719 passed) minus the minimal lane (1489)
+  rather than counted from the diff; 190 are this pass's gates and the other 40 are the
+  `ffi::libarchive_wrapper::*` unit tests riding on the module gate — the two figures reconcile
+  exactly, which is the check worth doing.
+  **63 of the 190 route through `Archive::modify` / `commit_changes`, and all 63 operate on ZIP** — a
+  format whose own backend is compiled in and working. They are gated because AD-0071 puts
+  modification on libarchive for every format. Each was checked individually against the over-gating
+  audit to confirm this is decision 1 being honest rather than a mechanical mistake. That the ZIP
+  share is 63 of 63 rather than a mixture is the point: the minimal profile does not lose *some*
+  modify coverage, it loses all of it, for the format that build exists to serve. Worth having in
+  hand before the `modify` operation feature is designed.
+
+  **The predicted trap recurred four times, and the audit caught all four.**
+  `contract_metadata_consistent_across_formats` and `test_format_capability_check` each had ZIP
+  assertions as their substance with one incidental TAR line; both are now split so only the TAR
+  half is gated. The other two are the sharp ones: they are in
+  `tests/stream_bound_test.rs` — the *same file* where the `sevenzip` increment was caught
+  over-gating — and they are two of the very tests that pass repaired, looping over fixtures and
+  skipping just the 7z one. The libarchive pass gated them wholesale because they now failed for a
+  new reason, leaving the earlier fix intact inside the body of a test that no longer ran. **A
+  mechanical pass can silently revert a previous increment's fix for the identical bug.** The audit
+  must run against the diff, not on the assumption that a once-fixed file stays fixed; and gating a
+  test that contains a fixture loop should be treated as suspect on sight.
+
+  **Two new failure modes, both in the automation rather than the code.** First, the gating loop's
+  "already gated" guard matches the string `libarchive` in the characters before a `#[test]`, so it
+  read two doc comments that mention libarchive in *prose* as gates and skipped both tests. It should
+  match the attribute, not the word.
+
+  Second and worse: the loop ran `cargo test` **without `--no-fail-fast`**, and cargo stops after the
+  first failing test *binary*. `format_compatibility_test` sorts early and stayed red because of
+  those two skipped tests — so `integration_tests` never ran in any of the eight rounds. Gating them
+  by hand let cargo reach the next binary and **43 further failures appeared at once**. Had the two
+  been gated at round one, the loop would have exited **green** with 43 tests still ungated in a
+  binary it never executed. A mechanical gating pass must use `--no-fail-fast`, because it is
+  enumerating failures, not asking for a verdict. AD-0058 carries both, because the next format
+  feature runs the same script.
+
+  A `test-libarchive-only` lane joins the other two, for the same reason: L3 and L4 test both
+  extremes and a feature wired to nothing passes both.
+
+  Remaining after this increment: `zip-read` / `zip-write`, `sfx`, and the five operation features —
+  so the six profiles are still definitions rather than selectable configurations. Required Action 5
+  still owes build-time and binary-size numbers; the dependency measurement is done for all three.
+
 
 ### Non-UTF-8 path fidelity round 2 (OI-0076-001)
 - **Type:** 2

@@ -487,3 +487,184 @@ and not just the predicate.
 
 Still to do: `zip-read`, `zip-write`, `libarchive`, `sfx`, and the five operation
 features.
+
+## Amendment (2026-09-06, third increment — `libarchive`, and the C dependency is gone)
+
+`libarchive` is the third format feature and the one this record was really
+written for. It is unlike the first two in kind: `sevenzip` gates a cargo
+dependency and `zip-crypto` gates an upstream feature, but libarchive is a
+**system C library**, discovered by `pkg-config` in `build.rs` and linked as
+`dylib=archive`.
+
+### What actually changed, verified rather than asserted
+
+The `build.rs` probe was unconditional. On a host without libarchive it
+panicked —
+
+> `libarchive not found. Install it with: brew install libarchive`
+
+— for *every* consumer, including one who only ever wanted to read a ZIP and
+would never reach the backend. That panic is now behind
+`CARGO_FEATURE_LIBARCHIVE` (the form Cargo exposes features to build scripts in),
+on both the Unix and Windows arms.
+
+Verified in the emitted build-script output rather than by reading the source:
+the `--no-default-features` build directory emits **no `rustc-link-lib` and no
+`rustc-link-search` for archive at all**, against `dylib=archive` plus a link
+search path in the default build. A read-only ZIP consumer now builds with no
+system C library present.
+
+The crate count does not move (154 default, 122 minimal) because libarchive is
+not a cargo crate — which is exactly why the crate count was never the whole
+measurement. The build-time system dependency is the thing that was removed, and
+it is the one that decides whether the crate builds at all on a bare host.
+
+### Decision 1 is now enforced by the compiler
+
+The previous amendment ruled `modify = ["read", "create", "libarchive"]` on the
+strength of AD-0071, and warned that the consequence was "there is no
+libarchive-free modify profile". That is now a fact in the code rather than a
+line in a table: `Archive::modify`'s backend binding diverges when the feature is
+off, with an error that names AD-0071 and the feature. Everything after the
+binding is unreachable in that configuration, which is the intended shape and is
+marked as such rather than left for a future reader to puzzle over.
+
+### Dead code that only the minimal profile can see
+
+Turning the backend off stranded a scatter of helpers that are genuinely used —
+`rename_noclobber` (all three platform arms), `path_to_cstring`,
+`FileIdentity::capture` / `revalidate`, `stage_unknown_size_entry`, and two
+`ExtractionPlan` cap fields. None is dead code; each simply has no caller in a
+build with no libarchive, so each is `allow(dead_code)` **conditioned on that
+configuration** rather than unconditionally. An unconditional allow would have
+hidden real dead code in the default build, which is the failure mode the
+minimal clippy lane exists to catch.
+
+### The test-gating pass, and two ways it lied
+
+The `sevenzip` amendment predicted the over-gating trap would recur on every
+later format feature and said to check for it rather than trust a green minimal
+lane. It recurred, once, and the check is what found it:
+`contract_metadata_consistent_across_formats` opens `test.zip` **and**
+`test.tar`, so the mechanical pass gated the whole test — but every assertion
+with substance in it is about ZIP entry sizes, and the TAR half is one
+`is_empty()` call. Gating it wholesale took the ZIP metadata contract out of the
+minimal profile, and the lane stayed green while doing it. Only the TAR half is
+gated now.
+
+The second lie was new, and it was the automation's own guard. The gating loop
+skips a test that is already gated by looking for the string `libarchive` in the
+characters just before its `#[test]`. Two tests carry doc comments that mention
+libarchive in prose — "via libarchive's `format_raw`", "when libarchive's first
+header reports" — so the guard read documentation as a gate, reported
+`SKIP already gated`, and left both ungated. The loop then exhausted its rounds
+and reported **`gave up after 8 rounds`** rather than green.
+
+That failure was loud, and it is worth being precise about why, because the
+quiet version of it is the dangerous one. A guard that string-matches prose can
+equally well fire on a test that genuinely needs gating in a run whose *other*
+failures resolve — and then the loop exits green with a test silently dropped
+from both profiles. The guard should match the attribute, not the word. Recorded
+here because the next format feature will run the same script.
+
+### The third lie was the worst, and it was `cargo test`'s default
+
+The loop ran `cargo test --no-default-features` without `--no-fail-fast`, and
+**cargo stops after the first test binary that fails.** `format_compatibility_test`
+sorts early and was red every round because of the two tests the prose-matching
+guard had skipped — so `integration_tests` never executed at all, in any of the
+eight rounds. The loop was not converging slowly; it was structurally incapable
+of converging, and its `gave up after 8 rounds` was the only reason anyone
+looked.
+
+Gating those two tests let cargo reach the next binary and **43 further failures
+appeared at once** — roughly a third again of the whole gating pass, invisible
+until the suites ahead of them were green. Had the two prose-skipped tests been
+gated by hand at round one, the loop would have exited **green** with 43 tests
+still ungated in a binary it never ran, and the minimal lane would have said so.
+
+The rule this leaves: a mechanical gating pass must run with `--no-fail-fast`,
+because the thing it is trying to enumerate is *all* failures, and the default
+gives it one binary's worth. The same applies to any loop that treats a test
+run as a worklist rather than a verdict.
+
+Note that neither the L3/L4 release-gate lanes nor a human reading a summary
+line would have caught this: the run really did fail, the loop really did report
+failure, and the count of failures was simply truncated by a flag nobody chose.
+
+### The mechanical pass reverted the previous increment's fix, in the same file
+
+The most instructive failure of the increment. `tests/stream_bound_test.rs` is
+where the `sevenzip` pass was caught over-gating four multi-backend tests, and
+the fix was to loop over fixtures and `continue` past just the 7z one, so ZIP and
+TAR stayed covered. That fix is still in the file, comment and all.
+
+The libarchive pass then gated two of those same repaired tests **wholesale**,
+because they now failed for a new reason — their `test.tar` fixture — and a
+mechanical pass sees only pass/fail. The repair was still there, in the body of a
+test that no longer ran in the minimal profile. Coverage of ZIP through
+`StreamBound::DeclaredSize` and `StreamBound::Cap` was removed by the same
+pass, in the same file, that a previous increment had already fixed for the same
+reason.
+
+Two things follow. First: **the audit must be run against the diff, not against
+the tree's history** — "this file was fixed before" is not protection, because
+the fix and the regression live at different granularities (the fix is inside the
+body, the regression is an attribute above it). Second: a fixture loop is now the
+established shape for a multi-backend test here, so the audit should treat
+*gating a test that contains a fixture loop* as suspect on its face, before
+looking at which fixtures it names.
+
+Both looping tests now skip per-fixture on both features, and neither carries a
+whole-test gate.
+
+### The modify tests are decision 1, arriving as a bill
+
+**230 tests run with `libarchive` and not without it** — measured as the delta
+between the new isolation lane (1719 passed) and the minimal lane (1489), not
+counted from the diff. 190 of those are the gates this pass added; the other 40
+are the `ffi::libarchive_wrapper::*` unit tests, which ride on the module's own
+gate and needed no attribute. The two figures reconcile exactly, which is the
+check worth doing: a static count of added attributes and a measured lane delta
+that disagree mean either a gate landed somewhere unintended or a module gate is
+doing invisible work. **Sixty-three of the 190 route through
+`Archive::modify` / `commit_changes`, and every single one operates on a ZIP
+archive** — a format whose own backend is compiled in and working. They are gated
+because AD-0071 puts modification on libarchive for *every* format, so they
+cannot run, and the audit had to confirm one by one that this is decision 1 being
+honest rather than over-gating.
+
+That the ZIP share is 63 of 63 rather than a mixture is the number to carry
+forward: the minimal profile does not lose *some* modify coverage, it loses the
+whole of it, and the format it loses it for is the one that build exists to
+serve. This is the cost that ruling predicted, now countable — a third of the
+whole gating pass — and it is worth having in hand before the `modify` operation
+feature is designed.
+
+### Running total
+
+| Feature | Crates removed | Kind |
+| --- | --- | --- |
+| `sevenzip` | 10 | optional cargo dependency |
+| `zip-crypto` | 22 | upstream feature toggle |
+| `libarchive` | 0 | **system C library + build probe** |
+
+Three features, 154 → 122 crates, and the C toolchain requirement gone. Still to
+do: `zip-read`, `zip-write`, `sfx`, and the five operation features.
+
+Lane results for this increment, all with `--no-fail-fast`:
+
+| lane | suites | passed | failed |
+| --- | --- | --- | --- |
+| `--no-default-features` | 43 | 1489 | 0 |
+| `--no-default-features --features libarchive` | 43 | 1719 | 0 |
+| `--all-features` | 43 | 2088 | 0 |
+
+`clippy --all-targets -- -D warnings` is clean on both the minimal and the full
+profile.
+
+One process note that cost real time here and is not specific to this feature:
+the harness reported two of these runs as "exit code 0" while cargo's own status
+was 101 with failures. The `CARGO_EXIT=` marker written into the artifact after
+the command terminates is the only reason neither was reported as green. That
+marker is not ceremony.
