@@ -426,3 +426,64 @@ over-gate tests. The first mechanical pass disabled four multi-backend tests in
 removing ZIP and TAR coverage from the minimal profile. They now skip only the
 7z fixture. Expect the same trap on every later format feature, and check for it
 rather than trusting a green minimal lane.
+
+## Amendment (2026-09-06, second increment — `zip-crypto`, and a diagnostic that names the wrong crate)
+
+`zip-crypto` is the second format feature. It is not a `dep:` gate like
+`sevenzip` — it toggles the `zip` crate's own `aes-crypto` feature — and it is
+the larger of the two by some margin.
+
+### Measurement
+
+**Twenty-two crates**, against `sevenzip`'s ten: `aes`, `cipher`, `block-buffer`,
+`constant_time_eq`, `cpufeatures`, `crypto-common`, `digest`, and the rest of the
+hashing/AES stack. The minimal profile is now **122 crates against 154 for
+default** — a third of the graph gone, from two features.
+
+That ordering is worth noting for the remaining work: the biggest footprint win
+so far came from a *capability* of a format, not from a whole backend. The
+remaining format features should be measured before being assumed cheap or
+expensive.
+
+### The bug this increment surfaced
+
+With `zip-crypto` off, reading a WinZip-AES entry produced the `zip` crate's own
+message: *"AES encrypted files cannot be decrypted without the aes-crypto
+feature."*
+
+Accurate, and useless. `aes-crypto` is **not a feature of this crate**. A caller
+would search this `Cargo.toml` for it, find nothing, and have no way to reach the
+thing that actually fixes their build. This is the same failure the previous
+amendment's decision 4 was about — a diagnostic that is true but not actionable —
+arriving by a different route, from a dependency rather than from our own code.
+
+`is_aes_feature_missing` now classifies it and the error names `zip-crypto`.
+The match is on the stable half of the upstream sentence rather than the whole
+string, so a rewording upstream degrades to the generic format error instead of
+silently mis-classifying; and the classifier is compiled unconditionally, so its
+unit test runs in the ordinary build rather than only in the profile nobody uses
+by default.
+
+### A committed fixture, which this project mostly avoids
+
+Most ZIP fixtures are written in-test through the `zip` crate. This one cannot
+be: the test that consumes it exists to run in a build **without** `zip-crypto`,
+which is exactly a build that cannot write a WinZip-AES archive. So
+`tests/fixtures/test_aes256.zip` is generated out of band by the new
+`scripts/generate-zip-fixtures.sh` and committed, following the same
+run-by-hand-never-from-the-build rule as the 7z, RAR and TAR fixture scripts.
+
+Both directions are pinned — the refusal names `zip-crypto` and does *not* leak
+`aes-crypto`, and the same fixture decrypts when the feature is on — and both
+were mutation-checked, including the end-to-end path, so the wiring is covered
+and not just the predicate.
+
+### Running total
+
+| Feature | Crates removed | Kind |
+| --- | --- | --- |
+| `sevenzip` | 10 | optional dependency |
+| `zip-crypto` | 22 | upstream feature toggle |
+
+Still to do: `zip-read`, `zip-write`, `libarchive`, `sfx`, and the five operation
+features.

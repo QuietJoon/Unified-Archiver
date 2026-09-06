@@ -340,9 +340,30 @@ have hit a decision wall on three of four.
   They now skip only the 7z fixture. A `test-sevenzip-only` gate lane was added for the same reason:
   the existing lanes test both extremes, and a feature wired to nothing passes both.
 
-  Remaining in this item: `zip-read` / `zip-write` / `zip-crypto`, `libarchive`, `sfx`, and the five
-  operation features — so the six profiles are still definitions rather than selectable
+  Remaining in this item after the second increment: `zip-read` / `zip-write`, `libarchive`, `sfx`,
+  and the five operation features — so the six profiles are still definitions rather than selectable
   configurations. `libarchive` is the hard one and inherits the `modify` dependency from decision 1.
+
+- **Second increment LANDED 2026-09-06 — `zip-crypto`, and it is the bigger one.** Not a `dep:` gate
+  like `sevenzip`; it toggles the `zip` crate's own `aes-crypto` feature. **Twenty-two crates**
+  against `sevenzip`'s ten, so the minimal profile is now **122 crates against 154 for default** —
+  a third of the graph gone from two features. Worth carrying forward: the biggest footprint win so
+  far came from a *capability* of a format, not a whole backend, so the remaining features should be
+  measured rather than assumed cheap or expensive.
+
+  **A real bug surfaced.** With the feature off, reading a WinZip-AES entry produced the `zip`
+  crate's own message — *"AES encrypted files cannot be decrypted without the aes-crypto feature"* —
+  which is accurate and useless, because `aes-crypto` is not a feature of this crate. A caller would
+  search this `Cargo.toml`, find nothing, and have no route to the thing that fixes their build.
+  The same "true but not actionable" failure decision 4 was about, arriving from a dependency
+  instead of from our own code. It is classified now and names `zip-crypto`, matching on the stable
+  half of the upstream sentence so a rewording degrades to the generic error rather than
+  mis-classifying.
+
+  Needed a committed fixture, which this project mostly avoids: the test exists to run in a build
+  **without** `zip-crypto`, which is exactly a build that cannot write a WinZip-AES archive. Hence
+  `scripts/generate-zip-fixtures.sh` and `tests/fixtures/test_aes256.zip`, run by hand and never
+  from the build, like the 7z/RAR/TAR scripts. Both directions mutation-checked, end to end.
 
 
 ### Non-UTF-8 path fidelity round 2 (OI-0076-001)
