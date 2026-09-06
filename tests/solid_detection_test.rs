@@ -36,6 +36,7 @@ fn test_is_solid_zip() {
     assert!(!is_solid, "ZIP archives should never be solid");
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_is_solid_7z() {
     // 7z archive - check actual solid compression detection
@@ -90,6 +91,7 @@ fn test_has_recovery_zip() {
     );
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_has_recovery_7z() {
     // 7z archives don't support recovery records
@@ -164,6 +166,7 @@ fn test_recovery_percentage_zip() {
     );
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_recovery_percentage_7z() {
     // 7z archives don't support recovery records

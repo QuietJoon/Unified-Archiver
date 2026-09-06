@@ -3,6 +3,7 @@
 //! These tests create archives and then extract them to verify correctness.
 
 use std::fs;
+#[cfg_attr(not(feature = "sevenzip"), allow(unused_imports))]
 use unified_archive::{
     Archive, ArchiveFormat, CompressionLevel, CompressionOptions, WritableFormat,
 };
@@ -81,6 +82,7 @@ fn test_create_and_extract_targz() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_create_and_extract_7z() {
     let temp = common::temp_test_dir();

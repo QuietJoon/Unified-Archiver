@@ -46,6 +46,7 @@ fn test_open_valid_rar() {
     ));
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_open_valid_7z() {
     let archive = Archive::open(fixture("test.7z")).unwrap();
@@ -246,6 +247,7 @@ fn test_has_recovery_record_zip_returns_false() {
     assert!(!archive.has_recovery_record().unwrap());
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_has_recovery_record_7z_returns_false() {
     let archive = Archive::open(fixture("test.7z")).unwrap();
@@ -260,6 +262,7 @@ fn test_recovery_percentage_zip_returns_none() {
     assert_eq!(archive.recovery_percentage().unwrap(), None);
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_recovery_percentage_7z_returns_none() {
     let archive = Archive::open(fixture("test.7z")).unwrap();
@@ -284,6 +287,7 @@ fn test_is_solid_tar_returns_false() {
 /// backend, so `is_solid` must dispatch on the source format — a solid
 /// 7z opened for modification previously fell into the always-`false`
 /// backend arm.
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_is_solid_7z_modify_mode_answers_truthfully() {
     use sevenz_rust2::{ArchiveEntry as SzEntry, ArchiveWriter, SourceReader};
@@ -321,6 +325,7 @@ fn test_is_solid_7z_modify_mode_answers_truthfully() {
 
 /// R0079-0035 companion: a genuinely non-solid 7z still answers `false`
 /// through the Modify-mode read-side probe.
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_is_solid_7z_modify_mode_non_solid_returns_false() {
     let dir = tempfile::tempdir().unwrap();
@@ -474,4 +479,47 @@ fn test_drop_write_mode_no_panic() {
         let _archive = Archive::create(&path, options).unwrap();
         // archive dropped in Write mode - should not panic
     }
+}
+
+// ── AD 0058 format features: the compiled-out diagnostic ──
+
+/// The point of gating a format is not that it fails — it is that it
+/// fails *legibly*. A build without `sevenzip` must tell the caller
+/// which feature to turn on, otherwise they cannot distinguish "this
+/// crate can't read 7z" from "this build wasn't compiled with it" and
+/// will go looking for a different library.
+#[cfg(not(feature = "sevenzip"))]
+#[test]
+fn opening_7z_without_the_feature_names_the_feature() {
+    // `Archive` is not `Debug`, so `expect_err` is unavailable here.
+    let msg = match Archive::open(fixture("test.7z")) {
+        Ok(_) => panic!("7z must not open in a build compiled without the backend"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        msg.contains("sevenzip"),
+        "the refusal must name the Cargo feature that fixes it, got: {msg}"
+    );
+
+    // And the build-aware accessor agrees with what `open` just did.
+    assert_eq!(
+        crate::ArchiveFormat::SevenZip.availability(),
+        crate::Support::BehindFeature {
+            feature: "sevenzip"
+        }
+    );
+}
+
+/// With the feature on, the same fixture opens. Pinning both sides
+/// keeps the gate honest: a test that only ran in one configuration
+/// would not notice the feature being wired to nothing.
+#[cfg(feature = "sevenzip")]
+#[test]
+fn opening_7z_with_the_feature_succeeds() {
+    let archive = Archive::open(fixture("test.7z")).expect("7z opens when compiled in");
+    assert!(!archive.list_files().expect("list").is_empty());
+    assert_eq!(
+        crate::ArchiveFormat::SevenZip.availability(),
+        crate::Support::Full
+    );
 }

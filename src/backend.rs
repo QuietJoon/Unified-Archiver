@@ -741,6 +741,7 @@ impl ReadBackend for crate::ffi::zip_wrapper::ZipArchive {
     }
 }
 
+#[cfg(feature = "sevenzip")]
 impl ReadBackend for crate::ffi::sevenz_wrapper::SevenZArchive {
     #[inline]
     fn list_files_budgeted(&self, budget: Option<usize>) -> Result<Arc<Vec<ArchiveEntry>>> {
@@ -962,6 +963,7 @@ pub(crate) fn read_backend_view(backend: &ArchiveBackend) -> Option<&dyn ReadBac
     match backend {
         #[cfg(feature = "rar-support")]
         ArchiveBackend::Unrar(u) => Some(u.as_ref()),
+        #[cfg(feature = "sevenzip")]
         ArchiveBackend::SevenZ(s) => Some(s.as_ref()),
         ArchiveBackend::ZipReader(z) => Some(z.as_ref()),
         ArchiveBackend::Libarchive(l) => Some(l.as_ref()),

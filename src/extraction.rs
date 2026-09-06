@@ -760,6 +760,7 @@ impl Archive {
                     options.preserve_times,
                 )
                 .map(|_| ()),
+            #[cfg(feature = "sevenzip")]
             ArchiveBackend::SevenZ(sevenz) => sevenz.extract_file_with_options_preserve(
                 file_path,
                 &options.destination,

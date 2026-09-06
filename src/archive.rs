@@ -3,6 +3,7 @@
 use crate::entry::ArchiveEntry;
 use crate::error::{ArchiveError, Result};
 use crate::ffi::libarchive_wrapper::LibarchiveArchive;
+#[cfg(feature = "sevenzip")]
 use crate::ffi::sevenz_wrapper::SevenZArchive;
 #[cfg(feature = "rar-support")]
 use crate::ffi::wrapper::UnrarArchive;
@@ -30,6 +31,7 @@ pub(crate) enum ArchiveMode {
 pub(crate) enum ArchiveBackend {
     #[cfg(feature = "rar-support")]
     Unrar(Box<UnrarArchive>),
+    #[cfg(feature = "sevenzip")]
     SevenZ(Box<SevenZArchive>),
     ZipWriter(Box<ZipWriter>),
     ZipReader(Box<ZipArchive>),
@@ -765,9 +767,22 @@ impl Archive {
                 let zip = ZipArchive::open(path)?;
                 ArchiveBackend::ZipReader(Box::new(zip))
             }
+            #[cfg(feature = "sevenzip")]
             ArchiveFormat::SevenZip => {
                 let sevenz = SevenZArchive::open(path)?;
                 ArchiveBackend::SevenZ(Box::new(sevenz))
+            }
+            #[cfg(not(feature = "sevenzip"))]
+            ArchiveFormat::SevenZip => {
+                return Err(ArchiveError::unsupported(
+                    "open",
+                    format,
+                    Some(
+                        "7z support is disabled in this build (enable the \
+                         `sevenzip` Cargo feature)"
+                            .to_string(),
+                    ),
+                ));
             }
             ArchiveFormat::Tar
             | ArchiveFormat::TarGzip
@@ -860,9 +875,22 @@ impl Archive {
                 let zip = ZipArchive::open_with_password(&path_buf, pwd_str)?;
                 ArchiveBackend::ZipReader(Box::new(zip))
             }
+            #[cfg(feature = "sevenzip")]
             ArchiveFormat::SevenZip => {
                 let sevenz = SevenZArchive::open_with_password(&path_buf, pwd_str)?;
                 ArchiveBackend::SevenZ(Box::new(sevenz))
+            }
+            #[cfg(not(feature = "sevenzip"))]
+            ArchiveFormat::SevenZip => {
+                return Err(ArchiveError::unsupported(
+                    "open",
+                    format,
+                    Some(
+                        "7z support is disabled in this build (enable the \
+                         `sevenzip` Cargo feature)"
+                            .to_string(),
+                    ),
+                ));
             }
             // Formats that do not encode encryption at the archive level —
             // any "password" the caller supplies is simply meaningless here.
@@ -1669,7 +1697,20 @@ impl Archive {
         Ok(None)
     }
 
+    /// 7z arm with the `sevenzip` feature off: there is no backend to
+    /// hand the window to, so the probe declines exactly as it does for
+    /// a payload whose magic does not match. Declining (rather than
+    /// erroring) is right here — `try_open_in_place` is an optimisation
+    /// over staging, and its contract is already "say no and let the
+    /// caller stage". A build without 7z then fails at `open`, with the
+    /// unsupported-format diagnostic that names the feature.
+    #[cfg(not(feature = "sevenzip"))]
+    fn try_open_sevenz_in_place(_path_ref: &Path, _offset: u64) -> Result<Option<Self>> {
+        Ok(None)
+    }
+
     /// 7z arm. See the doc comment on [`Self::try_open_in_place`].
+    #[cfg(feature = "sevenzip")]
     fn try_open_sevenz_in_place(path_ref: &Path, offset: u64) -> Result<Option<Self>> {
         const SEVENZ_SIGNATURE: [u8; 6] = [b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C];
 
@@ -2021,9 +2062,10 @@ impl Archive {
             #[cfg(feature = "rar-support")]
             ArchiveBackend::Unrar(unrar) => unrar.has_recovery_record(),
             // Other formats don't support recovery records
+            #[cfg(feature = "sevenzip")]
+            ArchiveBackend::SevenZ(_) => Ok(false),
             ArchiveBackend::ZipWriter(_)
             | ArchiveBackend::ZipReader(_)
-            | ArchiveBackend::SevenZ(_)
             | ArchiveBackend::Libarchive(_) => Ok(false),
         }
     }
@@ -2070,9 +2112,9 @@ impl Archive {
             ArchiveBackend::Libarchive(backend) => backend.take_backend_warnings(),
             #[cfg(feature = "rar-support")]
             ArchiveBackend::Unrar(_) => Vec::new(),
-            ArchiveBackend::ZipWriter(_)
-            | ArchiveBackend::ZipReader(_)
-            | ArchiveBackend::SevenZ(_) => Vec::new(),
+            #[cfg(feature = "sevenzip")]
+            ArchiveBackend::SevenZ(_) => Vec::new(),
+            ArchiveBackend::ZipWriter(_) | ArchiveBackend::ZipReader(_) => Vec::new(),
         }
     }
 
@@ -2134,9 +2176,10 @@ impl Archive {
             #[cfg(feature = "rar-support")]
             ArchiveBackend::Unrar(unrar) => unrar.recovery_percentage(),
             // Other formats don't support recovery records
+            #[cfg(feature = "sevenzip")]
+            ArchiveBackend::SevenZ(_) => Ok(None),
             ArchiveBackend::ZipWriter(_)
             | ArchiveBackend::ZipReader(_)
-            | ArchiveBackend::SevenZ(_)
             | ArchiveBackend::Libarchive(_) => Ok(None),
         }
     }
@@ -2183,6 +2226,10 @@ impl Archive {
         // modify-open encryption probe uses. No password is needed:
         // encrypted archives are rejected by `Archive::modify` up
         // front.
+        // Unreachable without the `sevenzip` feature — `open` refuses the
+        // format, so no handle can carry it — but the reopen names the
+        // backend type, so it is gated rather than left to dangle.
+        #[cfg(feature = "sevenzip")]
         if self.mode == ArchiveMode::Modify && self.format == ArchiveFormat::SevenZip {
             // R0001-0003: the probe is a pathname reopen, so it is subject to
             // the same DCR-007 hazard every other modify-mode pathname step
@@ -2205,6 +2252,7 @@ impl Archive {
         match &self.backend {
             #[cfg(feature = "rar-support")]
             ArchiveBackend::Unrar(unrar) => unrar.is_solid(),
+            #[cfg(feature = "sevenzip")]
             ArchiveBackend::SevenZ(sevenz) => sevenz.is_solid(),
             ArchiveBackend::ZipWriter(_)
             | ArchiveBackend::ZipReader(_)
@@ -2363,6 +2411,7 @@ impl Archive {
         match &self.backend {
             #[cfg(feature = "rar-support")]
             ArchiveBackend::Unrar(unrar) => unrar.bound_identity(),
+            #[cfg(feature = "sevenzip")]
             ArchiveBackend::SevenZ(sevenz) => sevenz.bound_identity(),
             ArchiveBackend::ZipReader(zip) => zip.bound_identity(),
             ArchiveBackend::Libarchive(libarchive) => libarchive.bound_identity(),
@@ -2517,7 +2566,11 @@ fn finalize_write_backend(backend: &mut ArchiveBackend) -> Result<()> {
         ArchiveBackend::Libarchive(b) => b.close_write(),
         #[cfg(feature = "rar-support")]
         ArchiveBackend::Unrar(_) => Err(ArchiveError::read_only_backend(crate::error::ops::FINISH)),
-        ArchiveBackend::SevenZ(_) | ArchiveBackend::ZipReader(_) => {
+        #[cfg(feature = "sevenzip")]
+        ArchiveBackend::SevenZ(_) => {
+            Err(ArchiveError::read_only_backend(crate::error::ops::FINISH))
+        }
+        ArchiveBackend::ZipReader(_) => {
             Err(ArchiveError::read_only_backend(crate::error::ops::FINISH))
         }
     }

@@ -70,6 +70,7 @@ fn test_streaming_extraction_zip() {
     assert!(text.contains("Hello"), "Should contain 'Hello'");
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_streaming_extraction_7z() {
     // Test streaming extraction from 7z archive

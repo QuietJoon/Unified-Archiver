@@ -77,6 +77,7 @@ fn test_list_files_zip() {
     }
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_list_files_7z() {
     let archive = Archive::open(fixture("test.7z")).unwrap();
@@ -187,6 +188,7 @@ fn test_validate_integrity_valid_zip() {
     assert_eq!(report.total_entries, archive.entry_count().unwrap());
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_validate_integrity_valid_7z() {
     let archive = Archive::open(fixture("test.7z")).unwrap();
@@ -272,6 +274,7 @@ fn test_calculate_manifest_digest_matches_manual_computation() {
     assert_eq!(actual, expected);
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_calculate_manifest_digest_7z() {
     let archive = Archive::open(fixture("test.7z")).unwrap();
@@ -753,6 +756,7 @@ fn test_check_symlinks_returns_correct_warning_types() {
 
 // ── Cross-format consistency tests ──
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_list_files_consistent_across_zip_and_7z() {
     let zip = Archive::open(fixture("test.zip")).unwrap();

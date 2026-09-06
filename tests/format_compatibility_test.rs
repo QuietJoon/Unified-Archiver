@@ -639,6 +639,7 @@ fn test_open_rar_bytes_with_zip_extension_routes_to_rar() {
 }
 
 /// Heuristic case 2: 7z bytes carrying a `.zip` filename open as 7z.
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_open_7z_bytes_with_zip_extension_routes_to_7z() {
     let temp = tempfile::tempdir().unwrap();

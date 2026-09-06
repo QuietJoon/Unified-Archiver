@@ -25,6 +25,11 @@
 //! Fixtures come from `scripts/generate-7z-fixtures.sh`, run by hand and
 //! committed; never from the build.
 
+// Every test in this file is about the 7z backend, so the whole file is
+// gated rather than each test: gating them individually left the imports
+// and fixture constants dangling in the minimal profile.
+#![cfg(feature = "sevenzip")]
+
 #[path = "common/mod.rs"]
 mod common;
 

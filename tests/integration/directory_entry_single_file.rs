@@ -12,10 +12,12 @@
 //! `is_directory`/`is_dir` and call `create_dir_all`.
 
 use super::common;
+#[cfg_attr(not(feature = "sevenzip"), allow(unused_imports))]
 use super::common::command_exists;
 
 use std::fs;
 use std::path::Path;
+#[cfg_attr(not(feature = "sevenzip"), allow(unused_imports))]
 use std::process::Command;
 
 use unified_archive::Archive;
@@ -47,6 +49,7 @@ fn build_zip_with_dir(archive_path: &Path) {
     );
 }
 
+#[cfg(feature = "sevenzip")]
 /// Directory-carrying 7z via the CLI (`7zz`/`7z`).
 ///
 /// OI-0056-010: the 7z writer is a library dependency rather than a
@@ -156,6 +159,7 @@ fn single_file_extract_creates_directory_zip_backend() {
     common::cleanup(&tmp);
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn single_file_extract_creates_directory_sevenz() {
     let tmp = common::temp_test_dir();

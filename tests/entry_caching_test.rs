@@ -45,6 +45,7 @@ fn test_entry_caching_zip() {
     assert!(std::ptr::eq(entries2.as_ptr(), entries3.as_ptr()));
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_entry_caching_7z() {
     let archive = Archive::open("tests/fixtures/test.7z").expect("Failed to open 7z archive");

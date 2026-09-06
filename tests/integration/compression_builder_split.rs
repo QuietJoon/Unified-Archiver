@@ -7,6 +7,7 @@
 //! path through a format-specific entry point. Round-trip tests
 //! confirm the resulting archives are readable.
 
+#[cfg_attr(not(feature = "sevenzip"), allow(unused_imports))]
 use unified_archive::{
     Archive, ArchiveFormat, CompressionLevel, LibarchiveCompressionOptions,
     SevenZCompressionOptions, WritableFormat, ZipCompressionOptions,
@@ -43,6 +44,7 @@ fn zip_compression_options_round_trips() {
     let _ = std::fs::remove_file(&archive_path);
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn seven_zip_compression_options_round_trips() {
     let opts = SevenZCompressionOptions::new().level(CompressionLevel::Normal);

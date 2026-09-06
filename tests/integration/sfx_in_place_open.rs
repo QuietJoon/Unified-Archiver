@@ -222,6 +222,7 @@ fn plain_archive_reports_in_place() {
 /// Non-vacuity is the same as the ZIP case: on the staging path this is
 /// `Err(ArchiveError::Format)`, "payload size N exceeds maximum 16
 /// bytes", so a pass here cannot also be a pass on the staged path.
+#[cfg(feature = "sevenzip")]
 #[test]
 fn sevenz_sfx_opens_above_the_staging_ceiling() {
     let dir = tempfile::tempdir().unwrap();
@@ -238,6 +239,7 @@ fn sevenz_sfx_opens_above_the_staging_ceiling() {
     assert_eq!(archive.format(), ArchiveFormat::SevenZip);
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn open_sfx_reads_a_sevenz_payload_in_place() {
     let dir = tempfile::tempdir().unwrap();

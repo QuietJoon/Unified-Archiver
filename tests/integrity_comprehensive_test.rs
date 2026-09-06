@@ -85,6 +85,7 @@ fn test_valid_archive_baseline_zip() {
 // MULTI-FORMAT CORRUPTION DETECTION
 // ============================================================================
 
+#[cfg(feature = "sevenzip")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_corruption_detection_consistency_across_formats() {
@@ -339,6 +340,7 @@ fn test_concurrent_validation_same_archive() {
     );
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_concurrent_validation_different_archives() {

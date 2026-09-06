@@ -207,6 +207,7 @@ fn tar_read_surface_is_refused_after_a_same_name_archive_is_swapped_in() {
 /// barely compresses, so the resulting archives cannot coincidentally share
 /// a length — which is the only half of the identity that survives off
 /// Unix.
+#[cfg(feature = "sevenzip")]
 #[test]
 fn sevenz_read_surface_is_refused_after_a_same_name_archive_is_swapped_in() {
     let temp = common::temp_test_dir();

@@ -15,15 +15,18 @@
 //! dependency, not a dev-dependency).
 
 use super::common;
+#[cfg_attr(not(feature = "sevenzip"), allow(unused_imports))]
 use super::common::command_exists;
 
 use std::fs;
 use std::io::Write as _;
 use std::path::Path;
+#[cfg_attr(not(feature = "sevenzip"), allow(unused_imports))]
 use std::process::Command;
 
 use unified_archive::ArchiveError;
 use unified_archive::ffi::libarchive_wrapper::LibarchiveArchive;
+#[cfg(feature = "sevenzip")]
 use unified_archive::ffi::sevenz_wrapper::SevenZArchive;
 use unified_archive::ffi::zip_wrapper::ZipArchive;
 
@@ -75,6 +78,7 @@ fn build_parity_zip(path: &Path) {
     fs::write(path, &bytes).unwrap();
 }
 
+#[cfg(feature = "sevenzip")]
 /// Directory-carrying 7z via the CLI (`7zz`/`7z`).
 ///
 /// OI-0056-010: the 7z **writer** is a library dependency, not a
@@ -278,6 +282,7 @@ fn zip_backend_unique_file_still_extracts() {
 
 // ── 7z ──
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn sevenz_backend_rejects_directory_entries() {
     let tmp = common::temp_test_dir();
@@ -310,6 +315,7 @@ fn sevenz_backend_rejects_directory_entries() {
     common::cleanup(&tmp);
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn sevenz_backend_not_found_uses_gate_shape() {
     let tmp = common::temp_test_dir();

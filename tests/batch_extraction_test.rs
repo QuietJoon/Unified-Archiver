@@ -190,6 +190,7 @@ fn test_extract_by_ids_rar() {
     cleanup_temp_dir(&temp_dir);
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_extract_by_ids_7z() {
     let temp_dir = setup_temp_dir("extract_by_ids_7z");

@@ -57,6 +57,7 @@ fn test_extract_all_zip() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_extract_all_7z() {
     let temp = common::temp_test_dir();

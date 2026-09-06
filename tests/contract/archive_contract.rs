@@ -24,6 +24,7 @@ fn contract_open_valid_zip() {
     assert_eq!(archive.format(), ArchiveFormat::Zip);
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn contract_open_valid_7z() {
     let archive = Archive::open(fixture("test.7z")).expect("Should open valid 7z");

@@ -237,7 +237,18 @@ pub(crate) mod inspection;
 pub(crate) mod modification;
 /// `Read + Seek` view of a byte range inside a larger file — how an SFX
 /// payload is opened where it lies instead of being copied out (DEF-001).
+// Shared by the 7z and RAR backends (offset-windowed and multi-volume
+// sources). Not dead code — but in a build with *neither* feature it has
+// no caller, and the minimal profile is the only place that shows.
+#[cfg_attr(
+    not(any(feature = "sevenzip", feature = "rar-support")),
+    allow(dead_code)
+)]
 pub(crate) mod payload_window;
+#[cfg_attr(
+    not(any(feature = "sevenzip", feature = "rar-support")),
+    allow(dead_code)
+)]
 pub(crate) mod volume_chain;
 
 #[cfg(test)]

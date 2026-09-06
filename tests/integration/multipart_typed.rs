@@ -30,6 +30,7 @@ fn multipart_layout_returns_single_for_non_multipart_zip() {
     }
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn multipart_layout_returns_single_for_non_multipart_7z() {
     let archive = Archive::open(

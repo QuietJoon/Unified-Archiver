@@ -120,6 +120,10 @@ pub(crate) fn normalize_path(path: &str) -> String {
 /// carry S_IFLNK. Shared by the ZIP and 7z backends, whose link
 /// policy must classify identically at listing time and in every
 /// extract path (R0069-0018 / R0075-0049).
+// Only the 7z backend consults this today; the other backends get the
+// entry kind from their own metadata. Not dead, just uncalled when 7z is
+// compiled out.
+#[cfg_attr(not(feature = "sevenzip"), allow(dead_code))]
 #[inline]
 pub(crate) fn unix_mode_is_symlink(mode: u32) -> bool {
     (mode & 0xF000) == 0xA000

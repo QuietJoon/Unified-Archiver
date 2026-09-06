@@ -26,6 +26,7 @@ fn contract_list_files_zip() {
     }
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn contract_list_files_7z() {
     let archive = Archive::open(fixture("test.7z")).unwrap();
@@ -254,6 +255,7 @@ fn contract_list_files_caching_stable() {
     }
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn contract_list_files_caching_same_length() {
     let archive = Archive::open(fixture("test.7z")).unwrap();
@@ -318,6 +320,7 @@ fn contract_validate_integrity_corrupted_zip() {
     }
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn contract_validate_integrity_valid_7z() {
     let archive = Archive::open(fixture("test.7z")).unwrap();

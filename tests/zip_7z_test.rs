@@ -6,6 +6,7 @@ mod common;
 use std::fs;
 use unified_archive::Archive;
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_7z_list_files() {
     use unified_archive::{ArchiveFormat, EntryType};
@@ -54,6 +55,7 @@ fn test_zip_extract_to_memory() {
     assert_eq!(content_str, "Hello, RAR World!\n");
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_7z_extract_to_memory() {
     let archive = Archive::open("tests/fixtures/test.7z").expect("Failed to open 7z archive");

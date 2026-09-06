@@ -77,6 +77,7 @@ fn permissions_is_unix_bits_only_for_tar() {
     assert_permissions_unix_bits_only(&archive, "tar", Some(FIXTURE_MODE));
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn permissions_is_unix_bits_only_for_seven_zip() {
     let archive = Archive::open("tests/fixtures/test.7z").unwrap();

@@ -98,6 +98,7 @@ fn zip_refuses_a_drifted_listing_id() {
 
 // ── 7z ─────────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn sevenz_pushes_the_same_bytes_the_buffering_route_returns() {
     let archive = crate::ffi::sevenz_wrapper::SevenZArchive::open(fixture("test.7z"))
@@ -123,6 +124,7 @@ fn sevenz_pushes_the_same_bytes_the_buffering_route_returns() {
 /// The 7z walk visits blocks in table order and must stop once the target is
 /// consumed. An id past the end has to fail rather than silently return zero
 /// bytes, which would digest as an empty payload.
+#[cfg(feature = "sevenzip")]
 #[test]
 fn sevenz_refuses_an_id_the_walk_never_reaches() {
     let archive =

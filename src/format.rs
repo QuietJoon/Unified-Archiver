@@ -21,6 +21,29 @@ pub enum Support {
     Partial,
     /// Not supported
     None,
+    /// Supported by this crate, but compiled out of *this* build.
+    ///
+    /// Distinct from [`None`](Self::None), which means the crate cannot
+    /// do this at all. This variant means the caller can have it by
+    /// enabling `feature` and rebuilding — actionable information that
+    /// `None` would have hidden, sending them to look for a different
+    /// library instead (AD 0058, 2026-09-06 amendment).
+    BehindFeature {
+        /// Cargo feature that enables this capability.
+        feature: &'static str,
+    },
+}
+
+impl Support {
+    /// Is the capability usable in this build?
+    ///
+    /// `BehindFeature` is *not* usable here, which is the whole point of
+    /// it being a separate state: it is unavailable now and obtainable
+    /// later. Callers gating behaviour want this; callers rendering a
+    /// capability table want the variant.
+    pub fn is_available(self) -> bool {
+        matches!(self, Self::Full | Self::Partial)
+    }
 }
 
 /// Per-operation capabilities for an archive format
@@ -375,6 +398,56 @@ impl ArchiveFormat {
     /// the format across feature combinations. Callers that need a
     /// build-aware answer must test `cfg!(feature = "rar-support")`
     /// themselves.
+    /// Whether *this build* can open the format, as opposed to whether
+    /// the crate supports it.
+    ///
+    /// [`capabilities`](Self::capabilities) deliberately describes the
+    /// **format** and is build-independent (R0001-0063): RAR reports
+    /// `Full` there even in a build compiled without `rar-support`. That
+    /// is the right contract for a capability matrix and the wrong one
+    /// for "can I open this file right now" — which is exactly what a
+    /// caller staring at an [`Unsupported`](crate::ArchiveError::Unsupported)
+    /// error needs to know.
+    ///
+    /// This is the build-aware answer, and it is why
+    /// [`Support::BehindFeature`] exists: it names the Cargo feature
+    /// that would enable the format, so the answer is actionable rather
+    /// than merely accurate.
+    ///
+    /// AD 0058's 2026-09-06 amendment asked whether a disabled format
+    /// should report `Support::None` from the capability matrix. It
+    /// should not, and neither should it report `BehindFeature` there —
+    /// that matrix is a description of the format, and making it
+    /// build-dependent would reverse R0001-0063 silently. The
+    /// build-aware question deserved its own accessor instead.
+    pub fn availability(&self) -> Support {
+        match self {
+            ArchiveFormat::Rar | ArchiveFormat::Rar5 => {
+                if cfg!(feature = "rar-support") {
+                    Support::Full
+                } else {
+                    Support::BehindFeature {
+                        feature: "rar-support",
+                    }
+                }
+            }
+            ArchiveFormat::SevenZip => {
+                if cfg!(feature = "sevenzip") {
+                    Support::Full
+                } else {
+                    Support::BehindFeature {
+                        feature: "sevenzip",
+                    }
+                }
+            }
+            // Every other format is unconditional in this build. As more
+            // AD 0058 format features land, their arms join this match —
+            // which is the point of routing the question through one
+            // function rather than scattering `cfg!` at call sites.
+            _ => Support::Full,
+        }
+    }
+
     pub fn capabilities(&self) -> FormatCapabilities {
         match self {
             ArchiveFormat::Zip => FormatCapabilities {
@@ -2092,5 +2165,70 @@ mod tests {
         assert_eq!(s, copied);
         assert_ne!(Support::Full, Support::None);
         assert!(!format!("{:?}", Support::Partial).is_empty());
+    }
+
+    // ── AD 0058 format features: build-aware availability ──
+
+    /// `availability` must answer for *this build*, and the two halves
+    /// are asserted against `cfg!` rather than hardcoded, so the test is
+    /// meaningful in every feature combination the release gate runs.
+    #[test]
+    fn availability_reports_behind_feature_for_a_compiled_out_format() {
+        let sevenz = ArchiveFormat::SevenZip.availability();
+        if cfg!(feature = "sevenzip") {
+            assert_eq!(sevenz, Support::Full);
+            assert!(sevenz.is_available());
+        } else {
+            assert_eq!(
+                sevenz,
+                Support::BehindFeature {
+                    feature: "sevenzip"
+                }
+            );
+            assert!(
+                !sevenz.is_available(),
+                "a compiled-out format is not available in this build"
+            );
+        }
+
+        let rar = ArchiveFormat::Rar.availability();
+        if cfg!(feature = "rar-support") {
+            assert_eq!(rar, Support::Full);
+        } else {
+            assert_eq!(
+                rar,
+                Support::BehindFeature {
+                    feature: "rar-support"
+                }
+            );
+        }
+    }
+
+    /// The distinction this variant exists for: "compiled out" must not
+    /// be reported as "not supported", because only one of the two is
+    /// something the caller can fix.
+    #[test]
+    fn behind_feature_is_distinct_from_none() {
+        let behind = Support::BehindFeature {
+            feature: "sevenzip",
+        };
+        assert_ne!(behind, Support::None);
+        assert!(!behind.is_available());
+        assert!(!Support::None.is_available());
+        assert!(Support::Full.is_available());
+        assert!(Support::Partial.is_available());
+    }
+
+    /// The capability matrix stays build-independent (R0001-0063). This
+    /// pins that the new accessor did not quietly change it — the two
+    /// answer different questions and a format compiled out still
+    /// describes itself fully.
+    #[test]
+    fn capabilities_stay_build_independent() {
+        let caps = ArchiveFormat::SevenZip.capabilities();
+        assert_eq!(caps.compression_read, Support::Full);
+        assert_eq!(caps.encryption_read, Support::Full);
+        let rar = ArchiveFormat::Rar.capabilities();
+        assert_eq!(rar.compression_read, Support::Full);
     }
 }

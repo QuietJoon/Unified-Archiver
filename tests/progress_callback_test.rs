@@ -139,6 +139,7 @@ fn test_progress_callback_zip() {
     let _ = std::fs::remove_dir_all(&dest);
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_progress_callback_7z() {
     let archive = Archive::open("tests/fixtures/test.7z").expect("Failed to open 7z archive");

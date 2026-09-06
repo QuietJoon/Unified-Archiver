@@ -29,6 +29,7 @@ fn contract_extract_all_zip() {
     );
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn contract_extract_all_7z() {
     let archive = Archive::open(fixture("test.7z")).unwrap();

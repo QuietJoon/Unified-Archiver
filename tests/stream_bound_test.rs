@@ -203,6 +203,12 @@ fn cap_bound_tolerates_a_short_entry() {
 #[test]
 fn declared_size_healthy_entries_reach_clean_eof() {
     for fixture in ["test.zip", "test.7z", "test.tar", "test.tar.gz"] {
+        // The 7z fixture is the only one this build may lack;
+        // skip just that entry so the other backends stay covered
+        // in the minimal profile (AD 0058 format features).
+        if fixture.ends_with(".7z") && !cfg!(feature = "sevenzip") {
+            continue;
+        }
         let archive = Archive::open(common::fixture(fixture)).expect("open fixture");
         let (entry, declared) = only_entry(&archive);
         let declared = declared.expect("these formats declare entry sizes");
@@ -254,6 +260,12 @@ fn declared_size_healthy_rar_entry_reaches_clean_eof() {
 #[test]
 fn cap_below_declared_size_is_refused_by_staging_backends() {
     for fixture in ["test.zip", "test.7z"] {
+        // The 7z fixture is the only one this build may lack;
+        // skip just that entry so the other backends stay covered
+        // in the minimal profile (AD 0058 format features).
+        if fixture.ends_with(".7z") && !cfg!(feature = "sevenzip") {
+            continue;
+        }
         let archive = Archive::open(common::fixture(fixture)).expect("open fixture");
         let (entry, declared) = only_entry(&archive);
         let declared = declared.expect("declared size");
@@ -329,6 +341,12 @@ fn cap_below_declared_size_is_refused_by_rar() {
 #[test]
 fn cap_refusal_label_names_the_caller_operation_on_staging_backends() {
     for fixture in ["test.zip", "test.7z"] {
+        // The 7z fixture is the only one this build may lack;
+        // skip just that entry so the other backends stay covered
+        // in the minimal profile (AD 0058 format features).
+        if fixture.ends_with(".7z") && !cfg!(feature = "sevenzip") {
+            continue;
+        }
         let archive = Archive::open(common::fixture(fixture)).expect("open fixture");
         let (entry, declared) = only_entry(&archive);
         assert!(
@@ -454,6 +472,12 @@ fn cap_below_declared_size_serves_a_prefix_on_libarchive() {
 #[test]
 fn cap_above_entry_size_reads_the_whole_entry() {
     for fixture in ["test.zip", "test.7z", "test.tar"] {
+        // The 7z fixture is the only one this build may lack;
+        // skip just that entry so the other backends stay covered
+        // in the minimal profile (AD 0058 format features).
+        if fixture.ends_with(".7z") && !cfg!(feature = "sevenzip") {
+            continue;
+        }
         let archive = Archive::open(common::fixture(fixture)).expect("open fixture");
         let (entry, declared) = only_entry(&archive);
         let declared = declared.expect("declared size");

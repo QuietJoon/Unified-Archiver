@@ -60,6 +60,7 @@ fn test_integrity_check_valid_rar5() {
     println!("✓ RAR5: {} files validated successfully", report.validated);
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_integrity_check_valid_7z() {
     let archive = Archive::open("tests/fixtures/test.7z").expect("Failed to open test 7z");

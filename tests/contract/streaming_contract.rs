@@ -73,6 +73,7 @@ fn contract_streaming_basic_read_rar() {
     assert!(!content.is_empty());
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn contract_streaming_basic_read_7z() {
     let archive = Archive::open(fixture("test.7z")).unwrap();

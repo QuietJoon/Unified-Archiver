@@ -177,6 +177,7 @@ fn test_consistency_recovery_named_fixture() {
     assert_fixture_recovery_metadata("tests/fixtures/test_recovery.rar");
 }
 
+#[cfg(feature = "sevenzip")]
 #[test]
 fn test_consistency_no_recovery_formats() {
     // Formats without recovery support should return consistent results
