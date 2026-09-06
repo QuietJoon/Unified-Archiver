@@ -16,7 +16,7 @@ crc32fast = "1.4"
 secstr = "0.5"
 walkdir = "2.4"
 sevenz-rust2 = { version = "0.19", optional = true }  # Native Rust 7z backend with CRC32 metadata access (maintained fork); gated by the `sevenzip` feature
-zip = { version = "2.2", default-features = false, features = ["deflate", "aes-crypto"] }  # Native Rust ZIP backend — sole reader/extractor + creator for all ZIP
+zip = { version = "2.2", default-features = false, features = ["deflate"] }  # Native Rust ZIP backend — sole reader/extractor + creator for all ZIP; AES read is the `zip-crypto` feature
 tempfile = "3.0"  # Atomic write helper backing AtomicOutputFile and modification temp paths
 fs4 = "1"  # Advisory file locking for Modify mode (MADR-0009, MADR-0016); maintained fs2 successor
 
@@ -43,9 +43,10 @@ cc = "1"
 # capability set, which is a re-expression and not a "flip": ordering constraint 2
 # protects against the default set LOSING capability before both profiles are
 # proven, and nothing observable changes here (AD-0058, 2026-09-06 amendment).
-default = ["rar-support", "v2-api", "sevenzip"]
+default = ["rar-support", "v2-api", "sevenzip", "zip-crypto"]
 rar-support = []  # RAR/RAR5 support (requires UnRAR license compliance)
 sevenzip = ["dep:sevenz-rust2"]  # 7z read/extract/create via the native Rust backend
+zip-crypto = ["zip/aes-crypto"]  # WinZip-AES encrypted ZIP reading
 external-rar-create = []  # RAR creation via external WinRAR CLI (Windows only)
 # D2 typed-handle split (ReadArchive / WriteArchive / ModifyArchive). Additive since v0.3;
 # on by default since 2026-09-03 (owner ruling). `--no-default-features` turns it off.

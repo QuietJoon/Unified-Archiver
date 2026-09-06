@@ -84,6 +84,30 @@ fn is_password_required(e: &zip::result::ZipError) -> bool {
     )
 }
 
+/// Is this the `zip`-crate refusal that means "this entry is WinZip-AES
+/// encrypted and the crate was built without its `aes-crypto` feature"?
+///
+/// Reported as `UnsupportedArchive` with a message, like several other
+/// conditions, so the message is the only discriminator the crate offers
+/// — there is no published constant for this one the way there is for
+/// [`ZipError::PASSWORD_REQUIRED`](zip::result::ZipError::PASSWORD_REQUIRED).
+/// Matched on the stable half of the sentence ("AES" plus the feature
+/// name) rather than the whole string, so upstream rewording around it
+/// does not silently turn this back into a generic format error.
+///
+/// Always compiled: with `zip-crypto` on, the condition cannot arise and
+/// this simply never matches. Keeping it unconditional means the arm is
+/// covered by the ordinary build too, rather than existing only in the
+/// configuration nobody runs by default.
+fn is_aes_feature_missing(e: &zip::result::ZipError) -> bool {
+    match e {
+        zip::result::ZipError::UnsupportedArchive(message) => {
+            message.contains("AES") && message.contains("aes-crypto")
+        }
+        _ => false,
+    }
+}
+
 /// Open a ZIP entry by index, using password decryption if provided.
 ///
 /// **Missing-credential classification (ticgit `9bdf2c`).** A read of an
@@ -116,6 +140,21 @@ fn open_entry_by_index<'a>(
                 "Password required to decrypt ZIP entry {}: reopen the archive with its password",
                 index
             ))
+        } else if is_aes_feature_missing(&e) {
+            // The `zip` crate's own message names *its* feature
+            // (`aes-crypto`), which is not a feature of this crate — a
+            // caller reading it would search our `Cargo.toml` for
+            // `aes-crypto` and find nothing. Name ours instead, so the
+            // diagnostic is actionable rather than merely accurate
+            // (AD 0058 format features).
+            ArchiveError::unsupported(
+                "extract",
+                ArchiveFormat::Zip,
+                Some(format!(
+                    "ZIP entry {index} is WinZip-AES encrypted and this build cannot decrypt it \
+                     (enable the `zip-crypto` Cargo feature)"
+                )),
+            )
         } else {
             ArchiveError::format(
                 Some(ArchiveFormat::Zip),

@@ -21,6 +21,10 @@
 //! dispatch that was broken. Only a call through `Archive` exercises it.
 //! Keep these assertions on the facade.
 
+// Every test here builds an AE-2 (WinZip-AES) fixture, so the whole file
+// needs the ZIP crypto backend (AD 0058 format features).
+#![cfg(feature = "zip-crypto")]
+
 use super::common;
 
 use std::io::Write as _;

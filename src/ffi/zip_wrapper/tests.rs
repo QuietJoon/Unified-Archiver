@@ -322,6 +322,7 @@ fn test_zip_wrapper_extract_to_stream() {
     assert!(!buf.is_empty());
 }
 
+#[cfg(feature = "zip-crypto")]
 /// Build an AES-encrypted single-entry ZIP. The zip crate writes the
 /// AE-2 variant (stored CRC32 = 0) for payloads under 20 bytes and
 /// AE-1 (real stored CRC32) otherwise.
@@ -338,6 +339,7 @@ fn build_aes_zip(path: &Path, payload: &[u8], password: &str) {
     writer.finish().unwrap();
 }
 
+#[cfg(feature = "zip-crypto")]
 /// R0079-0007: AE-2 entries store CRC32 = 0 in the central directory,
 /// so the wrapper-level CRC comparison must be skipped — integrity is
 /// covered by the AES authentication tag instead.
@@ -366,6 +368,7 @@ fn test_zip_wrapper_ae2_encrypted_not_flagged_corrupt() {
     assert_eq!(std::fs::read(dest.join("secret.txt")).unwrap(), payload);
 }
 
+#[cfg(feature = "zip-crypto")]
 /// AE-1 entries (>= 20 bytes) keep a real stored CRC32, so the
 /// wrapper-level verification must still run for them.
 #[test]
@@ -394,6 +397,7 @@ fn build_plain_zip(path: &Path, name: &str, payload: &[u8]) {
     writer.finish().unwrap();
 }
 
+#[cfg(feature = "zip-crypto")]
 /// DCR-012: an AE-2 entry's central-directory CRC32 is the
 /// specification's placeholder 0, not a checksum, so the listing must
 /// report `None`. Reporting `Some(0)` made every AE-2 entry fold the
@@ -420,6 +424,7 @@ fn test_zip_wrapper_ae2_entry_lists_crc32_none() {
     );
 }
 
+#[cfg(feature = "zip-crypto")]
 /// The DCR-012 gate keys on the AE-2 *placeholder*, not on encryption:
 /// an AE-1 entry (>= 20 bytes) carries a real stored CRC32, so it must
 /// still be listed.
@@ -539,6 +544,7 @@ fn test_zip_wrapper_encrypted_empty_file_without_aes_field_keeps_crc32() {
     );
 }
 
+#[cfg(feature = "zip-crypto")]
 /// The `0x9901` parser reads the vendor version out of an extra-field
 /// chain, tolerates a preceding field, and refuses malformed input
 /// rather than guessing. Exercised through a real AE-1 / AE-2 archive
@@ -583,6 +589,7 @@ fn test_zip_wrapper_aes_vendor_version_reads_ae1_and_ae2() {
     );
 }
 
+#[cfg(feature = "zip-crypto")]
 /// DCR-012: with the listing reporting `None`, the digest walk streams
 /// AE-2 entries by listing id. The id-addressed path must return the
 /// decrypted payload (and must not trip the AE-2 CRC compare), because
@@ -619,6 +626,7 @@ fn test_zip_wrapper_extract_to_stream_by_listing_id_ae2() {
     );
 }
 
+#[cfg(feature = "zip-crypto")]
 /// Without a password the AE-2 payload cannot be read, so the
 /// id-addressed stream the digest walk uses must fail rather than
 /// substitute a value. Listing itself keeps working (AD 0014).
@@ -1400,4 +1408,79 @@ fn a_failed_first_operation_leaves_the_handle_retryable() {
         .list_files()
         .expect("the retry runs against a complete, healthy archive nobody swapped");
     assert_eq!(entries.len(), 2);
+}
+
+// ── AD 0058 format features: the `zip-crypto` diagnostic ──
+
+/// The classifier, tested directly and in every configuration.
+///
+/// It is deliberately compiled unconditionally, so this runs in the
+/// ordinary build too rather than only in the profile nobody uses by
+/// default. The match is on the stable half of the upstream sentence;
+/// these cases pin that it is neither too narrow (missing the real
+/// message) nor too broad (swallowing other `UnsupportedArchive` cases,
+/// which would turn a genuine unsupported-shape error into a misleading
+/// "enable a feature" suggestion).
+#[test]
+fn aes_feature_missing_is_told_apart_from_other_unsupported_archives() {
+    use zip::result::ZipError;
+
+    let real = ZipError::UnsupportedArchive(
+        "AES encrypted files cannot be decrypted without the aes-crypto feature.",
+    );
+    assert!(super::is_aes_feature_missing(&real));
+
+    // Other `UnsupportedArchive` conditions must not be rewritten into
+    // an "enable `zip-crypto`" suggestion that would not help.
+    for other in [
+        ZipError::UnsupportedArchive(ZipError::PASSWORD_REQUIRED),
+        ZipError::UnsupportedArchive("Compression method not supported"),
+        ZipError::UnsupportedArchive("AES"),
+    ] {
+        assert!(
+            !super::is_aes_feature_missing(&other),
+            "must not claim the AES feature is missing for: {other}"
+        );
+    }
+    assert!(!super::is_aes_feature_missing(&ZipError::InvalidPassword));
+}
+
+/// End to end, in the build that actually has the problem: reading a
+/// committed WinZip-AES fixture without `zip-crypto` must name **our**
+/// feature. The `zip` crate's own message names `aes-crypto`, which is
+/// not a feature of this crate — a caller reading it would search this
+/// `Cargo.toml` and find nothing.
+///
+/// The fixture is committed rather than built in-test because a build
+/// without `zip-crypto` cannot write one (`scripts/generate-zip-fixtures.sh`).
+#[cfg(not(feature = "zip-crypto"))]
+#[test]
+fn reading_an_aes_zip_without_the_feature_names_this_crates_feature() {
+    let path = crate::test_utils::fixture("test_aes256.zip");
+    let archive = ZipArchive::open_with_password(&path, "fixturepw").expect("open");
+    let msg = match archive.extract_to_memory("secret.txt") {
+        Ok(_) => panic!("a build without `zip-crypto` must not decrypt AES"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        msg.contains("zip-crypto"),
+        "the refusal must name this crate's feature, got: {msg}"
+    );
+    assert!(
+        !msg.contains("aes-crypto"),
+        "the upstream feature name must not leak to callers, got: {msg}"
+    );
+}
+
+/// The same fixture in a build that *has* the feature: it decrypts. Both
+/// sides pinned, so the gate cannot be wired to nothing.
+#[cfg(feature = "zip-crypto")]
+#[test]
+fn reading_an_aes_zip_with_the_feature_succeeds() {
+    let path = crate::test_utils::fixture("test_aes256.zip");
+    let archive = ZipArchive::open_with_password(&path, "fixturepw").expect("open");
+    let payload = archive
+        .extract_to_memory("secret.txt")
+        .expect("AES decrypts when the feature is on");
+    assert_eq!(payload, b"a longer payload so this is AE-1 not AE-2");
 }
