@@ -668,3 +668,72 @@ the harness reported two of these runs as "exit code 0" while cargo's own status
 was 101 with failures. The `CARGO_EXIT=` marker written into the artifact after
 the command terminates is the only reason neither was reported as green. That
 marker is not ceremony.
+
+## Amendment (2026-09-07, Required Action 5 completed — and the metrics disagree)
+
+Required Action 5 asked for dependency, build-time and binary-size measurement.
+The dependency half was done per-increment; this completes the other two, across
+the whole feature matrix rather than one feature at a time. That turns out to
+matter, because **the three metrics rank the features in almost opposite
+orders**, and any one of them alone would have produced a wrong conclusion.
+
+### Method
+
+Binary size is `examples/inspect_archive` built `--release` and **stripped**
+(`strip -x`), because unstripped sizes are dominated by debug symbols and
+flatter the comparison. Each feature is measured alone against
+`--no-default-features`, so the numbers attribute rather than accumulate. Build
+cost is the wall time to re-run `build.rs` and relink, which isolates the
+build-script contribution — the part a feature can make expensive independently
+of how much Rust it pulls in.
+
+### Results
+
+| feature | crates removed | stripped bytes added | `build.rs` cost |
+| --- | ---: | ---: | --- |
+| `zip-crypto` | **22** | **+17 KB** (+1.9 %) | none |
+| `sevenzip` | 10 | **+581 KB** (+65 %) | none |
+| `libarchive` | **0** | +197 KB (+22 %) | probe only (~0 s) |
+| `rar-support` | — | +403 KB (+45 %) | **~21 s** (vendored C++) |
+
+Minimal is 891 KB stripped; everything on is 1,897 KB — **2.13×**. The individual
+deltas sum to 1,198 KB against a measured combined 1,006 KB, so roughly 16 % of
+the per-feature cost is shared and disappears when features are combined. Feature
+costs are not additive, and a footprint claim that adds them up overstates.
+
+### What each metric would have told you on its own
+
+`zip-crypto` removes **22 crates — more than any other feature — and 17 KB of
+binary.** `sevenzip` removes 10 crates and **581 KB**. By crate count
+`zip-crypto` is the biggest win available; by binary size it is nearly free to
+keep, and `sevenzip` is thirty-four times more valuable. The zip-crypto
+amendment's caution that "the remaining features should be measured rather than
+assumed cheap or expensive" was right, and understated: crate count here is not
+an incomplete proxy for footprint, it is an **actively misleading** one, because
+a crate's presence in the graph says nothing about how much of it survives
+`--gc-sections` and inlining.
+
+`libarchive` inverts it the other way. It removes **zero crates**, adds a middling
+197 KB, and costs no measurable build time — by all three numbers it looks like
+the least interesting feature in the table. It is the most important one, because
+its cost is not on any of these axes: without it the crate **does not build at
+all** on a host with no `libarchive` installed. A prerequisite is not a
+quantity, and Required Action 5's three metrics cannot see it.
+
+`rar-support` is the only feature whose dominant cost is time — ~21 s of vendored
+C++ per clean build, invisible to both other metrics.
+
+### Consequence for the profiles
+
+`read-minimal` (ZIP only, no C toolchain) is 891 KB stripped and builds with no
+system library. That is the footprint claim this record exists to substantiate,
+and it is now a measured number.
+
+The ranking to use when choosing what to gate next is **binary size**, not crate
+count — with the standing exception that a feature carrying a build prerequisite
+or a long C/C++ compile is worth gating regardless of what it weighs. On those
+grounds the remaining `zip-read` / `zip-write` / `sfx` split should be expected
+to be cheap in bytes, and should be justified on API-surface and
+prerequisite grounds rather than by a footprint number it probably will not
+deliver.
+

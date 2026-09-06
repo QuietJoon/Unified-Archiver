@@ -89,13 +89,45 @@ about because libarchive and RAR behavior are not fully isolated by feature.
 6. After Stage 1 stabilizes, introduce `unified-archive-core`,
    `unified-archive-read`, and the full `unified-archive` facade.
 
+### Update (2026-09-07) — Required Actions 3 and 5 are done; 2 is three-sevenths done
+
+Stage 1 is landing in increments (AD-0058 carries one amendment per increment).
+Status against the Required Actions above:
+
+- **RA 3 — COMPLETE.** `build.rs` no longer probes or builds a disabled native
+  backend. Verified in emitted build-script output, not by reading source: a
+  `--no-default-features` build emits no `rustc-link-lib`/`rustc-link-search`
+  for archive and does not compile the vendored UnRAR C++.
+- **RA 5 — COMPLETE.** Dependency tree, build time and binary size are measured
+  for every shipped feature. Headline: minimal is **891 KB stripped** against
+  1,897 KB for everything on (2.13×), and **122 crates against 154**. The
+  measurement also showed the three metrics rank features in nearly opposite
+  orders — `zip-crypto` removes the most crates (22) and the least binary
+  (17 KB) — so future gating decisions should be made on binary size, not crate
+  count. Full table in AD-0058's 2026-09-07 amendment.
+- **RA 2 — three of seven.** `zip-crypto`, `sevenzip` and `libarchive` are
+  shipped features. `zip-read`, `zip-write`, `sfx` remain; `rar` ships under its
+  existing name `rar-support`, which the 2026-09-06 ruling kept deliberately.
+- **RA 1 — not started.** The five operation features are unbuilt, so the six
+  profiles in RA 4 remain definitions rather than selectable configurations.
+  Note that AD-0071 makes `modify` depend on `libarchive` permanently, so there
+  is no libarchive-free `modify` profile; that consequence is ruled and recorded,
+  not an open question.
+- **RA 6 — parked** by the 2026-09-02 owner ruling (Stage 2 revisited only if
+  measurement proves feature selection insufficient). RA 5's numbers do not make
+  that case.
+
 ### Verification
 
 - [ ] Read-minimal build works without libarchive, RAR, create, or modify
-      dependencies.
-- [ ] Full build preserves the current API surface.
-- [ ] `build.rs` does not probe or build disabled native backends.
-- [ ] CI covers both read-only and full profiles.
+      dependencies. *(libarchive and RAR halves verified 2026-09-06/07; the
+      create and modify halves wait on RA 1.)*
+- [x] Full build preserves the current API surface. *(`--all-features`: 43
+      suites, 2088 passed, 0 failed.)*
+- [x] `build.rs` does not probe or build disabled native backends.
+- [ ] CI covers both read-only and full profiles. *(Both extremes plus three
+      per-feature isolation lanes are in `scripts/release-gate.sh`; the six named
+      profiles wait on RA 1.)*
 - [ ] Facade-crate migration notes are documented before publishing the split.
 
 ### Related

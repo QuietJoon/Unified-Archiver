@@ -418,8 +418,36 @@ have hit a decision wall on three of four.
   extremes and a feature wired to nothing passes both.
 
   Remaining after this increment: `zip-read` / `zip-write`, `sfx`, and the five operation features —
-  so the six profiles are still definitions rather than selectable configurations. Required Action 5
-  still owes build-time and binary-size numbers; the dependency measurement is done for all three.
+  so the six profiles are still definitions rather than selectable configurations.
+
+- **Required Action 5 COMPLETE 2026-09-07 — and the three metrics disagree with each other.** Binary
+  size and build time are now measured across the whole feature matrix, not one feature at a time,
+  which is what exposed the problem. Stripped `inspect_archive`, each feature alone against
+  `--no-default-features`:
+
+  | feature | crates removed | stripped bytes added | `build.rs` cost |
+  | --- | ---: | ---: | --- |
+  | `zip-crypto` | **22** | **+17 KB** | none |
+  | `sevenzip` | 10 | **+581 KB** | none |
+  | `libarchive` | **0** | +197 KB | probe only (~0 s) |
+  | `rar-support` | — | +403 KB | **~21 s** vendored C++ |
+
+  Minimal is **891 KB stripped**, everything on is 1,897 KB — 2.13×. That 891 KB is the
+  `read-minimal` footprint claim, now a measured number rather than an assertion.
+
+  **`zip-crypto` removes the most crates (22) and the least binary (17 KB); `sevenzip` removes 10
+  crates and 581 KB.** By crate count zip-crypto is the biggest win available; by binary size
+  sevenzip is thirty-four times more valuable. Crate count is not an incomplete proxy for footprint
+  here, it is an actively misleading one. Per-feature deltas also sum to 1,198 KB against a measured
+  combined 1,006 KB, so ~16 % is shared — feature costs are not additive and adding them overstates.
+
+  `libarchive` looks least interesting on all three axes (0 crates, middling bytes, no time) and is
+  the most important, because its real cost is that without it the crate **does not build at all**
+  on a host lacking the system library. A prerequisite is not a quantity, and none of Required
+  Action 5's metrics can see it. Recorded so the next selection is made on binary size — with the
+  standing exception for build prerequisites and long C/C++ compiles — rather than on crate count.
+  On those grounds `zip-read` / `zip-write` / `sfx` should be expected to be cheap in bytes and
+  justified on API-surface grounds instead.
 
 
 ### Non-UTF-8 path fidelity round 2 (OI-0076-001)
