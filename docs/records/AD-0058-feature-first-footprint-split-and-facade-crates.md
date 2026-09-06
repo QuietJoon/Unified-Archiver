@@ -914,3 +914,65 @@ drops 1489 → 1294, so `sfx` carries 195 tests.
 
 Remaining after this increment: `zip-read` / `zip-write`, and the five operation
 features.
+
+## Amendment (2026-09-07, ordering — the last two format features are not separable from the operation features)
+
+Four of the seven format features have landed as standalone increments
+(`sevenzip`, `zip-crypto`, `libarchive`, `sfx`). The remaining two — `zip-read`
+and `zip-write` — should **not** be attempted the same way, and this is worth
+settling before someone starts one and discovers it mid-refactor.
+
+### Why the pattern stops working here
+
+Every profile in this record's own table pairs the ZIP features with an
+operation feature, and never selects one without the other:
+
+| Profile | Features |
+| --- | --- |
+| `read-minimal` | `read`, `zip-read` |
+| `create` | `create`, `zip-write`, `sevenzip`, `libarchive` |
+| `modify` | `modify`, `zip-read`, `zip-write`, `sevenzip`, `libarchive` |
+
+`zip-write` on its own selects a ZIP writer backend with no creation API in
+front of it, and `create` on its own selects a creation API whose only
+always-present format has no writer. **Neither is a configuration any consumer
+would choose**, so shipping either alone would add an isolation lane that tests
+a combination nobody uses — and the value of those lanes, demonstrated twice in
+the `sfx` increment, comes precisely from their being real configurations.
+
+The other four features had no such partner. `sevenzip`, `libarchive`, `sfx` and
+`zip-crypto` each name a backend or a capability that is meaningful with the
+current always-on operation surface, which is why each worked as an increment.
+
+### The other reason: the write path is where the entanglement is
+
+Measured rather than assumed. `ZipWriter` is referenced from `modification.rs`
+(11 sites), `archive.rs` (9), `creation.rs` (6) and — the one that matters —
+`libarchive_wrapper/writer.rs` (5), so the ZIP writer and the libarchive writer
+are not cleanly separable at the backend boundary either. Compare `sfx`, whose
+whole public surface was five methods.
+
+### Ruling
+
+`zip-read` / `zip-write` land **together with** the five operation features, as
+one increment, not before them. That increment is larger than any so far and
+should be planned as such; it is the one that turns the six profiles from
+definitions into selectable configurations, which is Required Action 4.
+
+Nothing here changes the feature list or the profile table — this is a
+sequencing ruling only. The four shipped format features are unaffected.
+
+### What is already true, so the next increment starts from evidence
+
+- Required Actions 3 and 5 are complete; the `read-minimal` floor is **837 KB
+  stripped** and moves with each increment.
+- Each shipped feature has an isolation lane, and the lane set is the thing that
+  catches cross-feature defects — two of five found real ones on first run.
+- `common::backend_available` is the established way to keep a multi-format test
+  covering every backend a build actually has. The operation-feature increment
+  will need the operation equivalent of it, because the same trap applies:
+  a test gated on `create` that also asserts read behaviour loses the read half
+  from every read-only profile, silently.
+- AD-0071 fixes one shape in advance: `modify` depends on `libarchive` for every
+  format, so there is no libarchive-free `modify` profile, and 63 modify tests
+  all operate on ZIP.

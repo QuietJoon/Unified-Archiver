@@ -505,7 +505,17 @@ have hit a decision wall on three of four.
   the full count unchanged from before the increment, which is the check that nothing left the
   default build. `sfx` carries 195 tests (1489 → 1294).
 
-  Remaining in this item: `zip-read` / `zip-write` and the five operation features.
+  Remaining in this item: `zip-read` / `zip-write` and the five operation features — and
+  **they are one unit, not two.** Ruled 2026-09-07 (AD-0058 amendment): every profile in the table
+  pairs the ZIP features with an operation feature and never selects one without the other, so
+  `zip-write` alone is a ZIP writer with no creation API in front of it and `create` alone is a
+  creation API whose only always-present format has no writer. Neither is a configuration a consumer
+  would pick, and an isolation lane for a combination nobody uses gives up exactly the value the
+  lanes proved they have. Measured corroboration: `ZipWriter` is referenced from `modification.rs`
+  (11 sites), `archive.rs` (9), `creation.rs` (6) and `libarchive_wrapper/writer.rs` (5), so the
+  write path is not cleanly separable at the backend boundary either — against `sfx`, whose entire
+  public surface was five methods. That combined increment is Required Action 4: it turns the six
+  profiles from definitions into selectable configurations.
 
 ### Non-UTF-8 path fidelity round 2 (OI-0076-001)
 - **Type:** 2

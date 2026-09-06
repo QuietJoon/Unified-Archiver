@@ -105,9 +105,14 @@ Status against the Required Actions above:
   orders — `zip-crypto` removes the most crates (22) and the least binary
   (17 KB) — so future gating decisions should be made on binary size, not crate
   count. Full table in AD-0058's 2026-09-07 amendment.
-- **RA 2 — three of seven.** `zip-crypto`, `sevenzip` and `libarchive` are
-  shipped features. `zip-read`, `zip-write`, `sfx` remain; `rar` ships under its
-  existing name `rar-support`, which the 2026-09-06 ruling kept deliberately.
+- **RA 2 — four of seven** (updated 2026-09-07). `zip-crypto`, `sevenzip`,
+  `libarchive` and `sfx` are shipped features. `zip-read` and `zip-write` remain;
+  `rar` ships under its existing name `rar-support`, which the 2026-09-06 ruling
+  kept deliberately. Each shipped feature now has its own isolation lane in
+  `scripts/release-gate.sh`, and that is not a formality: two of the five found
+  real defects on their first run — a coverage loss predating every increment,
+  and an undocumented cross-feature dependency (`sevenzip` reads 7z, but
+  libarchive is what writes it).
 - **RA 1 — not started.** The five operation features are unbuilt, so the six
   profiles in RA 4 remain definitions rather than selectable configurations.
   Note that AD-0071 makes `modify` depend on `libarchive` permanently, so there
