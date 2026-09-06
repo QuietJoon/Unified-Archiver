@@ -293,6 +293,17 @@ a decision wall on three of four.
   Whole-tree archiving now fails on one badly named file; that is the accepted cost. AD-0064 gains
   an amendment recording that its write-side question is closed.
 
+- **DISCHARGED 2026-09-06 — implemented.** `walk_directory_tree` refuses a source path component
+  that is not valid UTF-8, so all three `add_directory_recursive`s (the facade's and both writer
+  backends') are covered by one guard that none of them can bypass. `DirWalkEntry::archive_path`
+  stays a `String`, as ruled. AD-0064 carries the amendment. One thing the ruling could not have
+  known and the amendment records: a non-UTF-8 *child* name cannot be created on either macOS
+  filesystem here — HFS+ rewrites the byte to the literal text `%FF` — so a filesystem-level test of
+  that case passes without ever constructing the case it claims to cover. Coverage is split: the
+  source root end to end (the walk visits it under the caller's own spelling, so the bytes survive),
+  the child case on in-memory paths. Both directions mutation-checked. **The read-side residual
+  (ticgit `81f344`) is untouched and still open.**
+
 ### 7z error classification and integrity drain (OI-0080-007)
 - **Type:** 2
 - **Verified:** yes — `classify_decode_error` and `test_integrity` read directly, 2026-08-07
@@ -331,6 +342,30 @@ a decision wall on three of four.
   blaming healthy later entries. The taxonomy record gains an amendment; the existing test
   asserting corrupt-payload-is-recorded-not-aborted still holds, because the drain-error case is a
   new third branch and not a reclassification of that one.
+
+- **DISCHARGED 2026-09-06 — implemented, and Required Action 3 was finally measured.** The new form
+  is `ArchiveError::IntegrityScanAborted { path, entry, reason, failed_before_abort }`, recorded as
+  AD-0073; the enum is `#[non_exhaustive]`, so it is not a breaking change. It carries the verdicts
+  already reached rather than discarding them. `test_sevenz_integrity_records_corrupt_payload` is
+  unchanged and still passes, as the ruling predicted.
+
+  **Required Action 3 — "first verify whether `for_each_entries` re-syncs the solid cursor after a
+  short callback read" — had never been done, through two re-examinations. It has now.** It does
+  re-sync: with 10 of entry 1's 30,000 bytes consumed, entry 2 still came back complete and
+  byte-correct. So the mis-attribution *as the finding described it* is unreachable by that route,
+  and AD-0073 says so instead of leaving the original motivation standing. The guard is kept for the
+  decode-*error* state, which is a different state and is not observable here — a weaker claim than
+  the finding made, and the accurate one.
+
+  Two further things found while implementing, neither of them the ruled work:
+  * **Both read loops in `test_integrity` were unbounded.** Now bounded by the declared unpacked
+    size (authoritative per R0075-0051), plus one byte so an over-producing decoder is detected
+    rather than looped on. Each iteration terminates or advances, so both are provably finite.
+  * **A corrupt LZMA2 7z hangs `test_integrity` forever, on unmodified HEAD.** Inside sevenz-rust2's
+    decoder, in a single `read` that never returns — an atomic counter at the call site logged
+    exactly one entry and never a second; `sample(1)` put every sample at that call. No bound here
+    can interrupt a call that does not return, so it is **not fixed**: filed as ticgit `f8c4b2`.
+    Whether the extraction paths share it is noted there and not yet measured.
 
 ## Type 3 — blocked
 - **Ruling 6, 2026-09-03 — widened to `Option<u16>`.** Landed. The old signature did not truncate
