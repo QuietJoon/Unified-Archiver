@@ -27,6 +27,7 @@
 mod common;
 
 use std::fs;
+#[cfg_attr(not(feature = "sfx"), allow(unused_imports))]
 use std::io::{Read, Write};
 
 use unified_archive::{
@@ -187,6 +188,7 @@ fn r0068_0080_extract_to_stream_with_options_uses_password() {
 // R0068-0081: Archive::path() survives offset-open
 // ──────────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "sfx")]
 #[test]
 fn r0068_0081_open_at_offset_preserves_caller_path() {
     let temp = common::temp_test_dir();
@@ -296,6 +298,7 @@ fn nix_uid_is_root() -> bool {
 // R0068-0083: SFX raw-signature negative cases
 // ──────────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "sfx")]
 #[test]
 fn r0068_0083_executable_with_incidental_gzip_magic_is_not_sfx() {
     // Synthesize a "stubby" file that contains the gzip magic (0x1F 0x8B)

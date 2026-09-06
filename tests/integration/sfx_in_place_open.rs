@@ -18,6 +18,10 @@
 //! Which path a handle got is not left implicit: `Archive::payload_access()`
 //! reports it.
 
+// In-place vs staged SFX payload opening — entirely `sfx` surface
+// (AD 0058 format features).
+#![cfg(feature = "sfx")]
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 

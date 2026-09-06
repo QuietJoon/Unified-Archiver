@@ -292,7 +292,7 @@ fn test_is_solid_tar_returns_false() {
 /// backend, so `is_solid` must dispatch on the source format — a solid
 /// 7z opened for modification previously fell into the always-`false`
 /// backend arm.
-#[cfg(feature = "sevenzip")]
+#[cfg(all(feature = "sevenzip", feature = "libarchive"))]
 #[test]
 fn test_is_solid_7z_modify_mode_answers_truthfully() {
     use sevenz_rust2::{ArchiveEntry as SzEntry, ArchiveWriter, SourceReader};
@@ -330,7 +330,7 @@ fn test_is_solid_7z_modify_mode_answers_truthfully() {
 
 /// R0079-0035 companion: a genuinely non-solid 7z still answers `false`
 /// through the Modify-mode read-side probe.
-#[cfg(feature = "sevenzip")]
+#[cfg(all(feature = "sevenzip", feature = "libarchive"))]
 #[test]
 fn test_is_solid_7z_modify_mode_non_solid_returns_false() {
     let dir = tempfile::tempdir().unwrap();
@@ -343,6 +343,7 @@ fn test_is_solid_7z_modify_mode_non_solid_returns_false() {
 
 // ── Archive::open_at_offset tests ──
 
+#[cfg(feature = "sfx")]
 #[test]
 fn test_open_at_offset_zero_is_plain_open() {
     let archive = Archive::open_at_offset(fixture("test.zip"), 0)
@@ -350,6 +351,7 @@ fn test_open_at_offset_zero_is_plain_open() {
     assert_eq!(archive.format(), ArchiveFormat::Zip);
 }
 
+#[cfg(feature = "sfx")]
 #[test]
 fn test_open_at_offset_past_eof_rejected() {
     let len = std::fs::metadata(fixture("test.zip")).unwrap().len();
@@ -359,6 +361,7 @@ fn test_open_at_offset_past_eof_rejected() {
 
 // ── Archive::open_sfx tests ──
 
+#[cfg(feature = "sfx")]
 #[test]
 fn test_open_sfx_non_sfx_file() {
     // A normal ZIP is not an SFX
@@ -368,6 +371,7 @@ fn test_open_sfx_non_sfx_file() {
 
 // ── Archive::extract_stub tests ──
 
+#[cfg(feature = "sfx")]
 #[test]
 fn test_extract_stub_non_sfx_detection() {
     let detection = crate::sfx::SfxDetectionResult {
@@ -386,6 +390,7 @@ fn test_extract_stub_non_sfx_detection() {
     assert!(err_msg.contains("non-SFX"));
 }
 
+#[cfg(feature = "sfx")]
 #[test]
 fn test_extract_stub_missing_offset() {
     let detection = crate::sfx::SfxDetectionResult {
@@ -404,6 +409,7 @@ fn test_extract_stub_missing_offset() {
     assert!(err_msg.contains("missing offset"));
 }
 
+#[cfg(feature = "sfx")]
 #[test]
 fn test_extract_stub_rejects_forged_detection() {
     // R0069-0007: with internal re-detection, a forged

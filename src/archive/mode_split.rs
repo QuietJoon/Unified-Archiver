@@ -34,10 +34,12 @@ use crate::error::{ArchiveWarning, Result, ResultWithWarnings};
 use crate::format::ArchiveFormat;
 use crate::inspection::{MultipartLayout, SizedContentTotal, ValidationReport};
 use crate::modification::ModificationOptions;
+#[cfg_attr(not(feature = "sfx"), allow(unused_imports))]
 use crate::options::{
     CompressionOptions, ExtractionOptions, LibarchiveCompressionOptions, SevenZCompressionOptions,
     SfxStagingProgress, ZipCompressionOptions,
 };
+#[cfg(feature = "sfx")]
 use crate::sfx::SfxDetectionResult;
 use crate::streaming::{StreamBound, StreamingExtractor};
 use std::path::{Path, PathBuf};
@@ -78,6 +80,7 @@ impl ReadArchive {
 
     /// Open an archive that begins at a non-zero byte offset
     /// (mirrors [`Archive::open_at_offset`]).
+    #[cfg(feature = "sfx")]
     pub fn open_at_offset(path: impl AsRef<Path>, offset: u64) -> Result<Self> {
         let inner = Archive::open_at_offset(path, offset)?;
         debug_assert_eq!(inner.mode, ArchiveMode::Read);
@@ -86,6 +89,7 @@ impl ReadArchive {
 
     /// Open a self-extracting archive (mirrors
     /// [`Archive::open_sfx`]).
+    #[cfg(feature = "sfx")]
     pub fn open_sfx(path: impl AsRef<Path>) -> Result<Self> {
         let inner = Archive::open_sfx(path)?;
         debug_assert_eq!(inner.mode, ArchiveMode::Read);
@@ -192,6 +196,7 @@ impl ReadArchive {
     /// Detect whether `path` is a self-extracting archive (mirrors
     /// the static [`Archive::detect_sfx`] helper, exposed here for
     /// API symmetry with the typed handle).
+    #[cfg(feature = "sfx")]
     pub fn detect_sfx(path: impl AsRef<Path>) -> Result<SfxDetectionResult> {
         Archive::detect_sfx(path)
     }
@@ -201,6 +206,7 @@ impl ReadArchive {
     /// Open a self-extracting archive while observing — and optionally
     /// cancelling — the payload-staging copy (mirrors
     /// [`Archive::open_with_sfx_progress`]).
+    #[cfg(feature = "sfx")]
     pub fn open_with_sfx_progress(
         path: impl AsRef<Path>,
         progress: Option<SfxStagingProgress>,
@@ -212,6 +218,7 @@ impl ReadArchive {
 
     /// Extract the executable stub from an SFX archive for analysis
     /// (mirrors the static [`Archive::extract_stub`]).
+    #[cfg(feature = "sfx")]
     pub fn extract_stub(path: impl AsRef<Path>, detection: &SfxDetectionResult) -> Result<Vec<u8>> {
         Archive::extract_stub(path, detection)
     }

@@ -89,6 +89,7 @@ impl<R: Read + Seek> PayloadWindow<R> {
     /// is the sum of its parts. The same "start past the end" refusal applies,
     /// and for the same reason: a caller asking for a payload that cannot exist
     /// is a bug worth surfacing rather than an empty window worth serving.
+    #[cfg_attr(not(feature = "sevenzip"), allow(dead_code))]
     pub(crate) fn from_sized(inner: R, start: u64, total_len: u64) -> std::io::Result<Self> {
         let len = total_len.checked_sub(start).ok_or_else(|| {
             std::io::Error::new(
@@ -117,6 +118,7 @@ impl PayloadWindow<std::fs::File> {
     /// Errors with `InvalidInput` when `start` is past the end of the
     /// file — a caller asking for a payload that cannot exist is a bug
     /// worth surfacing, not an empty window worth serving.
+    #[cfg_attr(not(feature = "sfx"), allow(dead_code))]
     pub(crate) fn from_file(file: std::fs::File, start: u64) -> std::io::Result<Self> {
         let file_len = file.metadata()?.len();
         let len = file_len.checked_sub(start).ok_or_else(|| {

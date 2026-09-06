@@ -43,15 +43,33 @@ cc = "1"
 # capability set, which is a re-expression and not a "flip": ordering constraint 2
 # protects against the default set LOSING capability before both profiles are
 # proven, and nothing observable changes here (AD-0058, 2026-09-06 amendment).
-default = ["rar-support", "v2-api", "sevenzip", "zip-crypto", "libarchive"]
+default = ["rar-support", "v2-api", "sevenzip", "zip-crypto", "libarchive", "sfx"]
 rar-support = []  # RAR/RAR5 support (requires UnRAR license compliance)
-sevenzip = ["dep:sevenz-rust2"]  # 7z read/extract/create via the native Rust backend
+# 7z READ and extract via the native Rust backend. Note the asymmetry, found by
+# the `sevenzip`-only lane: 7z *creation* and *modification* go through
+# libarchive (`archive_write_set_format_7zip`), not sevenz-rust2 — so a build
+# with `sevenzip` and without `libarchive` reads 7z and cannot write it. That is
+# the honest routing, not a defect, but it means `sevenzip` alone does not make
+# 7z writable and tests covering 7z writes need both features.
+sevenzip = ["dep:sevenz-rust2"]
 zip-crypto = ["zip/aes-crypto"]  # WinZip-AES encrypted ZIP reading
 # TAR family, raw single-file compressed formats, ISO — and, per AD-0071,
 # ZIP/7z modification, which binds this backend unconditionally. Turning it
 # off removes the system libarchive dependency and its build.rs probe, so a
 # read-only ZIP/7z consumer needs no C library present at build time.
 libarchive = []
+# Self-extracting archive detection and offset opening (AD-0058's `sfx`).
+# Gates the 3-stage detection pipeline and the public offset-open API:
+# `detect_sfx`, `open_sfx`, `open_with_sfx_progress`, `open_at_offset`,
+# `extract_stub`, and the SFX fallback inside `Archive::open`.
+#
+# `PayloadWindow` and the backends' `payload_offset` field are deliberately
+# NOT gated. The field defaults to 0 and is only ever set by the offset-open
+# paths, so without this feature the window wraps at offset 0 and is a no-op;
+# and the RAR4 recovery walk drives `PayloadWindow` directly, independent of
+# SFX. Gating a `u64` and a 219-line adapter would buy nothing and would put a
+# compound cfg on the backends.
+sfx = []
 external-rar-create = []  # RAR creation via external WinRAR CLI (Windows only)
 # D2 typed-handle split (ReadArchive / WriteArchive / ModifyArchive). Additive since v0.3;
 # on by default since 2026-09-03 (owner ruling). `--no-default-features` turns it off.
@@ -105,6 +123,13 @@ path = "examples/create_archive.rs"
 name = "modify_archive"
 path = "examples/modify_archive.rs"
 
+# Declared explicitly only to carry `required-features`; the other examples
+# are auto-discovered. Without `sfx` there is no detection API to demonstrate.
+[[example]]
+name = "detect_sfx"
+path = "examples/detect_sfx.rs"
+required-features = ["sfx"]
+
 [[bench]]
 name = "archive_operations"
 harness = false
@@ -116,4 +141,5 @@ harness = false
 [[bench]]
 name = "sfx_detection"
 harness = false
+required-features = ["sfx"]
 

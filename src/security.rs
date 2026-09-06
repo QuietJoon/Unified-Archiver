@@ -2275,6 +2275,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sfx")]
     /// AD 0040 / R0081 I1: the configured SFX ceiling is readable from the
     /// limits and defaults to the shipped constant, so a staging gate can
     /// consult the caller's value instead of the constant. A *lowered* cap

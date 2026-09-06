@@ -9,6 +9,10 @@
 //! - Test text files and random data
 //! - Test archives with coincidental signature patterns
 
+// These pin what must NOT be detected as an SFX, which still requires the
+// detection pipeline to exist (AD 0058 format features).
+#![cfg(feature = "sfx")]
+
 use std::io::Write;
 use tempfile::NamedTempFile;
 use unified_archive::{Archive, SfxConfidence};

@@ -11,6 +11,7 @@ use crate::ffi::wrapper::UnrarArchive;
 use crate::ffi::zip_wrapper::ZipArchive;
 use crate::ffi::zip_writer::ZipWriter;
 use crate::format::ArchiveFormat;
+#[cfg_attr(not(feature = "sfx"), allow(unused_imports))]
 use crate::security::{Cap, ExtractionLimits};
 use once_cell::sync::OnceCell;
 use std::path::{Path, PathBuf};
@@ -59,6 +60,7 @@ pub(crate) enum ArchiveBackend {
 pub(crate) enum PayloadSource {
     /// Payload copied into a tempfile (AD 0040 ceiling applied). The
     /// [`tempfile::TempPath`] deletes the copy when the `Archive` drops.
+    #[cfg_attr(not(feature = "sfx"), allow(dead_code))]
     Staged(tempfile::TempPath),
     /// Payload read directly out of the caller's file, starting at
     /// `offset`. No bytes were copied and no ceiling was consulted.
@@ -324,6 +326,7 @@ const _: fn() = || {
 /// the `*_with_limits` entry points source from the caller's limits.
 /// `default_sfx_cap_matches_extraction_limits_default` pins the two
 /// values together.
+#[cfg(feature = "sfx")]
 const DEFAULT_SFX_PAYLOAD_CAP: Cap = Cap::Limited(crate::sfx::limits::MAX_SFX_PAYLOAD_SIZE);
 
 /// Stage `payload_size = file_len - offset` bytes from `path_ref` into
@@ -362,6 +365,7 @@ const DEFAULT_SFX_PAYLOAD_CAP: Cap = Cap::Limited(crate::sfx::limits::MAX_SFX_PA
 /// `false` from the callback aborts the copy and surfaces
 /// [`ArchiveError::Cancelled { operation: "sfx_staging" }`](ArchiveError::Cancelled)
 /// (R0075-0003).
+#[cfg(feature = "sfx")]
 fn stage_sfx_payload(
     path_ref: &Path,
     offset: u64,
@@ -613,6 +617,7 @@ fn revalidate_read_identity(
 /// `Archive::open` used to drop the SFX failure while
 /// `Archive::open_encrypted` dropped the detection failure; both now
 /// report the pair through this helper.
+#[cfg(feature = "sfx")]
 fn sfx_fallback_failure(
     detect_err: &ArchiveError,
     sfx_cause: impl std::fmt::Display,
@@ -716,6 +721,9 @@ impl Archive {
                 Ok(archive)
             }
             Err(detect_err) => {
+                // Without the `sfx` feature there is no probe to fall back
+                // to, so the detection error is the whole story (AD 0058).
+                #[cfg(feature = "sfx")]
                 if crate::format::extension_suggests_executable(&path_buf) {
                     // R0076-0074: a failed SFX probe no longer collapses
                     // into the bare detection error — both causes surface.
@@ -848,6 +856,7 @@ impl Archive {
                 // `Archive::open`'s flow so encrypted SFX archives can
                 // be opened directly here without a separate detect-then-
                 // re-open dance.
+                #[cfg(feature = "sfx")]
                 if crate::format::extension_suggests_executable(&path_buf) {
                     return match Self::open_sfx_payload_for_encrypted(&path_buf, pwd_str) {
                         Ok(Some(staged)) => Ok(staged),
@@ -964,6 +973,7 @@ impl Archive {
     /// }
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
+    #[cfg(feature = "sfx")]
     pub fn detect_sfx(path: impl AsRef<Path>) -> Result<crate::sfx::SfxDetectionResult> {
         crate::sfx::detect_sfx(path)
     }
@@ -1008,6 +1018,7 @@ impl Archive {
     /// (AD 0040). Use [`Archive::open_sfx_with_limits`] to supply your
     /// own ceiling. The ceiling bounds a copy, so it does not apply to
     /// an in-place open.
+    #[cfg(feature = "sfx")]
     pub fn open_sfx(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_sfx_progress(path, None)
     }
@@ -1035,6 +1046,7 @@ impl Archive {
     /// let archive = Archive::open_sfx_with_limits("installer.exe", &limits)?;
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
+    #[cfg(feature = "sfx")]
     pub fn open_sfx_with_limits(path: impl AsRef<Path>, limits: &ExtractionLimits) -> Result<Self> {
         Self::open_sfx_staged(path.as_ref(), None, limits.max_sfx_payload_size())
     }
@@ -1079,6 +1091,7 @@ impl Archive {
     /// [`max_sfx_payload_size`](ExtractionLimits::max_sfx_payload_size);
     /// [`Archive::open_with_sfx_progress_and_limits`] takes the
     /// caller's ceiling instead.
+    #[cfg(feature = "sfx")]
     pub fn open_with_sfx_progress(
         path: impl AsRef<Path>,
         progress: Option<crate::options::SfxStagingProgress>,
@@ -1099,6 +1112,7 @@ impl Archive {
     /// Both are inert on an in-place open, where there is no copy to
     /// bound, watch, or cancel — see
     /// [`Archive::open_with_sfx_progress`].
+    #[cfg(feature = "sfx")]
     pub fn open_with_sfx_progress_and_limits(
         path: impl AsRef<Path>,
         progress: Option<crate::options::SfxStagingProgress>,
@@ -1115,6 +1129,7 @@ impl Archive {
     ///
     /// The name is historical — since ticket `1ddc37ec` this does not
     /// always stage.
+    #[cfg(feature = "sfx")]
     fn open_sfx_staged(
         path_ref: &Path,
         progress: Option<crate::options::SfxStagingProgress>,
@@ -1246,6 +1261,7 @@ impl Archive {
     /// (AD 0040). Use [`Archive::open_at_offset_with_limits`] to
     /// tighten (or lift) that ceiling. An in-place open copies nothing,
     /// so the ceiling cannot bind on it.
+    #[cfg(feature = "sfx")]
     pub fn open_at_offset(path: impl AsRef<Path>, offset: u64) -> Result<Self> {
         Self::open_at_offset_with_format_hint(path.as_ref(), offset, DEFAULT_SFX_PAYLOAD_CAP, None)
     }
@@ -1276,6 +1292,7 @@ impl Archive {
     /// let archive = Archive::open_at_offset_with_limits("file.bin", 65536, &limits)?;
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
+    #[cfg(feature = "sfx")]
     pub fn open_at_offset_with_limits(
         path: impl AsRef<Path>,
         offset: u64,
@@ -1302,6 +1319,7 @@ impl Archive {
     /// magic-vs-extension consistency check, so the helper deliberately
     /// drops the hint in that case. SFX flows always pass a non-zero
     /// offset, so the elision is invisible to them.
+    #[cfg(feature = "sfx")]
     pub(crate) fn open_at_offset_with_format_hint(
         path_ref: &Path,
         offset: u64,
@@ -1325,6 +1343,7 @@ impl Archive {
     /// Internal variant that threads an optional staging progress hook
     /// (R0075-0003) and the caller's staging ceiling (`max_payload`)
     /// through to [`stage_sfx_payload`].
+    #[cfg(feature = "sfx")]
     pub(crate) fn open_at_offset_with_format_hint_and_progress(
         path_ref: &Path,
         offset: u64,
@@ -1461,6 +1480,7 @@ impl Archive {
     /// Any I/O or parse failure here also returns `Ok(None)`: the
     /// staging path is then responsible for producing the error, so a
     /// bad offset keeps reporting exactly what it reported before.
+    #[cfg_attr(not(feature = "sfx"), allow(dead_code))]
     fn try_open_in_place(
         path_ref: &Path,
         offset: u64,
@@ -1480,7 +1500,7 @@ impl Archive {
             return Ok(Some(archive));
         }
 
-        #[cfg(feature = "rar-support")]
+        #[cfg(all(feature = "rar-support", feature = "sfx"))]
         if matches!(
             format_hint,
             None | Some(ArchiveFormat::Rar) | Some(ArchiveFormat::Rar5)
@@ -1594,7 +1614,7 @@ impl Archive {
     /// needs no reader adapter — but for the same reason it must be shown
     /// that the SDK will land on the *caller's* offset and not an earlier
     /// signature it happens to meet first.
-    #[cfg(feature = "rar-support")]
+    #[cfg(all(feature = "rar-support", feature = "sfx"))]
     fn try_open_rar_in_place(path_ref: &Path, offset: u64) -> Result<Option<Self>> {
         const RAR4_MARKER: [u8; 7] = *b"Rar!\x1a\x07\x00";
         const RAR5_MARKER: [u8; 8] = *b"Rar!\x1a\x07\x01\x00";
@@ -1661,7 +1681,7 @@ impl Archive {
     /// Chunked with an overlap so a marker straddling a chunk boundary is
     /// still seen. `limit` is bounded by the reach gate before this runs,
     /// so the whole scan is bounded too.
-    #[cfg(feature = "rar-support")]
+    #[cfg(all(feature = "rar-support", feature = "sfx"))]
     fn first_rar_signature_before(
         path_ref: &Path,
         limit: u64,
@@ -1777,6 +1797,7 @@ impl Archive {
     /// [`Archive::open_encrypted`]. Returns `Ok(None)`
     /// when the source is not an SFX so the caller can surface its
     /// own non-SFX error.
+    #[cfg(feature = "sfx")]
     fn open_sfx_payload_for_encrypted(path_ref: &Path, password: &str) -> Result<Option<Self>> {
         let detection = Self::detect_sfx(path_ref)?;
         let Some((format, offset, _stub)) = detection.payload_coordinates() else {
@@ -1838,6 +1859,7 @@ impl Archive {
     /// }
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
+    #[cfg(feature = "sfx")]
     pub fn extract_stub(
         path: impl AsRef<Path>,
         detection: &crate::sfx::SfxDetectionResult,
@@ -2402,11 +2424,14 @@ impl Archive {
     /// ```no_run
     /// use unified_archive::{Archive, archive::PayloadAccess};
     ///
+    /// # #[cfg(feature = "sfx")]
+    /// # {
     /// let archive = Archive::open_sfx("installer.exe")?;
     /// match archive.payload_access() {
     ///     PayloadAccess::InPlace => println!("read in place; no temp space used"),
     ///     PayloadAccess::Staged => println!("payload copied to a tempfile"),
     /// }
+    /// # }
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
     pub fn payload_access(&self) -> PayloadAccess {
@@ -2673,13 +2698,13 @@ pub mod mode_split;
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sfx"))]
 mod in_place_payload_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sfx"))]
 mod sfx_fallback_error_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sfx"))]
 mod sfx_payload_cap_tests;
 
 /// OI-0081-001: read-side file-identity capture/revalidation. Exercises
@@ -2691,9 +2716,9 @@ mod sfx_payload_cap_tests;
 /// non-Unix fallback is length-only and cannot see a same-size swap.
 #[cfg(all(test, unix))]
 mod read_identity_tests {
-    use super::{
-        Archive, DEFAULT_SFX_PAYLOAD_CAP, capture_read_identity, revalidate_read_identity,
-    };
+    #[cfg(feature = "sfx")]
+    use super::DEFAULT_SFX_PAYLOAD_CAP;
+    use super::{Archive, capture_read_identity, revalidate_read_identity};
     use crate::error::ArchiveError;
     use crate::format::ArchiveFormat;
     use crate::test_utils::fixture;
@@ -2749,6 +2774,7 @@ mod read_identity_tests {
         );
     }
 
+    #[cfg(feature = "sfx")]
     #[test]
     fn sfx_staging_binds_to_the_detection_open_identity() {
         // R0001-0002: `detect_sfx` captures the identity of the inode it

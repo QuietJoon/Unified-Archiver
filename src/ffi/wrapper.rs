@@ -130,6 +130,7 @@ fn unrar_lock() -> Result<UnrarLockGuard> {
 /// Crate-visible because the gate that consults it lives in
 /// [`crate::Archive`], not here — this backend never refuses on its own;
 /// see [`UnrarArchive::open_at_offset`].
+#[cfg_attr(not(feature = "sfx"), allow(dead_code))]
 pub(crate) const UNRAR_MAX_SFX_SCAN: u64 = 0x400000 - 16;
 
 /// Safe wrapper around UnRAR archive handle
@@ -463,6 +464,7 @@ impl UnrarArchive {
     /// in-place handle the outer file *is* the archive, so binding the outer
     /// pathname binds the bytes being read. The same holds for
     /// [`Self::revalidate_identity`] and [`Self::fresh_handle`].
+    #[cfg_attr(not(feature = "sfx"), allow(dead_code))]
     pub(crate) fn open_at_offset(path: impl AsRef<Path>, offset: u64) -> Result<Self> {
         let mut archive = Self::open_with_mode(path, RAR_OM_EXTRACT)?;
         archive.payload_offset = offset;

@@ -138,6 +138,8 @@
 //! ```no_run
 //! use unified_archive::Archive;
 //!
+//! # #[cfg(feature = "sfx")]
+//! # {
 //! let result = Archive::detect_sfx("installer.exe")?;
 //! // `payload_coordinates()` yields the three fields together, or `None` if
 //! // this is not an SFX — prefer it over unwrapping the accessors one by one.
@@ -145,6 +147,7 @@
 //!     println!("Found {format:?} archive at offset {offset}");
 //!     println!("Stub type: {stub:?}");
 //! }
+//! # }
 //! # Ok::<(), unified_archive::ArchiveError>(())
 //! ```
 //!
@@ -220,6 +223,7 @@ pub mod format;
 pub mod options;
 pub mod password;
 pub mod security; // Security utilities
+#[cfg(feature = "sfx")]
 pub mod sfx;
 pub mod stream_crc; // Stream-level CRC32 extraction
 pub mod streaming; // Phase 2.4: Streaming extraction // Phase 7: SFX detection
@@ -249,6 +253,7 @@ pub(crate) mod payload_window;
     not(any(feature = "sevenzip", feature = "rar-support")),
     allow(dead_code)
 )]
+#[cfg(feature = "sevenzip")]
 pub(crate) mod volume_chain;
 
 #[cfg(test)]
@@ -327,6 +332,7 @@ pub use password::Password;
 // They are demoted to `pub(crate)` and the few that remain useful as
 // public API are kept here.
 pub use security::{Cap, CompressionRatio, ExtractionLimits, ExtractionLimitsBuilder};
+#[cfg(feature = "sfx")]
 pub use sfx::{SfxConfidence, SfxDetectionResult, StubType}; // Phase 7: SFX detection
 pub use stream_crc::{
     CheckType, StreamChecksum, extract_bzip2_stream_crc, extract_gzip_stream_crc,

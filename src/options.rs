@@ -1150,6 +1150,7 @@ impl SfxStagingProgress {
 
     /// Invoke the callback with the running byte count. Returns
     /// `false` when the caller requested cancellation.
+    #[cfg_attr(not(feature = "sfx"), allow(dead_code))]
     pub(crate) fn emit(&mut self, bytes: u64) -> bool {
         (self.cb)(bytes)
     }

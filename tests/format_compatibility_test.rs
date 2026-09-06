@@ -710,6 +710,7 @@ fn test_open_zip_bytes_with_exe_extension_routes_to_zip() {
 /// followed by an embedded archive at non-zero offset) opens
 /// transparently through `Archive::open` thanks to the
 /// `.exe`-extension fallback path that retries via `Archive::open_sfx`.
+#[cfg(feature = "sfx")]
 #[test]
 fn test_open_real_sfx_with_exe_extension_falls_back_to_sfx() {
     use std::io::Write;

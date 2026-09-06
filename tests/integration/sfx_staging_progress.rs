@@ -6,6 +6,10 @@
 //! invoked with cumulative bytes copied, and returning `false` from a
 //! `with_cancel` callback aborts staging with `ArchiveError::Cancelled`.
 
+// SFX staging progress callbacks, entirely `sfx` surface (AD 0058 format
+// features).
+#![cfg(feature = "sfx")]
+
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

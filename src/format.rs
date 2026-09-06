@@ -781,6 +781,7 @@ impl ArchiveFormat {
     /// extensions (`.tar.gz`, `.tar.bz2`, `.tar.xz`) keep the compound
     /// suffix so libarchive's filter chain still sees the tar wrapper;
     /// single extensions are returned verbatim.
+    #[cfg_attr(not(feature = "sfx"), allow(dead_code))]
     pub(crate) fn suffix(self) -> &'static str {
         match self {
             ArchiveFormat::Zip => ".zip",
@@ -811,6 +812,7 @@ impl ArchiveFormat {
 /// extensions are preserved verbatim; absent or ambiguous extensions
 /// (`.rar`, anything not in [`format_from_extension`]) keep their
 /// original spelling, and a missing extension falls back to `.bin`.
+#[cfg_attr(not(feature = "sfx"), allow(dead_code))]
 pub(crate) fn stage_suffix_for(source: &Path) -> std::borrow::Cow<'static, str> {
     use std::borrow::Cow;
     if let Some(format) = format_from_extension(source) {
@@ -840,6 +842,7 @@ fn extension_suggests_iso(path: &Path) -> bool {
 /// Hint that the file might be a self-extracting archive. Used by
 /// [`Archive::open`]'s SFX fallback when neither magic-byte
 /// detection nor the extension-to-format map yields a result.
+#[cfg_attr(not(feature = "sfx"), allow(dead_code))]
 pub(crate) fn extension_suggests_executable(path: &Path) -> bool {
     extension_in(path, &["exe", "com", "scr", "app", "run", "sh", "bash"])
 }

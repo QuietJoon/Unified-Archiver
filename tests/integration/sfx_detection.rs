@@ -7,6 +7,11 @@
 //! - Verify detection succeeds for all SFX files
 //! - Verify correct stub type, format, and offset detection
 
+// Every case here drives SFX detection or offset opening, so the whole
+// file needs the `sfx` feature (AD 0058 format features). Per-test
+// libarchive/sevenzip gates inside compose with this one.
+#![cfg(feature = "sfx")]
+
 use std::io::Write;
 use tempfile::NamedTempFile;
 use unified_archive::{Archive, ArchiveFormat, StubType};
