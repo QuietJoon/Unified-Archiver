@@ -20,8 +20,18 @@ fn main() {
 
     // Link to libarchive using pkg-config
     // This will automatically handle platform-specific linking
+    //
+    // AD 0058 Stage 1: gated on the `libarchive` Cargo feature. Cargo
+    // exposes features to build scripts as `CARGO_FEATURE_<NAME>`, and
+    // this probe is unconditional no longer — it used to panic with
+    // "libarchive not found. Install it with: brew install libarchive"
+    // on a host that had no libarchive, even for a consumer who only
+    // wanted ZIP reading and would never call into it. Removing the
+    // probe is the point of the feature: without it, this crate builds
+    // with no system C library present at all.
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_LIBARCHIVE");
     #[cfg(not(target_os = "windows"))]
-    {
+    if std::env::var_os("CARGO_FEATURE_LIBARCHIVE").is_some() {
         // On macOS with Homebrew, libarchive is keg-only
         #[cfg(target_os = "macos")]
         {
@@ -65,7 +75,7 @@ fn main() {
     }
 
     #[cfg(target_os = "windows")]
-    {
+    if std::env::var_os("CARGO_FEATURE_LIBARCHIVE").is_some() {
         // On Windows the link configuration comes from outside this script:
         // OI-0065-001 keeps the discovery mechanism (vcpkg-root autodetect vs
         // explicit env vars vs vendoring) an open decision, so this arm

@@ -142,9 +142,11 @@ pub(crate) struct ExtractionPlan<'a> {
     pub selection: Option<&'a HashSet<usize>>,
     /// Per-entry size cap. Enforced by libarchive and by UnRAR inside its
     /// data callback (R0080-0008/0022); other backends ignore it.
+    #[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
     pub max_file_size: Option<u64>,
     /// Cumulative total-bytes cap. Enforced by libarchive and by UnRAR
     /// inside its data callback (R0080-0008/0022); other backends ignore it.
+    #[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
     pub max_total_size: Option<u64>,
 }
 
@@ -849,6 +851,7 @@ impl ReadBackend for crate::ffi::sevenz_wrapper::SevenZArchive {
     }
 }
 
+#[cfg(feature = "libarchive")]
 impl ReadBackend for crate::ffi::libarchive_wrapper::LibarchiveArchive {
     #[inline]
     fn list_files_budgeted(&self, budget: Option<usize>) -> Result<Arc<Vec<ArchiveEntry>>> {
@@ -966,6 +969,7 @@ pub(crate) fn read_backend_view(backend: &ArchiveBackend) -> Option<&dyn ReadBac
         #[cfg(feature = "sevenzip")]
         ArchiveBackend::SevenZ(s) => Some(s.as_ref()),
         ArchiveBackend::ZipReader(z) => Some(z.as_ref()),
+        #[cfg(feature = "libarchive")]
         ArchiveBackend::Libarchive(l) => Some(l.as_ref()),
         ArchiveBackend::ZipWriter(_) => None,
     }

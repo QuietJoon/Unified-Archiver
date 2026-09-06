@@ -252,6 +252,7 @@ fn test_extract_all_zip() {
     let _ = has_files;
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_extract_all_tar() {
     let temp = tempfile::tempdir().unwrap();

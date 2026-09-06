@@ -2,10 +2,13 @@
 //!
 //! Verifies that hard links are silently skipped during extraction for security.
 
+#[cfg_attr(not(feature = "libarchive"), allow(unused_imports))]
 use super::common;
 
+#[cfg_attr(not(feature = "libarchive"), allow(unused_imports))]
 use std::fs;
 
+#[cfg(feature = "libarchive")]
 #[test]
 #[cfg(unix)]
 fn test_hardlink_skip_during_extraction() {
@@ -59,6 +62,7 @@ fn test_hardlink_skip_during_extraction() {
     );
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 #[cfg(unix)]
 fn test_hardlink_entry_detection() {

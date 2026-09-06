@@ -22,6 +22,10 @@
 //!
 //! Unix-only: the assertions read destination names as raw bytes.
 
+// Every case here is reached through a libarchive-backed format (tar and
+// raw gzip), so the whole file needs that backend (AD 0058 format
+// features).
+#![cfg(feature = "libarchive")]
 #![cfg(unix)]
 
 use super::common;

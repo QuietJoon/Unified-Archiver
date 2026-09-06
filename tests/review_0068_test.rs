@@ -66,6 +66,7 @@ fn assert_recursive_layout(archive_path: &std::path::Path) {
     );
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn r0068_0078_recursive_create_tar() {
     let temp = common::temp_test_dir();
@@ -86,6 +87,7 @@ fn r0068_0078_recursive_create_tar() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn r0068_0078_recursive_create_tar_gzip() {
     let temp = common::temp_test_dir();
@@ -329,6 +331,7 @@ fn r0068_0083_executable_with_incidental_gzip_magic_is_not_sfx() {
 // R0068-0084: empty-directory round-trip on libarchive backends
 // ──────────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn r0068_0084_empty_directory_round_trip_tar() {
     let temp = common::temp_test_dir();
@@ -363,6 +366,7 @@ fn r0068_0084_empty_directory_round_trip_tar() {
 // ──────────────────────────────────────────────────────────────────────
 
 #[cfg(unix)]
+#[cfg(feature = "libarchive")]
 #[test]
 fn r0068_0085_recursive_create_rejects_symlinks_libarchive() {
     use std::os::unix::fs::symlink;
@@ -424,6 +428,7 @@ fn r0068_0085_recursive_create_rejects_symlinks_zip() {
 // R0068-0086: dup-path commit rejection
 // ──────────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn r0068_0086_commit_changes_rejects_added_vs_added_dup() {
     let temp = common::temp_test_dir();
@@ -450,6 +455,7 @@ fn r0068_0086_commit_changes_rejects_added_vs_added_dup() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn r0068_0086_commit_changes_rejects_retained_vs_added_dup() {
     let temp = common::temp_test_dir();
@@ -483,6 +489,7 @@ fn r0068_0086_commit_changes_rejects_retained_vs_added_dup() {
 // R0068-0087: backup noclobber
 // ──────────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn r0068_0087_commit_changes_refuses_to_clobber_existing_backup() {
     use unified_archive::ModificationOptions;

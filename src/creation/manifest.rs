@@ -356,6 +356,7 @@ impl SourceManifest {
                     }
                 }
             }
+            #[cfg(feature = "libarchive")]
             WriteBackend::Libarchive(b) => {
                 for entry in &self.entries {
                     entry.verify_unchanged(op)?;

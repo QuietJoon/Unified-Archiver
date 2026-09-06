@@ -345,6 +345,7 @@ fn test_open_at_offset_past_eof_errors() {
 // the `.tar.` prefix that `ArchiveFormat::detect()` needs to distinguish
 // tar.gz / tar.bz2 / tar.xz from their single-file siblings. The staging
 // suffix now reflects the source's compound extension.
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 fn build_sfx_fixture(payload: &[u8], suffix: &str) -> (tempfile::NamedTempFile, u64) {
     let temp = tempfile::Builder::new()
         .prefix("sfx-offset-")
@@ -362,6 +363,7 @@ fn build_sfx_fixture(payload: &[u8], suffix: &str) -> (tempfile::NamedTempFile, 
     (temp, offset)
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_open_at_offset_with_tar_gz_payload() {
     let fixture =
@@ -383,6 +385,7 @@ fn test_open_at_offset_with_tar_gz_payload() {
     );
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_open_at_offset_with_tar_bz2_payload() {
     let fixture =
@@ -404,6 +407,7 @@ fn test_open_at_offset_with_tar_bz2_payload() {
     );
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_open_at_offset_with_tar_xz_payload() {
     let fixture =

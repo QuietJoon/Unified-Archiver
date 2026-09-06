@@ -16,6 +16,10 @@
 //! the exact generation commands), so these tests need no codec CLI at
 //! runtime.
 
+// ZST / LZ4 / LZMA are all read through libarchive, so the whole file
+// needs that backend (AD 0058 format features).
+#![cfg(feature = "libarchive")]
+
 use super::common;
 
 use std::fs;

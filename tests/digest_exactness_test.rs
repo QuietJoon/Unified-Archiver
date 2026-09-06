@@ -22,9 +22,11 @@
 
 mod common;
 
+#[cfg_attr(not(feature = "libarchive"), allow(unused_imports))]
 use std::io::Read;
 use std::path::Path;
 
+#[cfg_attr(not(feature = "libarchive"), allow(unused_imports))]
 use unified_archive::{Archive, ArchiveError, CompressionOptions, StreamBound, WritableFormat};
 
 /// Digest of `tests/fixtures/test.tar` measured on the tree immediately
@@ -38,9 +40,12 @@ use unified_archive::{Archive, ArchiveError, CompressionOptions, StreamBound, Wr
 /// behaviour is wrong: re-measure on a commit before the R6 change
 /// (DCR-011) and compare, because the constant itself is the weaker half
 /// of the assertion.
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 const HEALTHY_TAR_DIGEST: &str = "f9413c0f";
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 const HEALTHY_TAR_TOTAL: u64 = 18;
 
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 fn write_tar(path: &Path, entry: &str, len: usize) {
     let mut archive = Archive::create(path, CompressionOptions::for_writable(WritableFormat::TAR))
         .expect("create tar");
@@ -65,6 +70,7 @@ fn write_tar(path: &Path, entry: &str, len: usize) {
 /// digest walk starts, and the corruption verdict this test exists to pin
 /// would never be reached. `tests/listing_identity_test.rs` covers that
 /// refusal for the digest surface's siblings.
+#[cfg(feature = "libarchive")]
 #[test]
 fn truncated_tar_entry_makes_the_digest_report_corruption() {
     let temp = common::temp_test_dir();
@@ -116,6 +122,7 @@ fn truncated_tar_entry_makes_the_digest_report_corruption() {
 
 /// R6 property 2: exactness changes the verdict on damaged archives, never
 /// the value produced by a healthy one.
+#[cfg(feature = "libarchive")]
 #[test]
 fn healthy_tar_digest_value_is_unchanged() {
     let archive = Archive::open(common::fixture("test.tar")).expect("open tar");
@@ -144,6 +151,7 @@ fn healthy_tar_digest_value_is_unchanged() {
 /// `src/inspection.rs`'s inline module only proves it is constructible.
 /// Before the typed return this call handed back a bare `0` that looked
 /// exactly like a genuinely empty archive's total.
+#[cfg(feature = "libarchive")]
 #[test]
 fn unknown_size_entry_still_digests_and_reports_an_incomplete_total() {
     let archive = Archive::open(common::fixture("test.gz")).expect("open gz");
@@ -223,6 +231,7 @@ fn unknown_size_entry_still_digests_and_reports_an_incomplete_total() {
 /// The asserts below keep that honest: a dense or non-`S`-typeflag fixture
 /// fails loudly rather than degrading the lane to "a mostly-zero member
 /// digests exactly", which is true and is not the property under test.
+#[cfg(feature = "libarchive")]
 #[test]
 fn sparse_tar_entry_digests_and_streams_to_clean_eof() {
     let archive_path = common::fixture("sparse.tar");

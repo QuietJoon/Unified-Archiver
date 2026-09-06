@@ -53,24 +53,28 @@ fn test_open_valid_7z() {
     assert_eq!(archive.format(), ArchiveFormat::SevenZip);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_open_valid_tar() {
     let archive = Archive::open(fixture("test.tar")).unwrap();
     assert_eq!(archive.format(), ArchiveFormat::Tar);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_open_valid_tar_gz() {
     let archive = Archive::open(fixture("test.tar.gz")).unwrap();
     assert_eq!(archive.format(), ArchiveFormat::TarGzip);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_open_valid_tar_bz2() {
     let archive = Archive::open(fixture("test.tar.bz2")).unwrap();
     assert_eq!(archive.format(), ArchiveFormat::TarBzip2);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_open_valid_tar_xz() {
     let archive = Archive::open(fixture("test.tar.xz")).unwrap();
@@ -277,6 +281,7 @@ fn test_is_solid_zip_returns_false() {
     assert!(!archive.is_solid().unwrap());
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_is_solid_tar_returns_false() {
     let archive = Archive::open(fixture("test.tar")).unwrap();

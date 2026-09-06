@@ -52,6 +52,7 @@ fn test_create_and_extract_zip() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_create_and_extract_targz() {
     let temp = common::temp_test_dir();

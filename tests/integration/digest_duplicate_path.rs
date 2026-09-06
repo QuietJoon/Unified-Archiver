@@ -9,6 +9,10 @@
 //! listing id restores digest support and hashes the shadowed payload
 //! distinctly (R0079-0028).
 
+// Every test here builds a tar fixture, so the whole file needs the
+// libarchive backend (AD 0058 format features).
+#![cfg(feature = "libarchive")]
+
 use super::common;
 
 use std::path::Path;

@@ -11,6 +11,7 @@
 //! contract+integration suite is tracked as test-suite reorganization
 //! work (R0074-0079).
 
+#[cfg_attr(not(feature = "libarchive"), allow(unused_imports))]
 use unified_archive::{Archive, ArchiveFormat, EntryType};
 
 #[cfg(feature = "rar-support")]
@@ -194,12 +195,14 @@ fn test_api_consistency_rar_and_rar5() {
 
 // ── TAR format tests ──
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_tar_format_detection() {
     let archive = Archive::open("tests/fixtures/test.tar").expect("Failed to open TAR archive");
     assert_eq!(archive.format(), ArchiveFormat::Tar);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_tar_list_files() {
     let archive = Archive::open("tests/fixtures/test.tar").expect("Failed to open TAR archive");
@@ -214,6 +217,7 @@ fn test_tar_list_files() {
     assert_eq!(file_entries[0].path, "test_file.txt");
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_tar_entry_count() {
     let archive = Archive::open("tests/fixtures/test.tar").expect("Failed to open TAR archive");
@@ -221,6 +225,7 @@ fn test_tar_entry_count() {
     assert!(count >= 1);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_tar_find_entry() {
     let archive = Archive::open("tests/fixtures/test.tar").expect("Failed to open TAR archive");
@@ -232,6 +237,7 @@ fn test_tar_find_entry() {
     assert_eq!(entry.size, Some(18));
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_tar_extract_to_memory() {
     let archive = Archive::open("tests/fixtures/test.tar").expect("Failed to open TAR archive");
@@ -243,6 +249,7 @@ fn test_tar_extract_to_memory() {
 
 // ── TAR.GZ format tests ──
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_tar_gz_format_detection() {
     let archive =
@@ -250,6 +257,7 @@ fn test_tar_gz_format_detection() {
     assert_eq!(archive.format(), ArchiveFormat::TarGzip);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_tar_gz_list_files() {
     let archive =
@@ -263,6 +271,7 @@ fn test_tar_gz_list_files() {
     assert_eq!(file_entries[0].path, "test_file.txt");
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_tar_gz_extract_to_memory() {
     let archive =
@@ -275,6 +284,7 @@ fn test_tar_gz_extract_to_memory() {
 
 // ── TAR.BZ2 format tests ──
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_tar_bz2_format_detection() {
     let archive =
@@ -282,6 +292,7 @@ fn test_tar_bz2_format_detection() {
     assert_eq!(archive.format(), ArchiveFormat::TarBzip2);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_tar_bz2_list_files() {
     let archive =
@@ -295,6 +306,7 @@ fn test_tar_bz2_list_files() {
     assert_eq!(file_entries[0].path, "test_file.txt");
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_tar_bz2_extract_to_memory() {
     let archive =
@@ -307,6 +319,7 @@ fn test_tar_bz2_extract_to_memory() {
 
 // ── TAR.XZ format tests ──
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_tar_xz_format_detection() {
     let archive =
@@ -314,6 +327,7 @@ fn test_tar_xz_format_detection() {
     assert_eq!(archive.format(), ArchiveFormat::TarXz);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_tar_xz_list_files() {
     let archive =
@@ -327,6 +341,7 @@ fn test_tar_xz_list_files() {
     assert_eq!(file_entries[0].path, "test_file.txt");
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_tar_xz_extract_to_memory() {
     let archive =
@@ -342,12 +357,14 @@ fn test_tar_xz_extract_to_memory() {
 // libarchive. Per MADR-0019, the single "data" entry is renamed to the archive's
 // file stem (e.g., test.gz → "test") for a stable, predictable API.
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_gzip_format_detection() {
     let archive = Archive::open("tests/fixtures/test.gz").expect("Failed to open GZIP archive");
     assert_eq!(archive.format(), ArchiveFormat::Gzip);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_gzip_list_files() {
     let archive = Archive::open("tests/fixtures/test.gz").expect("Failed to open GZIP archive");
@@ -356,6 +373,7 @@ fn test_gzip_list_files() {
     assert!(!entries.is_empty());
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_gzip_extract_to_memory() {
     let archive = Archive::open("tests/fixtures/test.gz").expect("Failed to open GZIP archive");
@@ -369,12 +387,14 @@ fn test_gzip_extract_to_memory() {
 
 // ── BZIP2 format tests ──
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_bzip2_format_detection() {
     let archive = Archive::open("tests/fixtures/test.bz2").expect("Failed to open BZIP2 archive");
     assert_eq!(archive.format(), ArchiveFormat::Bzip2);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_bzip2_list_files() {
     let archive = Archive::open("tests/fixtures/test.bz2").expect("Failed to open BZIP2 archive");
@@ -382,6 +402,7 @@ fn test_bzip2_list_files() {
     assert!(!entries.is_empty());
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_bzip2_extract_to_memory() {
     let archive = Archive::open("tests/fixtures/test.bz2").expect("Failed to open BZIP2 archive");
@@ -395,12 +416,14 @@ fn test_bzip2_extract_to_memory() {
 
 // ── XZ format tests ──
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_xz_format_detection() {
     let archive = Archive::open("tests/fixtures/test.xz").expect("Failed to open XZ archive");
     assert_eq!(archive.format(), ArchiveFormat::Xz);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_xz_list_files() {
     let archive = Archive::open("tests/fixtures/test.xz").expect("Failed to open XZ archive");
@@ -408,6 +431,7 @@ fn test_xz_list_files() {
     assert!(!entries.is_empty());
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_xz_extract_to_memory() {
     let archive = Archive::open("tests/fixtures/test.xz").expect("Failed to open XZ archive");
@@ -426,12 +450,14 @@ fn test_xz_extract_to_memory() {
 // `hdiutil makehybrid -iso -joliet` over a staging dir containing
 // test_file.txt with the shared fixture content.
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_iso_format_detection() {
     let archive = Archive::open("tests/fixtures/test.iso").expect("Failed to open ISO archive");
     assert_eq!(archive.format(), ArchiveFormat::Iso);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_iso_list_files() {
     let archive = Archive::open("tests/fixtures/test.iso").expect("Failed to open ISO archive");
@@ -450,6 +476,7 @@ fn test_iso_list_files() {
     );
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_iso_extract_to_memory() {
     let archive = Archive::open("tests/fixtures/test.iso").expect("Failed to open ISO archive");
@@ -468,6 +495,7 @@ fn test_iso_extract_to_memory() {
 
 /// All libarchive-backed formats with test_file.txt should produce
 /// identical extracted content
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_cross_format_content_consistency() {
     let tar_formats = vec![
@@ -491,6 +519,7 @@ fn test_cross_format_content_consistency() {
 
 /// All single-stream formats should produce identical decompressed content
 /// via libarchive's format_raw (MADR-0019).
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_single_stream_content_consistency() {
     let stream_formats = vec![
@@ -528,6 +557,7 @@ fn test_single_stream_content_consistency() {
 /// extension hint; the open path's confirmation pass refuses to
 /// accept the file as TarGzip when libarchive's first header reports
 /// a non-tar format.
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_open_plain_gzip_with_tar_gz_extension_rejected() {
     let temp = tempfile::tempdir().unwrap();
@@ -549,6 +579,7 @@ fn test_open_plain_gzip_with_tar_gz_extension_rejected() {
 /// AD 0062 A.6: a real tar.gz archive must still open cleanly through
 /// the confirmation path — the check must not flag genuine
 /// compressed tar inputs.
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_open_real_tar_gz_passes_confirmation() {
     let archive = Archive::open("tests/fixtures/test.tar.gz")
@@ -561,6 +592,7 @@ fn test_open_real_tar_gz_passes_confirmation() {
 /// must surface `ArchiveError::Unsupported` instead of silently
 /// no-opping. The flag previously had per-backend-defined behaviour
 /// that varied silently between formats.
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_extract_all_verify_crc32_rejected_on_tar_gz() {
     use unified_archive::{ArchiveError, ExtractionOptions};
@@ -585,6 +617,7 @@ fn test_extract_all_verify_crc32_rejected_on_tar_gz() {
 
 /// AD 0062 A.3: `verify_crc32 = false` on the same TAR.GZ fixture
 /// must extract cleanly — only the `true` request is gated.
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_extract_all_verify_crc32_false_on_tar_gz_succeeds() {
     use unified_archive::ExtractionOptions;

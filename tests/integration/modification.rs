@@ -2,10 +2,13 @@
 //!
 //! Tests the modification API for adding, removing, and replacing files in archives.
 
+#[cfg_attr(not(feature = "libarchive"), allow(unused_imports))]
 use super::common;
 
+#[cfg_attr(not(feature = "libarchive"), allow(unused_imports))]
 use unified_archive::{Archive, ArchiveFormat};
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_add_files_to_archive() {
     // Create a test archive first
@@ -35,6 +38,7 @@ fn test_add_files_to_archive() {
     std::fs::remove_file(test_path).ok();
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_remove_files_from_archive() {
     // Create a test archive first
@@ -70,6 +74,7 @@ fn test_remove_files_from_archive() {
     std::fs::remove_file(test_path).ok();
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_replace_files_in_archive() {
     // Create a test archive first
@@ -98,6 +103,7 @@ fn test_replace_files_in_archive() {
     std::fs::remove_file(test_path).ok();
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_combined_operations() {
     // Create a test archive first
@@ -150,6 +156,7 @@ fn test_open_nonexistent_archive() {
     assert!(result.is_err());
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_modify_preserves_unchanged_content_bytes() {
     let test_path = common::temp_test_dir().join("test_modify_preserve_bytes.zip");
@@ -178,6 +185,7 @@ fn test_modify_preserves_unchanged_content_bytes() {
     std::fs::remove_file(test_path).ok();
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_modify_empty_archive_add_then_commit() {
     let test_path = common::temp_test_dir().join("test_modify_empty_base.zip");
@@ -206,6 +214,7 @@ fn test_modify_empty_archive_add_then_commit() {
     std::fs::remove_file(test_path).ok();
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_modify_replace_grows_and_shrinks_payload() {
     let test_path = common::temp_test_dir().join("test_modify_grow_shrink.zip");
@@ -241,6 +250,7 @@ fn test_modify_replace_grows_and_shrinks_payload() {
     std::fs::remove_file(test_path).ok();
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_modify_remove_nonexistent_entry_errors_on_commit() {
     let test_path = common::temp_test_dir().join("test_modify_remove_missing.zip");
@@ -265,6 +275,7 @@ fn test_modify_remove_nonexistent_entry_errors_on_commit() {
     std::fs::remove_file(test_path).ok();
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_modify_add_and_remove_queues_are_independent() {
     // Adds and removes are tracked in independent queues. A remove targets
@@ -294,6 +305,7 @@ fn test_modify_add_and_remove_queues_are_independent() {
     std::fs::remove_file(test_path).ok();
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_modify_many_entries_preserves_ordering_and_content() {
     let test_path = common::temp_test_dir().join("test_modify_many_entries.zip");

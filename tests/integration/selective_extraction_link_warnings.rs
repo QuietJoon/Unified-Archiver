@@ -9,6 +9,10 @@
 //! previously all three dispatchers returned `ResultWithWarnings::ok(())`
 //! unconditionally, silently discarding the FR-022 signal.
 
+// Links are carried by tar in these fixtures, so the whole file needs the
+// libarchive backend (AD 0058 format features).
+#![cfg(feature = "libarchive")]
+
 use super::common;
 
 use std::fs;

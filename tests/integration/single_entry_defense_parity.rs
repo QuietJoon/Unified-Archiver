@@ -25,6 +25,7 @@ use std::path::Path;
 use std::process::Command;
 
 use unified_archive::ArchiveError;
+#[cfg(feature = "libarchive")]
 use unified_archive::ffi::libarchive_wrapper::LibarchiveArchive;
 #[cfg(feature = "sevenzip")]
 use unified_archive::ffi::sevenz_wrapper::SevenZArchive;
@@ -124,6 +125,7 @@ fn build_7z_with_dir(archive_path: &Path, staging: &Path) {
 /// directly is also stricter than the two-CLI-call dance it replaces: the
 /// second `regular.txt` record is guaranteed present rather than dependent
 /// on the local tar's append behaviour.
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 fn build_tar_with_dir_and_dup(archive_path: &Path) {
     common::write_tar(
         archive_path,
@@ -334,6 +336,7 @@ fn sevenz_backend_not_found_uses_gate_shape() {
 
 #[test]
 #[cfg(unix)]
+#[cfg(feature = "libarchive")]
 fn libarchive_backend_rejects_directory_and_duplicate_entries() {
     let tmp = common::temp_test_dir();
     let archive = tmp.join("parity.tar");
@@ -372,6 +375,7 @@ fn libarchive_backend_rejects_directory_and_duplicate_entries() {
     common::cleanup(&tmp);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 #[cfg(unix)]
 fn libarchive_backend_rejects_link_entries() {

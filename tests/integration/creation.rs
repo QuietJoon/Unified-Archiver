@@ -17,17 +17,23 @@ fn test_format_capability_check() {
     );
     assert!(result.is_ok());
 
-    let result = Archive::create(
-        temp.path().join("test.tar"),
-        CompressionOptions::for_writable(WritableFormat::TAR),
-    );
-    assert!(result.is_ok());
+    // Only the TAR arms need the backend. Gating the whole test would drop the
+    // ZIP creation check from the minimal profile — the one format that build
+    // is *for* — and leave the lane green while doing it (AD 0058).
+    #[cfg(feature = "libarchive")]
+    {
+        let result = Archive::create(
+            temp.path().join("test.tar"),
+            CompressionOptions::for_writable(WritableFormat::TAR),
+        );
+        assert!(result.is_ok());
 
-    let result = Archive::create(
-        temp.path().join("test.tar.gz"),
-        CompressionOptions::for_writable(WritableFormat::TAR_GZIP),
-    );
-    assert!(result.is_ok());
+        let result = Archive::create(
+            temp.path().join("test.tar.gz"),
+            CompressionOptions::for_writable(WritableFormat::TAR_GZIP),
+        );
+        assert!(result.is_ok());
+    }
 }
 
 /// Deliberately the deprecated constructor. The subject of this test is that
@@ -276,6 +282,7 @@ fn test_finish_succeeds() {
     assert_eq!(data, b"content");
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_create_compressed_tar_codec_roundtrip() {
     // R0075-0031 closure: the zstd/lz4/lzma write filters are wired, so
@@ -313,6 +320,7 @@ fn test_create_compressed_tar_codec_roundtrip() {
     }
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_create_tar_zst_compression_levels() {
     // zstd has no store mode: `Store` is remapped to level 1 in the

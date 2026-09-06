@@ -11,11 +11,13 @@
 //! earlier wording pointed readers at, was resolved 2026-04-30.
 
 use std::path::PathBuf;
+#[cfg_attr(not(feature = "libarchive"), allow(unused_imports))]
 use unified_archive::{Archive, CompressionOptions, ModificationOptions, WritableFormat};
 
 #[path = "common/mod.rs"]
 mod common;
 
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 fn fresh_zip(dir: &std::path::Path, name: &str) -> PathBuf {
     let path = dir.join(name);
     let mut opts = CompressionOptions::for_writable(WritableFormat::ZIP);
@@ -26,6 +28,7 @@ fn fresh_zip(dir: &std::path::Path, name: &str) -> PathBuf {
     path
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn create_backup_writes_sidecar_before_atomic_rename() {
     let temp = tempfile::tempdir().unwrap();
@@ -69,6 +72,7 @@ fn create_backup_writes_sidecar_before_atomic_rename() {
     assert!(new_entries.iter().any(|p| p == "c.txt"));
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn create_backup_disabled_by_default() {
     let temp = tempfile::tempdir().unwrap();
@@ -85,6 +89,7 @@ fn create_backup_disabled_by_default() {
     );
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn backup_suffix_normalizes_missing_dot() {
     let temp = tempfile::tempdir().unwrap();
@@ -105,6 +110,7 @@ fn backup_suffix_normalizes_missing_dot() {
     );
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn no_backup_when_no_modifications_pending() {
     // commit_changes with empty tracker is a no-op; we don't want to leave
@@ -125,6 +131,7 @@ fn no_backup_when_no_modifications_pending() {
 
 /// R0066-0013: commit with backup enabled must refuse to clobber an
 /// existing backup file. Previously `std::fs::copy` silently overwrote.
+#[cfg(feature = "libarchive")]
 #[test]
 fn backup_noclobber_refuses_to_overwrite_existing_backup() {
     let temp = tempfile::tempdir().unwrap();
@@ -158,6 +165,7 @@ fn backup_noclobber_refuses_to_overwrite_existing_backup() {
 /// R0066-0011/0012: `commit_changes` rejects retained+added and added+added
 /// duplicate output paths up front. The prior commit loop silently appended
 /// the colliding entry, producing ambiguous archives.
+#[cfg(feature = "libarchive")]
 #[test]
 fn commit_rejects_retained_vs_added_duplicate_path() {
     let temp = tempfile::tempdir().unwrap();
@@ -214,6 +222,7 @@ fn expansion_ratio_handles_zero_compressed_size() {
 /// *written* rather than what any reader surfaces. (The sole ZIP read
 /// backend does now surface 0x5455; the wire-level read keeps this test
 /// backend-agnostic.)
+#[cfg(feature = "libarchive")]
 #[test]
 fn modify_zip_preserves_atime_and_btime_through_commit() {
     use std::time::{Duration, UNIX_EPOCH};

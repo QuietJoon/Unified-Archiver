@@ -61,6 +61,7 @@ fn zip_add_file_from_path_refuses_a_symlink_source() {
 /// TAR creation path — the same policy has to hold whichever format the
 /// caller picked, or the guarantee depends on a choice they made for
 /// unrelated reasons.
+#[cfg(feature = "libarchive")]
 #[test]
 fn tar_add_file_from_path_refuses_a_symlink_source() {
     let temp = tempfile::tempdir().expect("temp dir");

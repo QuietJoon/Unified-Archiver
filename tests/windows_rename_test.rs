@@ -94,6 +94,7 @@ fn test_rename_with_overwrite() {
 ///
 /// This test creates an archive, modifies it, and commits changes.
 /// On Windows, this would fail before the MoveFileExW fix.
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_archive_modification_commit() {
     use unified_archive::{Archive, ArchiveFormat};

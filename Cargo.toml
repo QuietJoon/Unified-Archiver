@@ -43,10 +43,15 @@ cc = "1"
 # capability set, which is a re-expression and not a "flip": ordering constraint 2
 # protects against the default set LOSING capability before both profiles are
 # proven, and nothing observable changes here (AD-0058, 2026-09-06 amendment).
-default = ["rar-support", "v2-api", "sevenzip", "zip-crypto"]
+default = ["rar-support", "v2-api", "sevenzip", "zip-crypto", "libarchive"]
 rar-support = []  # RAR/RAR5 support (requires UnRAR license compliance)
 sevenzip = ["dep:sevenz-rust2"]  # 7z read/extract/create via the native Rust backend
 zip-crypto = ["zip/aes-crypto"]  # WinZip-AES encrypted ZIP reading
+# TAR family, raw single-file compressed formats, ISO — and, per AD-0071,
+# ZIP/7z modification, which binds this backend unconditionally. Turning it
+# off removes the system libarchive dependency and its build.rs probe, so a
+# read-only ZIP/7z consumer needs no C library present at build time.
+libarchive = []
 external-rar-create = []  # RAR creation via external WinRAR CLI (Windows only)
 # D2 typed-handle split (ReadArchive / WriteArchive / ModifyArchive). Additive since v0.3;
 # on by default since 2026-09-03 (owner ruling). `--no-default-features` turns it off.

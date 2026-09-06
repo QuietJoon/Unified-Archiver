@@ -58,6 +58,7 @@ fn contract_extract_all_rar() {
     );
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn contract_extract_all_tar() {
     let archive = Archive::open(fixture("test.tar")).unwrap();
@@ -71,6 +72,7 @@ fn contract_extract_all_tar() {
     );
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn contract_extract_all_tar_gz() {
     let archive = Archive::open(fixture("test.tar.gz")).unwrap();
@@ -84,6 +86,7 @@ fn contract_extract_all_tar_gz() {
     );
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn contract_extract_all_tar_bz2() {
     let archive = Archive::open(fixture("test.tar.bz2")).unwrap();
@@ -97,6 +100,7 @@ fn contract_extract_all_tar_bz2() {
     );
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn contract_extract_all_tar_xz() {
     let archive = Archive::open(fixture("test.tar.xz")).unwrap();

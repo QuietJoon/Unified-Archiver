@@ -114,6 +114,7 @@ fn single_file_extract_rejects_zip_symlink_zip_backend() {
     common::cleanup(&tmp);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 #[cfg(unix)]
 fn single_file_extract_rejects_tar_symlink_libarchive() {
@@ -140,6 +141,7 @@ fn single_file_extract_rejects_tar_symlink_libarchive() {
     common::cleanup(&tmp);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 #[cfg(unix)]
 fn single_file_extract_rejects_tar_hardlink_libarchive() {

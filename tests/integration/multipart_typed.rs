@@ -41,6 +41,7 @@ fn multipart_layout_returns_single_for_non_multipart_7z() {
     assert!(matches!(layout, MultipartLayout::Single { .. }));
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn multipart_layout_returns_single_for_tar() {
     // Compressed/uncompressed TARs are libarchive-backed and not

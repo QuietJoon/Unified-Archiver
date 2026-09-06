@@ -52,24 +52,28 @@ fn contract_open_valid_rar5() {
     assert_eq!(archive.format(), ArchiveFormat::Rar5);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn contract_open_valid_tar() {
     let archive = Archive::open(fixture("test.tar")).expect("Should open valid TAR");
     assert_eq!(archive.format(), ArchiveFormat::Tar);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn contract_open_valid_tar_gz() {
     let archive = Archive::open(fixture("test.tar.gz")).expect("Should open valid TAR.GZ");
     assert_eq!(archive.format(), ArchiveFormat::TarGzip);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn contract_open_valid_tar_bz2() {
     let archive = Archive::open(fixture("test.tar.bz2")).expect("Should open valid TAR.BZ2");
     assert_eq!(archive.format(), ArchiveFormat::TarBzip2);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn contract_open_valid_tar_xz() {
     let archive = Archive::open(fixture("test.tar.xz")).expect("Should open valid TAR.XZ");
@@ -136,6 +140,7 @@ fn contract_create_zip_archive() {
     assert_eq!(entries[0].path, "hello.txt");
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn contract_create_tar_archive() {
     let temp = tempfile::tempdir().unwrap();
@@ -149,6 +154,7 @@ fn contract_create_tar_archive() {
     assert!(path.exists(), "TAR file should exist after creation");
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn contract_create_tar_gz_archive() {
     let temp = tempfile::tempdir().unwrap();
@@ -162,6 +168,7 @@ fn contract_create_tar_gz_archive() {
     assert!(path.exists());
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn contract_create_tar_bz2_archive() {
     let temp = tempfile::tempdir().unwrap();
@@ -175,6 +182,7 @@ fn contract_create_tar_bz2_archive() {
     assert!(path.exists());
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn contract_create_tar_xz_archive() {
     let temp = tempfile::tempdir().unwrap();

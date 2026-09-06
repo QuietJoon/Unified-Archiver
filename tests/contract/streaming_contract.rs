@@ -92,6 +92,7 @@ fn contract_streaming_basic_read_7z() {
     assert!(!content.is_empty());
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn contract_streaming_basic_read_tar() {
     let archive = Archive::open(fixture("test.tar")).unwrap();

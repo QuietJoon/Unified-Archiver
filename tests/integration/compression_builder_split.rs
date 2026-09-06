@@ -64,6 +64,7 @@ fn seven_zip_compression_options_round_trips() {
     let _ = std::fs::remove_file(&archive_path);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn libarchive_compression_options_round_trips_tar() {
     let opts = LibarchiveCompressionOptions::for_writable(WritableFormat::TAR);
@@ -83,6 +84,7 @@ fn libarchive_compression_options_round_trips_tar() {
     let _ = std::fs::remove_file(&archive_path);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn libarchive_compression_options_round_trips_tar_gz() {
     let opts = LibarchiveCompressionOptions::for_writable(WritableFormat::TAR_GZIP)

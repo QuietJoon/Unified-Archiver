@@ -145,6 +145,7 @@ fn assert_identity_refusal<T>(label: &str, result: Result<T, ArchiveError>) {
 /// The whole read surface, against a handle whose archive has been
 /// replaced. Every one of these re-opens the archive by pathname, so every
 /// one of them must re-check the binding.
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 fn assert_every_read_operation_is_refused(
     archive: &Archive,
     entry: &str,
@@ -177,6 +178,7 @@ fn assert_every_read_operation_is_refused(
 /// it cannot rewind its read handle, so it re-opens the file once per
 /// operation. Every one of those re-opens is a place the cached listing
 /// could start describing a different file.
+#[cfg(feature = "libarchive")]
 #[test]
 fn tar_read_surface_is_refused_after_a_same_name_archive_is_swapped_in() {
     let temp = common::temp_test_dir();
@@ -289,6 +291,7 @@ fn rar_read_surface_is_refused_after_a_fixture_is_swapped_in() {
 /// — "the inode did not move" — is only expressible on Unix. Off Unix the
 /// identity is the length alone and an append is caught trivially.
 #[cfg(unix)]
+#[cfg(feature = "libarchive")]
 #[test]
 fn appending_one_byte_is_refused_even_though_the_inode_is_unchanged() {
     use std::io::Write as _;

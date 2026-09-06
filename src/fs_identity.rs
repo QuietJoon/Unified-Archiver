@@ -217,6 +217,7 @@ impl FileIdentity {
     /// is *not* best-effort is the comparison — see
     /// [`FileIdentity::revalidate`], which fails closed on a stat error
     /// once a binding exists.
+    #[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
     pub(crate) fn capture(path: &std::path::Path) -> Option<Self> {
         Self::stat(path).ok()
     }
@@ -237,6 +238,7 @@ impl FileIdentity {
     /// crate does not know that anything was swapped and saying so would
     /// both mislead the operator and hide the condition from a
     /// retry-on-`Io` caller.
+    #[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
     pub(crate) fn revalidate(
         expected: Self,
         path: &std::path::Path,

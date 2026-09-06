@@ -138,6 +138,7 @@ fn sevenz_refuses_an_id_the_walk_never_reaches() {
 
 // ── libarchive ─────────────────────────────────────────────────────────────
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn libarchive_pushes_the_same_bytes_the_buffering_route_returns() {
     let archive = crate::ffi::libarchive_wrapper::LibarchiveArchive::open(fixture("test.tar"))
@@ -244,6 +245,7 @@ fn rar_propagates_the_sinks_own_error_across_the_callback_boundary() {
 /// An earlier version of this test called the digest twice and compared
 /// the results. That compares a route to itself and would pass with the
 /// sink returning consistently wrong bytes.
+#[cfg(feature = "libarchive")]
 #[test]
 fn the_digest_resolves_crc_less_entries_to_the_correct_values() {
     let archive = crate::Archive::open(fixture("test.tar")).expect("open");

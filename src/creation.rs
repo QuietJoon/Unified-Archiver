@@ -6,6 +6,7 @@ mod manifest;
 
 use crate::archive::{Archive, ArchiveBackend, ArchiveMode};
 use crate::error::{ArchiveError, Result};
+#[cfg(feature = "libarchive")]
 use crate::ffi::libarchive_wrapper::LibarchiveArchive;
 use crate::ffi::zip_writer::ZipWriter;
 use crate::format::ArchiveFormat;
@@ -21,6 +22,7 @@ use std::path::Path;
 /// every write operation.
 pub(crate) enum WriteBackend<'a> {
     Zip(&'a mut ZipWriter),
+    #[cfg(feature = "libarchive")]
     Libarchive(&'a mut LibarchiveArchive),
 }
 
@@ -36,6 +38,7 @@ impl Archive {
         }
         match &mut self.backend {
             ArchiveBackend::ZipWriter(w) => Ok(WriteBackend::Zip(w)),
+            #[cfg(feature = "libarchive")]
             ArchiveBackend::Libarchive(b) => Ok(WriteBackend::Libarchive(b)),
             _ => Err(ArchiveError::read_only_backend(op)),
         }
@@ -155,10 +158,23 @@ impl Archive {
                 let writer = ZipWriter::create(&path_buf, &mut options)?;
                 ArchiveBackend::ZipWriter(Box::new(writer))
             }
+            #[cfg(feature = "libarchive")]
             _ => {
                 // Use libarchive for other formats
                 let libarchive = LibarchiveArchive::create(&path_buf, format, &mut options)?;
                 ArchiveBackend::Libarchive(Box::new(libarchive))
+            }
+            #[cfg(not(feature = "libarchive"))]
+            _ => {
+                return Err(ArchiveError::unsupported(
+                    "create",
+                    format,
+                    Some(
+                        "creating this format needs the libarchive backend, which is disabled \
+                         in this build (enable the `libarchive` Cargo feature)"
+                            .to_string(),
+                    ),
+                ));
             }
         };
 
@@ -249,6 +265,7 @@ impl Archive {
             |ns| ns.record_file(OP, path),
             |backend| match backend {
                 WriteBackend::Zip(w) => w.add_file_from_data(path, data),
+                #[cfg(feature = "libarchive")]
                 WriteBackend::Libarchive(b) => b.add_file_from_data(path, data),
             },
         )
@@ -321,6 +338,7 @@ impl Archive {
             |ns| ns.record_file(OP, archive_path),
             |backend| match backend {
                 WriteBackend::Zip(w) => w.add_file_from_path(fs_path_ref, archive_path),
+                #[cfg(feature = "libarchive")]
                 WriteBackend::Libarchive(b) => b.add_file_from_path(fs_path_ref, archive_path),
             },
         )
@@ -353,6 +371,7 @@ impl Archive {
             |ns| ns.record_dir(OP, path),
             |backend| match backend {
                 WriteBackend::Zip(w) => w.add_directory_entry(path),
+                #[cfg(feature = "libarchive")]
                 WriteBackend::Libarchive(b) => b.add_directory_entry(path),
             },
         )
@@ -797,6 +816,7 @@ mod tests {
         assert!(archive.modifications.is_none());
     }
 
+    #[cfg(feature = "libarchive")]
     #[test]
     fn test_create_tar() {
         let temp = tempfile::tempdir().unwrap();
@@ -807,6 +827,7 @@ mod tests {
         assert_eq!(archive.mode, ArchiveMode::Write);
     }
 
+    #[cfg(feature = "libarchive")]
     #[test]
     fn test_create_tar_gz() {
         let temp = tempfile::tempdir().unwrap();
@@ -816,6 +837,7 @@ mod tests {
         assert_eq!(archive.format(), ArchiveFormat::TarGzip);
     }
 
+    #[cfg(feature = "libarchive")]
     #[test]
     fn test_create_tar_bz2() {
         let temp = tempfile::tempdir().unwrap();
@@ -825,6 +847,7 @@ mod tests {
         assert_eq!(archive.format(), ArchiveFormat::TarBzip2);
     }
 
+    #[cfg(feature = "libarchive")]
     #[test]
     fn test_create_tar_xz() {
         let temp = tempfile::tempdir().unwrap();
@@ -849,6 +872,7 @@ mod tests {
         assert_archive_files(&path, &[("hello.txt", b"Hello, World!".as_slice())]);
     }
 
+    #[cfg(feature = "libarchive")]
     #[test]
     fn test_add_file_from_data_tar() {
         let temp = tempfile::tempdir().unwrap();
@@ -1004,6 +1028,7 @@ mod tests {
         assert!(entries.iter().any(|e| e.path.starts_with("mydir")));
     }
 
+    #[cfg(feature = "libarchive")]
     #[test]
     fn test_add_directory_tar() {
         let temp = tempfile::tempdir().unwrap();
@@ -1182,6 +1207,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "libarchive")]
     #[test]
     fn test_add_directory_recursive_preserves_nonempty_directory_metadata() {
         assert_nonempty_directory_metadata_survives(ArchiveFormat::Tar, "tar", 1);
@@ -1232,6 +1258,7 @@ mod tests {
         assert_eq!(data, content);
     }
 
+    #[cfg(feature = "libarchive")]
     #[test]
     fn test_create_and_read_roundtrip_tar() {
         let temp = tempfile::tempdir().unwrap();

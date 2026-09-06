@@ -21,6 +21,7 @@ use unified_archive::{
 
 /// Build a single-entry TAR (libarchive-backed: the only genuinely
 /// incremental stream path) whose payload is `len` bytes.
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 fn write_tar(path: &std::path::Path, entry: &str, len: usize) {
     let mut archive = Archive::create(path, CompressionOptions::for_writable(WritableFormat::TAR))
         .expect("create tar");
@@ -65,6 +66,7 @@ fn limits(max_file: Cap, max_total: Cap) -> ExtractionLimits {
 /// identity guard and this test would stop exercising the exactness bound
 /// it exists for. The refusal is worth pinning too, so it has its own
 /// companion test below rather than being folded in here.
+#[cfg(feature = "libarchive")]
 #[test]
 fn declared_size_truncated_entry_surfaces_unexpected_eof() {
     let temp = common::temp_test_dir();
@@ -124,6 +126,7 @@ fn declared_size_truncated_entry_surfaces_unexpected_eof() {
 /// The replacement is a different length as well as a different inode, so
 /// the refusal also holds off Unix, where the identity degrades to the
 /// byte length alone.
+#[cfg(feature = "libarchive")]
 #[test]
 fn a_renamed_in_replacement_is_refused_before_the_stream_opens() {
     use unified_archive::ArchiveError;
@@ -173,6 +176,7 @@ fn a_renamed_in_replacement_is_refused_before_the_stream_opens() {
 /// Same identity-preserving construction as the truncation test above, and
 /// for the same reason: the property under test is what the *bound* does
 /// with a short entry, so the archive must still reach the stream.
+#[cfg(feature = "libarchive")]
 #[test]
 fn cap_bound_tolerates_a_short_entry() {
     let temp = common::temp_test_dir();
@@ -203,10 +207,14 @@ fn cap_bound_tolerates_a_short_entry() {
 #[test]
 fn declared_size_healthy_entries_reach_clean_eof() {
     for fixture in ["test.zip", "test.7z", "test.tar", "test.tar.gz"] {
-        // The 7z fixture is the only one this build may lack;
-        // skip just that entry so the other backends stay covered
-        // in the minimal profile (AD 0058 format features).
+        // Skip only the fixtures whose backend this build lacks, so every
+        // backend that IS compiled in stays covered. Gating the whole test
+        // would drop ZIP — the format the minimal profile exists for — and
+        // leave the lane green while doing it (AD 0058 format features).
         if fixture.ends_with(".7z") && !cfg!(feature = "sevenzip") {
+            continue;
+        }
+        if fixture.contains(".tar") && !cfg!(feature = "libarchive") {
             continue;
         }
         let archive = Archive::open(common::fixture(fixture)).expect("open fixture");
@@ -436,6 +444,7 @@ fn rar_staged_length_check_accepts_a_healthy_entry() {
 /// The incremental backend keeps the prefix read a ceiling-only budget
 /// implies: libarchive hands back a reader, the caller gets `n` bytes,
 /// and only reading *past* `n` is an error.
+#[cfg(feature = "libarchive")]
 #[test]
 fn cap_below_declared_size_serves_a_prefix_on_libarchive() {
     let temp = common::temp_test_dir();
@@ -472,10 +481,14 @@ fn cap_below_declared_size_serves_a_prefix_on_libarchive() {
 #[test]
 fn cap_above_entry_size_reads_the_whole_entry() {
     for fixture in ["test.zip", "test.7z", "test.tar"] {
-        // The 7z fixture is the only one this build may lack;
-        // skip just that entry so the other backends stay covered
-        // in the minimal profile (AD 0058 format features).
+        // Skip only the fixtures whose backend this build lacks, so every
+        // backend that IS compiled in stays covered. Gating the whole test
+        // would drop ZIP — the format the minimal profile exists for — and
+        // leave the lane green while doing it (AD 0058 format features).
         if fixture.ends_with(".7z") && !cfg!(feature = "sevenzip") {
+            continue;
+        }
+        if fixture.contains(".tar") && !cfg!(feature = "libarchive") {
             continue;
         }
         let archive = Archive::open(common::fixture(fixture)).expect("open fixture");
@@ -499,6 +512,7 @@ fn cap_above_entry_size_reads_the_whole_entry() {
 /// Hard constraint: an entry with no declared size gets no invented
 /// declaration. A raw gzip stream (libarchive's single-file reader leaves
 /// the size field unset) reads to its natural EOF under `DeclaredSize`.
+#[cfg(feature = "libarchive")]
 #[test]
 fn declared_size_degrades_for_unknown_size_entries() {
     let archive = Archive::open(common::fixture("test.gz")).expect("open gz");
@@ -523,6 +537,7 @@ fn declared_size_degrades_for_unknown_size_entries() {
 /// at 4 bytes the backend budget is 4, so an unknown-size entry that
 /// decodes past it fails — previously the backend received
 /// `max_file_size` alone (unlimited) and produced the whole payload.
+#[cfg(feature = "libarchive")]
 #[test]
 fn max_total_size_participates_in_the_backend_budget() {
     let archive = Archive::open(common::fixture("test.gz")).expect("open gz");
@@ -544,6 +559,7 @@ fn max_total_size_participates_in_the_backend_budget() {
 /// The documented way to read a window of a larger entry: an exact
 /// `DeclaredSize` stream wrapped in `Read::take`. The inner stream never
 /// observes EOF, so the exactness check does not fire.
+#[cfg(feature = "libarchive")]
 #[test]
 fn declared_size_window_via_take_is_not_a_truncation() {
     let temp = common::temp_test_dir();

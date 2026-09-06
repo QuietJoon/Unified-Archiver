@@ -52,6 +52,7 @@ fn contract_list_files_rar5() {
     assert!(!entries.is_empty(), "RAR5 should contain entries");
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn contract_list_files_tar() {
     let archive = Archive::open(fixture("test.tar")).unwrap();
@@ -59,6 +60,7 @@ fn contract_list_files_tar() {
     assert!(!entries.is_empty(), "TAR should contain entries");
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn contract_list_files_tar_gz() {
     let archive = Archive::open(fixture("test.tar.gz")).unwrap();
@@ -66,6 +68,7 @@ fn contract_list_files_tar_gz() {
     assert!(!entries.is_empty(), "TAR.GZ should contain entries");
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn contract_list_files_tar_bz2() {
     let archive = Archive::open(fixture("test.tar.bz2")).unwrap();
@@ -73,6 +76,7 @@ fn contract_list_files_tar_bz2() {
     assert!(!entries.is_empty(), "TAR.BZ2 should contain entries");
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn contract_list_files_tar_xz() {
     let archive = Archive::open(fixture("test.tar.xz")).unwrap();
@@ -141,14 +145,20 @@ fn contract_metadata_entry_ids_sequential() {
 fn contract_metadata_consistent_across_formats() {
     // The same content archived in different formats should have consistent metadata
     let zip = Archive::open(fixture("test.zip")).unwrap();
-    let tar = Archive::open(fixture("test.tar")).unwrap();
-
     let zip_entries = zip.list_files().unwrap();
-    let tar_entries = tar.list_files().unwrap();
+
+    // Only the TAR half needs libarchive. Gating the whole test would take the
+    // ZIP size assertions below out of the minimal profile and leave the lane
+    // green while doing it (AD 0058).
+    #[cfg(feature = "libarchive")]
+    {
+        let tar = Archive::open(fixture("test.tar")).unwrap();
+        let tar_entries = tar.list_files().unwrap();
+        assert!(!tar_entries.is_empty());
+    }
 
     // Both should contain files (may differ in exact entries due to format differences)
     assert!(!zip_entries.is_empty());
-    assert!(!tar_entries.is_empty());
 
     // File entries should have non-None sizes
     for entry in zip_entries

@@ -383,6 +383,10 @@ impl Archive {
     /// unreachable (ti-9909d449, 2026-09-03): it was pure dispatch with
     /// no C contract behind it, so it could only ever disagree with the
     /// gate's wording, never with its verdict.
+    // Without `libarchive` the backend binding below diverges, so
+    // everything after it is unreachable in that configuration. That is
+    // the intended shape (AD-0071 / AD-0058 decision 1), not an oversight.
+    #[cfg_attr(not(feature = "libarchive"), allow(unreachable_code, unused_variables))]
     pub fn modify(path: impl AsRef<Path>) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
 
@@ -484,6 +488,27 @@ impl Archive {
         // a duplicate policy statement rather than a defence. Widening
         // the modify set therefore means editing `FormatCapabilities`,
         // not adding an arm here.
+        // AD-0071 makes this binding permanent for every modifiable
+        // format, and AD-0058's 2026-09-06 amendment therefore declares
+        // `modify = ["read", "create", "libarchive"]`. There is no
+        // libarchive-free modification path to fall back to, so a build
+        // without the feature refuses here rather than pretending.
+        #[cfg(not(feature = "libarchive"))]
+        #[allow(unused_variables, unreachable_code)]
+        let backend: ArchiveBackend = {
+            let _ = (&path_buf, locked_identity);
+            return Err(ArchiveError::unsupported(
+                ops::MODIFY,
+                format,
+                Some(
+                    "modification is implemented on the libarchive backend for every format \
+                     (AD 0071), which is disabled in this build (enable the `libarchive` \
+                     Cargo feature)"
+                        .to_string(),
+                ),
+            ));
+        };
+        #[cfg(feature = "libarchive")]
         let backend = {
             use crate::ffi::libarchive_wrapper::LibarchiveArchive;
             // R0080-0042: the read backend reopens the pathname;
@@ -1316,6 +1341,8 @@ impl Archive {
             }
 
             let streamable_size = entry.size;
+            #[cfg(not(feature = "libarchive"))]
+            let _ = streamable_size;
             let compression_override = zip_extras
                 .as_ref()
                 .and_then(|extras| extras.per_index.get(entry.id).map(|v| v.compression));
@@ -1338,6 +1365,7 @@ impl Archive {
                         w.add_file_from_reader(&entry.path, &mut stream)?;
                     }
                 }
+                #[cfg(feature = "libarchive")]
                 ArchiveBackend::Libarchive(b) => match streamable_size {
                     Some(size) => {
                         let mut stream = src.extract_to_stream(&entry.path)?;
@@ -1429,6 +1457,7 @@ impl Archive {
                         // silently committed under the wrong size.
                         w.add_file_from_reader_with_size(&path, &mut reader, size)?;
                     }
+                    #[cfg(feature = "libarchive")]
                     ArchiveBackend::Libarchive(b) => {
                         b.add_file_from_reader(&path, &mut reader, size)?;
                     }
@@ -1457,6 +1486,7 @@ impl Archive {
                         ArchiveBackend::ZipWriter(w) => {
                             w.add_file_from_reader(&path, &mut staged)?;
                         }
+                        #[cfg(feature = "libarchive")]
                         ArchiveBackend::Libarchive(b) => {
                             b.add_file_from_reader(&path, &mut staged, learned_size)?;
                         }
@@ -1904,6 +1934,7 @@ fn normalize_dup_check_path(path: &str) -> String {
 /// (R0069-0065). The streaming reader is drained chunk-by-chunk into
 /// the staging file; the file is rewound and returned alongside the
 /// observed size.
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 fn stage_unknown_size_entry(
     src: &crate::extraction::ValidatedSource<'_>,
     entry_path: &str,
@@ -2340,12 +2371,14 @@ mod tests;
 #[cfg(test)]
 mod commit_warning_and_cleanup_tests {
     use super::{Archive, ArchiveError, buffered_ingest_reader};
+    #[cfg_attr(not(feature = "libarchive"), allow(unused_imports))]
     use crate::error::{ArchiveWarning, EntrySkipReason, UnsupportedEntryKind};
     use crate::options::WritableFormat;
     use std::io::Write;
 
     /// A ZIP carrying one regular file and one symlink, plus a
     /// hard-link-free baseline the rewrite can re-emit.
+    #[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
     fn zip_with_symlink(path: &std::path::Path) {
         let file = std::fs::File::create(path).unwrap();
         let mut writer = zip::ZipWriter::new(file);
@@ -2359,6 +2392,7 @@ mod commit_warning_and_cleanup_tests {
     /// The rewrite drops the symlink (FR-022) but must not do it
     /// silently: exactly one warning naming the path and the kind
     /// reaches the caller through `ResultWithWarnings`.
+    #[cfg(feature = "libarchive")]
     #[test]
     fn dropped_symlink_surfaces_as_a_warning_to_the_caller() {
         let temp = tempfile::tempdir().unwrap();
@@ -2410,6 +2444,7 @@ mod commit_warning_and_cleanup_tests {
 
     /// A kind-lossless rewrite reports no warnings at all, so a caller
     /// can treat a non-empty vector as "this round-trip lost entries".
+    #[cfg(feature = "libarchive")]
     #[test]
     fn lossless_commit_reports_no_warnings() {
         let temp = tempfile::tempdir().unwrap();
@@ -2437,6 +2472,7 @@ mod commit_warning_and_cleanup_tests {
     /// The plain `commit_changes` keeps its `Result<()>` shape and
     /// still commits; it discards the warnings by design, which is why
     /// the `_with_warnings` sibling exists.
+    #[cfg(feature = "libarchive")]
     #[test]
     fn plain_commit_changes_still_commits_a_dropping_rewrite() {
         let temp = tempfile::tempdir().unwrap();
@@ -2455,6 +2491,7 @@ mod commit_warning_and_cleanup_tests {
     /// accepted guarantee is "original intact, staging file removed".
     /// A commit that fails *after* the staging archive exists must not
     /// leak it, and must leave the original byte-for-byte unchanged.
+    #[cfg(feature = "libarchive")]
     #[test]
     fn failed_commit_leaves_no_staging_file_and_keeps_the_original() {
         let temp = tempfile::tempdir().unwrap();
@@ -2551,6 +2588,7 @@ mod commit_warning_and_cleanup_tests {
     /// the same `Corruption`, so `add_entry_from_reader`'s rustdoc
     /// promise holds for a real modify commit and not just for the
     /// helper.
+    #[cfg(feature = "libarchive")]
     #[test]
     fn zip_commit_route_length_mismatch_is_corruption() {
         let temp = tempfile::tempdir().unwrap();

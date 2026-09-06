@@ -37,6 +37,10 @@
 //! property nothing else in the suite observes. Do not re-`#[ignore]` it
 //! to silence a failure: a failure here means the payload walk regressed.
 
+// The sentinel is defined on a CRC-less libarchive format, so the whole
+// file needs that backend (AD 0058 format features).
+#![cfg(feature = "libarchive")]
+
 use std::time::Instant;
 use unified_archive::{Archive, CompressionOptions, WritableFormat};
 

@@ -71,6 +71,7 @@ fn permissions_is_unix_bits_only_for_zip() {
     assert_permissions_unix_bits_only(&archive, "zip", Some(FIXTURE_MODE));
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn permissions_is_unix_bits_only_for_tar() {
     let archive = Archive::open("tests/fixtures/test.tar").unwrap();

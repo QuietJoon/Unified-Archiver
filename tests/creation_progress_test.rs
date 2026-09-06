@@ -47,6 +47,7 @@ fn progress_callback_invoked_once_per_entry_zip() {
     assert_eq!(*invocations.last().unwrap(), 10 * 64);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn progress_callback_invoked_once_per_entry_tar() {
     let temp = tempfile::tempdir().unwrap();

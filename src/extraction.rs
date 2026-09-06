@@ -41,6 +41,11 @@ fn assert_verify_crc32_supported(
     if !verify_crc32 {
         return Ok(());
     }
+    // Only the libarchive-backed formats lack a per-entry CRC32, so with
+    // that backend compiled out there is nothing left to refuse.
+    #[cfg(not(feature = "libarchive"))]
+    let _ = (archive, op);
+    #[cfg(feature = "libarchive")]
     if matches!(archive.backend, ArchiveBackend::Libarchive(_)) {
         return Err(ArchiveError::unsupported(
             op,
@@ -778,6 +783,7 @@ impl Archive {
                 options.preserve_times,
                 options.verify_crc32,
             ),
+            #[cfg(feature = "libarchive")]
             ArchiveBackend::Libarchive(libarchive) => libarchive.extract_file_with_options(
                 file_path,
                 &options.destination,

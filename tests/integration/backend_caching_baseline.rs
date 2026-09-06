@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use unified_archive::{Archive, CompressionOptions, WritableFormat};
 
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 fn build_tar_gz(path: &std::path::Path, entries: &[(&str, &[u8])]) {
     // `CompressionOptions` is `#[non_exhaustive]`; `..Default::default()` does
     // not escape that, so the checked constructor is the way in from a test
@@ -26,6 +27,7 @@ fn build_tar_gz(path: &std::path::Path, entries: &[(&str, &[u8])]) {
     creator.finish().expect("finish tar.gz");
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn libarchive_listing_is_frozen_at_first_observation() {
     let tmp = tempfile::tempdir().unwrap();

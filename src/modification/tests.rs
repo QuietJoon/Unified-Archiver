@@ -5,6 +5,7 @@ use crate::test_utils::fixture;
 /// Copy a fixture into a freshly-named tempfile so parallel tests each
 /// hold their own archive path — required now that `Archive::modify()`
 /// acquires an advisory exclusive lock (MADR-0009, MADR-0016).
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 fn fixture_copy(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
     let dst = dir.path().join(name);
@@ -106,6 +107,7 @@ fn test_modification_tracker_remove_entries() {
 
 // ── Archive::modify() tests ──
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_modify_zip_archive() {
     let (_td, _p) = fixture_copy("test.zip");
@@ -125,6 +127,7 @@ fn test_modify_7z_archive() {
     assert_eq!(archive.format(), ArchiveFormat::SevenZip);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_second_modify_blocked_by_advisory_lock() {
     // Two handles on the SAME path: the second modify() must fail with
@@ -179,6 +182,7 @@ fn test_modify_tar_archive() {
 
 // ── add_entry() tests ──
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_add_entry_in_modify_mode() {
     let (_td, _p) = fixture_copy("test.zip");
@@ -197,6 +201,7 @@ fn test_add_entry_not_in_modify_mode() {
     assert!(msg.contains("Modify mode") || msg.contains("add_entry"));
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_add_entry_multiple() {
     let (_td, _p) = fixture_copy("test.zip");
@@ -207,6 +212,7 @@ fn test_add_entry_multiple() {
     assert_eq!(archive.pending_operations().unwrap(), 3);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_add_entry_empty_data() {
     let (_td, _p) = fixture_copy("test.zip");
@@ -217,6 +223,7 @@ fn test_add_entry_empty_data() {
 
 // ── add_directory_entry() tests ──
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_add_directory_entry_in_modify_mode() {
     let (_td, _p) = fixture_copy("test.zip");
@@ -235,6 +242,7 @@ fn test_add_directory_entry_not_in_modify_mode() {
     assert!(msg.contains("Modify mode") || msg.contains("add_directory_entry"));
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_add_directory_entry_tracks_in_pending() {
     let (_td, _p) = fixture_copy("test.zip");
@@ -244,6 +252,7 @@ fn test_add_directory_entry_tracks_in_pending() {
     assert_eq!(archive.pending_operations().unwrap(), 2);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_clear_operations_clears_directories() {
     let (_td, _p) = fixture_copy("test.zip");
@@ -257,6 +266,7 @@ fn test_clear_operations_clears_directories() {
 
 // ── remove_entry() tests ──
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_remove_entry_in_modify_mode() {
     let (_td, _p) = fixture_copy("test.zip");
@@ -265,6 +275,7 @@ fn test_remove_entry_in_modify_mode() {
     assert!(result.is_ok());
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_remove_entry_unknown_path_is_accepted() {
     // removes target the source listing; a path that matches nothing is
@@ -285,6 +296,7 @@ fn test_remove_entry_not_in_modify_mode() {
     assert!(msg.contains("Modify mode") || msg.contains("remove_entry"));
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_remove_entry_tracks_path() {
     let (_td, _p) = fixture_copy("test.zip");
@@ -295,6 +307,7 @@ fn test_remove_entry_tracks_path() {
 
 // ── replace_entry() tests ──
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_replace_entry_in_modify_mode() {
     let (_td, _p) = fixture_copy("test.zip");
@@ -314,6 +327,7 @@ fn test_replace_entry_not_in_modify_mode() {
 
 // ── pending_operations() tests ──
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_pending_operations_initially_zero() {
     let (_td, _p) = fixture_copy("test.zip");
@@ -321,6 +335,7 @@ fn test_pending_operations_initially_zero() {
     assert_eq!(archive.pending_operations().unwrap(), 0);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_pending_operations_counts_adds_and_removes() {
     let (_td, _p) = fixture_copy("test.zip");
@@ -345,6 +360,7 @@ fn test_pending_operations_read_mode_errors() {
 
 // ── clear_operations() ──
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_clear_operations_clears_pending() {
     let (_td, _p) = fixture_copy("test.zip");
@@ -367,6 +383,7 @@ fn test_commit_changes_not_in_modify_mode() {
     assert!(msg.contains("Modify mode") || msg.contains("commit_changes"));
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_commit_changes_no_modifications_succeeds() {
     // When there are no pending modifications, commit should succeed immediately
@@ -386,6 +403,7 @@ fn test_commit_changes_no_modifications_succeeds() {
     assert!(result.is_ok());
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_commit_changes_add_entry_roundtrip() {
     let temp = tempfile::tempdir().unwrap();
@@ -414,6 +432,7 @@ fn test_commit_changes_add_entry_roundtrip() {
 /// impostor is left byte-for-byte intact. Unix-only: identity capture is
 /// `(dev, ino)` via `MetadataExt`; on other platforms revalidation is skipped.
 #[cfg(unix)]
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_commit_changes_aborts_on_path_identity_change() {
     let temp = tempfile::tempdir().unwrap();
@@ -460,6 +479,7 @@ fn test_commit_changes_aborts_on_path_identity_change() {
     assert_eq!(after, impostor_bytes);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_commit_changes_remove_entry_roundtrip() {
     let temp = tempfile::tempdir().unwrap();
@@ -483,6 +503,7 @@ fn test_commit_changes_remove_entry_roundtrip() {
 
 // ── R0069-0062: directory/file conflict detection ──
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_commit_changes_rejects_file_under_existing_file() {
     // Source has `a.txt` (file). The user then queues a new file at
@@ -507,6 +528,7 @@ fn test_commit_changes_rejects_file_under_existing_file() {
     );
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_commit_changes_rejects_directory_then_file_at_same_path() {
     // Adding `dir/` and `dir` (same normalized key, one is a leaf
@@ -525,6 +547,7 @@ fn test_commit_changes_rejects_directory_then_file_at_same_path() {
     assert!(matches!(err, ArchiveError::OperationBlocked { .. }));
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_commit_changes_accepts_file_under_added_directory() {
     // `dir/` and `dir/file.txt` together is the normal case and
@@ -547,6 +570,7 @@ fn test_commit_changes_accepts_file_under_added_directory() {
 
 // ── AD 0062 A.4: typed EntrySource adds ──
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_add_entry_from_path_round_trip_zip() {
     let temp = tempfile::tempdir().unwrap();
@@ -571,6 +595,7 @@ fn test_add_entry_from_path_round_trip_zip() {
     assert_eq!(read_back, payload_bytes);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_add_entry_from_reader_with_size_zip() {
     let temp = tempfile::tempdir().unwrap();
@@ -599,6 +624,7 @@ fn test_add_entry_from_reader_with_size_zip() {
     assert_eq!(read_back, payload);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_add_entry_from_reader_unknown_size_zip() {
     let temp = tempfile::tempdir().unwrap();
@@ -622,6 +648,7 @@ fn test_add_entry_from_reader_unknown_size_zip() {
     assert_eq!(read_back, payload);
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_replace_entry_from_path_swaps_payload() {
     let temp = tempfile::tempdir().unwrap();
@@ -649,6 +676,7 @@ fn test_replace_entry_from_path_swaps_payload() {
 
 // ── R0079-0014: validate_pending_commit preflights mod_options gates ──
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_validate_pending_commit_rejects_format_override_mismatch() {
     let temp = tempfile::tempdir().unwrap();
@@ -676,6 +704,7 @@ fn test_validate_pending_commit_rejects_format_override_mismatch() {
     );
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_validate_pending_commit_rejects_password_in_options() {
     let temp = tempfile::tempdir().unwrap();
@@ -703,6 +732,7 @@ fn test_validate_pending_commit_rejects_password_in_options() {
 
 // ── R0079-0020: strict-upfront retained-path validation ──
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_validate_pending_commit_rejects_wild_retained_directory_path() {
     use std::io::Write;
@@ -747,6 +777,7 @@ fn test_validate_pending_commit_rejects_wild_retained_directory_path() {
 
 // ── R0079-0037: gate skips link entries the rewrite drops (FR-022) ──
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_commit_changes_allows_add_at_dropped_symlink_path() {
     use std::io::Write;
@@ -801,6 +832,7 @@ fn test_commit_changes_allows_add_at_dropped_symlink_path() {
 // ── R0079-0021: commit preserves the archive file's own mode ──
 
 #[cfg(unix)]
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_commit_changes_preserves_archive_file_mode() {
     use std::os::unix::fs::PermissionsExt;
@@ -907,6 +939,7 @@ fn test_drain_into_tempfile_accepts_reader_at_cap() {
     assert!(buf.iter().all(|&b| b == 7));
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_commit_changes_emits_duplicate_directory_once() {
     // Adding the same directory path several times (including a
@@ -996,6 +1029,7 @@ mod rename_tests {
 // form, and the property it pins is a filesystem-write target.
 
 /// Build a Modify-mode handle over a one-entry ZIP with one pending change.
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 fn modify_handle_with_pending_change(dir: &std::path::Path, name: &str) -> Archive {
     let path = dir.join(name);
     let options = crate::options::CompressionOptions::for_writable(WritableFormat::ZIP);
@@ -1019,6 +1053,7 @@ fn modify_handle_with_pending_change(dir: &std::path::Path, name: &str) -> Archi
 ///
 /// This had no test of any kind before the split. `with_backup` was covered;
 /// the direct-assignment bypass it exists to catch was not.
+#[cfg(feature = "libarchive")]
 #[test]
 fn commit_plan_rejects_a_backup_suffix_that_would_escape_the_directory() {
     let temp = tempfile::tempdir().unwrap();
@@ -1048,6 +1083,7 @@ fn commit_plan_rejects_a_backup_suffix_that_would_escape_the_directory() {
 /// A suffix with no separator is the caller's business and must survive.
 /// Pinned so the sanitiser above cannot be "hardened" into ignoring the
 /// caller entirely.
+#[cfg(feature = "libarchive")]
 #[test]
 fn commit_plan_keeps_a_backup_suffix_that_is_merely_unusual() {
     let temp = tempfile::tempdir().unwrap();
@@ -1069,6 +1105,7 @@ fn commit_plan_keeps_a_backup_suffix_that_is_merely_unusual() {
 /// filesystem — a staging file in a temp directory could land on a different
 /// mount and turn the atomic replace into a copy. Appending because it keeps
 /// the original extension visible in leftover staging names.
+#[cfg(feature = "libarchive")]
 #[test]
 fn commit_plan_stages_beside_the_original_and_keeps_its_extension() {
     let temp = tempfile::tempdir().unwrap();
@@ -1114,6 +1151,7 @@ fn commit_plan_stages_beside_the_original_and_keeps_its_extension() {
 /// The counter is defence-in-depth against a same-tick collision that a test
 /// cannot force. Written down here so nobody later reads a green suite as
 /// evidence the counter is load-bearing and deletes it.
+#[cfg(feature = "libarchive")]
 #[test]
 fn commit_plan_staging_names_are_unique_within_one_process() {
     let temp = tempfile::tempdir().unwrap();
@@ -1131,6 +1169,7 @@ fn commit_plan_staging_names_are_unique_within_one_process() {
 /// only runs on `Err` — so a file created before this point would be
 /// orphaned permanently rather than removed. `None` is the signal that
 /// nothing was decided and nothing exists.
+#[cfg(feature = "libarchive")]
 #[test]
 fn commit_plan_returns_none_for_an_empty_tracker_and_creates_nothing() {
     let temp = tempfile::tempdir().unwrap();

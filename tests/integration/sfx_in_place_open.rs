@@ -140,6 +140,7 @@ fn tar_gz_sfx_still_stages_under_the_ceiling() {
 
 /// Same fixture, default ceiling: the tar.gz payload stages, and the
 /// handle says so.
+#[cfg(feature = "libarchive")]
 #[test]
 fn tar_gz_sfx_reports_staged_access() {
     let dir = tempfile::tempdir().unwrap();

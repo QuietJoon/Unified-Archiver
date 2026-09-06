@@ -234,6 +234,7 @@ impl Archive {
         if self.mode == ArchiveMode::Write {
             return match &self.backend {
                 ArchiveBackend::ZipWriter(w) => Ok(w.entries_written()),
+                #[cfg(feature = "libarchive")]
                 ArchiveBackend::Libarchive(b) => Ok(b.entries_written()),
                 // R0071-0013: a Write-mode archive whose backend is
                 // not a writer would mean a constructor / invariant

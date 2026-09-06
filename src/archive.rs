@@ -2,6 +2,7 @@
 
 use crate::entry::ArchiveEntry;
 use crate::error::{ArchiveError, Result};
+#[cfg(feature = "libarchive")]
 use crate::ffi::libarchive_wrapper::LibarchiveArchive;
 #[cfg(feature = "sevenzip")]
 use crate::ffi::sevenz_wrapper::SevenZArchive;
@@ -35,6 +36,7 @@ pub(crate) enum ArchiveBackend {
     SevenZ(Box<SevenZArchive>),
     ZipWriter(Box<ZipWriter>),
     ZipReader(Box<ZipArchive>),
+    #[cfg(feature = "libarchive")]
     Libarchive(Box<LibarchiveArchive>),
 }
 
@@ -798,8 +800,23 @@ impl Archive {
             | ArchiveFormat::Lz4
             | ArchiveFormat::Lzma
             | ArchiveFormat::Iso => {
-                let libarchive = LibarchiveArchive::open(path)?;
-                ArchiveBackend::Libarchive(Box::new(libarchive))
+                #[cfg(feature = "libarchive")]
+                {
+                    let libarchive = LibarchiveArchive::open(path)?;
+                    ArchiveBackend::Libarchive(Box::new(libarchive))
+                }
+                #[cfg(not(feature = "libarchive"))]
+                {
+                    return Err(ArchiveError::unsupported(
+                        "open",
+                        format,
+                        Some(
+                            "this format is read through the libarchive backend, which is \
+                             disabled in this build (enable the `libarchive` Cargo feature)"
+                                .to_string(),
+                        ),
+                    ));
+                }
             }
         };
 
@@ -2064,9 +2081,9 @@ impl Archive {
             // Other formats don't support recovery records
             #[cfg(feature = "sevenzip")]
             ArchiveBackend::SevenZ(_) => Ok(false),
-            ArchiveBackend::ZipWriter(_)
-            | ArchiveBackend::ZipReader(_)
-            | ArchiveBackend::Libarchive(_) => Ok(false),
+            #[cfg(feature = "libarchive")]
+            ArchiveBackend::Libarchive(_) => Ok(false),
+            ArchiveBackend::ZipWriter(_) | ArchiveBackend::ZipReader(_) => Ok(false),
         }
     }
 
@@ -2109,6 +2126,7 @@ impl Archive {
     /// ```
     pub fn take_backend_warnings(&self) -> Vec<crate::error::ArchiveWarning> {
         match &self.backend {
+            #[cfg(feature = "libarchive")]
             ArchiveBackend::Libarchive(backend) => backend.take_backend_warnings(),
             #[cfg(feature = "rar-support")]
             ArchiveBackend::Unrar(_) => Vec::new(),
@@ -2178,9 +2196,9 @@ impl Archive {
             // Other formats don't support recovery records
             #[cfg(feature = "sevenzip")]
             ArchiveBackend::SevenZ(_) => Ok(None),
-            ArchiveBackend::ZipWriter(_)
-            | ArchiveBackend::ZipReader(_)
-            | ArchiveBackend::Libarchive(_) => Ok(None),
+            #[cfg(feature = "libarchive")]
+            ArchiveBackend::Libarchive(_) => Ok(None),
+            ArchiveBackend::ZipWriter(_) | ArchiveBackend::ZipReader(_) => Ok(None),
         }
     }
 
@@ -2254,12 +2272,12 @@ impl Archive {
             ArchiveBackend::Unrar(unrar) => unrar.is_solid(),
             #[cfg(feature = "sevenzip")]
             ArchiveBackend::SevenZ(sevenz) => sevenz.is_solid(),
-            ArchiveBackend::ZipWriter(_)
-            | ArchiveBackend::ZipReader(_)
-            | ArchiveBackend::Libarchive(_) => {
+            ArchiveBackend::ZipWriter(_) | ArchiveBackend::ZipReader(_) => {
                 // ZIP, TAR, and other formats don't support solid compression
                 Ok(false)
             }
+            #[cfg(feature = "libarchive")]
+            ArchiveBackend::Libarchive(_) => Ok(false),
         }
     }
 
@@ -2414,6 +2432,7 @@ impl Archive {
             #[cfg(feature = "sevenzip")]
             ArchiveBackend::SevenZ(sevenz) => sevenz.bound_identity(),
             ArchiveBackend::ZipReader(zip) => zip.bound_identity(),
+            #[cfg(feature = "libarchive")]
             ArchiveBackend::Libarchive(libarchive) => libarchive.bound_identity(),
             // Write mode: there is no archive on disk yet to bind to.
             ArchiveBackend::ZipWriter(_) => None,
@@ -2563,6 +2582,7 @@ impl Archive {
 fn finalize_write_backend(backend: &mut ArchiveBackend) -> Result<()> {
     match backend {
         ArchiveBackend::ZipWriter(writer) => writer.finish(),
+        #[cfg(feature = "libarchive")]
         ArchiveBackend::Libarchive(b) => b.close_write(),
         #[cfg(feature = "rar-support")]
         ArchiveBackend::Unrar(_) => Err(ArchiveError::read_only_backend(crate::error::ops::FINISH)),

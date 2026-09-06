@@ -20,6 +20,7 @@ use crate::security::{verify_crc32, verify_crc32_value};
 /// FFI layer. On Windows the lossy UTF-8 form is used; full Windows
 /// wide-char support (`archive_read_open_filename_w` /
 /// `RAROpenArchiveExW`) is deferred to the OI-0065-001 follow-up.
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 pub(crate) fn path_to_cstring(path: &Path) -> std::result::Result<CString, std::ffi::NulError> {
     #[cfg(unix)]
     {
@@ -35,6 +36,7 @@ pub(crate) fn path_to_cstring(path: &Path) -> std::result::Result<CString, std::
 /// [`path_to_cstring`] with the standard NUL-byte rejection mapping —
 /// every FFI call site paired the conversion with the same
 /// `invalid_path(..., "Contains null byte")` error by hand.
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 pub(crate) fn path_to_cstring_checked(path: &Path) -> Result<CString> {
     path_to_cstring(path)
         .map_err(|_| ArchiveError::invalid_path(path.display().to_string(), "Contains null byte"))
@@ -423,6 +425,7 @@ pub(crate) fn rename_with_overwrite(from: &std::path::Path, to: &std::path::Path
 /// Returns `std::io::Result` so callers can map `AlreadyExists` to
 /// their operation-specific structured error.
 #[cfg(unix)]
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 pub(crate) fn rename_noclobber(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::hard_link(from, to)?;
     let _ = std::fs::remove_file(from);
@@ -430,6 +433,7 @@ pub(crate) fn rename_noclobber(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(windows)]
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 pub(crate) fn rename_noclobber(from: &Path, to: &Path) -> std::io::Result<()> {
     // R0001-0073: an interior NUL would shorten the path handed to
     // `MoveFileExW`, so it surfaces as `InvalidInput` instead of moving
@@ -465,6 +469,7 @@ pub(crate) fn rename_noclobber(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(any(unix, windows)))]
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 pub(crate) fn rename_noclobber(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::hard_link(from, to)?;
     let _ = std::fs::remove_file(from);

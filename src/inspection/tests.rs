@@ -94,6 +94,7 @@ fn test_list_files_rar() {
     assert!(!entries.is_empty());
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_list_files_tar() {
     let archive = Archive::open(fixture("test.tar")).unwrap();
@@ -287,6 +288,7 @@ fn test_calculate_manifest_digest_7z() {
 // TAR has no per-entry CRC in its metadata; the digest must still be
 // content-based (streamed CRC32) and not fall back to path/size — otherwise
 // renamed-but-identical content would appear distinct.
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_calculate_manifest_digest_tar_is_stable_and_nonempty() {
     let archive = Archive::open(fixture("test.tar")).unwrap();
@@ -313,6 +315,7 @@ fn test_calculate_manifest_digest_tar_is_stable_and_nonempty() {
 /// produces the identical digest — which is exactly why the quadratic
 /// behaviour survived so long. Asserting the map covers every CRC-less
 /// file entry pins the route, not just the result.
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_resolve_crc32_single_pass_covers_every_crc_less_entry() {
     let archive = Archive::open(fixture("test.tar")).unwrap();
@@ -348,6 +351,7 @@ fn test_resolve_crc32_single_pass_covers_every_crc_less_entry() {
 /// value. They are two routes to the same number, and only one of them is
 /// exercised by the public digest on a libarchive archive — so pin the
 /// equality directly rather than trusting that both were tested.
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_single_pass_and_per_entry_crc32_agree() {
     let archive = Archive::open(fixture("test.tar")).unwrap();
@@ -476,6 +480,7 @@ fn test_detect_multipart_single_zip() {
     }
 }
 
+#[cfg(feature = "libarchive")]
 #[test]
 fn test_detect_multipart_tar_not_supported() {
     let archive = Archive::open(fixture("test.tar")).unwrap();

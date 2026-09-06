@@ -100,8 +100,10 @@ fn no_read_walk_compares_the_warn_status_on_its_own() {
 #[path = "common/mod.rs"]
 mod common;
 
+#[cfg_attr(not(feature = "libarchive"), allow(unused_imports))]
 use unified_archive::{Archive, ArchiveWarning};
 
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 fn block(payload: &[u8]) -> Vec<u8> {
     let mut b = payload.to_vec();
     b.resize(512, 0);
@@ -110,6 +112,7 @@ fn block(payload: &[u8]) -> Vec<u8> {
 
 /// One ustar header block. The checksum field counts as spaces while summing,
 /// which is the format's own rule.
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 fn ustar_header(name: &[u8], size: usize, typeflag: u8) -> Vec<u8> {
     let mut h = vec![0u8; 512];
     h[..name.len()].copy_from_slice(name);
@@ -135,6 +138,7 @@ fn ustar_header(name: &[u8], size: usize, typeflag: u8) -> Vec<u8> {
 ///
 /// Verified against the system `bsdtar` (libarchive's own CLI), which lists
 /// `f.txt` and prints that warning.
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 fn malformed_pax_tar() -> Vec<u8> {
     let bad_record = b"this is not a pax attribute record at all\n";
     let payload = b"hello\n";
@@ -148,6 +152,7 @@ fn malformed_pax_tar() -> Vec<u8> {
     tar
 }
 
+#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 fn staged_malformed_pax_tar() -> (std::path::PathBuf, std::path::PathBuf) {
     let dir = common::temp_test_dir();
     let archive = dir.join("malformed_pax.tar");
@@ -160,6 +165,7 @@ fn staged_malformed_pax_tar() -> (std::path::PathBuf, std::path::PathBuf) {
 /// Before this fix `list_files()` refused `ARCHIVE_WARN` while
 /// `validate_integrity()` accepted it, so these two calls returned opposite
 /// verdicts about the same bytes.
+#[cfg(feature = "libarchive")]
 #[test]
 fn listing_and_integrity_agree_on_an_archive_libarchive_warns_about() {
     let (dir, archive_path) = staged_malformed_pax_tar();
@@ -186,6 +192,7 @@ fn listing_and_integrity_agree_on_an_archive_libarchive_warns_about() {
 /// Accepting the status is only half of it. The message libarchive attached
 /// was discarded at every accepting site, so a caller was told the archive was
 /// fine with no way to learn what had been objected to.
+#[cfg(feature = "libarchive")]
 #[test]
 fn the_warning_text_reaches_the_caller_instead_of_being_discarded() {
     let (dir, archive_path) = staged_malformed_pax_tar();
@@ -240,6 +247,7 @@ fn the_warning_text_reaches_the_caller_instead_of_being_discarded() {
 /// `extract_all` has a warning channel; the other reads do not, and that is
 /// the whole reason the sink exists. A caller who lists an archive must still
 /// be able to find out that libarchive objected to it.
+#[cfg(feature = "libarchive")]
 #[test]
 fn a_listing_caller_can_still_reach_what_the_backend_said() {
     let (dir, archive_path) = staged_malformed_pax_tar();
