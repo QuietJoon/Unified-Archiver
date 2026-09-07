@@ -181,14 +181,53 @@ run_lane clippy cargo clippy --all-targets --all-features -- -D warnings
 # by hand at every gate but was never in the recipe, so the recipe did not
 # reproduce the gate — AD-0070 condition 1. The minimal profile is exactly where
 # dangling items hide, because nothing else builds it.
-run_lane clippy-no-default-features cargo clippy --all-targets --no-default-features -- -D warnings
+run_lane clippy-read-minimal \
+    cargo clippy --all-targets --no-default-features --features read,zip-read -- -D warnings
 
 # L3: the full profile. This is the lane the project has historically run.
 run_lane test-all-features cargo test --all-features -- --test-threads=4
 
-# L4: the other side of every default-feature flip. Cheap insurance against
-# shipping a default change that breaks the minimal build.
-run_lane test-no-default-features cargo test --no-default-features -- --test-threads=4
+# L4: THE SIX AD-0058 PROFILES. These replace the old
+# `test-no-default-features` lane, which is no longer a valid configuration:
+# every backend is feature-gated now, so selecting none leaves the crate with
+# no backend at all and `lib.rs` refuses it with a `compile_error!`. The floor
+# was never the empty set — AD-0058's table has always said `read-minimal` is
+# `read` + `zip-read`, and that is what the footprint claim is measured
+# against.
+#
+# These are the configurations a consumer actually selects, which is the whole
+# point: an isolation lane earns its keep by being real (proved twice on
+# 2026-09-07, when the `rar-support` and `sevenzip` lanes each found a defect
+# on their first run).
+run_lane profile-read-minimal \
+    cargo test --no-default-features --features read,zip-read -- --test-threads=4
+run_lane profile-read-zip \
+    cargo test --no-default-features --features read,zip-read,zip-crypto,sfx -- --test-threads=4
+run_lane profile-read-all-formats \
+    cargo test --no-default-features \
+        --features read,zip-read,zip-crypto,sevenzip,rar-support,libarchive,sfx \
+        -- --test-threads=4
+# The `create` profile as AD-0058 defines it is `create, zip-write, sevenzip,
+# libarchive` — no reader. That is a legitimate CONSUMER configuration (a
+# program that only writes archives) but it cannot be a useful TEST lane: every
+# creation test verifies its work by reading the archive back, so running the
+# suite there produced 236 failures that all say "wrote it, cannot read it",
+# which is the profile behaving correctly.
+#
+# Split accordingly, and do not conflate the two:
+#   * a compile-only lane for the profile exactly as the record defines it,
+#     which is what catches the feature being wired to nothing;
+#   * a test lane with a reader added, which is the only way to assert that
+#     what `create` writes is correct.
+run_lane check-profile-create-pure \
+    cargo check --all-targets --no-default-features --features create,zip-write,sevenzip,libarchive
+run_lane profile-create \
+    cargo test --no-default-features \
+        --features create,read,zip-read,zip-write,sevenzip,libarchive -- --test-threads=4
+run_lane profile-modify \
+    cargo test --no-default-features --features modify,zip-read,zip-write,sevenzip,libarchive -- --test-threads=4
+run_lane profile-full \
+    cargo test --no-default-features --features full -- --test-threads=4
 
 # L4b: one AD 0058 format feature on its own. L3 and L4 cover only the two
 # extremes — everything on, everything off — and a feature can be wired to
@@ -196,9 +235,9 @@ run_lane test-no-default-features cargo test --no-default-features -- --test-thr
 # tests; with it off, the tests are cfg'd away. This lane is the one that fails
 # if `sevenzip` stops actually selecting the backend.
 run_lane test-sevenzip-only \
-    cargo test --no-default-features --features sevenzip -- --test-threads=4
+    cargo test --no-default-features --features read,zip-read,sevenzip -- --test-threads=4
 run_lane test-zip-crypto-only \
-    cargo test --no-default-features --features zip-crypto -- --test-threads=4
+    cargo test --no-default-features --features read,zip-read,zip-crypto -- --test-threads=4
 # `libarchive` is the odd one of the three: it adds no Cargo dependency at all,
 # so a dependency-tree diff cannot see it. What it gates is the build-script
 # probe for the system C library — the thing that makes this crate unbuildable
@@ -206,7 +245,7 @@ run_lane test-zip-crypto-only \
 # `libarchive` feature stops selecting the backend, since L4 (everything off)
 # would still be green with the backend wired to nothing.
 run_lane test-libarchive-only \
-    cargo test --no-default-features --features libarchive -- --test-threads=4
+    cargo test --no-default-features --features read,zip-read,libarchive -- --test-threads=4
 # `sfx` and `rar-support` complete the per-feature set, and the reason every
 # format feature needs its OWN lane is not symmetry — it is that one feature's
 # code can reference another feature's module. `Archive::first_rar_signature_before`
@@ -216,9 +255,9 @@ run_lane test-libarchive-only \
 # found by sweeping combinations, and a `rar-support`-only lane is what keeps it
 # found (AD 0058).
 run_lane test-sfx-only \
-    cargo test --no-default-features --features sfx -- --test-threads=4
+    cargo test --no-default-features --features read,zip-read,sfx -- --test-threads=4
 run_lane test-rar-support-only \
-    cargo test --no-default-features --features rar-support -- --test-threads=4
+    cargo test --no-default-features --features read,zip-read,rar-support -- --test-threads=4
 
 # L5: default features as a consumer gets them, compile-only. Links no test
 # binaries, so it cannot hit the first-exec admission stall.
@@ -227,12 +266,14 @@ run_lane check-default cargo check --all-targets
 # L6: Windows cfg-compile. OWNER-INVOKED ONLY — see --with-windows-check.
 if [[ "${with_windows}" -eq 1 ]]; then
     run_lane check-windows-cfg \
-        cargo check --target x86_64-pc-windows-msvc --no-default-features --features external-rar-create
+        cargo check --target x86_64-pc-windows-msvc --no-default-features \
+            --features read,zip-read,create,zip-write,external-rar-create
 fi
 
 # L7: Linux cross-compile check. Only once OI-0080-001 is unparked.
 if [[ "${with_cross}" -eq 1 ]]; then
-    run_lane check-linux-musl cargo check --target x86_64-unknown-linux-musl --no-default-features
+    run_lane check-linux-musl \
+        cargo check --target x86_64-unknown-linux-musl --no-default-features --features read,zip-read
 fi
 
 # --- Record. --------------------------------------------------------------
