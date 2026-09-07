@@ -1239,8 +1239,18 @@ impl Archive {
         // routes source reads through libarchive, which does not
         // surface this metadata; the side-car lookup keeps
         // round-trips faithful without switching backends.
+        // The ZIP writer is the only backend that can carry these extras, so the
+        // filter — and the propagation below — compile only when it exists. A
+        // `modify` build without `zip-write` still commits; it simply has no ZIP
+        // writer to hand the side-car metadata to.
+        #[cfg(feature = "zip-write")]
         let zip_extras = validated_zip_extras
             .filter(|_| matches!(new_archive.backend, ArchiveBackend::ZipWriter(_)));
+        #[cfg(not(feature = "zip-write"))]
+        let zip_extras: Option<ZipSourceExtras> = {
+            let _ = &validated_zip_extras;
+            None
+        };
 
         // Copy all entries from original except removed ones. The
         // `ValidatedSource` token (D3) replaces the prior
@@ -1303,6 +1313,9 @@ impl Archive {
             let streamable_size = entry.size;
             #[cfg(not(feature = "libarchive"))]
             let _ = streamable_size;
+            // Only the ZIP writer consumes this; without `zip-write` the
+            // side-car lookup has no destination.
+            #[cfg_attr(not(feature = "zip-write"), allow(unused_variables))]
             let compression_override = zip_extras
                 .as_ref()
                 .and_then(|extras| extras.per_index.get(entry.id).map(|v| v.compression));
@@ -1467,6 +1480,7 @@ impl Archive {
         }
 
         // Propagate ZIP archive-level comment (if any) before finalizing.
+        #[cfg(feature = "zip-write")]
         if let (Some(extras), ArchiveBackend::ZipWriter(w)) =
             (zip_extras.as_ref(), &mut new_archive.backend)
         {
@@ -1786,6 +1800,7 @@ struct CommitPlan {
 /// the facade listing before the consumer trusts it (R0069-0064 / R0075-0034).
 #[derive(Debug)]
 pub(crate) struct ZipSourceExtras {
+    #[cfg_attr(not(feature = "zip-write"), allow(dead_code))]
     archive_comment: Vec<u8>,
     per_index: Vec<ZipSourceEntryView>,
 }

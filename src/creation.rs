@@ -270,6 +270,7 @@ impl Archive {
             OP,
             |ns| ns.record_file(OP, path),
             |backend| match backend {
+                #[cfg(feature = "zip-write")]
                 WriteBackend::Zip(w) => w.add_file_from_data(path, data),
                 #[cfg(feature = "libarchive")]
                 WriteBackend::Libarchive(b) => b.add_file_from_data(path, data),
@@ -343,6 +344,7 @@ impl Archive {
             OP,
             |ns| ns.record_file(OP, archive_path),
             |backend| match backend {
+                #[cfg(feature = "zip-write")]
                 WriteBackend::Zip(w) => w.add_file_from_path(fs_path_ref, archive_path),
                 #[cfg(feature = "libarchive")]
                 WriteBackend::Libarchive(b) => b.add_file_from_path(fs_path_ref, archive_path),
@@ -376,6 +378,7 @@ impl Archive {
             OP,
             |ns| ns.record_dir(OP, path),
             |backend| match backend {
+                #[cfg(feature = "zip-write")]
                 WriteBackend::Zip(w) => w.add_directory_entry(path),
                 #[cfg(feature = "libarchive")]
                 WriteBackend::Libarchive(b) => b.add_directory_entry(path),

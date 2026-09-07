@@ -560,11 +560,14 @@ pub(crate) fn unix_seconds_to_system_time(seconds: i64) -> Option<std::time::Sys
     Some(UNIX_EPOCH + Duration::from_secs(seconds as u64))
 }
 
-#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Convert SystemTime to zip::DateTime for ZIP archive entries.
 ///
 /// Returns None if the time cannot be represented in ZIP's DOS date format
 /// (valid range: 1980-01-01 through 2107-12-31).
+#[cfg_attr(
+    not(all(any(feature = "create", feature = "modify"), feature = "zip-write")),
+    allow(dead_code)
+)]
 pub(crate) fn system_time_to_zip_datetime(time: std::time::SystemTime) -> Option<zip::DateTime> {
     use std::time::UNIX_EPOCH;
 
@@ -1170,12 +1173,15 @@ pub(crate) fn notify_creation_progress(
     Ok(())
 }
 
-#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Copy data from `reader` to `writer` and call `notify` after each
 /// chunk so creation progress and `ControlFlow::Break` cancellation
 /// fire during the entry, not only after the whole entry is on disk
 /// (R0071-0007). The 64 KiB chunk size matches the libarchive write-side
 /// buffer so cross-backend progress cadence is consistent.
+#[cfg_attr(
+    not(all(any(feature = "create", feature = "modify"), feature = "zip-write")),
+    allow(dead_code)
+)]
 pub(crate) fn copy_with_progress<R: Read + ?Sized, W: Write>(
     reader: &mut R,
     writer: &mut W,

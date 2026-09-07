@@ -129,7 +129,8 @@ libarchive = []
 sfx = ["read"]
 external-rar-create = ["create"]  # RAR creation via external WinRAR CLI (Windows only)
 # D2 typed-handle split (ReadArchive / WriteArchive / ModifyArchive). Additive since v0.3;
-# on by default since 2026-09-03 (owner ruling). `--no-default-features` turns it off.
+# on by default since 2026-09-03 (owner ruling). Selecting features explicitly
+# without `v2-api` turns it off — e.g. `--no-default-features --features read,zip-read`.
 #
 # The flip is NOT blocked on CI (AD-0070, 2026-09-03). This comment used to say
 # it was: "AD 0058 ordering constraint 2 forbids flipping default features until
@@ -141,14 +142,19 @@ external-rar-create = ["create"]  # RAR creation via external WinRAR CLI (Window
 # the real obstacle: both sides of this flip are observable on any dev host.
 #
 # What the flip actually needs is that both sides are RUN. As of 2026-09-03 they
-# are: `cargo test --all-features` (v2 on) and `cargo test --no-default-features`
-# (v2 off) are both release-gate lanes in scripts/release-gate.sh, and the
+# are: `test-all-features` / `profile-full` (v2 on) and the read/create/modify
+# profile lanes (v2 off) are all release-gate lanes in scripts/release-gate.sh,
+# and the
 # minimal profile was made clippy-clean in the same pass — eight test files had
 # dangling imports on it, because nobody had ever built it.
 #
 # FLIPPED ON BY DEFAULT 2026-09-03 (owner ruling, migration step 3). Both sides
-# stay covered: `--all-features` builds it, `--no-default-features` does not,
-# and both are release-gate lanes. Integration coverage was added in the same
+# stay covered: `--all-features` and the `full` profile build it, the
+# `read-minimal` / `read-zip` / `read-all-formats` / `create` / `modify` profiles
+# do not, and all are release-gate lanes. (A bare `--no-default-features` is not
+# among them: since the AD-0058 operation split it selects no backend at all and
+# `lib.rs` refuses it with a `compile_error!`; its lane was removed 2026-09-07.)
+# Integration coverage was added in the same
 # pass — before the flip `v2-api` had in-crate tests only, which is thin for a
 # default.
 #
@@ -162,7 +168,15 @@ external-rar-create = ["create"]  # RAR creation via external WinRAR CLI (Window
 # a removal today would be a removal with no deprecation cycle behind it. The
 # good news is the public v2 surface is already clean: `Archive` leaks only
 # through two private helpers.
-v2-api = []
+# The typed handles wrap the `Archive` facade and call its create/modify surface
+# in 56 places, so the feature cannot stand alone — declaring the dependency is
+# the honest option, exactly as `modify` declares `libarchive`. Found 2026-09-08
+# by a documentation audit: `--features v2-api` without these failed with 34
+# errors, and no release-gate profile exercised that combination, because every
+# profile either has the write operations or omits `v2-api`.
+# Note the transitive consequence: `modify` implies `libarchive`, so there is no
+# libarchive-free build that keeps `v2-api`.
+v2-api = ["read", "integrity", "create", "modify"]
 
 [[example]]
 name = "inspect_archive"

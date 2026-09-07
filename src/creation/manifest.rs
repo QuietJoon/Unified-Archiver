@@ -341,6 +341,7 @@ impl SourceManifest {
     /// without a special case.
     pub(crate) fn write_into(&self, backend: WriteBackend<'_>, op: &'static str) -> Result<()> {
         match backend {
+            #[cfg(feature = "zip-write")]
             WriteBackend::Zip(w) => {
                 for entry in &self.entries {
                     entry.verify_unchanged(op)?;
