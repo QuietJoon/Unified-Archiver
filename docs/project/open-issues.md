@@ -55,7 +55,10 @@ already refuted.
 - **Source:** AD 0058
 - **Date:** 2026-04-25
 - **Decision:** ACCEPT (explicit user request to track the plan in Open Issues)
-- **Status:** OPEN
+- **Status:** OPEN — **Stage 1 COMPLETE 2026-09-07.** Required Actions 1–5 are all done; the entry
+  stays open only for RA 6 (facade crates), which the 2026-09-02 owner ruling parked and which
+  RA 5's measurements did not make the case for. Nothing here is waiting on work: closing it is a
+  decision about whether Stage 2 is ever revisited.
 
 ### Problem
 
@@ -99,13 +102,29 @@ Status against the Required Actions above:
   `--no-default-features` build emits no `rustc-link-lib`/`rustc-link-search`
   for archive and does not compile the vendored UnRAR C++.
 - **RA 5 — COMPLETE.** Dependency tree, build time and binary size are measured
-  for every shipped feature. Headline: minimal is **891 KB stripped** against
-  1,897 KB for everything on (2.13×), and **122 crates against 154**. The
-  measurement also showed the three metrics rank features in nearly opposite
-  orders — `zip-crypto` removes the most crates (22) and the least binary
-  (17 KB) — so future gating decisions should be made on binary size, not crate
-  count. Full table in AD-0058's 2026-09-07 amendment.
-- **RA 2 — four of seven** (updated 2026-09-07). `zip-crypto`, `sevenzip`,
+  for every shipped feature, and **re-measured against the real floor once the
+  operation features landed**: `read-minimal` is **578 KB stripped** against
+  1,897 KB for `full` — a **3.28×** spread — with **122 crates against 154**, no
+  C toolchain and no system library. (The 891 KB figure this line carried
+  earlier was correct when taken, before `sfx` and the operation features were
+  extracted; the floor moves with each increment.)
+
+  Two findings outlive the numbers. The three metrics rank features in nearly
+  opposite orders — `zip-crypto` removes the most crates (22) and the least
+  binary (17 KB) — so gating decisions belong on binary size, not crate count.
+  And the operation features alone took **259 KB (31 %)** off the floor, more
+  than any format feature: **what the crate can *do* costs more than what it can
+  do it *to*.** Full tables in AD-0058's 2026-09-07 amendments.
+- **RA 1 — COMPLETE 2026-09-07.** All five operation features (`read`, `integrity`, `create`,
+  `modify`, `full`) are implemented and gate real code. `integrity` was briefly declared and wired to
+  nothing — caught by reading the feature table against the source, not by a lane, because a feature
+  that gates nothing never breaks a build.
+- **RA 4 — COMPLETE 2026-09-07.** The six profiles are selectable configurations with lanes in
+  `scripts/release-gate.sh`. Two consequences worth knowing: `cargo test --no-default-features` is no
+  longer valid (no backend at all; `lib.rs` refuses it with `compile_error!`), and the `create`
+  profile needs a compile lane plus a separate reader-bearing test lane, because a profile with no
+  reader cannot observe what it writes.
+- **RA 2 — COMPLETE 2026-09-07** (was four of seven). `zip-crypto`, `sevenzip`,
   `libarchive` and `sfx` are shipped features. `zip-read` and `zip-write` remain;
   `rar` ships under its existing name `rar-support`, which the 2026-09-06 ruling
   kept deliberately. Each shipped feature now has its own isolation lane in
@@ -113,26 +132,24 @@ Status against the Required Actions above:
   real defects on their first run — a coverage loss predating every increment,
   and an undocumented cross-feature dependency (`sevenzip` reads 7z, but
   libarchive is what writes it).
-- **RA 1 — not started.** The five operation features are unbuilt, so the six
-  profiles in RA 4 remain definitions rather than selectable configurations.
-  Note that AD-0071 makes `modify` depend on `libarchive` permanently, so there
-  is no libarchive-free `modify` profile; that consequence is ruled and recorded,
-  not an open question.
+- **Superseded status line (was "RA 1 — not started").** AD-0071's consequence still holds and is
+  now enforced by the compiler: `modify = ["read", "create", "libarchive"]`, so there is no
+  libarchive-free `modify` profile.
 - **RA 6 — parked** by the 2026-09-02 owner ruling (Stage 2 revisited only if
   measurement proves feature selection insufficient). RA 5's numbers do not make
   that case.
 
 ### Verification
 
-- [ ] Read-minimal build works without libarchive, RAR, create, or modify
-      dependencies. *(libarchive and RAR halves verified 2026-09-06/07; the
-      create and modify halves wait on RA 1.)*
+- [x] Read-minimal build works without libarchive, RAR, create, or modify
+      dependencies. *(All four halves verified 2026-09-07: `read,zip-read`
+      compiles and tests clean with zero warnings.)*
 - [x] Full build preserves the current API surface. *(`--all-features`: 43
       suites, 2088 passed, 0 failed.)*
 - [x] `build.rs` does not probe or build disabled native backends.
-- [ ] CI covers both read-only and full profiles. *(Both extremes plus three
-      per-feature isolation lanes are in `scripts/release-gate.sh`; the six named
-      profiles wait on RA 1.)*
+- [x] CI covers both read-only and full profiles. *(All six named profiles have
+      lanes, plus five per-feature isolation lanes and a compile-only lane for
+      the reader-less `create` profile.)*
 - [ ] Facade-crate migration notes are documented before publishing the split.
 
 ### Related

@@ -505,8 +505,53 @@ have hit a decision wall on three of four.
   the full count unchanged from before the increment, which is the check that nothing left the
   default build. `sfx` carries 195 tests (1489 → 1294).
 
-  Remaining in this item: `zip-read` / `zip-write` and the five operation features — and
-  **they are one unit, not two.** Ruled 2026-09-07 (AD-0058 amendment): every profile in the table
+- **STAGE 1 COMPLETE 2026-09-07 — the operation features and the ZIP split landed as one unit.**
+  All five operation features (`read`, `integrity`, `create`, `modify`, `full`) plus `zip-read` /
+  `zip-write`, exactly as the sequencing ruling below required. **The six profiles are selectable
+  configurations now, not definitions** — that is Required Action 4, and with RA 3 and RA 5 already
+  done it leaves only RA 6 (facade crates), which stays parked because RA 5's numbers did not make
+  the case.
+
+  Ten configurations compile with **zero errors and zero warnings**, `clippy -D warnings` is clean on
+  all ten, and all six profile test lanes pass: read-minimal 1137, read-zip 1338, read-all-formats
+  1720, create 1487, modify 1611, full 2127 — 0 failed in every one.
+
+  **The footprint claim is now a measured number, and it inverts the split's own premise.**
+  `read-minimal` links **578 KB stripped against 1,897 KB for `full` — 3.28×**, with no C toolchain
+  and no system library. The operation features alone took **259 KB (31 %)** off the floor
+  (837 KB → 578 KB), which is the largest single reduction in the whole split — larger than any
+  format feature. The first four increments all gated *formats* on the theory that backends carry the
+  weight; combined with the Required Action 5 finding that crate count ranks features nearly
+  backwards, the lesson is that **what the crate can *do* costs more than what it can do it *to*.**
+
+  **Four things worth carrying forward:**
+
+  1. **The empty configuration is no longer valid.** Every backend is gated, so selecting none
+     leaves `ArchiveBackend` with no variants — and `match` on a reference to an empty enum is
+     rejected, which surfaced as a wall of `non-exhaustive patterns` errors pointing at innocent
+     code. `lib.rs` now says so via `compile_error!`. **`cargo test --no-default-features` is no
+     longer a valid lane**; the six profile lanes replace it, and every per-feature isolation lane
+     gains `read,zip-read`.
+  2. **The `create` profile cannot be a test lane as AD-0058 defines it.** No reader, so its 236
+     failures were all "wrote it, cannot read it back" — the profile behaving correctly. Split into a
+     compile-only lane for the exact profile (which is what catches a feature wired to nothing) and a
+     test lane with a reader added (the only configuration where the claim is assertable). A profile
+     that cannot observe its own effects needs both.
+  3. **`integrity` was declared and wired to nothing** — found in this increment's own work, by
+     reading the feature table against the source. It gated no code at all, and **would have passed
+     every lane**, because a feature that gates nothing never breaks a build. The lanes catch a
+     feature wired *incorrectly*; only inspection catches one wired to *nothing*.
+  4. **`NamespaceTracker` had to move, and dodging the refactor cost more than doing it.** It is the
+     conflict gate shared by both write paths; widening the `modification` module gate to
+     `any(create, modify)` to avoid extracting it meant a create-only build compiled 2,726 lines to
+     reach 30, and the cascade that followed was the compiler saying so. Now `src/write_namespace.rs`
+     (161 lines), with `modification` cleanly `modify`-only.
+
+  Remaining in this item: **nothing in Stage 1.** Stage 2 facade crates stay parked.
+
+- **Superseded plan (2026-09-07) — `zip-read` / `zip-write` and the five operation features are one
+  unit.** Executed as ruled; kept because the reasoning is what shaped the increment.
+  **They are one unit, not two.** Ruled 2026-09-07 (AD-0058 amendment): every profile in the table
   pairs the ZIP features with an operation feature and never selects one without the other, so
   `zip-write` alone is a ZIP writer with no creation API in front of it and `create` alone is a
   creation API whose only always-present format has no writer. Neither is a configuration a consumer

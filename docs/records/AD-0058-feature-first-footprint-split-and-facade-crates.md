@@ -976,3 +976,159 @@ sequencing ruling only. The four shipped format features are unaffected.
 - AD-0071 fixes one shape in advance: `modify` depends on `libarchive` for every
   format, so there is no libarchive-free `modify` profile, and 63 modify tests
   all operate on ZIP.
+
+## Amendment (2026-09-07, Stage 1 complete — the operation features and the ZIP split)
+
+The last increment, and the one the 2026-09-07 sequencing ruling said had to be
+a single unit: the five operation features (`read`, `integrity`, `create`,
+`modify`, `full`) together with `zip-read` / `zip-write`. Stage 1's feature list
+is now fully implemented, and **the six profiles are selectable configurations
+rather than definitions** — Required Action 4.
+
+### The empty configuration is no longer valid, and that is a real change
+
+With every backend behind a feature, selecting none leaves `ArchiveBackend` with
+**no variants at all**. A `match` on a reference to an empty enum is not
+accepted, so the failure mode was a wall of `non-exhaustive patterns` errors
+pointing at code that was not the problem.
+
+`lib.rs` now carries a `compile_error!` that names the fix. This is not a
+regression: AD-0058's profile table has always said the floor is `read-minimal`
+= `read` + `zip-read`, never the empty set, and that is the profile the 837 KB
+footprint number was measured against. The consequence for verification is
+concrete — **`cargo test --no-default-features` is no longer a valid lane** and
+is replaced in `scripts/release-gate.sh` by the six profile lanes. Every
+per-feature isolation lane also gains `read,zip-read`, since a format feature
+alone selects no reader.
+
+### `NamespaceTracker` had to move, and the first attempt to avoid moving it was wrong
+
+`NamespaceTracker` is the two-set file/directory conflict gate used by **both**
+write paths — Modify's `commit_changes` and Write's per-add — and it lived in
+`modification.rs`. Gating that module on `modify` alone broke `create`; the first
+fix was to widen the gate to `any(create, modify)`, which meant a create-only
+build compiled all 2,726 lines of the modification module to reach 30 lines of
+shared logic.
+
+That was the wrong call and the compiler said so: the cascade of
+`no field modifications` errors that followed was the module being half-selected.
+It is now `src/write_namespace.rs` (161 lines, gated on `any(create, modify)`),
+`modification` is cleanly `modify`-only, and the three helpers it depends on
+(`record_file`, `record_dir`, `normalize_dup_check_path`, `ancestor_paths`) moved
+with it. Worth recording because the instinct to avoid a refactor mid-increment
+produced more work than the refactor did.
+
+### The `create` profile cannot be a test lane as this record defines it
+
+`create` = `create, zip-write, sevenzip, libarchive` — **no reader**. Running the
+suite there produced **236 failures**, every one of them "wrote the archive,
+cannot read it back". That is the profile behaving exactly as specified: it is a
+legitimate consumer configuration (a program that only writes archives) and an
+impossible test configuration, because every creation test verifies its work by
+reading.
+
+Resolved by splitting rather than by redefining the profile or by tolerating 236
+red tests that describe correct behaviour:
+
+* `check-profile-create-pure` — compile-only, the profile exactly as this record
+  defines it. This is the lane that catches the feature being wired to nothing.
+* `profile-create` — the test lane, with `read,zip-read` added, which is the only
+  configuration in which "what `create` writes is correct" is an assertable
+  claim.
+
+The general point, since the operation features make it recurrent: **a profile
+that cannot observe its own effects needs a compile lane and a separate,
+larger test configuration.** Conflating them silently changes what the record
+promises.
+
+### `integrity` was declared and wired to nothing
+
+Caught in this increment, in this increment's own work: `integrity` sat in the
+feature table with **no `#[cfg]` anywhere referencing it** — precisely the
+"feature wired to nothing" defect the isolation lanes exist to detect, and it
+would have passed every lane, because a feature that gates nothing never breaks
+a build. It now gates `validate_integrity`, `calculate_archive_crc`,
+`calculate_manifest_digest`, `calculate_content_multiset_digest_and_size`,
+`has_recovery_record` and `recovery_percentage`.
+
+It was found by reading the feature table against the source, not by a lane.
+That is worth stating plainly: **the lanes catch a feature that is wired
+incorrectly; nothing but inspection catches a feature that is wired to nothing at
+all.**
+
+### Two mistakes of my own, recorded because both are cheap to repeat
+
+**A name grep cannot see a trait method.** I removed `use std::io::{Read, Write}`
+from a test as unused — they are used through `read_to_end` and `write_all`,
+which name the *method*, not the trait. Five profiles broke. Restored with
+conditions matching the actual call sites.
+
+**Two `cfg_attr` allows on one item are a clippy error, not a redundancy.**
+Batch-adding conditional allows produced pairs like
+`#[cfg_attr(not(A), allow(dead_code))] #[cfg_attr(not(B), allow(dead_code))]`,
+which `clippy::duplicated_attributes` rejects. The correct merge is
+`#[cfg_attr(not(all(A, B)), allow(dead_code))]` — allow unless *both* features
+are present — and doing it by hand file-by-file was whack-a-mole until it was
+done as one repo-wide transformation.
+
+### The footprint claim, finally measured against the real floor
+
+The whole record exists to substantiate one claim: that a read-only consumer
+should not pay for a writer. It is now a number.
+
+| Profile | stripped | × floor |
+| --- | ---: | ---: |
+| `read-minimal` | **577,784** | 1.00 |
+| `read-zip` | 632,408 | 1.09 |
+| `read-all-formats` | 1,638,536 | 2.84 |
+| `full` | 1,897,112 | **3.28** |
+
+**The operation features alone take 259 KB off the floor — 31 %** (837 KB before
+this increment, 578 KB now), which is the largest single reduction of the entire
+split, larger than any format feature. That is worth pausing on, because it
+inverts the assumption the split started from: the first four increments all
+gated *formats*, on the theory that backends are where the weight is, and the
+Required Action 5 amendment already showed crate count ranks features roughly
+backwards. The operation split says something stronger — **what the crate can
+*do* costs more than what it can do it *to*.**
+
+A read-only ZIP consumer now links **578 KB against 1,897 KB for everything**, a
+3.28× spread, with no C toolchain and no system library. Both halves of that
+sentence were assertions when this record was written.
+
+### Lane results
+
+| Profile | suites | passed | failed |
+| --- | --- | --- | --- |
+| `read-minimal` | 43 | 1137 | 0 |
+| `read-zip` | 43 | 1338 | 0 |
+| `read-all-formats` | 43 | 1720 | 0 |
+| `create` (with a reader, see above) | 43 | 1487 | 0 |
+| `modify` | 43 | 1611 | 0 |
+| `full` | 43 | 2127 | 0 |
+
+`clippy --all-targets -- -D warnings` is clean on all six plus `default`,
+`--all-features`, `read+integrity`, and the reader-less `create` profile.
+
+### Feature table as shipped
+
+| Operation | Depends on |
+| --- | --- |
+| `read` | — |
+| `integrity` | `read` |
+| `create` | — |
+| `modify` | `read`, `create`, `libarchive` (AD-0071 / decision 1) |
+| `full` | everything except `external-rar-create` (decision 2) |
+
+| Format | Depends on |
+| --- | --- |
+| `zip-read`, `zip-write` | — |
+| `zip-crypto` | `zip-read` |
+| `sfx` | `read` |
+| `sevenzip`, `rar-support`, `libarchive` | — |
+
+`sevenzip` reads 7z; libarchive writes it (2026-09-07 amendment).
+`external-rar-create` implies `create`.
+
+Stage 2 (facade crates) remains parked by the 2026-09-02 owner ruling; Required
+Action 5's numbers did not make the case for it.
