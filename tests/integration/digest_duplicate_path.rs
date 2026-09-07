@@ -17,8 +17,10 @@ use super::common;
 
 use std::path::Path;
 
+#[cfg_attr(not(feature = "integrity"), allow(unused_imports))]
 use unified_archive::Archive;
 
+#[cfg_attr(not(feature = "integrity"), allow(dead_code))]
 /// Build a tar at `archive_path` carrying `member.txt` twice — the shape a
 /// `tar -cf` followed by `tar -rf` append produces, and the legal way a
 /// duplicate path arises in a real tar. The two occurrences carry `first`
@@ -38,6 +40,7 @@ fn build_dup_member_tar(archive_path: &Path, first: &[u8], second: &[u8]) {
     );
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn duplicate_path_tar_digests_both_payloads_distinctly() {
     let tmp = common::temp_test_dir();

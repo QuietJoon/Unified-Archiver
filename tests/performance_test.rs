@@ -284,6 +284,7 @@ fn perf_entry_lookup() {
     }
 }
 
+#[cfg(feature = "integrity")]
 /// Performance target: Validation is reasonably fast
 ///
 /// Target: <100ms for small archives
@@ -395,6 +396,7 @@ fn perf_streaming_chunked_read_integrity() {
     }
 }
 
+#[cfg(feature = "integrity")]
 /// Performance regression: Ensure no major slowdowns
 ///
 /// This test establishes baseline timing for future comparison.

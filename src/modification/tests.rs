@@ -896,7 +896,7 @@ fn test_modify_lzma_rejected_with_capability_error() {
 
 #[test]
 fn test_ancestor_paths_basic() {
-    use crate::modification::ancestor_paths;
+    use crate::write_namespace::ancestor_paths;
     assert_eq!(ancestor_paths(""), Vec::<String>::new());
     assert_eq!(ancestor_paths("a"), Vec::<String>::new());
     assert_eq!(ancestor_paths("a/b"), vec!["a".to_string()]);

@@ -27,9 +27,18 @@
 mod common;
 
 use std::fs;
-#[cfg_attr(not(feature = "sfx"), allow(unused_imports))]
-use std::io::{Read, Write};
+// Both are used only through trait methods (`read_to_end`, `write_all`), so a
+// name grep does not see them — restored after removing them on exactly that
+// mistake. Conditions track the profiles whose tests call them.
+#[cfg_attr(not(feature = "read"), allow(unused_imports))]
+use std::io::Read;
+#[cfg_attr(not(all(feature = "create", feature = "sfx")), allow(unused_imports))]
+use std::io::Write;
 
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use unified_archive::{
     Archive, ArchiveError, ArchiveFormat, CompressionLevel, CompressionOptions, ExtractionOptions,
     StreamBound, WritableFormat,
@@ -39,6 +48,7 @@ use unified_archive::{
 // R0068-0078 / R0068-0079: per-format recursive create coverage
 // ──────────────────────────────────────────────────────────────────────
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 fn seed_recursive_source(root: &std::path::Path) {
     let src = root.join("rec_src");
     fs::create_dir_all(src.join("subdir")).unwrap();
@@ -46,6 +56,7 @@ fn seed_recursive_source(root: &std::path::Path) {
     fs::write(src.join("subdir/b.txt"), b"bravo").unwrap();
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 fn assert_recursive_layout(archive_path: &std::path::Path) {
     let reader = Archive::open(archive_path)
         .unwrap_or_else(|e| panic!("open {}: {:?}", archive_path.display(), e));
@@ -67,6 +78,7 @@ fn assert_recursive_layout(archive_path: &std::path::Path) {
     );
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn r0068_0078_recursive_create_tar() {
@@ -88,6 +100,7 @@ fn r0068_0078_recursive_create_tar() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn r0068_0078_recursive_create_tar_gzip() {
@@ -109,6 +122,7 @@ fn r0068_0078_recursive_create_tar_gzip() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn r0068_0079_recursive_create_zip_root_preserving() {
     // Counterpart for the libarchive backends above — confirms the
@@ -188,6 +202,7 @@ fn r0068_0080_extract_to_stream_with_options_uses_password() {
 // R0068-0081: Archive::path() survives offset-open
 // ──────────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "create")]
 #[cfg(feature = "sfx")]
 #[test]
 fn r0068_0081_open_at_offset_preserves_caller_path() {
@@ -233,9 +248,11 @@ fn r0068_0081_open_at_offset_preserves_caller_path() {
 // R0068-0082: multipart detection surfaces unreadable directory errors
 // ──────────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "create")]
 #[cfg(unix)]
 #[test]
 fn r0068_0082_multipart_detection_surfaces_dir_io_error() {
+    #[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
     use std::os::unix::fs::PermissionsExt;
 
     let temp = common::temp_test_dir();
@@ -286,6 +303,7 @@ fn r0068_0082_multipart_detection_surfaces_dir_io_error() {
     );
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 #[cfg(unix)]
 fn nix_uid_is_root() -> bool {
     unsafe extern "C" {
@@ -334,6 +352,7 @@ fn r0068_0083_executable_with_incidental_gzip_magic_is_not_sfx() {
 // R0068-0084: empty-directory round-trip on libarchive backends
 // ──────────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn r0068_0084_empty_directory_round_trip_tar() {
@@ -368,6 +387,7 @@ fn r0068_0084_empty_directory_round_trip_tar() {
 // R0068-0085: recursive symlink rejection parity (Unix-only)
 // ──────────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "create")]
 #[cfg(unix)]
 #[cfg(feature = "libarchive")]
 #[test]
@@ -398,6 +418,7 @@ fn r0068_0085_recursive_create_rejects_symlinks_libarchive() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "create")]
 #[cfg(unix)]
 #[test]
 fn r0068_0085_recursive_create_rejects_symlinks_zip() {
@@ -431,6 +452,8 @@ fn r0068_0085_recursive_create_rejects_symlinks_zip() {
 // R0068-0086: dup-path commit rejection
 // ──────────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "create")]
+#[cfg(feature = "modify")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn r0068_0086_commit_changes_rejects_added_vs_added_dup() {
@@ -458,6 +481,8 @@ fn r0068_0086_commit_changes_rejects_added_vs_added_dup() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "create")]
+#[cfg(feature = "modify")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn r0068_0086_commit_changes_rejects_retained_vs_added_dup() {
@@ -492,6 +517,8 @@ fn r0068_0086_commit_changes_rejects_retained_vs_added_dup() {
 // R0068-0087: backup noclobber
 // ──────────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "create")]
+#[cfg(feature = "modify")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn r0068_0087_commit_changes_refuses_to_clobber_existing_backup() {

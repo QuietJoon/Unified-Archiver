@@ -71,6 +71,7 @@ fn test_rar5_find_entry() {
     assert!(not_found.is_none());
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
@@ -133,6 +134,7 @@ fn test_nonexistent_file_error() {
 // equality in-crate, and `tests/integration/format_compatibility.rs` checks a
 // report produced by a real `validate_integrity()` call against `entry_count()`.
 
+#[cfg(feature = "integrity")]
 /// Test that the same API works for both RAR and RAR5
 #[cfg(feature = "rar-support")]
 #[test]

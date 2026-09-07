@@ -83,6 +83,7 @@ fn test_dependent_methods_use_cache() {
     assert!(std::ptr::eq(entries.as_ptr(), entries_again.as_ptr()));
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]

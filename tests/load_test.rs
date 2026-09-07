@@ -7,24 +7,37 @@
 #[path = "common/mod.rs"]
 mod common;
 
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use std::fs;
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use unified_archive::{Archive, CompressionLevel, CompressionOptions, WritableFormat};
 use walkdir::WalkDir;
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 const ENTRY_COUNT: usize = 512;
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 fn make_archive_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     dir.join(name)
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 fn entry_path(index: usize) -> String {
     format!("group_{:02}/file_{:04}.txt", index % 16, index)
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 fn entry_contents(index: usize) -> Vec<u8> {
     format!("payload-{index:04}-{}", "x".repeat(index % 31)).into_bytes()
 }
 
+#[cfg(feature = "create")]
 fn build_large_zip_archive(path: &std::path::Path) {
     let mut options = CompressionOptions::for_writable(WritableFormat::ZIP);
     options.level = CompressionLevel::Store;
@@ -38,6 +51,7 @@ fn build_large_zip_archive(path: &std::path::Path) {
     archive.finish().unwrap();
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 fn count_extracted_files(root: &std::path::Path) -> usize {
     WalkDir::new(root)
         .into_iter()
@@ -46,6 +60,9 @@ fn count_extracted_files(root: &std::path::Path) -> usize {
         .count()
 }
 
+#[cfg(feature = "integrity")]
+#[cfg(feature = "create")]
+#[cfg(feature = "modify")]
 #[test]
 fn load_many_small_entries_roundtrip() {
     let temp = tempfile::tempdir().unwrap();
@@ -77,6 +94,7 @@ fn load_many_small_entries_roundtrip() {
     assert_eq!(report.validated, ENTRY_COUNT);
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn load_extraction_paths_handle_many_entries() {
     let temp = tempfile::tempdir().unwrap();

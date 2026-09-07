@@ -3,6 +3,7 @@ mod common;
 // Comprehensive integrity checking tests for critical core library validation
 // These tests ensure archive integrity verification works correctly under all conditions
 
+#[cfg_attr(not(feature = "integrity"), allow(unused_imports))]
 use std::thread;
 use unified_archive::{Archive, ArchiveError};
 
@@ -10,6 +11,7 @@ use unified_archive::{Archive, ArchiveError};
 // CORRUPTED ARCHIVE DETECTION TESTS
 // ============================================================================
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_detect_crc_corruption_zip() {
     // Test that CRC-corrupted ZIP files are detected
@@ -38,6 +40,7 @@ fn test_detect_crc_corruption_zip() {
     }
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_detect_truncated_archive_zip() {
     // Test that truncated archives are properly handled
@@ -61,6 +64,7 @@ fn test_detect_truncated_archive_zip() {
     }
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_valid_archive_baseline_zip() {
     // Baseline: valid archive should pass all validation
@@ -87,6 +91,7 @@ fn test_valid_archive_baseline_zip() {
 // MULTI-FORMAT CORRUPTION DETECTION
 // ============================================================================
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "sevenzip")]
 #[test]
 #[serial_test::file_serial(rar)]
@@ -162,6 +167,7 @@ fn test_corruption_detection_consistency_across_formats() {
 // EDGE CASE TESTS
 // ============================================================================
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_validation_empty_file_in_archive() {
     // Test validation of archives containing empty files (0 bytes)
@@ -203,6 +209,7 @@ fn test_validation_empty_file_in_archive() {
     fs::remove_dir_all(&temp_dir).ok();
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_validation_large_file() {
     // Test validation of archives with files > 1MB
@@ -243,6 +250,7 @@ fn test_validation_large_file() {
     }
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_validation_special_characters_in_filename() {
     // Test validation with special characters in filenames
@@ -299,6 +307,7 @@ fn test_validation_special_characters_in_filename() {
 // CONCURRENT VALIDATION TESTS
 // ============================================================================
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_concurrent_validation_same_archive() {
     // Test that multiple threads can validate the same archive simultaneously
@@ -346,6 +355,7 @@ fn test_concurrent_validation_same_archive() {
     );
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "sevenzip")]
 #[test]
 #[serial_test::file_serial(rar)]
@@ -449,6 +459,7 @@ fn test_validation_not_an_archive() {
     }
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_validation_encrypted_without_password() {
@@ -488,6 +499,7 @@ fn test_validation_encrypted_without_password() {
 // STRESS TESTS
 // ============================================================================
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_validation_many_files() {
     // Test validation of archive with many files (stress test)
@@ -515,6 +527,7 @@ fn test_validation_many_files() {
     );
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_validation_repeated_calls() {
     // Test that validation can be called multiple times on same archive
@@ -546,6 +559,7 @@ fn test_validation_repeated_calls() {
 // VALIDATION REPORT STRUCTURE TESTS
 // ============================================================================
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_validation_report_counts_accuracy() {
     // Test that validation report counts are mathematically correct
@@ -590,6 +604,7 @@ fn test_validation_report_counts_accuracy() {
     );
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_validation_failed_list_contains_paths() {
     // Test that failed files list contains actual file paths

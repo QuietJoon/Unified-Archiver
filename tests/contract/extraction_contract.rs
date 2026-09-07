@@ -12,6 +12,10 @@
 mod common;
 
 use common::fixture;
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use unified_archive::{Archive, CompressionOptions, ExtractionOptions, WritableFormat};
 
 // ── Contract 1: Extract from each supported format ──
@@ -116,6 +120,7 @@ fn contract_extract_all_tar_xz() {
 
 // ── Contract 2: Verify extracted files match originals (byte-for-byte) ──
 
+#[cfg(feature = "create")]
 #[test]
 fn contract_extract_to_memory_matches_original() {
     // Create an archive with known content, then verify extraction matches
@@ -140,6 +145,7 @@ fn contract_extract_to_memory_matches_original() {
     );
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn contract_extract_file_matches_original() {
     let temp = tempfile::tempdir().unwrap();
@@ -161,6 +167,7 @@ fn contract_extract_file_matches_original() {
     assert_eq!(extracted, original, "Extracted file must match original");
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn contract_extract_multiple_files_match() {
     let temp = tempfile::tempdir().unwrap();
@@ -301,6 +308,7 @@ fn contract_extraction_completes_in_reasonable_time() {
 
 // ── Extra: extract_filtered contract ──
 
+#[cfg(feature = "create")]
 #[test]
 fn contract_extract_filtered_only_matching() {
     let temp = tempfile::tempdir().unwrap();

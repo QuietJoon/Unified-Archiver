@@ -118,6 +118,8 @@
 //! ### Create Archives
 //!
 //! ```no_run
+//! # #[cfg(feature = "create")]
+//! # {
 //! use unified_archive::{Archive, CompressionOptions, WritableFormat};
 //!
 //! // `CompressionOptions` is `#[non_exhaustive]`, so a struct literal — with
@@ -130,6 +132,7 @@
 //! creator.add_file_from_data("readme.txt", b"Hello, world!")?;
 //! creator.add_directory_recursive("./src")?;
 //! creator.finish()?;
+//! # }
 //! # Ok::<(), unified_archive::ArchiveError>(())
 //! ```
 //!
@@ -215,6 +218,28 @@
 //! - [ProgressCallback] - Monitor extraction progress
 
 // Core modules
+// AD 0058: a build with no backend at all is not a supported configuration.
+// Every backend is feature-gated, so selecting none leaves `ArchiveBackend`
+// with no variants — and a `match` on a reference to an empty enum is not
+// accepted, which surfaces as a wall of "non-exhaustive patterns" errors
+// pointing at code that is not the problem. Say what is actually wrong.
+//
+// The floor is `read-minimal` (`read` + `zip-read`), never the empty set: that
+// is what AD-0058's profile table has always said, and it is the profile the
+// footprint claim is measured against.
+#[cfg(not(any(
+    feature = "zip-read",
+    feature = "zip-write",
+    feature = "sevenzip",
+    feature = "rar-support",
+    feature = "libarchive"
+)))]
+compile_error!(
+    "unified-archive needs at least one backend feature. The minimum useful \
+     build is `--features read,zip-read` (AD-0058's `read-minimal` profile); \
+     see the `[features]` table in Cargo.toml for the rest."
+);
+
 pub mod archive;
 pub(crate) mod backend; // D1: ReadBackend trait scaffold (R0068-0029)
 pub mod entry;
@@ -232,12 +257,14 @@ pub mod streaming; // Phase 2.4: Streaming extraction // Phase 7: SFX detection
 // `pub(crate)` — the curated facade re-exports below are the only
 // public entry points, so backend renames and module reorganisations
 // stay non-breaking.
+#[cfg(feature = "create")]
 pub(crate) mod creation;
 pub(crate) mod extraction;
 /// Shared inode-identity primitive for the by-name revalidation guards
 /// (DCR-007 / OI-0081-001 / R0080-0061).
 pub(crate) mod fs_identity;
 pub(crate) mod inspection;
+#[cfg(feature = "modify")]
 pub(crate) mod modification;
 /// `Read + Seek` view of a byte range inside a larger file — how an SFX
 /// payload is opened where it lies instead of being copied out (DEF-001).
@@ -255,6 +282,10 @@ pub(crate) mod payload_window;
 )]
 #[cfg(feature = "sevenzip")]
 pub(crate) mod volume_chain;
+/// Shared write-path namespace bookkeeping — see the module docs. Selected by
+/// either write operation, because both gates run through it.
+#[cfg(any(feature = "create", feature = "modify"))]
+pub(crate) mod write_namespace;
 
 #[cfg(test)]
 pub(crate) mod test_utils;
@@ -315,6 +346,7 @@ pub use format::{ArchiveFormat, FormatCapabilities, Support};
 // public method returning a type the caller cannot name is not a public
 // method (OI-0001-007).
 pub use inspection::{MultipartLayout, SizedContentTotal, ValidationReport};
+#[cfg(feature = "modify")]
 pub use modification::ModificationOptions; // Phase 6: Archive modification
 pub use options::{
     CompressionLevel, CompressionOptions, EntryFilter, ExtractionOptions,

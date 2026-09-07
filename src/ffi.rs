@@ -14,5 +14,7 @@ pub mod sevenz_wrapper; // Native Rust 7z backend with CRC32 metadata
 pub mod unrar; // UnRAR manual bindings
 #[cfg(feature = "rar-support")]
 pub mod wrapper; // UnRAR safe wrapper
+#[cfg(feature = "zip-read")]
 pub mod zip_wrapper; // Native Rust ZIP backend — sole reader/extractor for encrypted and unencrypted ZIP
+#[cfg(feature = "zip-write")]
 pub mod zip_writer; // Native Rust ZIP creation backend

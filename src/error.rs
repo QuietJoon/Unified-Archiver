@@ -352,16 +352,27 @@ pub(crate) mod ops {
     pub const LIST_FILES: &str = Operation::ListFiles.as_str();
     pub const LIST_FILES_FOR_LIMITS: &str = Operation::ListFilesForLimits.as_str();
     pub const VALIDATE_INTEGRITY: &str = Operation::ValidateIntegrity.as_str();
+    #[cfg_attr(not(feature = "modify"), allow(dead_code))]
     pub const MODIFY: &str = Operation::Modify.as_str();
+    #[cfg_attr(not(feature = "modify"), allow(dead_code))]
     pub const ADD_ENTRY: &str = Operation::AddEntry.as_str();
+    #[cfg_attr(not(feature = "modify"), allow(dead_code))]
     pub const REMOVE_ENTRY: &str = Operation::RemoveEntry.as_str();
+    #[cfg_attr(not(feature = "modify"), allow(dead_code))]
     pub const COMMIT_CHANGES: &str = Operation::CommitChanges.as_str();
+    #[cfg_attr(not(feature = "modify"), allow(dead_code))]
     pub const PENDING_OPERATIONS: &str = Operation::PendingOperations.as_str();
+    #[cfg_attr(not(feature = "modify"), allow(dead_code))]
     pub const CLEAR_OPERATIONS: &str = Operation::ClearOperations.as_str();
+    #[cfg_attr(not(feature = "modify"), allow(dead_code))]
     pub const ADD_DIRECTORY_ENTRY: &str = Operation::AddDirectoryEntry.as_str();
+    #[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
     pub const ADD_FILE_FROM_DATA: &str = Operation::AddFileFromData.as_str();
+    #[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
     pub const ADD_FILE_FROM_PATH_AS: &str = Operation::AddFileFromPathAs.as_str();
+    #[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
     pub const ADD_DIRECTORY: &str = Operation::AddDirectory.as_str();
+    #[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
     pub const ADD_DIRECTORY_RECURSIVE: &str = Operation::AddDirectoryRecursive.as_str();
     pub const CREATE: &str = Operation::Create.as_str();
     pub const FINISH: &str = Operation::Finish.as_str();

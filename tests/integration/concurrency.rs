@@ -4,15 +4,44 @@
 //! - FR-020: Thread-safe APIs for concurrent archive operations on different files
 //! - FR-021: Multiple archive handles used concurrently without blocking
 
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use super::common;
 
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use std::fs;
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use std::path::Path;
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use std::sync::Arc;
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use std::thread;
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "create")]
 /// Create a test ZIP using the crate's own creation API. Hermetic: no
 /// dependency on an external `zip` CLI or `which` probe (R0065-0014/0015).
 fn create_test_zip(path: &Path, content: &str) -> std::io::Result<()> {
@@ -29,6 +58,7 @@ fn create_test_zip(path: &Path, content: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn test_concurrent_archive_open() {
     // T120a: Test concurrent Archive::open() calls on different files
@@ -83,6 +113,7 @@ fn test_concurrent_archive_open() {
     );
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn test_concurrent_list_files() {
     // Test that multiple threads can list files from different archives concurrently
@@ -125,6 +156,7 @@ fn test_concurrent_list_files() {
     );
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn test_concurrent_extraction_different_archives() {
     // Test extracting from different archives concurrently
@@ -174,11 +206,13 @@ fn test_concurrent_extraction_different_archives() {
     );
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Entry metadata compared across threads — enough of `ArchiveEntry` to
 /// catch a backend that hands one thread another thread's listing, or a
 /// partially-populated one (R0001-0092).
 type EntryFacts = (String, Option<u64>, Option<u32>, unified_archive::EntryType);
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 fn entry_facts(entries: &[unified_archive::ArchiveEntry]) -> Vec<EntryFacts> {
     entries
         .iter()
@@ -186,6 +220,7 @@ fn entry_facts(entries: &[unified_archive::ArchiveEntry]) -> Vec<EntryFacts> {
         .collect()
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn test_no_data_races_on_repeated_access() {
     // Test that repeated concurrent access doesn't cause data races
@@ -336,6 +371,7 @@ fn test_concurrent_rar_open_and_list() {
     }
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn test_concurrent_performance_no_excessive_blocking() {
     // Test that concurrent operations don't block excessively

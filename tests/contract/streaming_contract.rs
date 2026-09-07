@@ -17,6 +17,10 @@ mod common;
 
 use common::fixture;
 use std::io::Read;
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use unified_archive::{Archive, CompressionOptions, StreamBound, WritableFormat};
 
 // ── Contract 1: Basic streaming reader ──
@@ -326,6 +330,7 @@ fn contract_streaming_extractor_progress() {
 
 // ── Extra: Roundtrip create-stream-verify ──
 
+#[cfg(feature = "create")]
 #[test]
 fn contract_streaming_roundtrip() {
     let temp = tempfile::tempdir().unwrap();

@@ -8,6 +8,7 @@ use crate::archive::{Archive, ArchiveBackend, ArchiveMode};
 use crate::error::{ArchiveError, Result};
 #[cfg(feature = "libarchive")]
 use crate::ffi::libarchive_wrapper::LibarchiveArchive;
+#[cfg(feature = "zip-write")]
 use crate::ffi::zip_writer::ZipWriter;
 use crate::format::ArchiveFormat;
 use manifest::{ManifestKind, SourceManifest};
@@ -21,6 +22,7 @@ use std::path::Path;
 /// `Unrar | SevenZ | ZipReader` boilerplate that used to appear on
 /// every write operation.
 pub(crate) enum WriteBackend<'a> {
+    #[cfg(feature = "zip-write")]
     Zip(&'a mut ZipWriter),
     #[cfg(feature = "libarchive")]
     Libarchive(&'a mut LibarchiveArchive),
@@ -37,6 +39,7 @@ impl Archive {
             return Err(ArchiveError::read_only_backend(op));
         }
         match &mut self.backend {
+            #[cfg(feature = "zip-write")]
             ArchiveBackend::ZipWriter(w) => Ok(WriteBackend::Zip(w)),
             #[cfg(feature = "libarchive")]
             ArchiveBackend::Libarchive(b) => Ok(WriteBackend::Libarchive(b)),
@@ -153,6 +156,7 @@ impl Archive {
         // CREATE_NEW on Windows), which surfaces `AlreadyExists`
         // atomically — no facade-level `exists()` race window.
         let backend = match format {
+            #[cfg(feature = "zip-write")]
             ArchiveFormat::Zip => {
                 // Use native Rust zip crate for ZIP creation
                 let writer = ZipWriter::create(&path_buf, &mut options)?;
@@ -184,11 +188,13 @@ impl Archive {
             mode: ArchiveMode::Write,
             format,
             entry_cache: OnceCell::new(),
+            #[cfg(feature = "modify")]
             modifications: None,
+            #[cfg(feature = "modify")]
             mod_options: None,
             _backing_tempfile: None,
             _lock_file: None,
-            write_namespace: Some(crate::modification::NamespaceTracker::default()),
+            write_namespace: Some(crate::write_namespace::NamespaceTracker::default()),
             write_poisoned: false,
             finalized: false,
         })
@@ -523,7 +529,8 @@ impl Archive {
                 // handle always carries a tracker. Plan against a
                 // throwaway tracker so the step still runs — and still
                 // rejects — rather than skipping validation.
-                let mut txn = NamespaceTxn::new(crate::modification::NamespaceTracker::default());
+                let mut txn =
+                    NamespaceTxn::new(crate::write_namespace::NamespaceTracker::default());
                 (plan(&mut txn)?, None)
             }
         };
@@ -548,7 +555,7 @@ impl Archive {
 /// sets before every add to obtain the same all-or-nothing property
 /// (R0080-0031 / R0080-0032), which made an N-entry create quadratic.
 struct NamespaceTxn {
-    live: crate::modification::NamespaceTracker,
+    live: crate::write_namespace::NamespaceTracker,
     undo: NamespaceUndo,
 }
 
@@ -563,7 +570,7 @@ struct NamespaceUndo {
 }
 
 impl NamespaceTxn {
-    fn new(live: crate::modification::NamespaceTracker) -> Self {
+    fn new(live: crate::write_namespace::NamespaceTracker) -> Self {
         Self {
             live,
             undo: NamespaceUndo::default(),
@@ -573,7 +580,7 @@ impl NamespaceTxn {
     /// Reserve `path` as a file. Delegates to the shared modify-side
     /// rule set so the create-side gate cannot drift from it.
     fn record_file(&mut self, op: &'static str, path: &str) -> Result<()> {
-        let mut probe = crate::modification::NamespaceTracker::default();
+        let mut probe = crate::write_namespace::NamespaceTracker::default();
         probe.record_file(op, path)?;
         self.journal(probe);
         self.live.record_file(op, path)
@@ -581,7 +588,7 @@ impl NamespaceTxn {
 
     /// Reserve `path` as a directory. See [`Self::record_file`].
     fn record_dir(&mut self, op: &'static str, path: &str) -> Result<()> {
-        let mut probe = crate::modification::NamespaceTracker::default();
+        let mut probe = crate::write_namespace::NamespaceTracker::default();
         probe.record_dir(op, path)?;
         self.journal(probe);
         self.live.record_dir(op, path)
@@ -594,7 +601,7 @@ impl NamespaceTxn {
     /// and are skipped; journalling a key the live record then fails to
     /// insert is harmless, because the undo removes an absent key as a
     /// no-op.
-    fn journal(&mut self, probe: crate::modification::NamespaceTracker) {
+    fn journal(&mut self, probe: crate::write_namespace::NamespaceTracker) {
         for key in probe.file_paths {
             if !self.live.file_paths.contains(&key) {
                 self.undo.files.push(key);
@@ -608,7 +615,7 @@ impl NamespaceTxn {
     }
 
     /// Hand the live tracker back together with the undo journal.
-    fn finish(self) -> (crate::modification::NamespaceTracker, NamespaceUndo) {
+    fn finish(self) -> (crate::write_namespace::NamespaceTracker, NamespaceUndo) {
         (self.live, self.undo)
     }
 }
@@ -616,7 +623,7 @@ impl NamespaceTxn {
 impl NamespaceUndo {
     /// Remove every key the transaction newly inserted, restoring the
     /// tracker to its pre-transaction state.
-    fn apply(&self, live: &mut crate::modification::NamespaceTracker) {
+    fn apply(&self, live: &mut crate::write_namespace::NamespaceTracker) {
         for key in &self.files {
             live.file_paths.remove(key);
         }
@@ -805,6 +812,16 @@ mod tests {
 
     // ── Archive::create tests ──
 
+    #[cfg(feature = "create")]
+    #[cfg(feature = "create")]
+    #[cfg(feature = "create")]
+    #[cfg(feature = "create")]
+    #[cfg(feature = "create")]
+    #[cfg(feature = "create")]
+    #[cfg(feature = "create")]
+    #[cfg(feature = "create")]
+    #[cfg(feature = "create")]
+    #[cfg(feature = "create")]
     #[test]
     fn test_create_zip() {
         let temp = tempfile::tempdir().unwrap();
@@ -813,6 +830,7 @@ mod tests {
         let archive = Archive::create(&path, options).unwrap();
         assert_eq!(archive.format(), ArchiveFormat::Zip);
         assert_eq!(archive.mode, ArchiveMode::Write);
+        #[cfg(feature = "modify")]
         assert!(archive.modifications.is_none());
     }
 

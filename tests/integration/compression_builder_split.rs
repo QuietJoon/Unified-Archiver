@@ -12,7 +12,7 @@
 // two separate ones expand to the same `allow` when both are off, which
 // clippy rejects as a duplicated attribute.
 #[cfg_attr(
-    not(all(feature = "sevenzip", feature = "libarchive")),
+    not(all(feature = "create", feature = "sevenzip", feature = "libarchive")),
     allow(unused_imports)
 )]
 use unified_archive::{
@@ -20,6 +20,7 @@ use unified_archive::{
     SevenZCompressionOptions, WritableFormat, ZipCompressionOptions,
 };
 
+#[cfg(feature = "create")]
 fn unique_dest(prefix: &str, ext: &str) -> std::path::PathBuf {
     // Per-test scratch path under TMPDIR (set by the project's test
     // harness to a machine-local scratch volume). Strictly per-test so
@@ -31,6 +32,7 @@ fn unique_dest(prefix: &str, ext: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{prefix}_{nonce}.{ext}"))
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn zip_compression_options_round_trips() {
     let opts = ZipCompressionOptions::new().level(CompressionLevel::Maximum);
@@ -51,6 +53,7 @@ fn zip_compression_options_round_trips() {
     let _ = std::fs::remove_file(&archive_path);
 }
 
+#[cfg(feature = "create")]
 #[cfg(all(feature = "sevenzip", feature = "libarchive"))]
 #[test]
 fn seven_zip_compression_options_round_trips() {
@@ -71,6 +74,7 @@ fn seven_zip_compression_options_round_trips() {
     let _ = std::fs::remove_file(&archive_path);
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn libarchive_compression_options_round_trips_tar() {
@@ -91,6 +95,7 @@ fn libarchive_compression_options_round_trips_tar() {
     let _ = std::fs::remove_file(&archive_path);
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn libarchive_compression_options_round_trips_tar_gz() {
@@ -111,6 +116,7 @@ fn libarchive_compression_options_round_trips_tar_gz() {
     let _ = std::fs::remove_file(&archive_path);
 }
 
+#[cfg(feature = "create")]
 #[test]
 // The deprecated loose constructor is this test's SUBJECT, not an oversight:
 // it is the only path that can hold a non-creatable format long enough to

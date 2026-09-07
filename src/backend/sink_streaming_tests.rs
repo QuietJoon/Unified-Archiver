@@ -22,11 +22,20 @@
 //! route produces, and the chunking is real rather than one call with
 //! everything in it.
 
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use std::io::Read;
 
 use super::*;
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use crate::test_utils::fixture;
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Collect a whole payload through the sink, plus the chunk count.
 fn drain(backend: &dyn ReadBackend, id: usize, path: &str) -> Result<(Vec<u8>, usize, u64)> {
     let mut out = Vec::new();
@@ -40,6 +49,7 @@ fn drain(backend: &dyn ReadBackend, id: usize, path: &str) -> Result<(Vec<u8>, u
     Ok((out, chunks, total))
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// The reported byte count must equal what the sink actually received. A
 /// backend that returned a declared size instead of the decoded length would
 /// pass every "bytes come out" check and still be lying.
@@ -54,6 +64,7 @@ fn assert_total_matches(bytes: &[u8], total: u64, label: &str) {
 
 // ── ZIP ────────────────────────────────────────────────────────────────────
 
+#[cfg(all(feature = "create", feature = "zip-read"))]
 #[test]
 fn zip_pushes_the_same_bytes_the_buffering_route_returns() {
     let archive = crate::ffi::zip_wrapper::ZipArchive::open(fixture("test.zip"))
@@ -82,6 +93,7 @@ fn zip_pushes_the_same_bytes_the_buffering_route_returns() {
     );
 }
 
+#[cfg(all(feature = "create", feature = "zip-read"))]
 #[test]
 fn zip_refuses_a_drifted_listing_id() {
     let archive = crate::ffi::zip_wrapper::ZipArchive::open(fixture("test.zip")).expect("open");
@@ -232,6 +244,7 @@ fn rar_propagates_the_sinks_own_error_across_the_callback_boundary() {
 
 // ── the property that keeps the two digest routes honest ───────────────────
 
+#[cfg(feature = "integrity")]
 /// The digest resolves CRC-less entries through the push route, and this
 /// checks that what it resolves is *correct* — not merely stable.
 ///

@@ -16,6 +16,7 @@ pub(crate) fn fixture(name: &str) -> PathBuf {
 /// 2010-01-02 03:04:06. Shared by the zip-crate backend
 /// metadata-preservation tests (R0079-0019).
 #[cfg(all(test, unix))]
+#[cfg_attr(not(feature = "modify"), allow(dead_code))]
 pub(crate) fn build_zip_with_mode_and_mtime(path: &std::path::Path) {
     use std::io::Write as _;
 

@@ -2,8 +2,10 @@ mod common;
 
 // Test archive integrity checking with validate_integrity()
 
+#[cfg_attr(not(feature = "integrity"), allow(unused_imports))]
 use unified_archive::{Archive, ArchiveError};
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_integrity_check_valid_zip() {
     let archive = Archive::open("tests/fixtures/batch_test.zip").expect("Failed to open test ZIP");
@@ -22,6 +24,7 @@ fn test_integrity_check_valid_zip() {
     println!("✓ ZIP: {} files validated successfully", report.validated);
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
@@ -42,6 +45,7 @@ fn test_integrity_check_valid_rar() {
     println!("✓ RAR: {} files validated successfully", report.validated);
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
@@ -62,6 +66,7 @@ fn test_integrity_check_valid_rar5() {
     println!("✓ RAR5: {} files validated successfully", report.validated);
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "sevenzip")]
 #[test]
 fn test_integrity_check_valid_7z() {
@@ -81,6 +86,7 @@ fn test_integrity_check_valid_7z() {
     println!("✓ 7z: {} files validated successfully", report.validated);
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_integrity_check_validation_report_structure() {
     let archive =
@@ -104,6 +110,7 @@ fn test_integrity_check_validation_report_structure() {
     println!("  Files failed: {}", report.failed.len());
 }
 
+#[cfg(feature = "integrity")]
 fn count_directories(archive: &Archive) -> usize {
     archive
         .list_files()
@@ -113,6 +120,7 @@ fn count_directories(archive: &Archive) -> usize {
         .count()
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_integrity_check_across_formats() {
@@ -152,6 +160,7 @@ fn test_integrity_check_across_formats() {
     }
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_integrity_check_empty_archive() {
     // Test with an archive that has no files
@@ -188,6 +197,7 @@ fn test_integrity_check_empty_archive() {
     );
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_integrity_check_encrypted_archive() {

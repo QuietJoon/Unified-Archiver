@@ -2057,6 +2057,7 @@ mod tests {
         assert_eq!(caps.compression_write, Support::Full);
     }
 
+    #[cfg(feature = "create")]
     #[test]
     fn test_create_with_password_rejected_for_zip() {
         use crate::options::CompressionOptions;

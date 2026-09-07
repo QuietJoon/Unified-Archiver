@@ -10,8 +10,13 @@ use std::fs;
 use std::io::Write as _;
 use std::path::PathBuf;
 
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use unified_archive::{Archive, CompressionOptions, WritableFormat};
 
+#[cfg(feature = "create")]
 #[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
 fn build_tar_gz(path: &std::path::Path, entries: &[(&str, &[u8])]) {
     // `CompressionOptions` is `#[non_exhaustive]`; `..Default::default()` does
@@ -27,6 +32,7 @@ fn build_tar_gz(path: &std::path::Path, entries: &[(&str, &[u8])]) {
     creator.finish().expect("finish tar.gz");
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn libarchive_listing_is_frozen_at_first_observation() {

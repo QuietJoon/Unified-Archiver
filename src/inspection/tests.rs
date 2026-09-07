@@ -174,6 +174,7 @@ fn test_find_entry_empty_path() {
 
 // ── validate_integrity tests ──
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_validate_integrity_valid_zip() {
     let archive = Archive::open(fixture("test.zip")).unwrap();
@@ -189,6 +190,7 @@ fn test_validate_integrity_valid_zip() {
     assert_eq!(report.total_entries, archive.entry_count().unwrap());
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "sevenzip")]
 #[test]
 fn test_validate_integrity_valid_7z() {
@@ -199,6 +201,7 @@ fn test_validate_integrity_valid_7z() {
 
 // ── calculate_archive_crc tests ──
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_calculate_archive_crc_zip() {
     let archive = Archive::open(fixture("test.zip")).unwrap();
@@ -208,6 +211,7 @@ fn test_calculate_archive_crc_zip() {
     assert_eq!(crc, crc2);
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_calculate_archive_crc_is_sum_of_entry_crcs() {
     let archive = Archive::open(fixture("test.zip")).unwrap();
@@ -222,6 +226,7 @@ fn test_calculate_archive_crc_is_sum_of_entry_crcs() {
 
 // ── calculate_manifest_digest tests ──
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_calculate_manifest_digest_deterministic() {
     let archive = Archive::open(fixture("test.zip")).unwrap();
@@ -234,6 +239,7 @@ fn test_calculate_manifest_digest_deterministic() {
     );
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_calculate_manifest_digest_differs_from_archive_crc() {
     let archive = Archive::open(fixture("test.zip")).unwrap();
@@ -248,6 +254,7 @@ fn test_calculate_manifest_digest_differs_from_archive_crc() {
     );
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_calculate_manifest_digest_matches_manual_computation() {
     let archive = Archive::open(fixture("test.zip")).unwrap();
@@ -275,6 +282,7 @@ fn test_calculate_manifest_digest_matches_manual_computation() {
     assert_eq!(actual, expected);
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "sevenzip")]
 #[test]
 fn test_calculate_manifest_digest_7z() {
@@ -285,6 +293,7 @@ fn test_calculate_manifest_digest_7z() {
     assert_eq!(digest, digest2);
 }
 
+#[cfg(feature = "integrity")]
 // TAR has no per-entry CRC in its metadata; the digest must still be
 // content-based (streamed CRC32) and not fall back to path/size — otherwise
 // renamed-but-identical content would appear distinct.
@@ -347,6 +356,7 @@ fn test_resolve_crc32_single_pass_covers_every_crc_less_entry() {
     }
 }
 
+#[cfg(feature = "integrity")]
 /// The one-pass resolver and the per-entry resolver must agree value for
 /// value. They are two routes to the same number, and only one of them is
 /// exercised by the public digest on a libarchive archive — so pin the

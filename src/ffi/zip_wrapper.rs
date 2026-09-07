@@ -1552,6 +1552,7 @@ impl ZipArchive {
         Ok(crate::streaming::StreamingExtractor::from_bytes(data))
     }
 
+    #[cfg_attr(not(feature = "integrity"), allow(dead_code))]
     /// Stream one entry addressed by its stable listing id rather than by
     /// path (ti-2a6e3153 for tar; DCR-012 brings ZIP under the same rule).
     ///

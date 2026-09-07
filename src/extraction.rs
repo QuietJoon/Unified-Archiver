@@ -774,7 +774,9 @@ impl Archive {
                 options.preserve_times,
                 options.verify_crc32,
             ),
+            #[cfg(feature = "zip-write")]
             ArchiveBackend::ZipWriter(_) => Err(ArchiveError::write_mode_only(ops::EXTRACT_FILE)),
+            #[cfg(feature = "zip-read")]
             ArchiveBackend::ZipReader(zip) => zip.extract_file_with_options_preserve(
                 file_path,
                 &options.destination,
@@ -810,6 +812,7 @@ impl Archive {
         Ok(())
     }
 
+    #[cfg_attr(not(feature = "read"), allow(dead_code))]
     /// Extract a single file to memory.
     ///
     /// Returns the file contents as a `Vec<u8>` without writing to disk.
@@ -921,6 +924,16 @@ impl Archive {
             .extract_to_memory_with_limit(file_path, effective_entry_cap(&options.limits))
     }
 
+    // Dead in a read-only profile (no write path calls it) and dead in a
+    // write-only profile (no read surface at all), so one condition has to
+    // cover both: allow unless this build has read AND a write operation.
+    #[cfg_attr(
+        not(all(
+            all(feature = "read", any(feature = "create", feature = "modify")),
+            feature = "integrity"
+        )),
+        allow(dead_code)
+    )]
     /// Same as `extract_to_memory` but skips the per-call entry-list rebuild and
     /// safety pre-check. Internal callers (e.g. `commit_changes`) use this when
     /// the entry has already been validated against a fresh listing.
@@ -1229,6 +1242,7 @@ impl Archive {
         })
     }
 
+    #[cfg_attr(not(feature = "integrity"), allow(dead_code))]
     /// Same as `extract_to_stream` but skips the per-call entry-list rebuild and
     /// safety pre-check. Used by `commit_changes` to copy retained entries.
     ///
@@ -1564,6 +1578,16 @@ pub(crate) struct ValidatedSource<'a> {
 }
 
 impl ValidatedSource<'_> {
+    // Dead in a read-only profile (no write path calls it) and dead in a
+    // write-only profile (no read surface at all), so one condition has to
+    // cover both: allow unless this build has read AND a write operation.
+    #[cfg_attr(
+        not(all(
+            all(feature = "read", any(feature = "create", feature = "modify")),
+            feature = "integrity"
+        )),
+        allow(dead_code)
+    )]
     /// Decode `file_path` to an in-memory `Vec<u8>` against the
     /// already-validated archive. Skips the per-call entry-list rebuild
     /// and safety pre-check that public extraction APIs perform.
@@ -1571,6 +1595,7 @@ impl ValidatedSource<'_> {
         self.archive.extract_to_memory_unchecked(file_path)
     }
 
+    #[cfg_attr(not(feature = "integrity"), allow(dead_code))]
     /// Streaming variant of [`Self::extract_to_memory`].
     pub(crate) fn extract_to_stream(
         &self,
@@ -1579,6 +1604,7 @@ impl ValidatedSource<'_> {
         self.archive.extract_to_stream_unchecked(file_path)
     }
 
+    #[cfg_attr(not(feature = "integrity"), allow(dead_code))]
     /// Stream a single already-listed entry by its stable listing id,
     /// applying the per-entry resource-limit checks against the resolved
     /// entry (ti-2a6e3153 / R0079-0028).

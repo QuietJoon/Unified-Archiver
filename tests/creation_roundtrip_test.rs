@@ -2,11 +2,15 @@
 //!
 //! These tests create archives and then extract them to verify correctness.
 
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use std::fs;
 // The 7z round-trip needs both features — `sevenzip` reads 7z but libarchive
 // is what writes it — so the allow has to track both, not just `sevenzip`.
 #[cfg_attr(
-    not(all(feature = "sevenzip", feature = "libarchive")),
+    not(all(feature = "create", feature = "sevenzip", feature = "libarchive")),
     allow(unused_imports)
 )]
 use unified_archive::{
@@ -16,6 +20,7 @@ use unified_archive::{
 #[path = "common/mod.rs"]
 mod common;
 
+#[cfg(feature = "create")]
 // Note: ZIP creation uses the native Rust `zip` crate instead of libarchive,
 // fixing the known central directory issues. Since DCR-009 the same crate also
 // handles ZIP reading and extraction, so both directions share one backend.
@@ -57,6 +62,7 @@ fn test_create_and_extract_zip() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn test_create_and_extract_targz() {
@@ -88,6 +94,7 @@ fn test_create_and_extract_targz() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "create")]
 #[cfg(all(feature = "sevenzip", feature = "libarchive"))]
 #[test]
 fn test_create_and_extract_7z() {

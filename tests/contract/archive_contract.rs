@@ -14,6 +14,10 @@
 mod common;
 
 use common::fixture;
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use unified_archive::{Archive, ArchiveError, ArchiveFormat, CompressionOptions, WritableFormat};
 
 // ── Contract 1: Open valid archive for each supported format ──
@@ -121,6 +125,7 @@ fn contract_open_nonexistent_file_returns_io_error() {
 
 // ── Contract 4: Create archive for each writable format ──
 
+#[cfg(feature = "create")]
 #[test]
 fn contract_create_zip_archive() {
     let temp = tempfile::tempdir().unwrap();
@@ -140,6 +145,7 @@ fn contract_create_zip_archive() {
     assert_eq!(entries[0].path, "hello.txt");
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn contract_create_tar_archive() {
@@ -154,6 +160,7 @@ fn contract_create_tar_archive() {
     assert!(path.exists(), "TAR file should exist after creation");
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn contract_create_tar_gz_archive() {
@@ -168,6 +175,7 @@ fn contract_create_tar_gz_archive() {
     assert!(path.exists());
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn contract_create_tar_bz2_archive() {
@@ -182,6 +190,7 @@ fn contract_create_tar_bz2_archive() {
     assert!(path.exists());
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn contract_create_tar_xz_archive() {
@@ -198,6 +207,7 @@ fn contract_create_tar_xz_archive() {
 
 // ── Contract 5: Modify unsupported format ──
 
+#[cfg(feature = "modify")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn contract_modify_rar_returns_unsupported() {
@@ -211,6 +221,7 @@ fn contract_modify_rar_returns_unsupported() {
     );
 }
 
+#[cfg(feature = "modify")]
 #[test]
 fn contract_modify_tar_returns_unsupported() {
     // TAR doesn't support modification (only ZIP and 7z do via can_modify())
@@ -267,6 +278,7 @@ fn contract_close_valid_archive() {
     assert!(result.is_ok(), "Closing valid archive should succeed");
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn contract_finish_created_archive() {
     let temp = tempfile::tempdir().unwrap();
@@ -294,6 +306,7 @@ fn contract_drop_auto_closes_archive() {
     assert!(!entries.is_empty());
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn contract_drop_created_archive_without_finish() {
     let temp = tempfile::tempdir().unwrap();

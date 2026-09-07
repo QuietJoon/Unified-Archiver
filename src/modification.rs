@@ -10,6 +10,7 @@ use crate::error::{
     ArchiveError, ArchiveWarning, Result, ResultWithWarnings, UnsupportedEntryKind,
 };
 use crate::format::ArchiveFormat;
+use crate::write_namespace::{NamespaceTracker, normalize_dup_check_path};
 use fs4::FileExt;
 use std::collections::HashSet;
 use std::fs::OpenOptions;
@@ -178,52 +179,6 @@ pub(crate) enum EntrySource {
     },
 }
 
-/// Two-set namespace tracker shared between Modify mode's
-/// `commit_changes` gate and Write mode's per-add gate (R0069-0052,
-/// AD 0062 A.4).
-///
-/// `file_paths` collects normalised paths that will land as files;
-/// `dir_paths` collects every directory path implied by the
-/// namespace (explicit directory entries plus all proper ancestors
-/// of file paths). The two sets must remain disjoint — an
-/// intersection means the same archive-internal path is being
-/// claimed as both a file and a directory, which is structurally
-/// impossible.
-#[derive(Default)]
-pub(crate) struct NamespaceTracker {
-    pub(crate) file_paths: HashSet<String>,
-    pub(crate) dir_paths: HashSet<String>,
-}
-
-impl NamespaceTracker {
-    /// Record a file-typed path. Errors on duplicate-or-conflict per
-    /// the rules in [`record_file`].
-    ///
-    /// `op` labels the originating operation so the error message and
-    /// `OperationBlocked.operation` field reference the caller's
-    /// public method (e.g. `add_file_from_data`, `commit_changes`)
-    /// instead of always reporting `commit_changes`.
-    pub(crate) fn record_file(&mut self, op: &'static str, path: &str) -> Result<()> {
-        record_file(op, &mut self.file_paths, &mut self.dir_paths, path)
-    }
-
-    /// Record a directory-typed path. Errors on
-    /// directory-vs-existing-file conflict per the rules in
-    /// [`record_dir`].
-    pub(crate) fn record_dir(&mut self, op: &'static str, path: &str) -> Result<()> {
-        record_dir(op, &mut self.file_paths, &mut self.dir_paths, path)
-    }
-
-    /// Whether `path` (after dup-check normalization) has already been
-    /// recorded as a directory. Lets the create-side `add_directory`
-    /// skip re-emitting a directory entry whose normalized path was
-    /// already emitted (R0081-0038) without reaching into the private
-    /// `normalize_dup_check_path` helper from another module.
-    pub(crate) fn contains_dir(&self, path: &str) -> bool {
-        self.dir_paths.contains(&normalize_dup_check_path(path))
-    }
-}
-
 /// Tracks modifications to an archive in Modify mode
 #[derive(Default)]
 pub(crate) struct ModificationTracker {
@@ -386,6 +341,7 @@ impl Archive {
     // Without `libarchive` the backend binding below diverges, so
     // everything after it is unreachable in that configuration. That is
     // the intended shape (AD-0071 / AD-0058 decision 1), not an oversight.
+    #[cfg(feature = "modify")]
     #[cfg_attr(not(feature = "libarchive"), allow(unreachable_code, unused_variables))]
     pub fn modify(path: impl AsRef<Path>) -> Result<Self> {
         let path_buf = path.as_ref().to_path_buf();
@@ -567,6 +523,7 @@ impl Archive {
         Ok(archive)
     }
 
+    #[cfg(feature = "modify")]
     /// Borrow the modification tracker, asserting Modify mode. `Archive::open_modify`
     /// establishes the invariant that `mode == Modify` iff `modifications.is_some()`,
     /// so both failure branches map to the same `OperationBlocked` error labelled
@@ -817,6 +774,7 @@ impl Archive {
         Ok(())
     }
 
+    #[cfg(feature = "modify")]
     /// Get pending operations count.
     ///
     /// Returns the total queued additions, removals, and directory entries,
@@ -835,6 +793,7 @@ impl Archive {
             + modifications.added_directories.len())
     }
 
+    #[cfg(feature = "modify")]
     /// Clear pending operations.
     ///
     /// Returns `OperationBlocked` if the archive is not in Modify mode
@@ -1111,6 +1070,7 @@ impl Archive {
             .map(|result| result.value)
     }
 
+    #[cfg(feature = "modify")]
     /// [`Archive::commit_changes`] that also hands back the warnings the
     /// rewrite produced.
     ///
@@ -1352,6 +1312,7 @@ impl Archive {
             // streaming/staging decisions cannot drift between the
             // metadata-preserving and plain variants.
             match &mut new_archive.backend {
+                #[cfg(feature = "zip-write")]
                 ArchiveBackend::ZipWriter(w) => {
                     let mut stream = src.extract_to_stream(&entry.path)?;
                     if preserve {
@@ -1449,6 +1410,7 @@ impl Archive {
                     mut reader,
                     size: Some(size),
                 } => match &mut new_archive.backend {
+                    #[cfg(feature = "zip-write")]
                     ArchiveBackend::ZipWriter(w) => {
                         // R0075-0032: route through the size-aware
                         // ZipWriter helper so a reader that under-
@@ -1483,6 +1445,7 @@ impl Archive {
                             .get(),
                     )?;
                     match &mut new_archive.backend {
+                        #[cfg(feature = "zip-write")]
                         ArchiveBackend::ZipWriter(w) => {
                             w.add_file_from_reader(&path, &mut staged)?;
                         }
@@ -1913,20 +1876,6 @@ fn cross_check_source_listing(
 // time (libarchive already did the first walk for list_files). Tolerable for
 // thousand-entry archives but the real fix is to switch the ZIP modify source
 // from libarchive to the zip crate so both walks collapse into one.
-/// Canonicalise an archive-internal path for duplicate-detection
-/// comparison: route through the shared `ffi::common::normalize_path`
-/// (backslash → forward slash) and then trim any trailing `/` so
-/// directory entries `dir/` and `dir` compare equal.
-/// Used by `commit_changes` to detect paths that would land at the same
-/// writer output even when their input form differs (R0069-0060 /
-/// R0069-0061). Single allocation per call: `normalize_path` produces
-/// the `String`, the truncation is in-place.
-fn normalize_dup_check_path(path: &str) -> String {
-    let mut normalized = crate::ffi::common::normalize_path(path);
-    let trimmed_len = normalized.trim_end_matches('/').len();
-    normalized.truncate(trimmed_len);
-    normalized
-}
 
 /// Stage an entry whose uncompressed size is unknown into a tempfile so
 /// libarchive's writer (which needs an entry size in the header) can
@@ -2058,117 +2007,6 @@ fn drain_into_tempfile<R: Read>(
         .seek(SeekFrom::Start(0))
         .map_err(|e| ArchiveError::io("modify_stage_seek", entry_path, e))?;
     Ok((staging, total))
-}
-
-/// Yield every proper ancestor directory path for an already-normalised
-/// dup-check key (forward slashes, no trailing `/`). Used by
-/// `commit_changes`'s namespace-collision gate to catch a vs a/b style
-/// directory/file conflicts (R0069-0062). For input `"a/b/c"` returns
-/// `["a", "a/b"]` in shallow-to-deep order. Empty input yields nothing.
-fn ancestor_paths(normalized: &str) -> Vec<String> {
-    if normalized.is_empty() {
-        return Vec::new();
-    }
-    let mut acc = Vec::new();
-    let mut cursor = 0;
-    while let Some(slash) = normalized[cursor..].find('/') {
-        cursor += slash;
-        acc.push(normalized[..cursor].to_string());
-        cursor += 1;
-        if cursor >= normalized.len() {
-            break;
-        }
-    }
-    acc
-}
-
-/// Record a file-typed path in the dup-check namespace. Rejects
-/// retained-or-added-twice collisions, file-vs-directory collisions
-/// at the leaf path, and file-under-leaf-as-file collisions
-/// (R0069-0062). On success, also marks every proper ancestor as a
-/// directory so a later file at the same ancestor key fails.
-///
-/// Promoted to `pub(crate)` so the create-side namespace gate
-/// (R0069-0052, AD 0062 A.4) can share the modify-side helper. `op`
-/// is threaded through every error so write-mode (`add_file_from_*`)
-/// and modify-mode (`commit_changes`) callers each see their own
-/// public-method name in the diagnostic instead of always reading
-/// `commit_changes:`.
-pub(crate) fn record_file(
-    op: &'static str,
-    file_paths: &mut std::collections::HashSet<String>,
-    dir_paths: &mut std::collections::HashSet<String>,
-    path: &str,
-) -> Result<()> {
-    let key = normalize_dup_check_path(path);
-    if dir_paths.contains(&key) {
-        return Err(ArchiveError::operation_blocked(
-            op,
-            format!("{op}: path '{path}' is claimed as both a file and a directory",),
-        ));
-    }
-    if !file_paths.insert(key.clone()) {
-        return Err(ArchiveError::operation_blocked(
-            op,
-            format!("{op}: duplicate output path '{path}' (retained or added twice)",),
-        ));
-    }
-    for ancestor in ancestor_paths(&key) {
-        if file_paths.contains(&ancestor) {
-            return Err(ArchiveError::operation_blocked(
-                op,
-                format!(
-                    "{op}: path '{ancestor}' is claimed as both a file and a directory (file '{path}' lives under it)",
-                ),
-            ));
-        }
-        dir_paths.insert(ancestor);
-    }
-    Ok(())
-}
-
-/// Record a directory-typed entry in the dup-check namespace. Rejects
-/// directory-vs-existing-file collisions at the leaf path and
-/// directory-under-leaf-as-file collisions, and — mirroring
-/// [`record_file`] — reserves every proper ancestor as a directory so a
-/// later file at an ancestor key fails (R0001-0011). Recording the same
-/// directory path more than once is accepted and coalesced into the
-/// single `dir_paths` slot — but that coalescing only keeps the
-/// *namespace* unique; the emission paths must still avoid writing the
-/// same directory entry twice, so callers skip re-emitting a directory
-/// whose normalized path was already emitted (the modification commit
-/// loop and `Archive::add_directory` both do this, R0081-0038). See
-/// [`record_file`] for the rationale of the `op` argument.
-pub(crate) fn record_dir(
-    op: &'static str,
-    file_paths: &mut std::collections::HashSet<String>,
-    dir_paths: &mut std::collections::HashSet<String>,
-    path: &str,
-) -> Result<()> {
-    let key = normalize_dup_check_path(path);
-    if file_paths.contains(&key) {
-        return Err(ArchiveError::operation_blocked(
-            op,
-            format!("{op}: path '{path}' is claimed as both a file and a directory",),
-        ));
-    }
-    // R0001-0011: without the ancestor sweep a file 'a' plus a directory
-    // 'a/b' was accepted in either order — `record_file` reserved 'a' as
-    // a directory but `record_dir` neither checked nor reserved its
-    // ancestors, so the rewrite could emit an impossible namespace.
-    for ancestor in ancestor_paths(&key) {
-        if file_paths.contains(&ancestor) {
-            return Err(ArchiveError::operation_blocked(
-                op,
-                format!(
-                    "{op}: path '{ancestor}' is claimed as both a file and a directory (directory '{path}' lives under it)",
-                ),
-            ));
-        }
-        dir_paths.insert(ancestor);
-    }
-    dir_paths.insert(key);
-    Ok(())
 }
 
 /// R0071-0002 container-format gate: a modify-mode rewrite must keep

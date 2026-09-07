@@ -9,16 +9,23 @@
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use unified_archive::{Archive, CompressionOptions, WritableFormat};
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 fn temp_dir() -> PathBuf {
     std::env::temp_dir()
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 fn cleanup(path: &std::path::Path) {
     let _ = std::fs::remove_file(path);
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Probe whether the temp filesystem accepts non-UTF-8 byte sequences
 /// in filenames. Linux ext4/xfs/btrfs do; macOS APFS/HFS+ enforce
 /// UTF-8 normalization and reject `\xff\xfe` with `EILSEQ`. Memoized
@@ -36,6 +43,7 @@ fn fs_supports_non_utf8_names() -> bool {
     })
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Fail loudly when the temp filesystem rejects the fixtures these tests
 /// need.
 ///
@@ -54,6 +62,7 @@ fn fs_supports_non_utf8_names() -> bool {
 /// TMPDIR=/Volumes/Temp/claude cargo test --test integration_tests --all-features \
 ///     -- --ignored --test-threads=4 integration::non_utf8_paths
 /// ```
+#[allow(unused_macros)]
 macro_rules! require_non_utf8_fs {
     () => {
         assert!(
@@ -75,6 +84,7 @@ macro_rules! require_non_utf8_fs {
               --test integration_tests --all-features -- --ignored --test-threads=4 \
               integration::non_utf8_paths`"
 )]
+#[cfg(feature = "create")]
 fn libarchive_path_roundtrips_through_non_utf8_archive_name() {
     require_non_utf8_fs!();
     // The archive's filesystem path itself contains \xff\xfe — invalid
@@ -159,6 +169,7 @@ fn unrar_archive_path_preserves_pathbuf_through_open() {
               --test integration_tests --all-features -- --ignored --test-threads=4 \
               integration::non_utf8_paths`"
 )]
+#[cfg(feature = "create")]
 fn add_file_from_path_rejects_non_utf8_filename_loudly() {
     require_non_utf8_fs!();
     // AD 0064 / R0075-0007: silent to_string_lossy at this boundary is
@@ -201,6 +212,7 @@ fn add_file_from_path_rejects_non_utf8_filename_loudly() {
               --test integration_tests --all-features -- --ignored --test-threads=4 \
               integration::non_utf8_paths`"
 )]
+#[cfg(feature = "create")]
 fn add_file_from_path_as_accepts_non_utf8_source_with_explicit_name() {
     require_non_utf8_fs!();
     // The escape hatch: callers with a non-UTF-8 source can still add
@@ -238,6 +250,7 @@ fn add_file_from_path_as_accepts_non_utf8_source_with_explicit_name() {
               --test integration_tests --all-features -- --ignored --test-threads=4 \
               integration::non_utf8_paths`"
 )]
+#[cfg(feature = "create")]
 fn libarchive_extract_to_memory_works_through_non_utf8_archive_name() {
     require_non_utf8_fs!();
     let mut archive_name = std::ffi::OsString::from("");

@@ -801,6 +801,7 @@ fn test_sevenz_extract_to_stream_by_listing_id_hits_each_occurrence() {
     );
 }
 
+#[cfg(feature = "integrity")]
 /// The regression this whole seam exists for, asserted at the
 /// **facade** — the only altitude that exercises the
 /// `ReadBackend::extract_to_stream_by_listing_id` forward. Calling the
@@ -909,6 +910,7 @@ fn assert_identity_blocked(err: ArchiveError, op: &str) {
     }
 }
 
+#[cfg(feature = "integrity")]
 /// Every operation that re-opens the archive refuses a same-name
 /// replacement, at the facade — the altitude a caller actually uses.
 ///

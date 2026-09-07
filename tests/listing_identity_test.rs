@@ -39,15 +39,27 @@ mod common;
 
 use std::path::Path;
 
+#[cfg_attr(
+    not(all(feature = "integrity", any(feature = "create", feature = "modify"))),
+    allow(unused_imports)
+)]
 use unified_archive::{
     Archive, ArchiveError, CompressionOptions, ExtractionOptions, StreamBound, WritableFormat,
 };
 
+#[cfg_attr(
+    not(all(feature = "integrity", any(feature = "create", feature = "modify"))),
+    allow(dead_code)
+)]
 /// The entry name both the bound archive and its replacement carry, so the
 /// name-drift guards would pass the swap through and the identity binding
 /// is provably the thing doing the refusing.
 const ENTRY: &str = "payload.bin";
 
+#[cfg_attr(
+    not(all(feature = "integrity", any(feature = "create", feature = "modify"))),
+    allow(dead_code)
+)]
 /// Deterministic, poorly-compressible payload bytes.
 ///
 /// Two properties are wanted, and a run of one repeated byte gives
@@ -68,6 +80,8 @@ fn payload(len: usize) -> Vec<u8> {
     out
 }
 
+#[cfg_attr(not(feature = "integrity"), allow(dead_code))]
+#[cfg(feature = "create")]
 /// Single-entry archive of `format` at `path`, whose only member is
 /// [`ENTRY`] carrying `len` bytes.
 fn write_archive(path: &Path, format: WritableFormat, len: usize) {
@@ -79,6 +93,10 @@ fn write_archive(path: &Path, format: WritableFormat, len: usize) {
     archive.finish().expect("finish archive");
 }
 
+#[cfg_attr(
+    not(all(feature = "integrity", any(feature = "create", feature = "modify"))),
+    allow(dead_code)
+)]
 /// Name and declared size of the archive's single file entry, taken from
 /// the AD 0065 snapshot every later operation reuses.
 fn only_file_entry(archive: &Archive) -> (String, Option<u64>) {
@@ -90,6 +108,10 @@ fn only_file_entry(archive: &Archive) -> (String, Option<u64>) {
     (file.path.clone(), file.size)
 }
 
+#[cfg_attr(
+    not(all(feature = "integrity", any(feature = "create", feature = "modify"))),
+    allow(dead_code)
+)]
 /// Install `replacement` at `target` as a genuinely different file, and
 /// assert the precondition that makes the swap detectable on every
 /// platform: a different length, so the check binds off Unix too, where
@@ -108,6 +130,7 @@ fn rename_over(target: &Path, replacement: &Path) {
     std::fs::rename(replacement, target).expect("rename the replacement over the bound archive");
 }
 
+#[cfg(feature = "integrity")]
 /// `result` must be the identity refusal, in its own vocabulary.
 ///
 /// Generic over the success type because `StreamingExtractor` is not
@@ -142,6 +165,7 @@ fn assert_identity_refusal<T>(label: &str, result: Result<T, ArchiveError>) {
     }
 }
 
+#[cfg(feature = "integrity")]
 /// The whole read surface, against a handle whose archive has been
 /// replaced. Every one of these re-opens the archive by pathname, so every
 /// one of them must re-check the binding.
@@ -174,6 +198,8 @@ fn assert_every_read_operation_is_refused(
     );
 }
 
+#[cfg(feature = "integrity")]
+#[cfg(feature = "create")]
 /// libarchive (TAR): the backend with the widest by-path re-open surface —
 /// it cannot rewind its read handle, so it re-opens the file once per
 /// operation. Every one of those re-opens is a place the cached listing
@@ -201,6 +227,8 @@ fn tar_read_surface_is_refused_after_a_same_name_archive_is_swapped_in() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "integrity")]
+#[cfg(feature = "create")]
 /// 7z: `open_reader` is re-run per operation, so the listing snapshot and
 /// every later extraction can straddle a replacement exactly as the tar
 /// case does.
@@ -232,6 +260,7 @@ fn sevenz_read_surface_is_refused_after_a_same_name_archive_is_swapped_in() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "integrity")]
 /// UnRAR: `fresh_handle` re-opens the archive by pathname for the listing
 /// walk, both extract paths and the integrity walk.
 ///
@@ -278,6 +307,8 @@ fn rar_read_surface_is_refused_after_a_fixture_is_swapped_in() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "integrity")]
+#[cfg(feature = "create")]
 /// Why `len` is part of the identity, stated as a test.
 ///
 /// Appending to a tar keeps `(dev, ino)` — the file is the same file — but
@@ -334,6 +365,8 @@ fn appending_one_byte_is_refused_even_though_the_inode_is_unchanged() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "integrity")]
+#[cfg(feature = "create")]
 /// ZIP refuses too — but from the facade, not from the backend, and the
 /// difference is the whole reason this test exists.
 ///

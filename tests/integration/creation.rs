@@ -2,11 +2,20 @@
 //!
 //! Tests the creation API for creating new archives from files and data.
 
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use std::fs;
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use unified_archive::{
     Archive, ArchiveError, ArchiveFormat, CompressionLevel, CompressionOptions, WritableFormat,
 };
 
+#[cfg(feature = "create")]
 #[test]
 fn test_format_capability_check() {
     let temp = tempfile::tempdir().unwrap();
@@ -36,6 +45,7 @@ fn test_format_capability_check() {
     }
 }
 
+#[cfg(feature = "create")]
 /// Deliberately the deprecated constructor. The subject of this test is that
 /// a non-creatable format reaches `Archive::create` and is rejected *there*;
 /// `WritableFormat` cannot express `Rar` at all and `try_new` fails at
@@ -63,6 +73,7 @@ fn test_unsupported_format_rejected() {
     }
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn test_existing_file_rejected() {
     let temp = tempfile::tempdir().unwrap();
@@ -77,6 +88,7 @@ fn test_existing_file_rejected() {
     assert!(result.is_err());
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn test_add_file_from_data() {
     let temp = tempfile::tempdir().unwrap();
@@ -99,6 +111,7 @@ fn test_add_file_from_data() {
     assert_eq!(entries.len(), 2);
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn test_add_file_from_path() {
     let temp = tempfile::tempdir().unwrap();
@@ -117,6 +130,7 @@ fn test_add_file_from_path() {
     assert_eq!(entries.len(), 1);
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn test_add_file_from_path_nonexistent() {
     let temp = tempfile::tempdir().unwrap();
@@ -127,6 +141,7 @@ fn test_add_file_from_path_nonexistent() {
     assert!(creator.add_file_from_path("/nonexistent/file.txt").is_err());
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn test_add_file_from_path_as() {
     let temp = tempfile::tempdir().unwrap();
@@ -148,6 +163,7 @@ fn test_add_file_from_path_as() {
     assert_eq!(entries[0].path, "custom/path/file.txt");
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn test_add_directory() {
     let temp = tempfile::tempdir().unwrap();
@@ -168,6 +184,7 @@ fn test_add_directory() {
     assert!(entries.iter().any(|e| e.path.starts_with("folder1")));
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn test_add_directory_recursive() {
     let temp = tempfile::tempdir().unwrap();
@@ -202,6 +219,7 @@ fn test_add_directory_recursive() {
     );
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn test_add_directory_recursive_nonexistent() {
     let temp = tempfile::tempdir().unwrap();
@@ -216,6 +234,7 @@ fn test_add_directory_recursive_nonexistent() {
     );
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn test_empty_archive_finish() {
     let temp = tempfile::tempdir().unwrap();
@@ -228,6 +247,7 @@ fn test_empty_archive_finish() {
     assert!(creator.finish().is_ok());
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn test_compression_levels() {
     let levels = vec![
@@ -264,6 +284,7 @@ fn test_compression_levels() {
     }
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn test_finish_succeeds() {
     let temp = tempfile::tempdir().unwrap();
@@ -282,6 +303,7 @@ fn test_finish_succeeds() {
     assert_eq!(data, b"content");
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn test_create_compressed_tar_codec_roundtrip() {
@@ -320,6 +342,7 @@ fn test_create_compressed_tar_codec_roundtrip() {
     }
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn test_create_tar_zst_compression_levels() {

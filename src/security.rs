@@ -330,6 +330,7 @@ impl ExtractionLimits {
         self.reject_unsafe_paths
     }
 
+    #[cfg_attr(not(feature = "integrity"), allow(dead_code))]
     /// Internal "all ceilings disabled" preset for callers that must
     /// bypass every guard (e.g. the content-multiset digest, which bounds
     /// itself by each entry's declared size instead).
@@ -732,6 +733,7 @@ pub fn set_archive_path_policy(policy: ArchivePathPolicy) -> ArchivePathPolicy {
 /// use unified_archive::{Archive, CompressionOptions};
 ///
 /// # fn main() -> Result<(), unified_archive::ArchiveError> {
+/// # #[cfg(feature = "create")]
 /// with_archive_path_policy(ArchivePathPolicy::Host, || {
 ///     let mut creator = Archive::create("host-named.zip", CompressionOptions::default())?;
 ///     // `CON` is refused under the portable default, accepted here.
@@ -898,6 +900,7 @@ pub fn validate_archive_internal_path_as(
     }
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Validate an archive-internal name at the creation/modification
 /// boundary under the process policy (AD 0044).
 ///

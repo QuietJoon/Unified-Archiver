@@ -217,6 +217,7 @@ proptest! {
         }
     }
 
+    #[cfg(feature = "integrity")]
     /// Property: Validation reports are consistent across multiple runs
         #[test]
     #[serial_test::file_serial(rar)]

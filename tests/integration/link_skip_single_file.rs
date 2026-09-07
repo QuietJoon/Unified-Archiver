@@ -90,12 +90,15 @@ fn single_file_extract_rejects_zip_symlink() {
     common::cleanup(&tmp);
 }
 
+#[cfg(feature = "zip-read")]
+#[cfg(feature = "create")]
 #[test]
 #[cfg(unix)]
 fn single_file_extract_rejects_zip_symlink_zip_backend() {
     // The `zip`-crate backend is reached for encrypted ZIPs. Calling the
     // backend directly exercises the same extract_file_with_options path
     // that production uses for `open_encrypted`.
+    #[cfg(feature = "zip-read")]
     use unified_archive::ffi::zip_wrapper::ZipArchive as ZipBackend;
 
     let tmp = common::temp_test_dir();

@@ -50,6 +50,8 @@ fn contract_password_error_for_encrypted_without_password() {
     );
 }
 
+#[cfg(feature = "create")]
+#[cfg(feature = "modify")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn contract_unsupported_operation_for_rar_modify() {
@@ -69,6 +71,7 @@ fn contract_unsupported_operation_for_rar_modify() {
     );
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn contract_corruption_error_for_corrupted_archive() {
     let archive = Archive::open(fixture("corrupted_crc.zip"));
@@ -173,6 +176,7 @@ fn contract_format_error_is_descriptive() {
     );
 }
 
+#[cfg(feature = "modify")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn contract_unsupported_error_explains_why() {
@@ -249,6 +253,7 @@ fn contract_display_format_error() {
     assert!(!display.is_empty());
 }
 
+#[cfg(feature = "modify")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn contract_display_unsupported_error() {

@@ -160,6 +160,7 @@ fn staged_malformed_pax_tar() -> (std::path::PathBuf, std::path::PathBuf) {
     (dir, archive)
 }
 
+#[cfg(feature = "integrity")]
 /// The divergence itself: listing and integrity must agree about one archive.
 ///
 /// Before this fix `list_files()` refused `ARCHIVE_WARN` while

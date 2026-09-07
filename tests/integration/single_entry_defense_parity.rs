@@ -29,10 +29,16 @@ use unified_archive::ArchiveError;
 use unified_archive::ffi::libarchive_wrapper::LibarchiveArchive;
 #[cfg(feature = "sevenzip")]
 use unified_archive::ffi::sevenz_wrapper::SevenZArchive;
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
+#[cfg(feature = "zip-read")]
 use unified_archive::ffi::zip_wrapper::ZipArchive;
 
 // ── helpers ──
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Unwrap the expected rejection and hand back its Debug text.
 fn rejection_text<T>(res: Result<T, ArchiveError>, ctx: &str) -> String {
     match res {
@@ -41,6 +47,7 @@ fn rejection_text<T>(res: Result<T, ArchiveError>, ctx: &str) -> String {
     }
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 fn assert_contains(haystack: &str, needle: &str, ctx: &str) {
     assert!(
         haystack.contains(needle),
@@ -48,11 +55,13 @@ fn assert_contains(haystack: &str, needle: &str, ctx: &str) {
     );
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Build a ZIP exercising every gate branch: regular `a.txt`, directory
 /// `subdir/`, symlink `link.txt -> a.txt`, and a duplicated name
 /// `dup0.txt` (written as `dup0.txt` + `dup1.txt`, then byte-patched —
 /// entry names are not covered by any checksum, mirroring the
 /// R0079-0026 fixture technique from the since-removed piz unit tests).
+#[cfg_attr(not(feature = "zip-read"), allow(dead_code))]
 fn build_parity_zip(path: &Path) {
     let file = fs::File::create(path).unwrap();
     let mut writer = zip::ZipWriter::new(file);
@@ -147,6 +156,8 @@ fn build_tar_with_dir_and_dup(archive_path: &Path) {
 // directory and refuses the ambiguous name rather than silently handing
 // back the surviving record.
 
+#[cfg(feature = "zip-read")]
+#[cfg(feature = "create")]
 #[test]
 fn zip_backend_rejects_directory_entries() {
     let tmp = common::temp_test_dir();
@@ -181,6 +192,8 @@ fn zip_backend_rejects_directory_entries() {
     common::cleanup(&tmp);
 }
 
+#[cfg(feature = "zip-read")]
+#[cfg(feature = "create")]
 #[test]
 fn zip_backend_rejects_symlink_entries() {
     let tmp = common::temp_test_dir();
@@ -216,6 +229,8 @@ fn zip_backend_rejects_symlink_entries() {
     common::cleanup(&tmp);
 }
 
+#[cfg(feature = "zip-read")]
+#[cfg(feature = "create")]
 #[test]
 fn zip_backend_duplicate_name_rejected() {
     let tmp = common::temp_test_dir();
@@ -254,6 +269,8 @@ fn zip_backend_duplicate_name_rejected() {
     common::cleanup(&tmp);
 }
 
+#[cfg(feature = "zip-read")]
+#[cfg(feature = "create")]
 #[test]
 fn zip_backend_not_found_uses_gate_shape() {
     let tmp = common::temp_test_dir();
@@ -267,6 +284,8 @@ fn zip_backend_not_found_uses_gate_shape() {
     common::cleanup(&tmp);
 }
 
+#[cfg(feature = "zip-read")]
+#[cfg(feature = "create")]
 /// The happy path must keep working: a unique regular file whose name is
 /// NOT duplicated extracts byte-exact even though the same archive carries
 /// a duplicated `dup0.txt` elsewhere (the duplicate guard is per-name).

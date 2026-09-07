@@ -5,14 +5,20 @@
 
 use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex};
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use unified_archive::{Archive, CompressionOptions, WritableFormat};
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 #[derive(Default)]
 struct Recorder {
     invocations: Vec<u64>,
 }
 
 impl Recorder {
+    #[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
     fn callback(this: Arc<Mutex<Self>>) -> Box<dyn unified_archive::ProgressCallback> {
         Box::new(
             move |processed: u64, _total: Option<u64>| -> ControlFlow<()> {
@@ -23,6 +29,7 @@ impl Recorder {
     }
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn progress_callback_invoked_once_per_entry_zip() {
     let temp = tempfile::tempdir().unwrap();
@@ -47,6 +54,7 @@ fn progress_callback_invoked_once_per_entry_zip() {
     assert_eq!(*invocations.last().unwrap(), 10 * 64);
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn progress_callback_invoked_once_per_entry_tar() {
@@ -74,6 +82,7 @@ fn progress_callback_invoked_once_per_entry_tar() {
     assert_eq!(*invocations.last().unwrap(), 5 * 32);
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn progress_callback_break_cancels_creation_zip() {
     let temp = tempfile::tempdir().unwrap();

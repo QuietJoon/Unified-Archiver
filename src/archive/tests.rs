@@ -1,4 +1,8 @@
 use super::*;
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use crate::options::WritableFormat;
 use crate::test_utils::fixture;
 
@@ -99,6 +103,7 @@ fn test_open_initializes_empty_cache() {
     assert!(archive.entry_cache.get().is_none());
 }
 
+#[cfg(feature = "modify")]
 #[test]
 fn test_open_has_no_modifications() {
     let archive = Archive::open(fixture("test.zip")).unwrap();
@@ -245,12 +250,14 @@ fn test_is_encrypted_encrypted_rar() {
 
 // ── Archive::has_recovery_record tests ──
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_has_recovery_record_zip_returns_false() {
     let archive = Archive::open(fixture("test.zip")).unwrap();
     assert!(!archive.has_recovery_record().unwrap());
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "sevenzip")]
 #[test]
 fn test_has_recovery_record_7z_returns_false() {
@@ -260,12 +267,14 @@ fn test_has_recovery_record_7z_returns_false() {
 
 // ── Archive::recovery_percentage tests ──
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_recovery_percentage_zip_returns_none() {
     let archive = Archive::open(fixture("test.zip")).unwrap();
     assert_eq!(archive.recovery_percentage().unwrap(), None);
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "sevenzip")]
 #[test]
 fn test_recovery_percentage_7z_returns_none() {
@@ -288,6 +297,7 @@ fn test_is_solid_tar_returns_false() {
     assert!(!archive.is_solid().unwrap());
 }
 
+#[cfg(feature = "modify")]
 /// R0079-0035: `Archive::modify` wraps every format in the Libarchive
 /// backend, so `is_solid` must dispatch on the source format — a solid
 /// 7z opened for modification previously fell into the always-`false`
@@ -328,6 +338,7 @@ fn test_is_solid_7z_modify_mode_answers_truthfully() {
     );
 }
 
+#[cfg(feature = "modify")]
 /// R0079-0035 companion: a genuinely non-solid 7z still answers `false`
 /// through the Modify-mode read-side probe.
 #[cfg(all(feature = "sevenzip", feature = "libarchive"))]
@@ -481,6 +492,7 @@ fn test_drop_read_mode_no_panic() {
     }
 }
 
+#[cfg(feature = "create")]
 #[test]
 fn test_drop_write_mode_no_panic() {
     let temp = tempfile::tempdir().unwrap();

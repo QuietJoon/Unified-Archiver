@@ -294,6 +294,7 @@ fn contract_entry_count_matches_list_files() {
 
 // ── Contract 5: Validate integrity detects corrupted files ──
 
+#[cfg(feature = "integrity")]
 #[test]
 fn contract_validate_integrity_valid_zip() {
     let archive = Archive::open(fixture("test.zip")).unwrap();
@@ -305,6 +306,7 @@ fn contract_validate_integrity_valid_zip() {
     );
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn contract_validate_integrity_corrupted_zip() {
     let archive = Archive::open(fixture("corrupted_crc.zip"));
@@ -330,6 +332,7 @@ fn contract_validate_integrity_corrupted_zip() {
     }
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "sevenzip")]
 #[test]
 fn contract_validate_integrity_valid_7z() {

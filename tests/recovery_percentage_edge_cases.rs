@@ -17,6 +17,7 @@ use unified_archive::Archive;
 // FIXTURE FACTS
 // ============================================================================
 
+#[cfg_attr(not(feature = "integrity"), allow(dead_code))]
 /// Recovery metadata of the committed RAR fixtures, read off the bytes on
 /// disk (R0001-0088). Each entry is that fixture's fact, not the format's:
 /// the RAR5 main header carries an archive-flags vint, and its
@@ -54,6 +55,7 @@ const FIXTURE_RECOVERY: &[(&str, bool, Option<u16>)] = &[
     ),
 ];
 
+#[cfg_attr(not(feature = "integrity"), allow(dead_code))]
 /// The expected `(has_recovery_record, recovery_percentage)` pair for a
 /// committed fixture.
 ///
@@ -76,6 +78,7 @@ fn expected_recovery(path: &str) -> (bool, Option<u16>) {
         })
 }
 
+#[cfg_attr(not(feature = "integrity"), allow(dead_code))]
 /// R0001-0088: the documented `has_recovery_record()` /
 /// `recovery_percentage()` contract, asserted rather than printed.
 ///
@@ -114,6 +117,7 @@ fn assert_recovery_contract(label: &str, has_recovery: bool, percentage: Option<
     }
 }
 
+#[cfg(feature = "integrity")]
 /// R0001-0088: assert both the format-level contract *and* the committed
 /// fixture's known recovery metadata, so a backend that lost the recovery
 /// flag (or invented one) fails instead of printing.
@@ -145,6 +149,7 @@ fn assert_fixture_recovery_metadata(path: &str) {
 // CONSISTENCY TESTS: has_recovery_record() vs recovery_percentage()
 // ============================================================================
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
@@ -152,6 +157,7 @@ fn test_consistency_rar_recovery_methods() {
     assert_fixture_recovery_metadata("tests/fixtures/test.rar");
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
@@ -159,6 +165,7 @@ fn test_consistency_rar5_recovery_methods() {
     assert_fixture_recovery_metadata("tests/fixtures/test_rar5.rar");
 }
 
+#[cfg(feature = "integrity")]
 /// R0001-0088 / ticgit 8c29f8: `tests/fixtures/test_recovery.rar` now earns
 /// its name. It used to be byte-identical to `tests/fixtures/test.rar` (same
 /// SHA-256, archive-flags `0`), so the positive branch of the
@@ -177,6 +184,7 @@ fn test_consistency_recovery_named_fixture() {
     assert_fixture_recovery_metadata("tests/fixtures/test_recovery.rar");
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "sevenzip")]
 #[test]
 fn test_consistency_no_recovery_formats() {
@@ -235,6 +243,7 @@ fn test_recovery_percentage_invalid_rar() {
     let _ = fs::remove_file(&temp_path);
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_recovery_percentage_truncated_file() {
     // Create a truncated RAR file (just signature)
@@ -275,6 +284,7 @@ fn test_recovery_percentage_empty_file() {
 // BOUNDARY CONDITION TESTS
 // ============================================================================
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
@@ -298,6 +308,7 @@ fn test_recovery_percentage_range_validation() {
     }
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
@@ -323,6 +334,7 @@ fn test_recovery_percentage_multiple_calls() {
 // FORMAT-SPECIFIC TESTS
 // ============================================================================
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
@@ -363,6 +375,7 @@ fn test_recovery_percentage_rar4_vs_rar5() {
     );
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
@@ -417,6 +430,7 @@ fn test_recovery_percentage_all_supported_formats() {
 // EDGE CASE: SPECIAL ARCHIVE TYPES
 // ============================================================================
 
+#[cfg(feature = "integrity")]
 /// Recovery metadata of a **data-encrypted** RAR archive
 /// (`test_encrypted_data.rar`, password `test123`, headers readable without
 /// one). Both accessors read the main archive header, which encryption of the
@@ -440,6 +454,7 @@ fn test_recovery_percentage_data_encrypted_archive() {
     assert_fixture_recovery_metadata("tests/fixtures/test_encrypted_data.rar");
 }
 
+#[cfg(feature = "integrity")]
 /// R0001-0089 item 2 / ticgit 8c29f8: the encrypted × recovery-record case
 /// that *works*.
 ///
@@ -456,6 +471,7 @@ fn test_recovery_percentage_data_encrypted_recovery_archive() {
     assert_fixture_recovery_metadata("tests/fixtures/test_encrypted_data_recovery.rar");
 }
 
+#[cfg(feature = "integrity")]
 /// R0001-0089 / ticgit 8c29f8 / ticgit 3f8790: the header-encrypted ×
 /// recovery-record case, which took two fixes to get right.
 ///
@@ -526,6 +542,7 @@ fn test_recovery_percentage_header_encrypted_recovery_archive() {
     );
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
@@ -556,6 +573,7 @@ fn test_recovery_percentage_solid_archive() {
 // PERFORMANCE AND RESOURCE TESTS
 // ============================================================================
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
@@ -587,6 +605,7 @@ fn test_recovery_percentage_does_not_extract() {
     );
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
@@ -626,6 +645,7 @@ fn test_recovery_percentage_read_only_operation() {
 // REGRESSION TESTS
 // ============================================================================
 
+#[cfg(feature = "integrity")]
 /// ticgit 7ca208: the public accessor's payload is `u16`, and this test is
 /// here to make that a compile error to undo rather than a silent narrowing.
 ///
@@ -647,6 +667,7 @@ fn recovery_percentage_is_typed_wide_enough_for_rar_6_10() {
     assert_eq!(pct, None, "ZIP archives carry no recovery record");
 }
 
+#[cfg(feature = "integrity")]
 /// R0001-0090: `recovery_percentage()` must answer the same before and
 /// after `list_files()` has walked (and memoised) the entry list — the
 /// listing leaves the UnRAR handle EOF-positioned, so the percentage parse
@@ -696,6 +717,7 @@ fn test_recovery_percentage_after_list_files() {
     );
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]

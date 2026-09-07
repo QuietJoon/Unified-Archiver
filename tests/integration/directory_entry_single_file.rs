@@ -126,8 +126,11 @@ fn single_file_extract_creates_directory_zip() {
     common::cleanup(&tmp);
 }
 
+#[cfg(feature = "zip-read")]
+#[cfg(feature = "create")]
 #[test]
 fn single_file_extract_creates_directory_zip_backend() {
+    #[cfg(feature = "zip-read")]
     use unified_archive::ffi::zip_wrapper::ZipArchive as ZipBackend;
 
     let tmp = common::temp_test_dir();

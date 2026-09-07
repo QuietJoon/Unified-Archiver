@@ -12,10 +12,13 @@
 mod common;
 
 use common::ZipMember;
+#[cfg_attr(not(feature = "integrity"), allow(unused_imports))]
 use std::fs;
 use std::path::Path;
+#[cfg_attr(not(feature = "integrity"), allow(unused_imports))]
 use unified_archive::Archive;
 
+#[cfg_attr(not(feature = "integrity"), allow(dead_code))]
 /// Build a DEFLATE-compressed ZIP holding `members`, then assert it opens.
 ///
 /// Replaces the old `run_zip` CLI wrapper. Entry names are the flat,
@@ -33,6 +36,7 @@ fn build_zip(path: &Path, members: &[ZipMember<'_>]) {
 // FILE TYPE TESTS
 // ============================================================================
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_validation_binary_files() {
     // Test validation of archives containing binary data
@@ -53,6 +57,7 @@ fn test_validation_binary_files() {
     common::cleanup(&temp_dir);
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_validation_text_files_various_encodings() {
     // Test text files with different line endings and content
@@ -80,6 +85,7 @@ fn test_validation_text_files_various_encodings() {
     common::cleanup(&temp_dir);
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_validation_mixed_file_types() {
     // Test archive with mixed binary, text and empty members
@@ -110,6 +116,7 @@ fn test_validation_mixed_file_types() {
 // DIRECTORY STRUCTURE TESTS
 // ============================================================================
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_validation_nested_directories() {
     // Test validation with deeply nested directory structures
@@ -154,6 +161,7 @@ fn test_validation_nested_directories() {
 // FILENAME TESTS
 // ============================================================================
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_validation_long_filename() {
     // Test validation with very long filenames (near system limits)
@@ -187,6 +195,7 @@ fn test_validation_long_filename() {
     common::cleanup(&temp_dir);
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_validation_unicode_filename() {
     // Test validation with Unicode/UTF-8 filenames
@@ -235,6 +244,7 @@ fn test_validation_unicode_filename() {
 // CORRUPTION PERSISTENCE TESTS
 // ============================================================================
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_validation_repeated_on_corrupted() {
     // Test that repeated validation calls on corrupted archive remain consistent
@@ -281,6 +291,7 @@ fn test_validation_repeated_on_corrupted() {
 // MEMORY STRESS TESTS
 // ============================================================================
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_validation_large_file_stress() {
     // Test validation of archive with larger file (5MB)
@@ -310,6 +321,7 @@ fn test_validation_large_file_stress() {
     common::cleanup(&temp_dir);
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_validation_many_small_files_stress() {
     // Test validation with many small files (stress file count)
@@ -344,6 +356,7 @@ fn test_validation_many_small_files_stress() {
 // SPECIFIC FORMAT EDGE CASES
 // ============================================================================
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_validation_zip_compression_methods() {
     // Test ZIP archives with different compression methods (store, deflate)
@@ -399,6 +412,7 @@ fn test_validation_zip_compression_methods() {
     common::cleanup(&temp_dir);
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_validation_error_recovery() {
     // Test that validation errors don't leave archive in bad state

@@ -251,6 +251,7 @@ fn test_find_entry_not_found() {
     }
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_validate_integrity_consistency() {
@@ -387,6 +388,7 @@ fn test_is_encrypted_consistency() {
     }
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_calculate_archive_crc_consistency() {
@@ -423,6 +425,7 @@ fn test_calculate_archive_crc_consistency() {
     }
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 #[serial_test::file_serial(rar)]
 fn test_unified_api_cross_format() {

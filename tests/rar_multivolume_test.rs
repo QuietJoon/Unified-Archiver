@@ -46,6 +46,7 @@ const PARTS: [&str; 3] = [
     "test_multivol.part3.rar",
 ];
 
+#[cfg_attr(not(feature = "integrity"), allow(dead_code))]
 /// A set whose first entry is split across all three volumes and whose second
 /// entry follows it. `PARTS` holds one logical entry, so every walk reaches
 /// its target before a continuation header can be miscounted; this set is the
@@ -56,6 +57,7 @@ const TAIL_PARTS: [&str; 3] = [
     "test_multivol_tail.part3.rar",
 ];
 
+#[cfg_attr(not(feature = "integrity"), allow(dead_code))]
 /// The literal content of `tail_marker.txt` in `TAIL_PARTS`, from
 /// `scripts/generate-rar-fixtures.sh`.
 const TAIL_CONTENT: &[u8] = b"tail marker after the split file\n";
@@ -77,6 +79,7 @@ fn subdir(dir: &Path, name: &str) -> PathBuf {
     path
 }
 
+#[cfg(feature = "integrity")]
 /// A complete set lists as **one logical entry**, not one per volume.
 ///
 /// UnRAR surfaces a per-volume file header for a split file: three headers
@@ -125,6 +128,7 @@ fn complete_volume_set_lists_one_logical_entry() {
     common::cleanup(&dir);
 }
 
+#[cfg(feature = "integrity")]
 /// Every public read route reaches the payload, including the two that used
 /// to refuse by recommending a call which also failed.
 ///
@@ -192,6 +196,7 @@ fn complete_volume_set_extracts_through_every_public_route() {
     common::cleanup(&dir);
 }
 
+#[cfg(feature = "integrity")]
 /// A split entry followed by another entry extracts by id and by name.
 ///
 /// This is the half of ticgit 3b4d15 that `PARTS` cannot reach. UnRAR

@@ -25,15 +25,19 @@
 // needs the ZIP crypto backend (AD 0058 format features).
 #![cfg(feature = "zip-crypto")]
 
+#[cfg_attr(not(feature = "integrity"), allow(unused_imports))]
 use super::common;
 
 use std::io::Write as _;
 use std::path::Path;
 
+#[cfg_attr(not(feature = "integrity"), allow(unused_imports))]
 use unified_archive::Archive;
 
+#[cfg_attr(not(feature = "integrity"), allow(dead_code))]
 const PASSWORD: &str = "dup-pw";
 
+#[cfg_attr(not(feature = "integrity"), allow(dead_code))]
 /// A payload short enough that the `zip` crate picks AE-2 (it switches to
 /// AE-1 at 20 bytes, where a real CRC32 is stored and the entry would
 /// never reach the streaming arm at all).
@@ -45,6 +49,7 @@ fn assert_is_ae2_length(payload: &[u8]) {
     );
 }
 
+#[cfg_attr(not(feature = "integrity"), allow(dead_code))]
 /// Build an AE-2 AES ZIP holding two entries whose *raw* names differ but
 /// which normalize to the same listing path: `sub/a.txt` and `sub\a.txt`
 /// (R0076-0048). Both are separate central-directory records, so the
@@ -74,6 +79,7 @@ fn build_ae2_dup_after_normalization_zip(path: &Path, first: &[u8], second: &[u8
     writer.finish().expect("finish AES zip");
 }
 
+#[cfg_attr(not(feature = "integrity"), allow(dead_code))]
 /// Expected digest for a two-entry archive: elements are bare 8-hex CRC32
 /// values, sorted, comma-joined, and CRC32-folded (DCR-012).
 fn expected_digest(payloads: [&[u8]; 2]) -> String {
@@ -85,6 +91,7 @@ fn expected_digest(payloads: [&[u8]; 2]) -> String {
     format!("{:08x}", crc32fast::hash(elements.join(",").as_bytes()))
 }
 
+#[cfg(feature = "integrity")]
 /// The headline case: the digest succeeds where the by-path fallback
 /// returned `OperationBlocked`, and its value proves both payloads were
 /// hashed distinctly.
@@ -153,6 +160,7 @@ fn ae2_duplicate_after_normalization_zip_digests_each_payload() {
     common::cleanup(&tmp);
 }
 
+#[cfg(feature = "integrity")]
 /// Content sensitivity through the same path: two archives that differ
 /// only in the shadowed occurrence's payload must digest differently.
 /// This is what the pre-DCR-012 `Some(0)` listing destroyed — every AE-2
@@ -185,6 +193,7 @@ fn ae2_duplicate_path_digest_tracks_the_shadowed_payload() {
     common::cleanup(&tmp);
 }
 
+#[cfg(feature = "integrity")]
 /// The new public-API precondition, pinned so it cannot regress silently:
 /// resolving an AE-2 entry's CRC32 means decrypting it, so a handle opened
 /// without a password can no longer digest the archive. It used to return

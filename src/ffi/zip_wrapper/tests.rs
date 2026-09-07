@@ -28,6 +28,11 @@ fn validate_then_list_files_serves_the_cached_listing() {
     use std::sync::Arc;
 
     let archive = Archive::open(fixture("test.zip")).unwrap();
+    // In a profile where ZipReader is the only compiled-in backend variant the
+    // pattern is irrefutable, so the `else` is unreachable — true, and not a
+    // reason to drop the guard that keeps the assertion honest in profiles
+    // where it is refutable (AD 0058).
+    #[allow(irrefutable_let_patterns)]
     let ArchiveBackend::ZipReader(zip) = &archive.backend else {
         panic!("a .zip must open on the ZipReader backend");
     };

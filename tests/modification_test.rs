@@ -1,11 +1,16 @@
 //! ZIP metadata preservation: archive comment and per-entry compression methods
 //! survive `commit_changes`.
 
-// Both cases commit through `Archive::modify`, which is a libarchive-backed
-// operation for every format including ZIP (AD 0071), so the whole file needs
-// that backend.
-#![cfg(feature = "libarchive")]
+// Both cases commit through `Archive::modify`, so the whole file needs the
+// `modify` operation feature — which implies `read`, `create` and `libarchive`
+// (AD 0058 decision 1 / AD 0071).
+#![cfg(feature = "modify")]
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use unified_archive::Archive;
 
 #[test]

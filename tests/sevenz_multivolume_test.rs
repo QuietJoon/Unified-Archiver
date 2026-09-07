@@ -160,6 +160,7 @@ fn split_set_extracts_the_same_bytes_as_the_unsplit_archive() {
     common::cleanup(&dir);
 }
 
+#[cfg(feature = "integrity")]
 /// Integrity validation sees one archive, not four files.
 #[test]
 fn split_set_validates_as_one_archive() {

@@ -22,11 +22,21 @@
 
 mod common;
 
-#[cfg_attr(not(feature = "libarchive"), allow(unused_imports))]
+#[cfg_attr(
+    not(all(feature = "integrity", feature = "libarchive")),
+    allow(unused_imports)
+)]
 use std::io::Read;
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use std::path::Path;
 
-#[cfg_attr(not(feature = "libarchive"), allow(unused_imports))]
+#[cfg_attr(
+    not(all(feature = "integrity", any(feature = "create", feature = "modify"))),
+    allow(unused_imports)
+)]
 use unified_archive::{Archive, ArchiveError, CompressionOptions, StreamBound, WritableFormat};
 
 /// Digest of `tests/fixtures/test.tar` measured on the tree immediately
@@ -40,12 +50,22 @@ use unified_archive::{Archive, ArchiveError, CompressionOptions, StreamBound, Wr
 /// behaviour is wrong: re-measure on a commit before the R6 change
 /// (DCR-011) and compare, because the constant itself is the weaker half
 /// of the assertion.
-#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
+#[cfg_attr(
+    not(all(feature = "integrity", feature = "libarchive")),
+    allow(dead_code)
+)]
 const HEALTHY_TAR_DIGEST: &str = "f9413c0f";
-#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
+#[cfg_attr(
+    not(all(feature = "integrity", feature = "libarchive")),
+    allow(dead_code)
+)]
 const HEALTHY_TAR_TOTAL: u64 = 18;
 
-#[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
+#[cfg_attr(
+    not(all(feature = "integrity", feature = "libarchive")),
+    allow(dead_code)
+)]
+#[cfg(feature = "create")]
 fn write_tar(path: &Path, entry: &str, len: usize) {
     let mut archive = Archive::create(path, CompressionOptions::for_writable(WritableFormat::TAR))
         .expect("create tar");
@@ -55,6 +75,8 @@ fn write_tar(path: &Path, entry: &str, len: usize) {
     archive.finish().expect("finish tar");
 }
 
+#[cfg(feature = "integrity")]
+#[cfg(feature = "create")]
 /// R6 property 1. The shortfall is produced exactly as
 /// `stream_bound_test`'s truncation case does it: take the AD 0065 listing
 /// snapshot, then rewrite the file on disk so it carries the same entry
@@ -120,6 +142,7 @@ fn truncated_tar_entry_makes_the_digest_report_corruption() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "integrity")]
 /// R6 property 2: exactness changes the verdict on damaged archives, never
 /// the value produced by a healthy one.
 #[cfg(feature = "libarchive")]
@@ -141,6 +164,7 @@ fn healthy_tar_digest_value_is_unchanged() {
     assert_eq!(total.unsized_entries(), 0);
 }
 
+#[cfg(feature = "integrity")]
 /// R6 property 3 / hard constraint 3: the raw gzip reader leaves the size
 /// field unset, so there is no declaration to hold the stream to. The
 /// entry keeps a ceiling-only bound and its natural EOF stays an ordinary
@@ -202,6 +226,7 @@ fn unknown_size_entry_still_digests_and_reports_an_incomplete_total() {
     assert_eq!(tar_total.exact(), Some(tar_total.sized_bytes()));
 }
 
+#[cfg(feature = "integrity")]
 /// R6 known-risk tripwire: exactness assumes libarchive delivers an entry's
 /// full *logical* extent, holes included. A sparse TAR member whose data
 /// blocks are shorter than its declared size would otherwise read as a

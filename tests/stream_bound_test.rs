@@ -14,11 +14,17 @@
 mod common;
 
 use std::io::Read;
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use unified_archive::{
     Archive, Cap, CompressionOptions, ExtractionLimits, ExtractionOptions, StreamBound,
     WritableFormat,
 };
 
+#[cfg(feature = "create")]
 /// Build a single-entry TAR (libarchive-backed: the only genuinely
 /// incremental stream path) whose payload is `len` bytes.
 #[cfg_attr(not(feature = "libarchive"), allow(dead_code))]
@@ -47,6 +53,7 @@ fn limits(max_file: Cap, max_total: Cap) -> ExtractionLimits {
         .build()
 }
 
+#[cfg(feature = "create")]
 /// R0001-0011 / OI-0001-001, the case the ticket names: an entry whose
 /// authoritative listing declares more bytes than the live stream
 /// delivers must not read as a short-but-valid payload.
@@ -106,6 +113,7 @@ fn declared_size_truncated_entry_surfaces_unexpected_eof() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "create")]
 /// The companion to the test above, and the reason its construction is
 /// spelled out so carefully (OI-0001-002).
 ///
@@ -169,6 +177,7 @@ fn a_renamed_in_replacement_is_refused_before_the_stream_opens() {
     common::cleanup(&temp);
 }
 
+#[cfg(feature = "create")]
 /// The same shortfall under a ceiling-only bound is *not* an error:
 /// `Cap(n)` is a budget, not an assertion about the entry's size
 /// (unchanged contract, pinned so the exactness work cannot leak into it).
@@ -441,6 +450,7 @@ fn rar_staged_length_check_accepts_a_healthy_entry() {
     assert_eq!(bytes, buf, "both paths deliver the same payload");
 }
 
+#[cfg(feature = "create")]
 /// The incremental backend keeps the prefix read a ceiling-only budget
 /// implies: libarchive hands back a reader, the caller gets `n` bytes,
 /// and only reading *past* `n` is an error.
@@ -556,6 +566,7 @@ fn max_total_size_participates_in_the_backend_budget() {
     assert!(buf.len() <= 4, "at most the ceiling is delivered");
 }
 
+#[cfg(feature = "create")]
 /// The documented way to read a window of a larger entry: an exact
 /// `DeclaredSize` stream wrapped in `Read::take`. The inner stream never
 /// observes EOF, so the exactness check does not fire.

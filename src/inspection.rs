@@ -3,6 +3,10 @@
 //! This module provides methods for inspecting archive contents, validating integrity,
 //! and querying archive metadata without extraction.
 
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use crate::archive::{Archive, ArchiveBackend};
 use crate::entry::{ArchiveEntry, EntryType};
 use crate::error::ops;
@@ -233,6 +237,7 @@ impl Archive {
         use crate::archive::ArchiveMode;
         if self.mode == ArchiveMode::Write {
             return match &self.backend {
+                #[cfg(feature = "zip-write")]
                 ArchiveBackend::ZipWriter(w) => Ok(w.entries_written()),
                 #[cfg(feature = "libarchive")]
                 ArchiveBackend::Libarchive(b) => Ok(b.entries_written()),
@@ -314,6 +319,7 @@ impl Archive {
     /// }
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
+    #[cfg(feature = "integrity")]
     pub fn validate_integrity(&self) -> Result<ValidationReport> {
         let entries = self.list_files()?;
         let total_entries = entries.len();
@@ -404,6 +410,7 @@ impl Archive {
     /// println!("Archive CRC: {:08X}", crc);
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
+    #[cfg(feature = "integrity")]
     pub fn calculate_archive_crc(&self) -> Result<u32> {
         let entries = self.list_files()?;
 
@@ -471,6 +478,7 @@ impl Archive {
     /// in it latently until its own forward was added, because both
     /// rustdocs asserted a per-entry CRC32 that the format does not
     /// guarantee.
+    #[cfg(feature = "integrity")]
     fn entry_crc32_for_digest(&self, entry: &ArchiveEntry) -> Result<u32> {
         if let Some(crc) = entry.crc32 {
             return Ok(crc);
@@ -544,6 +552,7 @@ impl Archive {
     /// implementations only because one is fed and the other pulls;
     /// `both_digest_routes_agree_on_a_truncated_payload` is what holds them
     /// together.
+    #[cfg(feature = "integrity")]
     fn crc32_for_digest_via_sink(&self, entry: &ArchiveEntry) -> Result<Option<u32>> {
         let declared = entry.size;
         let ceiling = declared.unwrap_or(crate::security::DEFAULT_MAX_FILE_SIZE);
@@ -600,6 +609,7 @@ impl Archive {
         }
     }
 
+    #[cfg_attr(not(feature = "integrity"), allow(dead_code))]
     /// Resolve every CRC-less file entry's CRC32 in a **single** traversal
     /// of the archive (OI-0001-009 / ticgit `82bf8fd4`).
     ///
@@ -762,11 +772,13 @@ impl Archive {
     /// }
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
+    #[cfg(feature = "integrity")]
     pub fn calculate_manifest_digest(&self) -> Result<String> {
         let (digest, _) = self.calculate_content_multiset_digest_and_size()?;
         Ok(digest)
     }
 
+    #[cfg(feature = "integrity")]
     /// Calculate content-multiset digest and total uncompressed file size in
     /// a single pass over the entry list (R0070-0089).
     ///
@@ -944,6 +956,7 @@ impl Archive {
     ///
     /// The digest is unaffected: unsized entries are hashed like any
     /// other, so an incomplete total sits beside a complete digest.
+    #[cfg(feature = "integrity")]
     pub fn calculate_content_multiset_digest_and_size(
         &self,
     ) -> Result<(String, SizedContentTotal)> {
@@ -963,6 +976,7 @@ impl Archive {
         })
     }
 
+    #[cfg(feature = "integrity")]
     /// Calculate content-multiset digest and total uncompressed file size.
     ///
     /// Thin shim over [`Self::calculate_content_multiset_digest_and_size`]
@@ -1311,6 +1325,7 @@ impl Archive {
     }
 }
 
+#[cfg_attr(not(feature = "integrity"), allow(dead_code))]
 /// Hash one CRC-less entry's payload under the DCR-011 size contract.
 ///
 /// R0076-0091: bound what the hasher consumes. A hostile or buggy decoder
@@ -1373,6 +1388,7 @@ fn crc32_of_bounded_payload<R: std::io::Read>(
     })
 }
 
+#[cfg_attr(not(feature = "integrity"), allow(dead_code))]
 /// Encode one element of the content-multiset digest input.
 ///
 /// Always exactly eight lowercase zero-padded hex characters, for every
@@ -1416,6 +1432,7 @@ fn sibling_scan_dir(path: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
+#[cfg_attr(not(feature = "integrity"), allow(dead_code))]
 /// Digest/size aggregation shared by
 /// [`Archive::calculate_content_multiset_digest_and_size`] and its
 /// regression tests. `crc32_for` resolves each file entry's CRC32 —

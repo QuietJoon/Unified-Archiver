@@ -50,6 +50,7 @@ fn test_is_solid_7z() {
     println!("7z archive solid status: {}", is_solid);
 }
 
+#[cfg(feature = "integrity")]
 // Recovery record tests
 #[cfg(feature = "rar-support")]
 #[test]
@@ -64,6 +65,7 @@ fn test_has_recovery_rar() {
     );
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
@@ -78,6 +80,7 @@ fn test_has_recovery_rar5() {
     );
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_has_recovery_zip() {
     // ZIP archives don't support recovery records
@@ -91,6 +94,7 @@ fn test_has_recovery_zip() {
     );
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "sevenzip")]
 #[test]
 fn test_has_recovery_7z() {
@@ -105,6 +109,7 @@ fn test_has_recovery_7z() {
     );
 }
 
+#[cfg(feature = "integrity")]
 // Recovery percentage tests
 #[cfg(feature = "rar-support")]
 #[test]
@@ -129,6 +134,7 @@ fn test_recovery_percentage_rar() {
     }
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "rar-support")]
 #[test]
 #[serial_test::file_serial(rar)]
@@ -153,6 +159,7 @@ fn test_recovery_percentage_rar5() {
     }
 }
 
+#[cfg(feature = "integrity")]
 #[test]
 fn test_recovery_percentage_zip() {
     // ZIP archives don't support recovery records
@@ -166,6 +173,7 @@ fn test_recovery_percentage_zip() {
     );
 }
 
+#[cfg(feature = "integrity")]
 #[cfg(feature = "sevenzip")]
 #[test]
 fn test_recovery_percentage_7z() {

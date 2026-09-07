@@ -2,12 +2,23 @@
 //!
 //! Tests the modification API for adding, removing, and replacing files in archives.
 
-#[cfg_attr(not(feature = "libarchive"), allow(unused_imports))]
+// Every case here goes through `Archive::modify` / `commit_changes`, so the
+// whole file needs the `modify` operation feature (AD 0058).
+#![cfg(feature = "modify")]
+
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use super::common;
 
-#[cfg_attr(not(feature = "libarchive"), allow(unused_imports))]
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use unified_archive::{Archive, ArchiveFormat};
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn test_add_files_to_archive() {
@@ -38,6 +49,7 @@ fn test_add_files_to_archive() {
     std::fs::remove_file(test_path).ok();
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn test_remove_files_from_archive() {
@@ -74,6 +86,7 @@ fn test_remove_files_from_archive() {
     std::fs::remove_file(test_path).ok();
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn test_replace_files_in_archive() {
@@ -103,6 +116,7 @@ fn test_replace_files_in_archive() {
     std::fs::remove_file(test_path).ok();
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn test_combined_operations() {
@@ -156,6 +170,7 @@ fn test_open_nonexistent_archive() {
     assert!(result.is_err());
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn test_modify_preserves_unchanged_content_bytes() {
@@ -185,6 +200,7 @@ fn test_modify_preserves_unchanged_content_bytes() {
     std::fs::remove_file(test_path).ok();
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn test_modify_empty_archive_add_then_commit() {
@@ -214,6 +230,7 @@ fn test_modify_empty_archive_add_then_commit() {
     std::fs::remove_file(test_path).ok();
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn test_modify_replace_grows_and_shrinks_payload() {
@@ -250,6 +267,7 @@ fn test_modify_replace_grows_and_shrinks_payload() {
     std::fs::remove_file(test_path).ok();
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn test_modify_remove_nonexistent_entry_errors_on_commit() {
@@ -275,6 +293,7 @@ fn test_modify_remove_nonexistent_entry_errors_on_commit() {
     std::fs::remove_file(test_path).ok();
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn test_modify_add_and_remove_queues_are_independent() {
@@ -305,6 +324,7 @@ fn test_modify_add_and_remove_queues_are_independent() {
     std::fs::remove_file(test_path).ok();
 }
 
+#[cfg(feature = "create")]
 #[cfg(feature = "libarchive")]
 #[test]
 fn test_modify_many_entries_preserves_ordering_and_content() {

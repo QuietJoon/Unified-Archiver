@@ -47,6 +47,7 @@ pub(crate) fn path_to_cstring_checked(path: &Path) -> Result<CString> {
 // risking unlink of pre-existing content on a name clash (R0069-0028 /
 // R0069-0029).
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Reject symlinks at the single-file `add_*_from_path` write boundary.
 ///
 /// `op` labels the originating writer method so the error message names
@@ -76,6 +77,7 @@ pub(crate) fn reject_symlink_path(path: &Path, op: &'static str) -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Open a file and re-verify after the open that the resolved path
 /// is not a symlink (post-open defence in depth, R0070-0021).
 ///
@@ -476,6 +478,7 @@ pub(crate) fn rename_noclobber(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "read"), allow(dead_code))]
 /// Convert year/month/day/hour/minute/second to SystemTime
 ///
 /// Returns `None` for pre-1970 dates, for years past a sane four-digit
@@ -557,6 +560,7 @@ pub(crate) fn unix_seconds_to_system_time(seconds: i64) -> Option<std::time::Sys
     Some(UNIX_EPOCH + Duration::from_secs(seconds as u64))
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Convert SystemTime to zip::DateTime for ZIP archive entries.
 ///
 /// Returns None if the time cannot be represented in ZIP's DOS date format
@@ -846,6 +850,7 @@ pub(crate) fn entry_cancel_hook<'a>(
     }
 }
 
+#[cfg_attr(not(feature = "integrity"), allow(dead_code))]
 /// Compute CRC32 by streaming through a reader (no full buffering)
 pub(crate) fn compute_crc32_reader<R: Read>(reader: &mut R, error_path: &Path) -> Result<u32> {
     let mut hasher = crc32fast::Hasher::new();
@@ -864,6 +869,7 @@ pub(crate) fn compute_crc32_reader<R: Read>(reader: &mut R, error_path: &Path) -
     Ok(hasher.finalize())
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Map a `walkdir::Error` from a recursive-add traversal onto the
 /// crate's `Io` error, preferring the walker's own path and I/O error
 /// when present. Shared by the facade namespace pre-walk and both
@@ -893,6 +899,7 @@ pub(crate) fn walkdir_io_error(
     ArchiveError::io(op, path, io_error)
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Entry kind surfaced by [`walk_directory_tree`]. `Special` covers
 /// everything that is neither a regular file nor a directory — the
 /// walker never follows links, so symlinks land here and each caller
@@ -903,6 +910,7 @@ pub(crate) enum DirWalkKind {
     Special { is_symlink: bool },
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// One filesystem entry surfaced by [`walk_directory_tree`], with its
 /// parent-rooted relative archive path (raw, un-normalized form —
 /// callers apply their own separator-normalization policy). The walk
@@ -919,6 +927,7 @@ pub(crate) struct DirWalkEntry<'a> {
     pub is_leaf_dir: bool,
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Shared recursive-add traversal, previously re-implemented by both
 /// creation backends and the facade namespace pre-walk (R0075-0006):
 /// rejects a symlinked root (R0070-0048), walks with
@@ -1002,6 +1011,7 @@ pub(crate) fn walk_directory_tree(
     Ok(())
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Refuse a walked entry whose archive-relative path is not valid
 /// UTF-8, rather than rendering it lossily (AD 0064 write-side ruling).
 ///
@@ -1026,6 +1036,7 @@ fn reject_non_utf8_relative(fs_path: &Path, relative: &Path) -> Result<()> {
     ))
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Choose the base every archive path is made relative to, plus a
 /// synthesised name for the source root when it needs one (OI-0080-005
 /// residual / ticgit 330f38).
@@ -1065,10 +1076,12 @@ fn archive_base_for_root(dir_path: &Path) -> (&Path, Option<String>) {
     }
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Fallback name for a filesystem root whose spelling carries no
 /// alphanumeric character to name it by — Unix `/`.
 const DEFAULT_ROOT_ARCHIVE_NAME: &str = "rootfs";
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Derive a stable, filesystem-safe archive name from a root path's own
 /// textual form.
 ///
@@ -1090,6 +1103,7 @@ fn synthesise_root_name(root: &Path) -> String {
     }
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Join a walked entry's parent-relative path to the source root's
 /// synthesised name, if it has one.
 ///
@@ -1105,6 +1119,7 @@ fn compose_archive_path(relative: &Path, synthetic_root: Option<&str>) -> String
     }
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Ensure a directory path has a trailing slash
 pub(crate) fn ensure_trailing_slash(path: &str) -> String {
     if path.ends_with('/') {
@@ -1114,6 +1129,7 @@ pub(crate) fn ensure_trailing_slash(path: &str) -> String {
     }
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Notify a creation progress callback after writing `additional` bytes.
 ///
 /// Shared by ZipWriter and LibarchiveArchive creation backends.
@@ -1154,6 +1170,7 @@ pub(crate) fn notify_creation_progress(
     Ok(())
 }
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// Copy data from `reader` to `writer` and call `notify` after each
 /// chunk so creation progress and `ControlFlow::Break` cancellation
 /// fire during the entry, not only after the whole entry is on disk

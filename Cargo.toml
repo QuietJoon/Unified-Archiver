@@ -43,7 +43,64 @@ cc = "1"
 # capability set, which is a re-expression and not a "flip": ordering constraint 2
 # protects against the default set LOSING capability before both profiles are
 # proven, and nothing observable changes here (AD-0058, 2026-09-06 amendment).
-default = ["rar-support", "v2-api", "sevenzip", "zip-crypto", "libarchive", "sfx"]
+default = [
+    "rar-support",
+    "v2-api",
+    "sevenzip",
+    "zip-crypto",
+    "libarchive",
+    "sfx",
+    "read",
+    "integrity",
+    "create",
+    "modify",
+    "zip-read",
+    "zip-write",
+]
+
+# ── AD 0058 Stage 1, operation features ──────────────────────────────────────
+# These gate what the crate can DO; the format features above gate what it can
+# do it TO. Together they make the six profiles in AD-0058 selectable rather
+# than merely defined (Required Action 4).
+#
+# `read` is the base: listing, entry lookup, extraction, streaming. Everything
+# else is meaningful only alongside it or alongside a writer.
+read = []
+# Validation, CRC and manifest digests. Needs the listing surface it validates.
+integrity = ["read"]
+# `Archive::create` and the add/finish surface.
+create = []
+# AD-0071 froze modification onto the libarchive backend for EVERY format,
+# including ZIP, so this dependency is not a policy choice — declaring it is the
+# honest option and the alternative breaks `commit_changes()` at link time.
+# Consequence, written down rather than discovered later: there is no
+# libarchive-free `modify` profile (AD-0058 decision 1, 2026-09-06).
+modify = ["read", "create", "libarchive"]
+# The aggregate: everything this crate can do from its own code. Deliberately
+# excludes `external-rar-create`, which shells out to a third-party WinRAR
+# install on one platform and so cannot be part of the green test lane that
+# ordering constraint 2 leans on (AD-0058 decision 2).
+full = [
+    "read",
+    "integrity",
+    "create",
+    "modify",
+    "zip-read",
+    "zip-write",
+    "zip-crypto",
+    "sevenzip",
+    "rar-support",
+    "libarchive",
+    "sfx",
+    "v2-api",
+]
+
+# ── ZIP backend halves ───────────────────────────────────────────────────────
+# ZIP is the one format with no C dependency, which is what makes `read-minimal`
+# (`read` + `zip-read`) a no-C-toolchain floor. The halves split because the
+# reader and the writer are separate backends with separate costs.
+zip-read = []
+zip-write = []
 rar-support = []  # RAR/RAR5 support (requires UnRAR license compliance)
 # 7z READ and extract via the native Rust backend. Note the asymmetry, found by
 # the `sevenzip`-only lane: 7z *creation* and *modification* go through
@@ -52,7 +109,7 @@ rar-support = []  # RAR/RAR5 support (requires UnRAR license compliance)
 # the honest routing, not a defect, but it means `sevenzip` alone does not make
 # 7z writable and tests covering 7z writes need both features.
 sevenzip = ["dep:sevenz-rust2"]
-zip-crypto = ["zip/aes-crypto"]  # WinZip-AES encrypted ZIP reading
+zip-crypto = ["zip/aes-crypto", "zip-read"]  # WinZip-AES encrypted ZIP reading
 # TAR family, raw single-file compressed formats, ISO — and, per AD-0071,
 # ZIP/7z modification, which binds this backend unconditionally. Turning it
 # off removes the system libarchive dependency and its build.rs probe, so a
@@ -69,8 +126,8 @@ libarchive = []
 # and the RAR4 recovery walk drives `PayloadWindow` directly, independent of
 # SFX. Gating a `u64` and a 219-line adapter would buy nothing and would put a
 # compound cfg on the backends.
-sfx = []
-external-rar-create = []  # RAR creation via external WinRAR CLI (Windows only)
+sfx = ["read"]
+external-rar-create = ["create"]  # RAR creation via external WinRAR CLI (Windows only)
 # D2 typed-handle split (ReadArchive / WriteArchive / ModifyArchive). Additive since v0.3;
 # on by default since 2026-09-03 (owner ruling). `--no-default-features` turns it off.
 #
@@ -118,10 +175,12 @@ path = "examples/extract_archive.rs"
 [[example]]
 name = "create_archive"
 path = "examples/create_archive.rs"
+required-features = ["create"]
 
 [[example]]
 name = "modify_archive"
 path = "examples/modify_archive.rs"
+required-features = ["modify"]
 
 # Declared explicitly only to carry `required-features`; the other examples
 # are auto-discovered. Without `sfx` there is no detection API to demonstrate.
@@ -130,13 +189,20 @@ name = "detect_sfx"
 path = "examples/detect_sfx.rs"
 required-features = ["sfx"]
 
+[[example]]
+name = "archive_crc"
+path = "examples/archive_crc.rs"
+required-features = ["integrity"]
+
 [[bench]]
 name = "archive_operations"
 harness = false
+required-features = ["integrity"]
 
 [[bench]]
 name = "integrity_validation_bench"
 harness = false
+required-features = ["integrity"]
 
 [[bench]]
 name = "sfx_detection"

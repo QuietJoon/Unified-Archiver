@@ -24,8 +24,13 @@
 
 use std::os::unix::fs::symlink;
 
+#[cfg_attr(
+    not(any(feature = "create", feature = "modify")),
+    allow(unused_imports)
+)]
 use unified_archive::{Archive, CompressionOptions, WritableFormat};
 
+#[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 /// A real file, and a real symlink pointing at it.
 fn target_and_link(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let target = dir.join("real.txt");
@@ -35,6 +40,7 @@ fn target_and_link(dir: &std::path::Path) -> (std::path::PathBuf, std::path::Pat
     (target, link)
 }
 
+#[cfg(feature = "create")]
 /// ZIP creation path. The refusal arrives from the facade gate; the ZIP
 /// writer's own check never runs for this input.
 #[test]
@@ -58,6 +64,7 @@ fn zip_add_file_from_path_refuses_a_symlink_source() {
     );
 }
 
+#[cfg(feature = "create")]
 /// TAR creation path — the same policy has to hold whichever format the
 /// caller picked, or the guarantee depends on a choice they made for
 /// unrelated reasons.
@@ -83,6 +90,7 @@ fn tar_add_file_from_path_refuses_a_symlink_source() {
     );
 }
 
+#[cfg(feature = "create")]
 /// The control: the same call on the real file succeeds. Without this, both
 /// tests above would still pass if `add_file_from_path` were broken outright.
 #[test]

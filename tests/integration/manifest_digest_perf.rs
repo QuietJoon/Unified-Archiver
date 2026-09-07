@@ -41,14 +41,28 @@
 // file needs that backend (AD 0058 format features).
 #![cfg(feature = "libarchive")]
 
+#[cfg_attr(
+    not(all(any(feature = "create", feature = "modify"), feature = "integrity")),
+    allow(unused_imports)
+)]
 use std::time::Instant;
+#[cfg_attr(
+    not(all(any(feature = "create", feature = "modify"), feature = "integrity")),
+    allow(unused_imports)
+)]
 use unified_archive::{Archive, CompressionOptions, WritableFormat};
 
+#[cfg_attr(
+    not(all(feature = "integrity", any(feature = "create", feature = "modify"))),
+    allow(dead_code)
+)]
 /// Entry count. Large enough that a quadratic walk is unmissable (the
 /// pre-fix ratio scaled with it), small enough that the linear walk stays
 /// in the low milliseconds.
 const ENTRIES: usize = 1000;
 
+#[cfg(feature = "integrity")]
+#[cfg(feature = "create")]
 #[test]
 fn manifest_digest_does_not_reopen_archive_per_entry() {
     let dir = tempfile::tempdir().expect("temp dir");

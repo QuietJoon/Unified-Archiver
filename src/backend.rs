@@ -150,6 +150,7 @@ pub(crate) struct ExtractionPlan<'a> {
     pub max_total_size: Option<u64>,
 }
 
+#[cfg_attr(not(feature = "integrity"), allow(dead_code))]
 /// One entry the single-traversal payload walk must visit, addressed by
 /// its stable listing id (OI-0001-009 / ticgit `82bf8fd4`).
 ///
@@ -172,6 +173,7 @@ pub(crate) struct PayloadTarget<'a> {
     pub declared_size: Option<u64>,
 }
 
+#[cfg_attr(not(feature = "integrity"), allow(dead_code))]
 /// Visitor handed each target's payload reader by
 /// [`ReadBackend::visit_payloads_by_listing_id`].
 ///
@@ -187,6 +189,7 @@ pub(crate) struct PayloadTarget<'a> {
 /// accumulate. Returning an error aborts the walk.
 pub(crate) type PayloadChunkSink<'v> = dyn FnMut(&[u8]) -> Result<()> + 'v;
 
+#[cfg_attr(not(feature = "integrity"), allow(dead_code))]
 pub(crate) type PayloadVisitor<'v> =
     dyn FnMut(&PayloadTarget<'_>, &mut dyn std::io::Read) -> Result<()> + 'v;
 
@@ -410,6 +413,7 @@ pub(crate) trait ReadBackend {
         })
     }
 
+    #[cfg_attr(not(feature = "integrity"), allow(dead_code))]
     /// Stream a single entry addressed by its stable listing `id` rather
     /// than by path (ti-2a6e3153).
     ///
@@ -464,6 +468,7 @@ pub(crate) trait ReadBackend {
         ))
     }
 
+    #[cfg_attr(not(feature = "integrity"), allow(dead_code))]
     /// Push one entry's decoded payload into `sink`, chunk by chunk, without
     /// materialising it in memory or staging it to disk (DEF-004).
     ///
@@ -591,6 +596,7 @@ pub(crate) trait ReadBackend {
     )]
     fn extract_file(&self, file_path: &str, dest_path: &Path) -> Result<()>;
 
+    #[cfg_attr(not(feature = "integrity"), allow(dead_code))]
     /// Walk every file entry, surface a list of paths whose payloads
     /// fail integrity checks. Empty result means the archive is sound.
     fn test_integrity(&self) -> Result<Vec<String>>;
@@ -631,6 +637,7 @@ pub(crate) trait ReadBackend {
 // match arm before the `&dyn ReadBackend` view is built). Trait-object
 // dispatch through `dispatch_read_backend` is still a vtable call —
 // these hints help the rare direct callers, not the dyn path.
+#[cfg(feature = "zip-read")]
 impl ReadBackend for crate::ffi::zip_wrapper::ZipArchive {
     #[inline]
     fn list_files_budgeted(&self, budget: Option<usize>) -> Result<Arc<Vec<ArchiveEntry>>> {
@@ -968,9 +975,11 @@ pub(crate) fn read_backend_view(backend: &ArchiveBackend) -> Option<&dyn ReadBac
         ArchiveBackend::Unrar(u) => Some(u.as_ref()),
         #[cfg(feature = "sevenzip")]
         ArchiveBackend::SevenZ(s) => Some(s.as_ref()),
+        #[cfg(feature = "zip-read")]
         ArchiveBackend::ZipReader(z) => Some(z.as_ref()),
         #[cfg(feature = "libarchive")]
         ArchiveBackend::Libarchive(l) => Some(l.as_ref()),
+        #[cfg(feature = "zip-write")]
         ArchiveBackend::ZipWriter(_) => None,
     }
 }

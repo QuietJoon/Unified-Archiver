@@ -90,6 +90,8 @@ fn test_rename_with_overwrite() {
     println!("Rename test passed on current platform");
 }
 
+#[cfg(feature = "create")]
+#[cfg(feature = "modify")]
 /// Test archive modification commit (integration test)
 ///
 /// This test creates an archive, modifies it, and commits changes.

@@ -8,7 +8,9 @@ use crate::ffi::libarchive_wrapper::LibarchiveArchive;
 use crate::ffi::sevenz_wrapper::SevenZArchive;
 #[cfg(feature = "rar-support")]
 use crate::ffi::wrapper::UnrarArchive;
+#[cfg(feature = "zip-read")]
 use crate::ffi::zip_wrapper::ZipArchive;
+#[cfg(feature = "zip-write")]
 use crate::ffi::zip_writer::ZipWriter;
 use crate::format::ArchiveFormat;
 #[cfg_attr(not(feature = "sfx"), allow(unused_imports))]
@@ -21,6 +23,7 @@ use std::path::{Path, PathBuf};
 pub(crate) enum ArchiveMode {
     Read,
     Write,
+    #[cfg_attr(not(feature = "modify"), allow(dead_code))]
     Modify,
 }
 
@@ -35,7 +38,9 @@ pub(crate) enum ArchiveBackend {
     Unrar(Box<UnrarArchive>),
     #[cfg(feature = "sevenzip")]
     SevenZ(Box<SevenZArchive>),
+    #[cfg(feature = "zip-write")]
     ZipWriter(Box<ZipWriter>),
+    #[cfg(feature = "zip-read")]
     ZipReader(Box<ZipArchive>),
     #[cfg(feature = "libarchive")]
     Libarchive(Box<LibarchiveArchive>),
@@ -219,8 +224,10 @@ pub struct Archive {
     /// of once per cache layer.
     pub(crate) entry_cache: OnceCell<std::sync::Arc<Vec<ArchiveEntry>>>,
     /// Modification tracker (for Modify mode)
+    #[cfg(feature = "modify")]
     pub(crate) modifications: Option<crate::modification::ModificationTracker>,
     /// Modification options (Modify mode only). `None` means defaults are used.
+    #[cfg(feature = "modify")]
     pub(crate) mod_options: Option<crate::modification::ModificationOptions>,
     /// How the embedded payload of an archive opened at a non-zero
     /// offset is reached — see [`PayloadSource`] and
@@ -260,7 +267,8 @@ pub struct Archive {
     /// or directory-vs-file conflicts surface a typed
     /// `OperationBlocked` *before* the writer backend produces a
     /// format-specific error. `None` outside Write mode.
-    pub(crate) write_namespace: Option<crate::modification::NamespaceTracker>,
+    #[cfg(any(feature = "create", feature = "modify"))]
+    pub(crate) write_namespace: Option<crate::write_namespace::NamespaceTracker>,
     /// Set to `true` once a write-mode operation has failed in a way
     /// that leaves the backend in an undefined state. Subsequent
     /// `add_*` calls return [`ArchiveError::OperationBlocked`] so
@@ -675,10 +683,13 @@ impl Archive {
             mode: ArchiveMode::Read,
             format,
             entry_cache: OnceCell::new(),
+            #[cfg(feature = "modify")]
             modifications: None,
+            #[cfg(feature = "modify")]
             mod_options: None,
             _backing_tempfile: None,
             _lock_file: None,
+            #[cfg(any(feature = "create", feature = "modify"))]
             write_namespace: None,
             write_poisoned: false,
             // Read-mode archives have nothing to finalize; pretend
@@ -752,6 +763,22 @@ impl Archive {
     /// window this OI closed.
     pub(crate) fn open_as_format(path: &Path, format: ArchiveFormat) -> Result<Self> {
         let backend = match format {
+            // Without `zip-read` there is no ZIP reader to route to. Refuse by
+            // name, in the same shape the `rar-support` arm below uses, rather
+            // than falling through to a backend that cannot serve it
+            // (AD 0058 operation/format features).
+            #[cfg(not(feature = "zip-read"))]
+            ArchiveFormat::Zip => {
+                return Err(ArchiveError::unsupported(
+                    "open",
+                    format,
+                    Some(
+                        "reading ZIP needs the `zip-read` Cargo feature, which \
+                         is disabled in this build"
+                            .to_string(),
+                    ),
+                ));
+            }
             #[cfg(feature = "rar-support")]
             ArchiveFormat::Rar | ArchiveFormat::Rar5 => {
                 let unrar = UnrarArchive::open(path)?;
@@ -769,6 +796,7 @@ impl Archive {
                     ),
                 ));
             }
+            #[cfg(feature = "zip-read")]
             ArchiveFormat::Zip => {
                 // AD 0007 (2026-07-23 collapse) / DCR-009: the `zip` crate is
                 // the sole ZIP backend for both encrypted and unencrypted
@@ -894,6 +922,7 @@ impl Archive {
                     ),
                 ));
             }
+            #[cfg(feature = "zip-read")]
             ArchiveFormat::Zip => {
                 // AD 0007 (2026-07-23 collapse): the `zip` crate backend serves
                 // every ZIP; the password path is the same backend as the plain
@@ -1494,6 +1523,7 @@ impl Archive {
             return Ok(None);
         }
 
+        #[cfg(feature = "zip-read")]
         if matches!(format_hint, None | Some(ArchiveFormat::Zip))
             && let Some(archive) = Self::try_open_zip_in_place(path_ref, offset)?
         {
@@ -1558,6 +1588,7 @@ impl Archive {
     }
 
     /// ZIP arm. See the doc comment on [`Self::try_open_in_place`].
+    #[cfg(feature = "zip-read")]
     fn try_open_zip_in_place(path_ref: &Path, offset: u64) -> Result<Option<Self>> {
         use std::io::{Seek, SeekFrom};
 
@@ -2084,6 +2115,7 @@ impl Archive {
     /// }
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
+    #[cfg(feature = "integrity")]
     pub fn has_recovery_record(&self) -> Result<bool> {
         // R0071-0012: read-side capability queries reject write-mode
         // handles instead of silently answering `false` for an
@@ -2105,7 +2137,10 @@ impl Archive {
             ArchiveBackend::SevenZ(_) => Ok(false),
             #[cfg(feature = "libarchive")]
             ArchiveBackend::Libarchive(_) => Ok(false),
-            ArchiveBackend::ZipWriter(_) | ArchiveBackend::ZipReader(_) => Ok(false),
+            #[cfg(feature = "zip-write")]
+            ArchiveBackend::ZipWriter(_) => Ok(false),
+            #[cfg(feature = "zip-read")]
+            ArchiveBackend::ZipReader(_) => Ok(false),
         }
     }
 
@@ -2154,7 +2189,10 @@ impl Archive {
             ArchiveBackend::Unrar(_) => Vec::new(),
             #[cfg(feature = "sevenzip")]
             ArchiveBackend::SevenZ(_) => Vec::new(),
-            ArchiveBackend::ZipWriter(_) | ArchiveBackend::ZipReader(_) => Vec::new(),
+            #[cfg(feature = "zip-write")]
+            ArchiveBackend::ZipWriter(_) => Vec::new(),
+            #[cfg(feature = "zip-read")]
+            ArchiveBackend::ZipReader(_) => Vec::new(),
         }
     }
 
@@ -2205,6 +2243,7 @@ impl Archive {
     /// }
     /// # Ok::<(), unified_archive::ArchiveError>(())
     /// ```
+    #[cfg(feature = "integrity")]
     pub fn recovery_percentage(&self) -> Result<Option<u16>> {
         // R0071-0012: same write-mode rejection as
         // `has_recovery_record` so a write handle never silently
@@ -2220,7 +2259,10 @@ impl Archive {
             ArchiveBackend::SevenZ(_) => Ok(None),
             #[cfg(feature = "libarchive")]
             ArchiveBackend::Libarchive(_) => Ok(None),
-            ArchiveBackend::ZipWriter(_) | ArchiveBackend::ZipReader(_) => Ok(None),
+            #[cfg(feature = "zip-write")]
+            ArchiveBackend::ZipWriter(_) => Ok(None),
+            #[cfg(feature = "zip-read")]
+            ArchiveBackend::ZipReader(_) => Ok(None),
         }
     }
 
@@ -2270,6 +2312,7 @@ impl Archive {
         // format, so no handle can carry it — but the reopen names the
         // backend type, so it is gated rather than left to dangle.
         #[cfg(feature = "sevenzip")]
+        #[cfg(feature = "modify")]
         if self.mode == ArchiveMode::Modify && self.format == ArchiveFormat::SevenZip {
             // R0001-0003: the probe is a pathname reopen, so it is subject to
             // the same DCR-007 hazard every other modify-mode pathname step
@@ -2294,7 +2337,13 @@ impl Archive {
             ArchiveBackend::Unrar(unrar) => unrar.is_solid(),
             #[cfg(feature = "sevenzip")]
             ArchiveBackend::SevenZ(sevenz) => sevenz.is_solid(),
-            ArchiveBackend::ZipWriter(_) | ArchiveBackend::ZipReader(_) => {
+            #[cfg(feature = "zip-write")]
+            ArchiveBackend::ZipWriter(_) => {
+                // ZIP, TAR, and other formats don't support solid compression
+                Ok(false)
+            }
+            #[cfg(feature = "zip-read")]
+            ArchiveBackend::ZipReader(_) => {
                 // ZIP, TAR, and other formats don't support solid compression
                 Ok(false)
             }
@@ -2456,10 +2505,12 @@ impl Archive {
             ArchiveBackend::Unrar(unrar) => unrar.bound_identity(),
             #[cfg(feature = "sevenzip")]
             ArchiveBackend::SevenZ(sevenz) => sevenz.bound_identity(),
+            #[cfg(feature = "zip-read")]
             ArchiveBackend::ZipReader(zip) => zip.bound_identity(),
             #[cfg(feature = "libarchive")]
             ArchiveBackend::Libarchive(libarchive) => libarchive.bound_identity(),
             // Write mode: there is no archive on disk yet to bind to.
+            #[cfg(feature = "zip-write")]
             ArchiveBackend::ZipWriter(_) => None,
         }
     }
@@ -2555,6 +2606,7 @@ impl Archive {
                 "Archive write handle is poisoned by an earlier failure; close it without calling finish() or recreate the archive",
             ));
         }
+        #[cfg(feature = "modify")]
         if self.mode == ArchiveMode::Modify {
             if let Some(modifications) = self.modifications.as_ref() {
                 let pending = modifications.added.len()
@@ -2606,6 +2658,7 @@ impl Archive {
 /// could drift.
 fn finalize_write_backend(backend: &mut ArchiveBackend) -> Result<()> {
     match backend {
+        #[cfg(feature = "zip-write")]
         ArchiveBackend::ZipWriter(writer) => writer.finish(),
         #[cfg(feature = "libarchive")]
         ArchiveBackend::Libarchive(b) => b.close_write(),
@@ -2615,6 +2668,7 @@ fn finalize_write_backend(backend: &mut ArchiveBackend) -> Result<()> {
         ArchiveBackend::SevenZ(_) => {
             Err(ArchiveError::read_only_backend(crate::error::ops::FINISH))
         }
+        #[cfg(feature = "zip-read")]
         ArchiveBackend::ZipReader(_) => {
             Err(ArchiveError::read_only_backend(crate::error::ops::FINISH))
         }
