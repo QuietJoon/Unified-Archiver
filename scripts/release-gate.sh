@@ -258,6 +258,14 @@ run_lane test-sfx-only \
     cargo test --no-default-features --features read,zip-read,sfx -- --test-threads=4
 run_lane test-rar-support-only \
     cargo test --no-default-features --features read,zip-read,rar-support -- --test-threads=4
+# `v2-api` earns a lane for the reason the others did, demonstrated the hard way
+# on 2026-09-08: it declared `[]` while `mode_split.rs` made 56 calls into the
+# create/modify/integrity surface, so `--features v2-api` without those failed to
+# compile — and NO profile caught it, because every profile either carries the
+# write operations or omits `v2-api`. The feature now declares its dependencies;
+# this lane is what keeps that honest.
+run_lane test-v2-api-only \
+    cargo test --no-default-features --features read,zip-read,rar-support,v2-api -- --test-threads=4
 
 # L5: default features as a consumer gets them, compile-only. Links no test
 # binaries, so it cannot hit the first-exec admission stall.
