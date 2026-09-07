@@ -222,6 +222,7 @@ fn expansion_ratio_handles_zero_compressed_size() {
 /// *written* rather than what any reader surfaces. (The sole ZIP read
 /// backend does now surface 0x5455; the wire-level read keeps this test
 /// backend-agnostic.)
+#[cfg(feature = "zip-write")]
 #[test]
 fn modify_zip_preserves_atime_and_btime_through_commit() {
     use std::time::{Duration, UNIX_EPOCH};

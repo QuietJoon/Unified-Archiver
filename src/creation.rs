@@ -1650,6 +1650,7 @@ mod tests {
     /// comes back as `cafe\u{301}.txt` and an equality assertion on the
     /// NFC spelling fails for reasons that have nothing to do with this
     /// guard.
+    #[cfg(feature = "zip-write")]
     #[test]
     fn test_recursive_create_accepts_non_ascii_utf8_names() {
         let temp = tempfile::tempdir().unwrap();

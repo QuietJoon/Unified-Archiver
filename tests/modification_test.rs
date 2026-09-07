@@ -4,7 +4,7 @@
 // Both cases commit through `Archive::modify`, so the whole file needs the
 // `modify` operation feature — which implies `read`, `create` and `libarchive`
 // (AD 0058 decision 1 / AD 0071).
-#![cfg(feature = "modify")]
+#![cfg(all(feature = "modify", feature = "zip-write"))]
 
 #[cfg_attr(not(any(feature = "create", feature = "modify")), allow(dead_code))]
 #[cfg_attr(
