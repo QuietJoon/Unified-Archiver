@@ -545,11 +545,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **`v2-api` is a default feature.** `Cargo.toml` now reads `default = ["rar-support", "v2-api"]`
-  (owner ruling, 2026-09-03). A default build exports
+- **`v2-api` is a default feature.** `Cargo.toml` added it to `default` (owner ruling, 2026-09-03); the default set has since grown to twelve entries — see the `[features]` table in `Cargo.toml` for the current list. A default build exports
   `unified_archive::v2::{ReadArchive, WriteArchive, ModifyArchive}`; the module previously required
   `--features v2-api`. Not a source break — the surface is purely additive — but it changes what a
-  default `cargo build` compiles, and `--no-default-features` still turns the module off. The flip
+  default `cargo build` compiles, and the module can still be dropped by selecting features explicitly without `v2-api` — e.g. `--no-default-features --features read,zip-read`; a bare `--no-default-features` no longer compiles at all, because every backend is feature-gated and `lib.rs` refuses a build with none. The flip
   had been gated on "CI coverage" borrowed from AD 0058's footprint-feature ordering constraint;
   AD-0070 established that the constraint was never about this flag and that the real requirement
   was that both sides be *run*. Both are now release-gate lanes, and the minimal profile was made

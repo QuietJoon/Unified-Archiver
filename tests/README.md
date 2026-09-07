@@ -29,7 +29,9 @@ Examples:
 - `concurrency.rs` — parallel `Archive` handles on different files.
 - `multipart_typed.rs` — typed `MultipartLayout` return: single-part ZIP / 7z / TAR surface as `Single` (R0075-0083).
 - `sfx_detection.rs` — SFX detection + open flows.
-- `performance_baseline.rs` — gated baseline (`UA_PRINT_PERF_BASELINE`).
+- `performance_baseline.rs` — SC-010 ratio: an in-process default-lane completeness assert plus an
+  `#[ignore]`d wall-clock comparison against a native archiver. The `UA_PRINT_PERF_BASELINE` env
+  gate was removed by OI-0056-010.
 
 ### Root-level `tests/*_test.rs`
 Behavior-organized regression and feature-coverage tests. These
@@ -74,7 +76,10 @@ TAR builder helpers across test files (R0074-0076); add the helper to
 Default `cargo test` runs should not produce timing-dependent
 assertions or noisy baseline prints. Performance baselines live behind
 `UA_PRINT_PERF_BASELINE=1` (R0074-0078) and any contract-level
-performance assertion behind `UA_RUN_PERF_CONTRACT_TEST=1`
+performance spot-check marked `#[ignore]` — `contract_list_files_performance`. The
+`UA_RUN_PERF_CONTRACT_TEST` env opt-in it used to sit behind was removed by
+OI-0056-010. Run it with
+`TMPDIR=/Volumes/Temp/claude cargo test --test contract_tests --all-features -- --ignored --test-threads=1 contract_list_files_performance`
 (R0074-0071). True benchmarks belong in `benches/` (R0074-0070).
 
 ## Temp directories

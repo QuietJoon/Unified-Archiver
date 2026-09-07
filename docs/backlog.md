@@ -165,11 +165,10 @@ Classification:
 
 ## Type 1 — ready to implement
 
-**One entry, 2026-09-06: the feature-first footprint split (OI-0058-001), whose last four open
-choices were ruled the same day.** It stays filed under Type 2 below until the next reconciliation
-moves it, rather than being duplicated here — see the `RULED 2026-09-06` note on that entry and
-AD-0058's amendment for the decisions. It is large and should land in increments; the recommended
-first increment is format features only.
+**Empty as of 2026-09-07.** The one entry this section held — the feature-first footprint split
+(OI-0058-001) — landed in five increments (`sevenzip`, `zip-crypto`, `libarchive`, `sfx`, then the
+five operation features with the ZIP split). AD-0058 Stage 1 is complete and Stage 2 (facade crates)
+is parked by the 2026-09-02 owner ruling, so nothing in it is claimable work.
 
 Everything else that was here is discharged. Of the four entries this section held on 2026-09-05,
 the commit-path split was implemented, and three declared themselves Type 2 or Type 3 in their own
@@ -545,9 +544,27 @@ have hit a decision wall on three of four.
      conflict gate shared by both write paths; widening the `modification` module gate to
      `any(create, modify)` to avoid extracting it meant a create-only build compiled 2,726 lines to
      reach 30, and the cascade that followed was the compiler saying so. Now `src/write_namespace.rs`
-     (161 lines), with `modification` cleanly `modify`-only.
+     (183 lines), with `modification` cleanly `modify`-only.
 
   Remaining in this item: **nothing in Stage 1.** Stage 2 facade crates stay parked.
+
+- **Follow-up 2026-09-08 — a documentation audit found a code defect the lanes could not.**
+  `v2-api` declared `[]` while `src/archive/mode_split.rs` made 56 calls into the
+  `create`/`modify`/`integrity` surface, so `--features read,zip-read,rar-support,v2-api` failed with
+  34 errors. It surfaced because a README sentence claimed that command as the libarchive-free build
+  and the claim was **checked by running it** — no lane compiled that combination, because every
+  profile either carries the write operations or omits `v2-api`. Now
+  `v2-api = ["read", "integrity", "create", "modify"]`; note the transitive consequence that
+  `modify` implies `libarchive`, so **no libarchive-free build can keep `v2-api`** — the README
+  claim was impossible, not merely wrong. Declaring it exposed `modify`-without-`zip-write` and
+  `create`-without-`zip-write`, both fixed by gating the ZIP-specific sites rather than widening a
+  feature. `test-v2-api-only` added.
+
+  **Third instance of the same shape** (after `rar-support`→`crate::sfx` and `sevenzip`/`libarchive`
+  7z-write), and the sharpest: the other two were reachable from a single-feature lane, this one
+  needed a specific *pair*. A per-feature lane catches a feature wired wrong on its own; it cannot
+  catch one that only breaks in combination. The sweep that found it was run by hand and nothing in
+  the gate reproduces it.
 
 - **Superseded plan (2026-09-07) — `zip-read` / `zip-write` and the five operation features are one
   unit.** Executed as ruled; kept because the reasoning is what shaped the increment.
@@ -686,7 +703,7 @@ have hit a decision wall on three of four.
   substitutions against a sibling `pub mod` in the same file, so the risk is low, but "low risk" is
   not "verified" and the distinction is the whole point of this entry.
 - **The one command that would settle it:** `cargo check --target x86_64-pc-windows-msvc
-  --no-default-features --features external-rar-create` — it skips the vendored UnRAR C++ build, so
+  --no-default-features --features read,zip-read,create,zip-write,external-rar-create` — it skips the vendored UnRAR C++ build, so
   it needs no Windows toolchain beyond the target's std.
 - **Blocked by:** owner decision, 2026-09-01 — the Windows lane stays deferred, and the owner will
   invoke this check explicitly rather than let it ride an unrelated change. This is not a capability

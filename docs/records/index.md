@@ -64,6 +64,10 @@ Generated view; the authoritative catalogue is [`index.yaml`](index.yaml). See [
 - [AD-0068](AD-0068-reject-review-0067-duplicate-of-0066.md) — AD 0068: Reject Review 0067 as byte-identical duplicate of Review 0066 — _archived_
 - [AD-0069](AD-0069-focused-closure-records-replace-omnibus-routing-tables.md) — AD 0069: Review closure is recorded in focused records, not in one omnibus routing table
 - [AD-0070](AD-0070-ci-means-recorded-per-platform-verification.md) — AD 0070: CI means recorded per-platform verification, not a hosted service
+- [AD-0071](AD-0071-libarchive-owns-zip-modification.md) — AD 0071: libarchive owns ZIP modification; the zip crate owns everything else ZIP
+- [AD-0072](AD-0072-the-uniform-interface-is-the-product.md) — AD 0072: The uniform interface is the product; the crate absorbs dependency gaps
+- [AD-0073](AD-0073-integrity-scan-aborted-is-a-third-class.md) — AD 0073: an abandoned integrity scan is a third outcome class, not a corruption verdict
+- [AD-0074](AD-0074-zip-central-extended-timestamp-not-pursued.md) — AD 0074: the ZIP central-directory extended-timestamp convention is not pursued
 
 ## Review-gate Decisions (MADR)
 

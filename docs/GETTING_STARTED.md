@@ -49,6 +49,13 @@ sudo dnf install libarchive-devel pkgconf-pkg-config gcc-c++
 > `clang++`) are required: `build.rs` compiles the bundled UnRAR SDK sources through the
 > `cc` crate.
 
+These prerequisites apply to the **default** feature set. `libarchive` and `pkg-config` are
+needed only with the `libarchive` feature; the C++ compiler only with `rar-support`. A ZIP-only
+build — `default-features = false, features = ["read", "zip-read"]`, adding `create` **and**
+`zip-write` to create ZIPs (`zip-write` selects the writer backend; `create` compiles the
+`Archive::create` API in front of it) — needs neither, and is the crate's minimal supported configuration (AD-0058 `read-minimal`).
+An empty feature set is *not* a valid build: `src/lib.rs` refuses it with a `compile_error!`.
+
 **Windows:**
 macOS and Linux are tested; Windows support is present but not release-verified.
 

@@ -21,10 +21,13 @@ below. The following items are `pub` only because their parent module is `pub mo
 not because they are part of the supported API:
 
 - `unified_archive::ffi::wrapper::UnrarArchive` (only with `rar-support`)
-- `unified_archive::ffi::libarchive_wrapper::LibarchiveArchive`
-- `unified_archive::ffi::zip_wrapper::ZipArchive`
-- `unified_archive::ffi::SevenZArchive`
-- `unified_archive::ffi::ZipWriter`
+- `unified_archive::ffi::libarchive_wrapper::LibarchiveArchive` — requires `libarchive`
+- `unified_archive::ffi::zip_wrapper::ZipArchive` — requires `zip-read`
+- `unified_archive::ffi::sevenz_wrapper::SevenZArchive` — requires `sevenzip`
+- `unified_archive::ffi::zip_writer::ZipWriter` — requires `zip-write`
+
+`src/ffi.rs` declares gated modules only and re-exports nothing, so each type is reached
+through its module path.
 
 These types are exposed for crate-internal composition and may change without notice.
 Use the `Archive` facade for all archive operations; backend selection is automatic.
@@ -1340,10 +1343,17 @@ pub enum Support {
     Full,
     Partial,
     None,
+    BehindFeature { feature: &'static str },
 }
 ```
 
-Capability tri-state used inside `FormatCapabilities`. See rustdoc for variant semantics.
+Capability state used inside `FormatCapabilities`. See rustdoc for variant semantics.
+
+`BehindFeature` means the crate supports this but the capability was compiled out of *this*
+build; `feature` names the Cargo feature that enables it. `Support::is_available()` returns
+`false` for it. Note that `ArchiveFormat::capabilities()` never returns `BehindFeature` — it
+describes the *format* and is build-independent by design (R0001-0063); use
+`ArchiveFormat::availability()` for the build-aware answer.
 
 ---
 
@@ -1930,8 +1940,7 @@ write.finish()?;
 ```
 
 The typed handles delegate to the existing `Archive` machinery — no
-behavioural divergence — and v0.4 is expected to flip `v2-api` on by
-default.
+behavioural divergence.
 
 ### Operation parity (OI-0076-004)
 
@@ -2029,8 +2038,15 @@ Enables RAR/RAR5 support via UnRAR library.
 **Disable RAR support:**
 ```toml
 [dependencies]
-unified-archive = { version = "0.4.0", default-features = false }
+unified-archive = { version = "0.4.0", default-features = false, features = [
+    "read", "integrity", "create", "modify",
+    "zip-read", "zip-write", "zip-crypto", "sevenzip", "libarchive", "sfx", "v2-api",
+] }
 ```
+
+An empty feature set is **not** a valid build — `src/lib.rs` refuses it with a
+`compile_error!` because no backend would be selected. The floor is
+`features = ["read", "zip-read"]` (AD-0058's `read-minimal` profile).
 
 ### `external-rar-create`
 
@@ -2040,7 +2056,7 @@ Use this only when you explicitly want the WinRAR CLI bridge. It is separate fro
 
 ### `v2-api` (default)
 
-Enabled by default since the 2026-09-03 flip; `--no-default-features` turns it off.
+Enabled by default since the 2026-09-03 flip. To build without it, select an explicit feature set that omits `v2-api` — e.g. `--no-default-features --features read,zip-read`. Bare `--no-default-features` is not a valid build (`src/lib.rs` raises a `compile_error!` when no backend feature is selected).
 Enables the additive typed-handle surface:
 `unified_archive::v2::{ReadArchive, WriteArchive, ModifyArchive}`.
 These wrappers narrow operations by mode at compile time while delegating

@@ -1,7 +1,7 @@
 ---
 type: ADR
 title: "AD 0058: Feature-first footprint split and facade crates"
-description: "Planned"
+description: "Stage 1 implemented 2026-09-07; Stage 2 (facade crates) parked"
 tags: [decision, ADR-0058]
 timestamp: 2026-04-25T00:00:00Z
 status: active
@@ -9,7 +9,7 @@ status: active
 
 # AD 0058: Feature-first footprint split and facade crates
 
-Status: Planned
+Status: Stage 1 implemented (2026-09-07) — Required Actions 1–5 complete; Stage 2 (facade crates) parked by the 2026-09-02 owner ruling.
 
 ## Plan
 
@@ -1132,3 +1132,80 @@ sentence were assertions when this record was written.
 
 Stage 2 (facade crates) remains parked by the 2026-09-02 owner ruling; Required
 Action 5's numbers did not make the case for it.
+
+
+## Amendment (2026-09-08, corrections found by a documentation drift audit)
+
+Three errors in the amendments above. Each was wrong when written rather than
+superseded, so none is sheltered by the "a dated amendment is historical" rule, and
+each is corrected here rather than edited in place.
+
+1. **The Windows lane is `check-windows-cfg`, not `check-windows-msvc`.** Decision 2
+   of the 2026-09-06 amendment cites "its own `check-windows-msvc --features
+   external-rar-create` lane" as the reason `external-rar-create` can stay out of
+   `full`. No lane has ever carried that name. The lane is `check-windows-cfg`, it
+   runs `cargo check --target x86_64-pc-windows-msvc --no-default-features --features
+   read,zip-read,create,zip-write,external-rar-create`, and it is opt-in via
+   `--with-windows-check`, owner-invoked only under the 2026-09-01 hold. **The
+   decision itself stands** — the lane exists, under a different name.
+
+2. **Four helpers moved with `NamespaceTracker`, not three.** The 2026-09-07 Stage 1
+   amendment says "the three helpers it depends on" and then lists four:
+   `record_file`, `record_dir`, `normalize_dup_check_path`, `ancestor_paths`. The list
+   is right; the count is wrong.
+
+3. **`src/write_namespace.rs` is 183 lines, not 161.** The file has been 183 lines
+   since the commit that created it (`9bbc8ca`, its only commit), so this was never
+   true. The gate — `any(create, modify)` — is as stated.
+
+Also worth recording, because a reader would reasonably assume otherwise: **`default`
+and `full` currently select the identical twelve-feature set.** `full` is defined as
+everything except `external-rar-create`, and `external-rar-create` was never in
+`default`, so the two coincide. Both statements about `full` in the tables above are
+accurate; the coincidence means `profile-full` and `check-default` exercise the same
+configuration, and `--all-features` is the only lane that adds `external-rar-create`.
+
+
+## Amendment (2026-09-08, a documentation audit found a code defect the lanes could not)
+
+A drift audit over the documentation — not a test run — found that **`v2-api`
+declared no dependencies while `src/archive/mode_split.rs` made 56 calls into the
+`create` / `modify` / `integrity` surface.** `--no-default-features --features
+read,zip-read,rar-support,v2-api` failed with 34 errors. It was found because a README
+sentence claimed that command as the way to build without libarchive, and the claim was
+checked by running it.
+
+**No release-gate lane could have caught it.** Every one of the six profiles either
+carries the write operations or omits `v2-api`, so the broken combination was never
+compiled. This is the third instance of the same shape recorded here — after
+`rar-support` code calling `crate::sfx`, and `sevenzip` reading 7z that only
+`libarchive` can write — and it is the sharpest, because the other two were at least
+reachable from a single-feature lane. This one required a *specific pair*.
+
+`v2-api = ["read", "integrity", "create", "modify"]` now. Note the transitive
+consequence, which is why the README claim was impossible rather than merely wrong:
+`modify` implies `libarchive`, so **no libarchive-free build can keep `v2-api`.**
+
+Declaring it exposed two further ungated combinations, both fixed by gating rather than
+by widening a feature:
+
+* **`modify` without `zip-write`** — ZIP archive-comment and per-entry-compression
+  propagation inside the otherwise format-agnostic commit path. Gated on `zip-write`;
+  making `modify` imply it would overclaim, since modifying a TAR needs no ZIP writer.
+* **`create` without `zip-write`** — four `WriteBackend::Zip` match arms in
+  `creation.rs` and `creation/manifest.rs`.
+
+`test-v2-api-only` joins the isolation lanes. The lesson generalises past this feature:
+**a per-feature lane catches a feature wired incorrectly on its own; it cannot catch a
+feature that is only broken in combination with another.** The combination sweep that
+found this was run by hand, and nothing in the gate reproduces it.
+
+### One documented fact was wrong in three places, and it is a Cargo subtlety worth stating
+
+`full` is **not** a member of `default`. The two expand to the same twelve features —
+`full` is everything except `external-rar-create`, which was never in `default` — but
+Cargo does not list `full` inside `default`, so **`cfg(feature = "full")` is false in a
+default build.** The 2026-09-08 correction amendment above says the sets coincide, which
+is true; three documents went further and marked `full` as "enabled by default", which
+is not. Corrected in `docs/architecture/bootstrap-config.md`,
+`docs/architecture/config-surface.md` and the manual's Cargo-features reference.

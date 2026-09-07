@@ -50,13 +50,13 @@ unified-archive ──build.rs/pkg-config──▶ system libarchive (dylib=arch
                                               └──▶ system C libzstd (.dylib)
 ```
 
-- `Cargo.lock` contains **no `zstd` or `zstd-sys` crate** anywhere in the tree (verified by grep). `sevenz-rust2`, `piz`, and `zip` pull none in our feature configuration. There is zero Rust-level zstd code to swap.
+- `Cargo.lock` contains **no `zstd` or `zstd-sys` crate** anywhere in the tree (verified by grep). `sevenz-rust2` and `zip` pull none in our feature configuration. (`piz` was evaluated and is not a dependency — DCR-009 left the `zip` crate as the sole ZIP backend.) There is zero Rust-level zstd code to swap.
 - A Cargo `[patch]` cannot help: it only redirects Rust crates in our dependency graph. The system `libarchive.dylib` was compiled and dynamically linked against C libzstd long before our build runs; nothing at the Cargo level changes that.
 - The only way to put `libzstd-rs-sys` underneath this crate is to **rebuild libarchive from source** against the Rust static `.a` — abandoning the pkg-config/Homebrew system-library model for a vendored per-platform libarchive build, all to obtain a slightly slower, not-yet-battle-tested decoder. The risk/reward is upside-down.
 
 ## 5. The scenario where it becomes relevant: v0.4 zstd create
 
-`.zst` / `.tar.zst` **creation** is deferred to v0.4 (R0075-0031), currently planned through libarchive's `archive_write_add_filter_zstd` (a new FFI binding in the libarchive write path). Two routes exist for that work:
+`.zst` / `.tar.zst` **creation** was deferred to v0.4 (R0075-0031), planned through libarchive's `archive_write_add_filter_zstd`. **Partly shipped:** `.tar.zst` creation landed by exactly that route (`archive_write_add_filter_zstd` in `src/ffi/libarchive_wrapper/writer.rs`); standalone `.zst` creation remains unimplemented. The Route B reasoning below is kept as live analysis for the standalone case. Two routes exist for that work:
 
 - **Route A (planned):** wire `archive_write_add_filter_zstd` through the existing libarchive FFI layer. No new dependency; consistent with how every other libarchive-backed format works here.
 - **Route B (alternative):** bypass libarchive for zstd and use a pure-Rust zstd implementation directly. This is the only route in which the Trifecta work matters to this project — and even then the dependency would be the safe `zstd` crate (Trifecta's fork, once published/upstreamed), **never** the bare `-sys` crate.

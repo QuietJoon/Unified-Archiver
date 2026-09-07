@@ -17,7 +17,7 @@ sources:
   - { id: creation, resource: src/creation.rs }
   - { id: modification, resource: src/modification.rs }
   - { id: entry, resource: src/entry.rs }
-synced_hash: a7bb268613d65c7193b29645b75e4fa85f6f6ac98b62bfb739134109dfa3a9ac
+synced_hash: 4aa91f6e63036a0a667bcc21fb2a63db71e0d3ec1596aefaf5fe3ca4c8aa4e65
 ---
 
 # Public API surface
@@ -106,7 +106,7 @@ pinned by a compile-time assertion in `src/archive.rs`.
 |---|---|
 | `ArchiveFormat` | enum — 18 variants: `SevenZip`, `Zip`, `Rar`, `Rar5`, `Tar`, `TarGzip`, `TarBzip2`, `TarXz`, `TarZst`, `TarLz4`, `TarLzma`, `Gzip`, `Bzip2`, `Xz`, `Zst`, `Lz4`, `Lzma`, `Iso`; `#[non_exhaustive]` |
 | `FormatCapabilities` | struct — `encryption_read`, `encryption_write`, `multipart_read`, `multipart_write`, `modification`, `compression_read`, `compression_write`, each a `Support`; `#[non_exhaustive]` |
-| `Support` | enum — `Full`, `Partial`, `None`; `#[non_exhaustive]` |
+| `Support` | enum — `Full`, `Partial`, `None`, `BehindFeature { feature: &'static str }`; `#[non_exhaustive]`. `fn is_available(self) -> bool` is `false` for `None` and `BehindFeature` |
 
 `ArchiveFormat` public methods:
 
@@ -484,8 +484,10 @@ the durability boundary for modify handles. Drop cannot return an error, so `fin
 With `features = ["v2-api"]`, `unified_archive::v2` exports three handles that split the
 `Archive` sum type by mode. They delegate to `Archive` rather than reimplementing it, so
 behaviour is unchanged; the change is structural — a `WriteArchive` cannot be passed to an
-extraction call, and `WriteArchive::finish` consumes the handle. They are additive in 0.3;
-the feature is planned to become default in 0.4.
+extraction call, and `WriteArchive::finish` consumes the handle. They are additive; `v2-api` has been in the default feature set since 2026-09-03. To
+build without them, select an explicit feature set that omits `v2-api` — note that
+`v2-api` implies `read`, `integrity`, `create` and `modify`, and `modify` implies
+`libarchive`.
 
 ### `ReadArchive`
 

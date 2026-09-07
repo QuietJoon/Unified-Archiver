@@ -70,7 +70,7 @@ sudo dnf install libarchive-devel pkgconf-pkg-config gcc-c++
 
 Additional notes:
 
-- `libarchive` is required on macOS and Linux.
+- `libarchive` is required for the **default** feature set on macOS and Linux. It sits behind the `libarchive` Cargo feature: a build that omits it (for example `default-features = false, features = ["read", "zip-read"]`) needs no system libarchive and no `pkg-config` probe. Note that `modify` implies `libarchive` (AD-0071), so any build that modifies archives needs it.
 - `pkg-config` is needed so `build.rs` can locate and link `libarchive`. A C++ compiler is needed
   because the bundled UnRAR SDK (default `rar-support` feature) is built as part of the crate: `build.rs` compiles its sources through the `cc` crate, so no `make` is involved.
 - Windows support exists in the codebase, but `v0.4.0` is not release-verified on Windows yet.
@@ -485,7 +485,7 @@ Check:
 
 - the input path exists
 - the output directory is writable
-- required system packages (`libarchive`, `pkg-config`) are installed
+- required system packages (`libarchive`, `pkg-config`) are installed — needed only if your build enables the `libarchive` feature (it is in `default`, and `modify` implies it)
 
 ### Password errors
 

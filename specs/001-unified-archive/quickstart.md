@@ -10,12 +10,12 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-unified-archive = "0.1.0"
+unified-archive = "0.4.0"
 ```
 
 ### Build Requirements
 
-The crate links against native C/C++ libraries at build time. You need:
+With the default feature set the crate links against native C/C++ libraries at build time. You need (none of this is required for a pure-Rust build — `--no-default-features --features read,zip-read`, or any feature set that omits both `libarchive` and `rar-support`; `build.rs` gates the libarchive pkg-config probe on `CARGO_FEATURE_LIBARCHIVE` and the UnRAR C++ build on `rar-support`):
 - **pkg-config** (to locate libarchive headers/libraries)
 - **make** and a **C++ compiler** (g++ or clang++) for building the UnRAR SDK
 - **libarchive** development headers
@@ -208,4 +208,4 @@ See [`docs/project/open-issues.md`](../../docs/project/open-issues.md) for the f
 
 Licensed under the MIT License.
 
-**RAR Support Note**: UnRAR license applies (free for non-commercial use). Commercial use requires license from RARLAB. Disable with `--no-default-features` if needed.
+**RAR Support Note**: UnRAR license applies (free for non-commercial use). Commercial use requires license from RARLAB. Disable it by selecting features explicitly without `rar-support` — e.g. `--no-default-features --features read,integrity,create,modify,zip-read,zip-write,zip-crypto,sevenzip,libarchive,sfx,v2-api`. A bare `--no-default-features` no longer compiles: `src/lib.rs` refuses a build with no backend feature.

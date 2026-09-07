@@ -15,7 +15,7 @@ sources:
   - { id: manifest, resource: Cargo.toml }
   - { id: test-layout, resource: tests/README.md }
   - { id: architecture-overview, resource: docs/architecture/README.md }
-synced_hash: 7e2abd7a690180b3a7446c0e49081bb48657c436a61b7490fedecbf56825f2a1
+synced_hash: 1f2db3b7395b0a0f253485bf292941a6c98ec87eb54e5ec7d16e31cf9d8c3bae
 ---
 
 # Building and testing unified-archive from source
@@ -194,13 +194,20 @@ your linkage against libarchive are all working together.
 UnRAR sources. Build once without it:
 
 ```bash
-cargo build --no-default-features
+cargo build --no-default-features --features read,integrity,create,modify,zip-read,zip-write,zip-crypto,sevenzip,libarchive,sfx,v2-api
 ```
+
+That is the default (`full`) feature set with `rar-support` removed. A *bare*
+`cargo build --no-default-features` is **not** a valid build: since the AD-0058 operation split
+every backend is feature-gated, and `src/lib.rs` raises a `compile_error!` unless at least one
+of `zip-read`, `zip-write`, `sevenzip`, `rar-support` or `libarchive` is named.
 
 This compile skips the C++ sources entirely, so it is markedly faster. In the resulting build,
 `Archive::open` on a RAR or RAR5 file returns an `Unsupported` error saying RAR/RAR5 support is
 disabled in this build; every other format behaves exactly as before. libarchive is still
-required — the `--no-default-features` flag does not affect it.
+required here only because the list above keeps the `libarchive` feature on — drop it from the
+list and the system library and its `build.rs` probe go away too, at the cost of the TAR family,
+ISO, the standalone compressed streams, 7z *writing*, and `modify`.
 
 You now have a working development loop. When you change something, the sequence is Step 3,
 Step 5 for the file you touched, Step 4 before you commit, then Steps 6 and 7.

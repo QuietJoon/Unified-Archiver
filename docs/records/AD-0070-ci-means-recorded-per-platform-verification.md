@@ -118,3 +118,35 @@ either.
 AD-0058 (feature-first footprint split — its ordering constraint 2 is what the
 `v2-api` comment borrows), AD-0046 (Windows support messaging), MADR-0029
 (scratch-path portability), OI-0065-001, OI-0080-001.
+
+
+## Amendment (2026-09-08, both "fails condition 1" verdicts are now satisfied)
+
+This record's condition 1 is "a committed recipe". Two of the bullets above were
+recorded as failing it. Both now pass, and the lane vocabulary the record assumes has
+changed underneath it — noted here rather than edited above.
+
+**The `v2-api` flip.** `v2-api` has been in `default` since 2026-09-03, so the
+prohibition this record quotes is retired. The prohibition text is still present in
+`Cargo.toml`, but only as a past-tense quotation of what the comment used to say,
+followed by the reasons it was wrong.
+
+**AD-0058 Stage 1's feature matrix.** Condition 1 is satisfied as of 2026-09-06/07:
+the six profile lanes and the five per-feature isolation lanes are committed in
+`scripts/release-gate.sh` and were run green — read-minimal 1137, read-zip 1338,
+read-all-formats 1720, create 1487, modify 1611, full 2127 tests, 0 failed in every
+one. Stage 1 Required Actions 1–5 are complete; only RA 6 (facade crates) remains, and
+it is parked.
+
+**A lane this record's readers will look for no longer exists.** The AD-0058 operation
+split made every backend feature-gated, so a bare `--no-default-features` selects no
+backend at all and `src/lib.rs` refuses it with a `compile_error!`. The
+`test-no-default-features` lane was therefore removed on 2026-09-07 and replaced by the
+six profile lanes; the floor is `read-minimal` (`--features read,zip-read`), never the
+empty set. Every per-feature isolation lane now carries `read,zip-read` for the same
+reason.
+
+That change strengthens rather than weakens this record's argument: two of the five
+isolation lanes found real defects on their first run — `rar-support` a coverage loss
+predating the split, `sevenzip` an undocumented cross-feature dependency — neither of
+which either extreme lane could reach.

@@ -1,7 +1,7 @@
 ---
 type: Design Note
 title: "OI-0058-001 — Feature-first footprint split & facade crates: cons / pros"
-description: "Status: parked design note (not an ADR)."
+description: "Status: Stage 1 shipped 2026-09-07 (v0.4.0); Stage 2 facade crates parked."
 tags: [design-note, ADR-0058, OI-0058-001]
 timestamp: 2026-04-29T00:00:00Z
 status: active
@@ -9,22 +9,22 @@ status: active
 
 # OI-0058-001 — Feature-first footprint split & facade crates: cons / pros
 
-**Status:** parked design note (not an ADR). Triggers a planning round when v0.3 stabilises.
+**Status:** partly superseded. Stage 1 (the feature split sketched below) shipped 2026-09-07 at v0.4.0 — see AD-0058's 2026-09-07 amendments. Only Stage 2 (facade crates) is still parked, by the 2026-09-02 owner ruling. The pros/cons below are kept as the pre-implementation record.
 
 ## Problem (one sentence)
-Read-only consumers of the crate today still pay the full dependency cost (libarchive, RAR, sevenz writer, modify, SFX, …) because operation families and backend formats are not feature-gated.
+Before AD-0058 Stage 1, read-only consumers of the crate paid the full dependency cost (libarchive, RAR, the sevenz reader, modify, SFX, …) because operation families and backend formats were not feature-gated. Resolved 2026-09-07: `read` + `zip-read` measures 577,784 bytes stripped / 122 crates against 1,897,112 / 154 for `full`.
 
 ## Sketch of the chosen plan (per AD 0058)
 Stage 1 — feature flags only, single crate:
 - functional: `read`, `integrity`, `create`, `modify`, `full`
-- format/backend: `zip-read`, `zip-write`, `zip-crypto`, `sevenzip`, `rar`, `libarchive`, `sfx`
+- format/backend: `zip-read`, `zip-write`, `zip-crypto`, `sevenzip`, `rar-support`, `libarchive`, `sfx` (as shipped; AD-0058's table wrote this one `rar`)
 
 Stage 2 — facade crates: `unified-archive-core`, `unified-archive-read`, `unified-archive` (full).
 
 ## Pros
 - Read-only path drops sevenz writer, RAR FFI, libarchive C library, full mmap-cache stack — measurable binary-size + build-time cut for the common consumer profile.
 - Build-time native-dep elimination: a `read`-only build needs no C toolchain at all when `libarchive` and `rar-support` are off.
-- Forces a long-lived no-features-on test matrix in CI; bugs that hide behind `--all-features` (the current default test command) get caught.
+- Forces a long-lived multi-profile test matrix in CI, floored at `--features read,zip-read` — not a no-features build, which `lib.rs` rejects with `compile_error!`. As shipped: six profile lanes plus five per-feature isolation lanes in `scripts/release-gate.sh`. Bugs that hide behind `--all-features` (still the `test-all-features` lane) get caught.
 - Aligns the crate with the rust-ecosystem norm (`tokio`, `serde`, `reqwest`) where consumers opt in to surface area.
 
 ## Cons

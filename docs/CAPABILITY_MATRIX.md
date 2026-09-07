@@ -50,16 +50,23 @@ nothing else**.
 - **Linux** — code-identical to macOS for every capability checked; no
   `cfg(target_os = "linux")` changes any of them. But **no verification run has ever
   been recorded on Linux**, so every cell is `untested` rather than confirmed.
-- **Windows** — **the crate does not currently build at all.** Not "some formats are
-  unavailable" — nothing compiles, under any feature combination. Two independent
+- **Windows** — **the crate does not currently build in its default feature set.** Not
+  "some formats are unavailable" — nothing compiles in that configuration. No *other*
+  Windows configuration has a recorded compile result either, so a reduced build is
+  unknown rather than known-broken. The gate's `check-windows-cfg` lane now probes a
+  libarchive-free set (`read,zip-read,create,zip-write,external-rar-create`), but it is
+  owner-invoked only and has not been run. Two independent
   causes, both verified by reading the tree: `src/ffi/libarchive_wrapper/writer.rs`
   calls `libc::_open_osfhandle` / `libc::_close`, which are spelled
   `open_osfhandle` / `close` in the pinned libc (the leading underscore is the C
   symbol, carried by `#[link_name]`, not the Rust path); and `build.rs` emits no
   link directives on Windows while `#[link(name = "archive")]` is unconditional, so
-  MSVC demands `archive.lib` regardless. Because `libarchive_wrapper` is not
-  feature-gated, `--no-default-features` does not avoid either — ZIP and 7z go down
-  with libarchive. Windows work is deferred by owner ruling; this entry documents the
+  MSVC demands `archive.lib` regardless. Both causes now live inside the `libarchive` feature — `src/ffi.rs` gates
+  `libarchive` and `libarchive_wrapper` on it, and `#[link(name = "archive")]` sits
+  inside `src/ffi/libarchive.rs` — so a build that omits `libarchive` reaches neither.
+  A ZIP-only Windows build (`--features read,zip-read`) is therefore no longer excluded
+  by these two causes; it has simply never been compiled. (Bare `--no-default-features`
+  is not a valid build in any case.) Windows work is deferred by owner ruling; this entry documents the
   state, it does not propose a fix.
 
 ## The matrix
@@ -352,17 +359,16 @@ documentation defects, and they need an owner decision to close.
 
 Found while assembling this file; listed so they are fixed rather than rediscovered.
 
-- **README's matrix marks Modify as ✅ for ZIP and 7z.** Both are `Support::Partial`.
 - **README says RAR creation "continues to work" on Windows.** The Windows build does
-  not compile, so RAR creation is reachable on no platform.
-- **README, `Limitations.md` and `docs/USER_MANUAL.md` all say 7z numeric splits are
-  unsupported.** They read as of 2026-09-05.
-- **"Encrypted ZIP creation is deliberately rejected"** appears in README, the crate
-  rustdoc and `Limitations.md`. It is a `hold`, not a settled rejection.
-- **`UnrarArchive::extract_to_stream`'s rustdoc** claims the UnRAR API requires
-  extraction to disk. The vendored SDK disproves it.
-- **`sevenz_wrapper::parse_entry`** blames `sevenz-rust2` for missing creation and
-  access times; the pinned version publishes both.
-- **`Limitations.md` §2** ends "RAR, TAR-family, standalone compressed formats, and
-  ISO are read-only", which contradicts the fact that the whole TAR family is
-  creatable. It means *not modifiable*.
+  not compile in its default feature set, so RAR creation is reachable on no platform.
+
+**Six of the seven entries this list carried were re-checked on 2026-09-08 and are
+resolved; they are struck rather than left to be rediscovered as still-open.** README's
+matrix now reads `△` for ZIP/7z Modify, not `✅`. All three of README, `Limitations.md`
+and `docs/USER_MANUAL.md` now document 7z numeric splits as supported for reading. The
+"encrypted ZIP creation is deliberately rejected" wording is gone — README now says
+"paused, not refused on principle (MADR-0027)". `UnrarArchive::extract_to_stream`'s
+rustdoc now names the real obstacle (adapting the SDK's `UCM_PROCESSDATA` push callback
+to a pull `Read`, DEF-004). `sevenz_wrapper::parse_entry`'s comment now says the blame
+on `sevenz-rust2` "was wrong: the pinned" version publishes both timestamps. And
+`Limitations.md` §2 no longer carries the "ISO are read-only" sentence.

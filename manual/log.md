@@ -1,5 +1,37 @@
 # Manual Log
 
+## 2026-09-08
+
+* **Drift fix (4 English pages) — not a sync.** A documentation audit against the shipped
+  AD-0058 Stage 1 feature split found four manual pages stating things the tree no longer
+  supports. Body edits only; no page added, removed or retitled and no `description` changed,
+  so `index.md` and the sub-indexes are untouched. All four were **in sync at HEAD** (canonical
+  body hash == `synced_hash`) before the edit, so each was rehashed with the canonical trimmed-body
+  command and verified to settle. `generated.at` was left alone — the sources were not re-read;
+  this was a correctness fix driven by an audit, not a re-derivation.
+  - `tutorials/developer/en/build-and-test-from-source.md` — Step 9 told the reader to run
+    `cargo build --no-default-features`, which **no longer compiles**: every backend is now
+    feature-gated and `src/lib.rs` raises a `compile_error!` when none is selected. Replaced with
+    the `full`-minus-`rar-support` set, which was verified to build (exit 0) and to skip the
+    UnRAR C++ sources. The follow-on claims ("libarchive is still required", "every other format
+    behaves exactly as before") were false too and are now scoped to the feature list given.
+  - `how-to/operator/en/install-native-dependencies.md` — the same broken command in the
+    licence-avoidance recipe; the Windows `external-rar-create` recipe, whose only build command
+    also failed to compile; and the per-platform precondition "libarchive is not optional",
+    which cited two code facts (`#[link(name = "archive")]` outside any `cfg`, `src/ffi.rs`
+    declaring the module unconditionally) that AD-0058 Stage 1 made false.
+  - `reference/developer/en/cargo-features.md` — the `[features]` section claimed "exactly four
+    entries", `default = ["rar-support"]`, "no feature enables an optional dependency" and "the
+    crate graph is identical for every feature combination". All four are now false: fifteen
+    entries, twelve in `default` (`full` is a separate aggregate, not a member),
+    `sevenzip = ["dep:sevenz-rust2"]`, and 122 crates minimal against 154 default. Section regenerated against the manifest, with operation/format
+    subsections and the `compile_error!` floor stated.
+  - `how-to/user/en/create-an-archive.md` — `can_create` was described as a predicate that
+    "cannot drift" from `Archive::create`. It is a plain `matches!` over the enum and knows
+    nothing about feature selection, so with `libarchive` off `can_create(Tar)` still answers
+    `true` while `Archive::create` returns `Unsupported`. Page now says so and points at
+    `availability()`.
+
 ## 2026-08-17
 
 * **Sync (version stamp — 6 English pages)**: The owner ruled the version for this change set

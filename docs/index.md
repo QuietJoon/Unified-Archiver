@@ -27,6 +27,10 @@ okf_version: "0.1"
 * [Dual ZIP backend collapsed to a single `zip`-crate backend (piz removed)](records/DCR-009-collapse-dual-zip-to-single-zip-crate-backend.md) - The piz mmap ZIP reader is removed; the `zip` crate becomes the sole ZIP backend for both encrypted and unencrypted archives. Duplicate-name rejection is re-homed into the ZIP backend and OI-0080-002 (mmap SIGBUS) is eliminated by…
 * [Extraction rejects non-regular, non-directory entries on every backend](records/DCR-010-extraction-rejects-special-entries.md) - FIFOs, sockets and device nodes are no longer materialised by the libarchive disk writer and are no longer decoded under file semantics by the 7z backend. The FR-022 skip class widens from links to every unsupported entry kind; the caller-visible warning for the new class is deferred.
 * [Digest methods hold CRC-less entries to their declared size exactly](records/DCR-011-digest-exactness-for-crc-less-entries.md) - calculate_content_multiset_digest_and_size and its shims return Corruption for a truncated CRC-less entry instead of digesting the short payload.
+* [Content-multiset digest drops the per-path occurrence ordinal](records/DCR-012-content-digest-drops-per-path-occurrence-ordinal.md) - Active
+* [Recursive creation emits every directory once, carrying source metadata, on both writers](records/DCR-013-recursive-creation-emits-directory-metadata.md) - Active
+* [Read handles are bound to the archive file's identity, not to a wider per-entry fingerprint](records/DCR-014-read-handle-bound-to-archive-file-identity.md) - Active
+* [In-place offset opens extended to RAR and 7z; libarchive deferred on gate strength, not on FFI cost](records/DCR-015-in-place-offset-opens-for-rar-and-sevenz.md) - Active
 * [Deferred OI Closure — Review-0075 Phase 2 Routing Implementation Plan](superpowers/plans/2026-04-29-deferred-oi-closure.md) - Implementation in deferred-OI-closure plan Phase 1.
 * `project/phase-state.yaml` - Machine-readable design/implementation state (not an OKF concept).
 
@@ -96,7 +100,7 @@ okf_version: "0.1"
 * [AD 0055: `ValidatedSource` token replaces `_unchecked` extraction (D3)](records/AD-0055-r0068-d3-validated-source-token.md) - Implemented.
 * [AD 0056: Defer the LibarchiveArchive read/write struct split (D9 deferred)](records/AD-0056-r0068-d9-libarchive-reader-writer-split-deferred.md) - Deferred.
 * [AD 0057: Defer D10 large-file refactors and `#[cfg(test)]` move-out](records/AD-0057-r0068-d10-large-file-refactor-deferred.md) - Deferred.
-* [AD 0058: Feature-first footprint split and facade crates](records/AD-0058-feature-first-footprint-split-and-facade-crates.md) - Planned
+* [AD 0058: Feature-first footprint split and facade crates](records/AD-0058-feature-first-footprint-split-and-facade-crates.md) - Stage 1 implemented 2026-09-07 (Required Actions 1–5 complete; twelve features, six release-gate profile lanes, 577,784-byte read-minimal floor). Stage 2 facade crates parked by the 2026-09-02 owner ruling.
 * [AD 0059: Review 0069 closure — accept wide modular-design pass, route by group](records/AD-0059-r0069-wide-modular-design-closure.md) - Implemented for the inline-fix subset.
 * [AD 0060: Review 0070 closure — broad modular triage, fix all 92 findings](records/AD-0060-r0070-broad-modular-triage-closure.md) - Implemented inline; Group-A items appended to OI-0069-001 /
 * [AD 0061: Review 0071 closure — narrow correctness pass, all 21 findings landed inline](records/AD-0061-r0071-narrow-correctness-closure.md) - Implemented inline.
@@ -110,6 +114,12 @@ okf_version: "0.1"
 * [AD 0023: Reject path-reference rewrites inside archived review documents](records/AD-0023-reject-archived-review-path-rewrites.md) - Implemented (no changes required); archived — imported from the pre-consolidation decisions/archive/ directory, no successor exists. Its ruling (append-only corrections to archived documents) still informs store governance.
 * [AD 0045: Reject R0063 Low-cluster doc-drift sweep; already covered by OI-0057-009 + post-v0.1.0 banners](records/AD-0045-reject-r0063-low-cluster-doc-drift-already-covered.md) - Archived — imported from the pre-consolidation decisions/archive/ directory, no successor exists. Rejects the R0063 Low-cluster doc-drift sweep (R0063-0011..0121) as already covered by OI-0057-009 and the post-v0.1.0 banners; reviewers still cite it as the governing carve-out.
 * [AD 0068: Reject Review 0067 as byte-identical duplicate of Review 0066](records/AD-0068-reject-review-0067-duplicate-of-0066.md) - Implemented (both reviews archived to reviews/reviewed/); archived 2026-08-07 — the ruling is discharged and nothing ever superseded it; the 2026-07-23 migration had mislabelled it superseded. Only in-repo explanation of why the review series skips 0067.
+* [AD 0069: Review closure is recorded in focused records, not in one omnibus routing table](records/AD-0069-focused-closure-records-replace-omnibus-routing-tables.md) - Active
+* [AD 0070: CI means recorded per-platform verification, not a hosted service](records/AD-0070-ci-means-recorded-per-platform-verification.md) - Active; amended 2026-09-08 (AD-0058 Stage 1 now satisfies condition 1; the `test-no-default-features` lane was removed)
+* [AD 0071: libarchive owns ZIP modification; the zip crate owns everything else ZIP](records/AD-0071-libarchive-owns-zip-modification.md) - Active; the reason `modify` implies `libarchive` and there is no libarchive-free modify profile
+* [AD 0072: The uniform interface is the product; the crate absorbs dependency gaps](records/AD-0072-the-uniform-interface-is-the-product.md) - Active; names the AD-0058 feature split as the counterweight that makes per-format cost affordable
+* [AD 0073: an abandoned integrity scan is a third outcome class, not a corruption verdict](records/AD-0073-integrity-scan-aborted-is-a-third-class.md) - Active
+* [AD 0074: the ZIP central-directory extended-timestamp convention is not pursued](records/AD-0074-zip-central-extended-timestamp-not-pursued.md) - Active (declined; closes OI-0081-004)
 * [AD: `Archive::list_files()` skips the libarchive CRC walk](records/MADR-0001-r045-list-files-skips-crc-walk.md) - Implemented (2026-04-14).
 * [AD: RAR extraction progress pre-scan uses an isolated handle](records/MADR-0002-r045-rar-progress-prescan-isolation.md) - Implemented (2026-04-14).
 * [AD: Reject bulk per-wrapper documentation entries; document the boundary instead](records/MADR-0003-r045-reject-bulk-internal-type-doc-entries.md) - Implemented (2026-04-14).
@@ -195,7 +205,7 @@ okf_version: "0.1"
 
 ## Other
 * [libzstd-rs-sys (Trifecta Tech Foundation) — adoption evaluation](design-notes/libzstd-rs-sys-evaluation.md) - Status: research note, evaluated 2026-06-10.
-* [OI-0058-001 — Feature-first footprint split & facade crates: cons / pros](design-notes/oi-0058-001-feature-footprint.md) - Status: parked design note (not an ADR).
+* [OI-0058-001 — Feature-first footprint split & facade crates: cons / pros](design-notes/oi-0058-001-feature-footprint.md) - Status: Stage 1 shipped 2026-09-07 (v0.4.0); Stage 2 (facade crates) parked.
 * [OI-0065-002 — Piz reader 0x5455/0x000A extra-field parsing: cons / pros](design-notes/oi-0065-002-piz-extra-fields.md) - Status: parked design note.
 * [OI-0075-002 — Snapshot semantics & per-backend caching baseline: cons / pros](design-notes/oi-0075-002-snapshot-caching.md) - Status: parked design note.
 

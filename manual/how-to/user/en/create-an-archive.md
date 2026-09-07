@@ -17,7 +17,7 @@ sources:
   - { id: archive-facade, resource: src/archive.rs }
   - { id: internal-path-validation, resource: src/security.rs }
   - { id: example-create, resource: examples/create_archive.rs }
-synced_hash: cc0a79fbcdc42bfb0f8789168d37f07a068c1365c1b0e5f1e7836d008d248d25
+synced_hash: ce3d6ced41567cddc5f4a0c3fb805cd43ac0e5150a9b147688301ce0ae3ccd92
 ---
 
 # How to create an archive in a given format
@@ -60,8 +60,14 @@ if !format.can_create() {
 }
 ```
 
-`ArchiveFormat::can_create` is the same predicate `Archive::create` consults, so its
-answer and the facade's behaviour cannot drift. The complete creatable set, and the reason
+Everything on this page needs the `create` Cargo feature (on by default); without it
+`Archive::create` and the `create_*` constructors are not compiled at all.
+
+`ArchiveFormat::can_create` is the same predicate `Archive::create` consults *for the format*,
+but it is a plain `matches!` over the enum and knows nothing about your feature selection, so the
+two can disagree in a reduced build: with `libarchive` off, `can_create(Tar)` still answers `true`
+while `Archive::create` returns `Unsupported`. Use `ArchiveFormat::availability()` for the
+build-aware answer. The complete creatable set, and the reason
 each remaining variant is refused, live in the
 [Format support matrix](../../../reference/user/en/format-support-matrix.md). Two
 substitutions come up in practice: `Rar` and `Rar5` have no facade creation path at all,

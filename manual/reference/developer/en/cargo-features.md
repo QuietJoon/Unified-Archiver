@@ -16,7 +16,7 @@ sources:
   - { id: external-mod, resource: src/external.rs }
   - { id: build-script, resource: build.rs }
   - { id: api-reference, resource: docs/API_REFERENCE.md }
-synced_hash: f40ecb0baab38ec1bf3ee3b50a3f480e75faa89b2e82c7d7cf57ed35cc4bc0fa
+synced_hash: f65ba796afe2de96974016c1aa962f8366632e913e2de9744d989074d8014a7e
 ---
 
 # Cargo features and MSRV
@@ -55,25 +55,85 @@ block to be written `unsafe extern`, and requires explicit `unsafe` blocks insid
 toolchain older than 1.85 is rejected by Cargo before compilation, and edition 2024
 itself is unavailable before 1.85.
 
-No feature raises or lowers the MSRV — no feature adds a dependency (see
+No feature raises or lowers the MSRV. One feature does add a dependency —
+`sevenzip = ["dep:sevenz-rust2"]` — and `zip-crypto` turns on the `zip` crate's own
+`aes-crypto` feature; neither moves the MSRV floor (see
 [Feature declarations](#feature-declarations)).
 
 ## Feature declarations
 
-The manifest's `[features]` table has exactly four entries:
+The manifest's `[features]` table has fifteen entries since the AD-0058 Stage 1
+split (2026-09-07): two aggregates (`default`, `full`), four operation features
+(`read`, `integrity`, `create`, `modify`) — what the crate can do — seven format
+features (`zip-read`, `zip-write`, `zip-crypto`, `sevenzip`, `rar-support`,
+`libarchive`, `sfx`) — what it can do it to — plus `v2-api` (API surface) and
+`external-rar-create` (external-tool bridge).
 
 | Feature | In default set | Declared value | Compiled when |
 |---|---|---|---|
-| `default` | — | `["rar-support"]` | always, unless the consumer sets `default-features = false` |
+| `default` | — | the twelve features marked "yes" below | always, unless the consumer sets `default-features = false` |
+| `full` | **no** | the same twelve | the feature is enabled. It expands to what `default` expands to, but `default` does not list `full`, so `cfg(feature = "full")` is false in a default build |
+| `read` | yes | `[]` | the feature is enabled |
+| `integrity` | yes | `["read"]` | the feature is enabled |
+| `create` | yes | `[]` | the feature is enabled |
+| `modify` | yes | `["read", "create", "libarchive"]` | the feature is enabled |
+| `zip-read` | yes | `[]` | the feature is enabled |
+| `zip-write` | yes | `[]` | the feature is enabled |
+| `zip-crypto` | yes | `["zip/aes-crypto", "zip-read"]` | the feature is enabled |
+| `sevenzip` | yes | `["dep:sevenz-rust2"]` | the feature is enabled |
 | `rar-support` | yes | `[]` | the feature is enabled, on every target |
-| `external-rar-create` | no | `[]` | the feature is enabled **and** `target_os = "windows"` |
-| `v2-api` | no | `[]` | the feature is enabled, on every target |
+| `libarchive` | yes | `[]` | the feature is enabled |
+| `sfx` | yes | `["read"]` | the feature is enabled |
+| `v2-api` | yes | `["read", "integrity", "create", "modify"]` | the feature is enabled, on every target |
+| `external-rar-create` | no | `["create"]` | the feature is enabled **and** `target_os = "windows"` |
 
-Every feature other than `default` has an empty value list. No feature enables an
-optional dependency,
-because the manifest declares no optional dependencies: the crate graph is identical
-for every feature combination. A feature switches `cfg` compilation of first-party
-code, and — for `rar-support` only — one step of the build script.
+`default` and `full` currently *expand to* the identical twelve-feature set: `full`
+is defined as everything except `external-rar-create`, and `external-rar-create` was
+never in `default`. They remain distinct features — `default` does not list `full` —
+so `cfg(feature = "full")` is false in a default build even though the selected set is
+the same. `--all-features` is the only configuration that adds `external-rar-create`.
+
+Two features do more than switch `cfg` compilation of first-party code:
+`sevenzip` pulls in the optional `sevenz-rust2` dependency, and `zip-crypto` enables
+the `zip` crate's `aes-crypto` feature. The crate graph is therefore **not** identical
+for every feature combination — measured, the minimal profile resolves 122 crates
+against 154 for the default set. `rar-support` and `libarchive` each switch one step
+of the build script.
+
+**At least one backend feature must be selected.** `src/lib.rs` carries a
+`compile_error!` under
+`#[cfg(not(any(feature = "zip-read", feature = "zip-write", feature = "sevenzip", feature = "rar-support", feature = "libarchive")))]`,
+so a bare `--no-default-features` build is rejected with a message naming the fix. The
+minimum useful configuration is `--features read,zip-read`, AD-0058's `read-minimal`
+profile; it links no native library and needs no C toolchain.
+
+### Operation features
+
+`read` gates listing, entry lookup, extraction and streaming. `integrity` gates
+`validate_integrity`, `calculate_archive_crc`, the manifest and content-multiset
+digests, and the recovery-record accessors. `create` gates `Archive::create` and the
+add/finish surface. `modify` gates `Archive::modify` and `commit_changes`.
+
+`modify` declares `libarchive` because AD-0071 puts modification on the libarchive
+backend for *every* format, ZIP included — so there is no libarchive-free `modify`
+build. `NamespaceTracker`, the file/directory conflict gate both write paths share,
+lives in `src/write_namespace.rs` under `any(create, modify)` so the two write
+operations stay independently selectable.
+
+### Format features
+
+`zip-read` and `zip-write` split the pure-Rust ZIP backend; `zip-read` is the one
+format with no C dependency, which is what makes `read-minimal` a no-toolchain floor.
+`zip-crypto` adds WinZip-AES *reading*. `sevenzip` gives 7z **read** only — 7z
+creation and modification route through libarchive's `archive_write_set_format_7zip`,
+so a build with `sevenzip` and without `libarchive` reads 7z and cannot write it.
+`libarchive` covers the TAR family, ISO and the standalone compressed streams, plus
+all creation other than ZIP and all modification. `sfx` gates self-extracting-archive
+detection and offset opening.
+
+A format compiled out reports `Support::BehindFeature { feature }` from
+`ArchiveFormat::availability()`. `ArchiveFormat::capabilities()` stays
+build-independent by design (R0001-0063) and never returns that variant.
 
 ### `rar-support` (in the default set)
 
@@ -184,17 +244,24 @@ consumes the handle. The method-by-method surface is in
 Platform gate: none. Dependencies: none added. Licence consequence: none.
 
 Version status: additive in 0.4.0 — the legacy `Archive` facade is unchanged whether
-the feature is on or off. Both the manifest comment and the rustdoc on
-`unified_archive::v2` record that 0.4 will enable it by default.
+the feature is on or off. It has been **on by default since 2026-09-03** (owner
+ruling); the manifest comment and the rustdoc on `unified_archive::v2` record the
+flip.
 
 With the feature off: `unified_archive::v2` does not exist and `mode_split` is not
 compiled.
 
 ### Effect of `default-features = false`
 
-The default set contains `rar-support` only. A dependency declared with
-`default-features = false` and no explicit feature list compiles the crate with all
-three features off, and with the full dependency set below still compiled.
+The default set contains twelve features. A dependency declared with
+`default-features = false` and **no** explicit feature list does not compile at all:
+no backend is selected and `src/lib.rs` raises its `compile_error!`. Name a feature
+set explicitly — `features = ["read", "zip-read"]` for the minimal floor, or the
+twelve-entry list above to reproduce the default.
+
+Turning features off does change the dependency set: `sevenzip` carries
+`sevenz-rust2` and `zip-crypto` carries the `zip` crate's AES stack, so the minimal
+profile resolves 122 crates against 154 for the default set.
 
 ## Dependency set
 

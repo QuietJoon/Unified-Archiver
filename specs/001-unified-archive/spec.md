@@ -289,7 +289,7 @@ The library studied 7zip-JBinding's unified interface design and adapted it to R
 - **SC-012**: [TARGET] Archive integrity validation using CRC32 detects corruption in test archives where the format and backend support CRC32 verification. Detection scope is limited to formats that store CRC32 and backends that expose it; 100% detection across all formats is a target, not a guarantee.
 - **SC-013**: Progress callbacks are rate-limited to ~60 updates/sec maximum; actual frequency varies by backend. ZIP and 7z provide per-entry granularity. RAR has full progress support.
 - **SC-014**: Library documentation includes working examples showing identical code processing multiple archive formats for all four primary user stories (inspect, extract, create, modify)
-- **SC-015**: The crate depends on bundled native libraries: libarchive (TAR family, ISO), UnRAR (RAR/RAR5), and optionally the external WinRAR CLI (via `external-rar-create` feature). ZIP uses the pure-Rust Piz and zip crates. 7z uses the pure-Rust sevenz-rust2 crate.
+- **SC-015**: The crate's native dependencies are feature-gated: libarchive (TAR family, ISO, 7z/TAR creation, and ZIP/7z modification per AD-0071) behind the `libarchive` feature, UnRAR (RAR/RAR5) behind `rar-support`, and the external WinRAR CLI behind `external-rar-create`. The `read-minimal` profile (`--no-default-features --features read,zip-read`) links no native library at all. ZIP uses the pure-Rust `zip` crate; 7z read uses `sevenz-rust2`.
 
 #### SFX Detection Criteria
 

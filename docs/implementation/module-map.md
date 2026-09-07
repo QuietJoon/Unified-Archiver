@@ -25,7 +25,12 @@ Ownership and placement of key structural pieces.
 | library | `src/inspection.rs` | Listing, lookup, integrity, multi-part, symlink warnings | `MultipartLayout`, `ValidationReport` |
 | library | `src/extraction.rs` | Extraction orchestration, shared sequential selective extraction, progress | (no owned types — orchestrates backends) |
 | library | `src/creation.rs` | Archive creation flow, write-mode operations | Archive write-mode API (`impl Archive` methods: create, add_file_from_data, add_file_from_path, add_file_from_path_as, add_directory, add_directory_recursive) |
-| library | `src/modification.rs` | Modify-mode API, copy-on-write commit | `ModificationTracker`, `ModificationOptions` |
+| library | `src/modification.rs` | Modify-mode API, copy-on-write commit (feature `modify`) | `ModificationTracker`, `ModificationOptions` |
+| library | `src/write_namespace.rs` | Archive-internal file/dir namespace conflict gate shared by both write paths (feature `create` or `modify`) | `NamespaceTracker`, `record_file`, `record_dir`, `normalize_dup_check_path`, `ancestor_paths` |
+| library | `src/backend.rs` | `ReadBackend` dispatch trait and the `ArchiveBackend` read/write routing | `ReadBackend`, `dispatch_read_backend` |
+| library | `src/ffi.rs` | Backend module declarations, each behind its format feature | `zip_wrapper`, `zip_writer`, `sevenz_wrapper`, `libarchive_wrapper`, `wrapper` |
+| library | `src/password.rs` | Password handling for encrypted archives | `Password` |
+| library | `src/volume_chain.rs` | Multi-volume 7z part chaining (feature `sevenzip`) | `VolumeChain` |
 | library | `src/streaming.rs` | Streaming extraction abstraction | `StreamingExtractor` |
 | library | `src/stream_crc.rs` | Stream-checksum module root | Holds the module doc and the re-exports only, no logic. **Every child is private**; each public item keeps its historic `stream_crc::…` path, so the R7 split (AD 0010 amendment 2026-08-21) added no public module path. Re-exports `StreamChecksum`, `CheckType` |
 | library | `src/stream_crc/digest.rs` | Value layer: checksum types and bit-level search (private) | `StreamChecksum`, `CheckType`, `find_pattern_last`, `find_bzip2_eos_crc_bitwise` — the I/O-free seam, which is why the bzip2 bit scan lives here rather than beside its codec |
@@ -41,7 +46,7 @@ Ownership and placement of key structural pieces.
 | library | `src/ffi/libarchive.rs` | Raw libarchive C FFI bindings | Raw C struct declarations, extern functions |
 | library | `src/ffi/sevenz_wrapper.rs` | Native Rust 7z read/extract | `SevenZArchive` |
 | library | `src/ffi/zip_wrapper.rs` | Native Rust ZIP read/extract — the sole ZIP reader, encrypted and unencrypted (DCR-009 retired the second backend) | `ZipArchive` (ZipReader backend) |
-| library | `src/archive/mode_split.rs` | D2 typed-handle split, re-exported as `crate::v2`; in the default build since `default = ["rar-support", "v2-api"]` (2026-09-03) | `ReadArchive`, `WriteArchive`, `ModifyArchive` |
+| library | `src/archive/mode_split.rs` | D2 typed-handle split, re-exported as `crate::v2`; behind the `v2-api` feature, which is one of the twelve members of `default` (`default` currently equals `full`: rar-support, v2-api, sevenzip, zip-crypto, libarchive, sfx, read, integrity, create, modify, zip-read, zip-write — see the `[features]` table in Cargo.toml) | `ReadArchive`, `WriteArchive`, `ModifyArchive` |
 | library | `src/payload_window.rs` | `Read + Seek` window over a byte range, for in-place SFX opens (DCR-015) | `PayloadWindow` |
 | library | `src/fs_identity.rs` | Read-handle file-identity capture and revalidation (DCR-014) | `FileIdentity` |
 | library | `src/ffi/zip_writer.rs` | Native Rust ZIP creation | `ZipWriter` |

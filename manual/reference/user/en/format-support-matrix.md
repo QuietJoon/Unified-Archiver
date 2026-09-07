@@ -15,7 +15,7 @@ sources:
   - { id: extraction, resource: src/extraction.rs }
   - { id: inspection, resource: src/inspection.rs }
   - { id: libarchive-writer, resource: src/ffi/libarchive_wrapper/writer.rs }
-synced_hash: 8a50642b9505ccbad83d31512ae3e3f6c739561ee01b22fdd9604485a824b255
+synced_hash: 372a70862fd93542b39115451c44d057f18a17c1193b07aab11231a9b087510c
 ---
 
 # Format support matrix
@@ -30,13 +30,19 @@ documentation in `src/lib.rs`.
 ### `Support`
 
 `unified_archive::Support` is the per-capability grade. It is `#[non_exhaustive]` and derives
-`Debug`, `Clone`, `Copy`, `PartialEq`, `Eq`. Three variants exist today:
+`Debug`, `Clone`, `Copy`, `PartialEq`, `Eq`. Four variants exist today:
 
 | Variant | Meaning as documented in `src/format.rs` |
 |---|---|
 | `Support::Full` | Fully supported and tested. |
 | `Support::Partial` | Partially supported (for example, read works but write does not). |
 | `Support::None` | Not supported. |
+| `Support::BehindFeature { feature }` | Supported by the crate, but compiled out of *this* build; `feature` names the Cargo feature that enables it. Added with the AD-0058 Stage 1 split. |
+
+`Support::is_available()` is `true` for `Full` and `Partial`, `false` for `None` and
+`BehindFeature`. Note that `ArchiveFormat::capabilities()` never returns `BehindFeature` —
+it describes the *format* and is build-independent by design (R0001-0063). The build-aware
+accessor is `ArchiveFormat::availability()`.
 
 Because the enum is `#[non_exhaustive]`, a downstream `match` on it must carry a wildcard arm.
 

@@ -50,7 +50,12 @@ From Technical Context, we need to resolve:
 
 **Selected: Hybrid approach - libarchive + unrar library**
 
-> **Retrospective correction (R040-024)**: The original decision framed this as a two-backend "libarchive + unrar" hybrid. The shipped architecture is a five-backend split: **Piz** (ZIP read), **ZipReader** (encrypted ZIP read), **SevenZ** (7z read), **UnRAR** (RAR read), and **libarchive** (TAR/ISO read + all archive creation). The rationale below reflects the original design-time thinking; the "Implementation strategy" section that follows documents the final state.
+> **Retrospective correction (R040-024, amended 2026-09)**: The original decision framed this as a
+> two-backend "libarchive + unrar" hybrid. The shipped architecture is a four-backend split: the
+> **zip** crate (all ZIP read/extract/create; AES read behind `zip-crypto`), **sevenz-rust2** (7z read
+> only), **UnRAR** (RAR read), and **libarchive** (TAR/ISO read, 7z and TAR creation, and all ZIP/7z
+> modification per AD-0071). Each backend now sits behind its own Cargo feature (AD-0058 Stage 1).
+> `piz` was evaluated and is not a dependency.
 
 **Rationale**:
 1. **libarchive** provides excellent cross-platform support for TAR variants, ISO, and archive creation
@@ -59,7 +64,11 @@ From Technical Context, we need to resolve:
 4. **Proven approach**: compress-tools reference shows libarchive works well in Rust ecosystem
 5. **Maintainability**: Well-documented C APIs, active communities
 
-> **Post-implementation note (R040-025)**: libarchive's current role is narrower than originally envisioned -- it handles TAR/ISO read and all archive creation. ZIP read is handled by Piz/ZipReader and 7z read by SevenZ, each chosen for better Rust-native ergonomics in those formats.
+> **Post-implementation note (R040-025, amended 2026-09)**: libarchive's current role is narrower
+> than originally envisioned -- it handles TAR/ISO read, 7z and TAR creation, and (per AD-0071) all
+> ZIP/7z modification. ZIP read/write is handled entirely by the pure-Rust `zip` crate (`zip-read` /
+> `zip-write`) and 7z read by `sevenz-rust2`, each chosen for better Rust-native ergonomics in those
+> formats.
 
 **Implementation strategy** *(updated post-implementation)*:
 - Use libarchive for: TAR variants (TAR.GZ, TAR.BZ2, TAR.XZ), ISO, archive creation

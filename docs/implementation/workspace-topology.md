@@ -32,6 +32,10 @@ unified-archive/
 │   ├── password.rs                 # Password newtype over secstr::SecStr
 │   ├── fs_identity.rs              # Read-handle file-identity binding (DCR-014)
 │   ├── payload_window.rs           # In-place SFX payload window (DCR-015)
+│   ├── write_namespace.rs          # Shared write-path namespace gate (create|modify)
+│   ├── volume_chain.rs             # Multi-volume 7z part chaining (sevenzip)
+│   ├── backend.rs                  # ReadBackend dispatch trait
+│   ├── backend/                    # Backend dispatch tests
 │   ├── archive/
 │   │   └── mode_split.rs           # v2 typed handles (ReadArchive/WriteArchive/ModifyArchive)
 │   ├── ffi.rs                      # FFI / native-backend module root (file-as-module: no mod.rs)
@@ -134,5 +138,5 @@ Not applicable (single crate).
 
 | Artifact | Source | Notes |
 |---|---|---|
-| `build.rs` | Native link orchestration | Compiles/links UnRAR SDK (static), links libarchive (dynamic via pkg-config) |
+| `build.rs` | Native link orchestration | Compiles/links the UnRAR SDK (static) only under `rar-support`; runs the libarchive pkg-config probe and dynamic link only under `libarchive`. Neither runs in the `read-minimal` profile (`--no-default-features --features read,zip-read`), which needs no system C library at build time. |
 | `CARGO_TARGET_DIR` | `/Volumes/Scratch/cargo_target` | External target dir (do not modify) |

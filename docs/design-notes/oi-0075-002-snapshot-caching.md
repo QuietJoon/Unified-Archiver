@@ -9,7 +9,7 @@ status: active
 
 # OI-0075-002 — Snapshot semantics & per-backend caching baseline: cons / pros
 
-**Status:** parked design note. Send-safety half is closed (Review 0075). Caching-baseline half is open.
+**Status:** closed out. AD-0065 selected Option A (frozen view at first use) on 2026-04-30, closing the send-safety half (Review 0075); DCR-009 later removed the `piz` backend this note discusses, leaving the `zip` crate as the sole ZIP reader. Kept for the reasoning; not a live decision.
 
 ## Problem (one sentence)
 `Archive`'s rustdoc was tightened in Review 0075 to "best-effort metadata cache" with a per-backend caching list, but the backends do not agree on a single caching policy: Piz caches mmap+central directory, ZipReader caches a Mutex'd handle, 7z caches the TOC, libarchive lazily reopens for every operation, UnRAR keeps the FFI handle alive.

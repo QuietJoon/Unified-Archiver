@@ -92,7 +92,7 @@ about because libarchive and RAR behavior are not fully isolated by feature.
 6. After Stage 1 stabilizes, introduce `unified-archive-core`,
    `unified-archive-read`, and the full `unified-archive` facade.
 
-### Update (2026-09-07) — Required Actions 3 and 5 are done; 2 is three-sevenths done
+### Update (2026-09-07) — Required Actions 1–5 are done; RA 6 is parked
 
 Stage 1 is landing in increments (AD-0058 carries one amendment per increment).
 Status against the Required Actions above:
@@ -125,7 +125,7 @@ Status against the Required Actions above:
   profile needs a compile lane plus a separate reader-bearing test lane, because a profile with no
   reader cannot observe what it writes.
 - **RA 2 — COMPLETE 2026-09-07** (was four of seven). `zip-crypto`, `sevenzip`,
-  `libarchive` and `sfx` are shipped features. `zip-read` and `zip-write` remain;
+  `libarchive`, `sfx`, `zip-read` and `zip-write` are all shipped features;
   `rar` ships under its existing name `rar-support`, which the 2026-09-06 ruling
   kept deliberately. Each shipped feature now has its own isolation lane in
   `scripts/release-gate.sh`, and that is not a formality: two of the five found
@@ -144,8 +144,9 @@ Status against the Required Actions above:
 - [x] Read-minimal build works without libarchive, RAR, create, or modify
       dependencies. *(All four halves verified 2026-09-07: `read,zip-read`
       compiles and tests clean with zero warnings.)*
-- [x] Full build preserves the current API surface. *(`--all-features`: 43
-      suites, 2088 passed, 0 failed.)*
+- [x] Full build preserves the current API surface. *(`full` profile, 2026-09-07:
+      43 suites, 2127 passed, 0 failed. The earlier `--all-features` figure of 2088
+      predates the operation-feature increment.)*
 - [x] `build.rs` does not probe or build disabled native backends.
 - [x] CI covers both read-only and full profiles. *(All six named profiles have
       lanes, plus five per-feature isolation lanes and a compile-only lane for
@@ -237,7 +238,7 @@ blocked on anything resembling CI:
   the smallest step from what ships.
 - **The `cfg(windows)` arms compiling** is checkable on the dev host today via
   `cargo check --target x86_64-pc-windows-msvc --no-default-features --features
-  external-rar-create`, which skips the vendored UnRAR C++ build. It is lane L6
+  read,zip-read,create,zip-write,external-rar-create`, which skips the vendored UnRAR C++ build. It is lane L6
   of `scripts/release-gate.sh`, **defaults off**, and is owner-invoked only
   under the 2026-09-01 hold. An agent must not enable it.
 - **libarchive actually linking, and the Windows tests actually running**, is
@@ -263,7 +264,9 @@ adopted.
    panic-with-OI-pointer fallback.
 4. Run the release gate on a Windows host and record it under
    `docs/verification/`: `cargo build` with default features, `cargo build
-   --no-default-features`, and `cargo test --all-features -- --test-threads=4`.
+   --no-default-features --features read,zip-read` (the `read-minimal` floor — a bare
+   `--no-default-features` build is refused by `lib.rs`'s `compile_error!` since
+   2026-09-07), and `cargo test --all-features -- --test-threads=4`.
    **Restated 2026-09-03 (AD-0070).** This used to read "Add a Windows CI job
    that compiles the crate with default features", which named a mechanism the
    project has ruled out rather than the property it needs.
@@ -271,7 +274,7 @@ adopted.
 ### Verification
 
 - [ ] Windows build succeeds with default features.
-- [ ] Windows build succeeds with `--no-default-features`.
+- [ ] Windows build succeeds with the `read-minimal` profile (`--no-default-features --features read,zip-read`).
 - [ ] RAR extraction works on Windows (or `rar-support` remains explicitly
       gated with a documented path to enable it).
 
@@ -1927,7 +1930,7 @@ or without any CI arrangement.
 Worth recording so the lane is not re-derived when it is unparked: the check
 half is already reachable here. `x86_64-unknown-linux-musl` std is installed on
 the dev host, and with `rar-support` disabled the build compiles no vendored
-C++ — so `cargo check --target x86_64-unknown-linux-musl --no-default-features`
+C++ — so `cargo check --target x86_64-unknown-linux-musl --no-default-features --features read,zip-read`
 runs today and is exactly what would expose Required Action 1's defect, since
 the libarchive discovery block would still branch on the *host* `cfg` rather
 than on `--target`. What is not reachable is linking and running a Linux
@@ -1939,7 +1942,7 @@ machine and its use is deferred by owner ruling 2026-09-03.
 1. Branch `build.rs` on `env::var("CARGO_CFG_TARGET_OS")` (plus `rerun-if-env-changed`) instead of host `cfg`.
 2. Drive the vendored UnRAR build from Cargo target variables (`cc` crate or explicit `CC`/`CXX`/`AR`/flags plumbing into the makefile), preserving the current native macOS/Linux static build behaviour exactly.
 3. When this is unparked, enable release-gate lane L7
-   (`cargo check --target x86_64-unknown-linux-musl --no-default-features`),
+   (`cargo check --target x86_64-unknown-linux-musl --no-default-features --features read,zip-read`),
    which is runnable on the dev host today — that target's std is installed and
    with `rar-support` off there is no vendored C++ to build. The link-and-run
    half needs a Linux sysroot or a container and is an environment need rather

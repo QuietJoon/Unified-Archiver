@@ -61,14 +61,17 @@ sudo dnf install libarchive-devel pkgconf-pkg-config gcc-c++
 brew install libarchive pkg-config
 ```
 
-> `pkg-config` and a C++ compiler are required: `build.rs` compiles the bundled
-> UnRAR SDK sources through the `cc` crate, and libarchive is located with
-> `pkg-config`.
+> `pkg-config` and a C++ compiler are required *for the default feature set*: `build.rs`
+> compiles the bundled UnRAR SDK sources through the `cc` crate when `rar-support` is on, and
+> locates libarchive with `pkg-config` when `libarchive` is on. The `read-minimal` profile
+> (`--no-default-features --features read,zip-read`) needs neither — ZIP is the one format with
+> no C dependency.
 
 **Windows:**
 Not yet auto-configured. The blocker is libarchive discovery: `build.rs`'s
-Windows branch emits only a build warning and no link directives, and libarchive
-is not feature-gated, so it must be supplied by hand. Until vcpkg-based
+Windows branch emits only a build warning and no link directives, and the libarchive probe sits
+behind the default-on `libarchive` Cargo feature, so libarchive must either be supplied by hand or
+switched off by building without that feature. Until vcpkg-based
 discovery lands (tracked as OI-0065-001), either:
 
 - install libarchive under `vcpkg` and set its lib directory via
@@ -76,9 +79,14 @@ discovery lands (tracked as OI-0065-001), either:
 - vendor libarchive yourself and provide a precompiled `.lib`.
 
 Keep `rar-support` enabled: the bundled UnRAR sources compile on Windows through
-the `cc` crate, so `--no-default-features` does not help with libarchive — it drops working RAR read support *and*
-the `v2-api` typed handles (`unified_archive::v2::{ReadArchive, WriteArchive, ModifyArchive}`), default-on since
-2026-09-03. The default feature set is `["rar-support", "v2-api"]`; `external-rar-create` is opt-in. RAR *creation* on Windows continues to work
+the `cc` crate, so a bare `--no-default-features` is not the answer — with no `--features` it does not build at all
+(`lib.rs` raises a `compile_error!` when no backend feature is selected). To build without a system
+libarchive, select features explicitly and leave `libarchive` out — e.g.
+`--no-default-features --features read,integrity,create,zip-read,zip-write,zip-crypto,sevenzip,rar-support,sfx`,
+which keeps working RAR read support and ZIP/7z reading and ZIP creation. Note what such a build
+gives up: `modify` implies `libarchive` (AD-0071), and `v2-api` implies `modify`, so the
+`unified_archive::v2` typed handles (`ReadArchive` / `WriteArchive` / `ModifyArchive`) —
+default-on since 2026-09-03 — cannot be kept in a libarchive-free build. The default feature set is `["rar-support", "v2-api", "sevenzip", "zip-crypto", "libarchive", "sfx", "read", "integrity", "create", "modify", "zip-read", "zip-write"]` — twelve features since the AD-0058 Stage 1 split. The `full` aggregate selects that same set (everything the crate can do from its own code); `external-rar-create`, which shells out to WinRAR, is opt-in and in neither. RAR *creation* on Windows continues to work
 through the optional `external::RarCreator` (WinRAR CLI) — though see the platform note below: the Windows build does not currently compile, so that lane is not reachable today either.
 
 ## Documentation

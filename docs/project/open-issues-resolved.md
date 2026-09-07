@@ -419,7 +419,14 @@ out of [`open-issues.md`](open-issues.md); they stay there and carry a `RESOLVED
   > Source ids corrected 2026-08-07 (`/indy-review-cleanup`): the line above previously read `R0057-0010, R0057-0014`, which resolves to the `sanitize_entry_path` filesystem-mutation finding and the `modify()` redundant-open finding — neither is about the feature flag. The ids below are the findings this entry actually tracks, read from Review 0057 before it was moved to the cold store.
 - **Date:** 2026-04-17
 - **Status:** RESOLVED (2026-04-18)
-- **Resolution:** `cargo build --no-default-features` and `cargo test --no-default-features` now both pass. Library code paths were already properly gated (`ArchiveBackend::Unrar` imports, match arms in `src/archive.rs`, `src/creation.rs`, `src/extraction.rs`, `src/inspection.rs`) and the build script already guarded `build_unrar()`. The remaining work was gating 108 RAR-fixture-dependent test functions across 23 test files with `#[cfg(feature = "rar-support")]` and gating three library-level tests (`test_open_valid_rar`, `test_is_encrypted_encrypted_rar`, `test_list_files_rar`). Runtime error for RAR formats with feature off surfaces as `Unsupported { operation: "open", format: Rar/Rar5, details: "RAR/RAR5 support is disabled in this build (enable the \`rar-support\` Cargo feature to include UnRAR)" }`.
+- **Resolution:** `cargo build --no-default-features` and `cargo test --no-default-features` now both pass.
+
+  > **Superseded 2026-09-08.** AD-0058 Stage 1 made every backend feature-gated, so a bare
+  > `--no-default-features` no longer compiles at all — `src/lib.rs` raises a `compile_error!`
+  > when no backend feature is selected. The equivalent RAR-free configuration today is
+  > `--no-default-features --features read,integrity,create,zip-read,zip-write,zip-crypto,sevenzip,sfx`,
+  > and the minimal floor is `--features read,zip-read`. The resolution above stands for the
+  > defect it closed; only the command has changed. Library code paths were already properly gated (`ArchiveBackend::Unrar` imports, match arms in `src/archive.rs`, `src/creation.rs`, `src/extraction.rs`, `src/inspection.rs`) and the build script already guarded `build_unrar()`. The remaining work was gating 108 RAR-fixture-dependent test functions across 23 test files with `#[cfg(feature = "rar-support")]` and gating three library-level tests (`test_open_valid_rar`, `test_is_encrypted_encrypted_rar`, `test_list_files_rar`). Runtime error for RAR formats with feature off surfaces as `Unsupported { operation: "open", format: Rar/Rar5, details: "RAR/RAR5 support is disabled in this build (enable the \`rar-support\` Cargo feature to include UnRAR)" }`.
 
 ---
 

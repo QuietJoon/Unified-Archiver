@@ -15,7 +15,7 @@ sources:
   - { id: user-manual, resource: docs/USER_MANUAL.md }
   - { id: libarchive-writer, resource: src/ffi/libarchive_wrapper/writer.rs }
   - { id: open-issues, resource: docs/project/open-issues.md }
-synced_hash: b9d27ba798e95c02387fcd8c6ffec8903e6eb15d0d2e12eb5df115b3a0f29f17
+synced_hash: a988b99a3d918ffaba98a17273bbffe3e3e2c5d9de112a233a89c49280793025
 ---
 
 # How to satisfy the native build dependencies
@@ -27,10 +27,11 @@ and the two checks that catch the failures people actually hit.
 ## Preconditions that hold on every platform
 
 - Rust 1.85 or newer (the crate is on edition 2024).
-- libarchive is not optional. `src/ffi/libarchive.rs` carries `#[link(name = "archive")]` outside
-  any `cfg`, and `src/ffi.rs` declares the `libarchive` module unconditionally, so every
-  build links `archive` no matter which Cargo features you select. `--no-default-features` does
-  not remove this requirement.
+- libarchive is optional as of AD-0058 Stage 1, but it is on by default. `src/ffi.rs` declares
+  its module behind `#[cfg(feature = "libarchive")]`, and `build.rs` runs its whole pkg-config
+  and Homebrew probe only when `CARGO_FEATURE_LIBARCHIVE` is set, so a build that leaves the
+  `libarchive` feature out neither links `archive` nor needs it installed. Any build that keeps
+  the feature — which includes every default build — does require it.
 - A C++ compiler is needed whenever the `rar-support` feature is on, which it is by default.
 - You do **not** need `make`. `build.rs` compiles the vendored UnRAR sources through the `cc`
   crate, which drives your C++ compiler directly.
@@ -115,16 +116,23 @@ defines from `CARGO_CFG_TARGET_OS` and `CARGO_CFG_TARGET_ENV`, and its Windows s
 upstream's `UnRARDll.vcxproj`, so `cc` compiles it with MSVC. The precondition is an MSVC C++
 toolchain (Visual Studio Build Tools) rather than `make`.
 
-`--no-default-features` is therefore a size and licence choice on Windows, not a workaround. It
-still does nothing about libarchive.
+Dropping `rar-support` is therefore a size and licence choice on Windows, not a workaround for the
+libarchive gap. Dropping the separate `libarchive` feature *is* that workaround: it removes the
+`#[link(name = "archive")]` block and the `build.rs` probe, at the cost of the TAR family, ISO, the
+standalone compressed streams, 7z writing, and `modify`. A bare `--no-default-features` is not a
+valid build in either case.
 
 **RAR creation without the SDK.** The optional `external-rar-create` feature is unaffected by any
 of the above. It compiles only on a Windows target and shells out to a WinRAR `rar.exe` that you
 install and license yourself:
 
 ```cmd
-cargo build --no-default-features --features external-rar-create
+cargo build --no-default-features --features read,zip-read,create,zip-write,external-rar-create
 ```
+
+(`external-rar-create` only implies `create`; a build still needs a backend feature, so the
+read/write ZIP pair is named explicitly. This is the same set the `check-windows-cfg` release-gate
+lane probes.)
 
 Its preconditions are a licensed WinRAR installation and a discoverable `rar.exe`:
 `RarCreator::new` runs `where rar.exe` against `PATH` first, then tries
@@ -207,8 +215,12 @@ the same reproduction in your own licence or documentation.
 If you would rather not carry the requirement at all, build without the sources:
 
 ```bash
-cargo build --no-default-features
+cargo build --no-default-features --features read,integrity,create,modify,zip-read,zip-write,zip-crypto,sevenzip,libarchive,sfx,v2-api
 ```
+
+That is the default (`full`) set with `rar-support` removed; a bare `--no-default-features` is not
+a valid build, because `src/lib.rs` raises a `compile_error!` unless at least one backend feature
+is named.
 
 What changes:
 
@@ -218,7 +230,10 @@ What changes:
 - `src/ffi/unrar.rs` and `src/ffi/wrapper.rs` are not compiled.
 - `Archive::open` on a RAR or RAR5 file returns `ArchiveError::Unsupported` stating that RAR/RAR5
   support is disabled in this build.
-- libarchive is still required, and every other format is unchanged.
+- libarchive is still required *because the list above keeps the `libarchive` feature on*, and
+  every other format is unchanged. Drop `libarchive` from the list too and you no longer need it
+  installed at all — at the cost of the TAR family, ISO, the standalone compressed streams, 7z
+  *writing*, and `modify` (AD-0071 binds modification to libarchive for every format).
 
 On Windows you can keep RAR *creation* while dropping the SDK, by adding
 `--features external-rar-create` as shown above: that path contains no RAR compression code and

@@ -37,12 +37,19 @@ native call means adding its declaration by hand.
 ### Running Tests
 
 ```bash
-# Default profile (rar-support + v2-api)
+# Default profile (all twelve default features — see `[features]` in Cargo.toml)
 cargo test -- --test-threads=4
 
-# The two profiles the release gate requires
+# The profiles the release gate requires. An empty feature set no longer compiles:
+# `lib.rs` refuses a build with no backend via `compile_error!`, and the floor is
+# `read-minimal` (`read` + `zip-read`).
 cargo test --all-features -- --test-threads=4
-cargo test --no-default-features -- --test-threads=4
+cargo test --no-default-features --features read,zip-read -- --test-threads=4
+cargo test --no-default-features --features read,zip-read,zip-crypto,sfx -- --test-threads=4
+cargo test --no-default-features --features read,zip-read,zip-crypto,sevenzip,rar-support,libarchive,sfx -- --test-threads=4
+cargo test --no-default-features --features create,read,zip-read,zip-write,sevenzip,libarchive -- --test-threads=4
+cargo test --no-default-features --features modify,zip-read,zip-write,sevenzip,libarchive -- --test-threads=4
+cargo test --no-default-features --features full -- --test-threads=4
 
 # Run one test binary
 cargo test --test integration_tests
@@ -242,9 +249,13 @@ All contributions must align with these principles.
    - This project has **no hosted CI** (AD-0070). "CI-covered" means a committed command was run on a host that can
      observe the property, and its native exit status was recorded against a commit.
    - Run `scripts/release-gate.sh` in the foreground of a terminal you own — not detached, not from a background
-     task. Its lanes are `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
-     `cargo test --all-features -- --test-threads=4`, `cargo test --no-default-features -- --test-threads=4`, and
-     `cargo check --all-targets`.
+     task. Its lanes are `fmt`, `clippy`, `clippy-read-minimal`, `test-all-features`, the six AD-0058 profile
+     lanes (`profile-read-minimal`, `profile-read-zip`, `profile-read-all-formats`,
+     `check-profile-create-pure` + `profile-create`, `profile-modify`, `profile-full`), the five
+     per-feature isolation lanes (`test-sevenzip-only`, `test-zip-crypto-only`, `test-libarchive-only`,
+     `test-sfx-only`, `test-rar-support-only`), and `check-default`; `check-windows-cfg` and
+     `check-linux-musl` run when their targets are installed. There is no bare `--no-default-features`
+     lane — that configuration no longer compiles.
    - Commit the resulting record under `docs/verification/`, naming the platform you ran on. A platform with no
      record is unverified, not assumed-green.
 

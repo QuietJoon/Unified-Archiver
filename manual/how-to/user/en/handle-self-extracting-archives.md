@@ -15,10 +15,15 @@ sources:
   - { id: sfx-limits, resource: src/sfx/limits.rs }
   - { id: archive-facade, resource: src/archive.rs }
   - { id: options, resource: src/options.rs }
-synced_hash: 1bb4ca8cd84f0feb9b9221a6177d472fe8d4b938261eede7fc1514b3cd5df223
+synced_hash: f8a94f11627ca16cf4ae59295088be6a406d8f42eafba3c320fd34d3e097334e
 ---
 
 # How to detect and open a self-extracting archive
+
+> **Before you start:** everything on this page needs the `sfx` Cargo feature. It is in
+> `default`, but absent from the `read-minimal` profile — without it `unified_archive::sfx`
+> does not exist and `SfxConfidence` / `SfxDetectionResult` / `StubType` are not re-exported.
+
 
 This page covers asking whether a file is a self-extracting archive (SFX),
 acting on the answer, and getting at either half of the file. Nothing here runs
